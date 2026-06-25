@@ -292,7 +292,7 @@
                                ; counterpart when it moves groups.
 (define *magit-hunks* '())     ; (start-line end-line file-header hunk-text type path)
 (define *magit-commit-lines* '()) ; (line . ref) — commit/stash lines RET can show
-(define *magit-show-history* #f)  ; stashes/unpushed/unpulled/recent — off = fewer git calls
+(define *magit-show-history* #f)  ; stashes/unpushed/unpulled — off = fewer git calls (recent commits always show)
 
 (define (magit-emit text face type path)
   (set! *magit-lines* (cons text *magit-lines*))
@@ -600,7 +600,8 @@
       (when (and (null? untracked) (null? unstaged) (null? staged))
         (magit-emit "Nothing to commit, working tree clean." "magit-file" #f #f)
         (magit-emit "" #f #f #f))
-      ;; --- stashes + history (lazy: 4 git calls only when shown, toggle with H) ---
+      ;; --- stashes + ahead/behind (lazy: 3 git calls only when shown, toggle
+      ;;     with H — recent commits below always render) ---
       (if *magit-show-history*
           (begin
             (magit-emit-commit-section "Stashes" (git-lines (list "stash" "list")))
@@ -610,11 +611,12 @@
                                                           (string-append up "..HEAD"))))
               (magit-emit-commit-section (string-append "Unpulled from " up)
                                          (git-lines (list "log" "--oneline"
-                                                          (string-append "HEAD.." up)))))
-            (magit-emit-commit-section "Recent commits"
-                                       (git-lines (list "log" "--oneline" "-n" "10"))))
-          (magit-emit "Press H to show stashes / unpushed / unpulled / recent commits."
-                      "magit-context" #f #f)))
+                                                          (string-append "HEAD.." up))))))
+          (magit-emit "Press H to show stashes / unpushed / unpulled."
+                      "magit-context" #f #f))
+      ;; --- recent commits (shown by default, one `git log` call) ---
+      (magit-emit-commit-section "Recent commits"
+                                 (git-lines (list "log" "--oneline" "-n" "10"))))
     (render-buffer "*magit*" "magit-status"
                    (join-lines (reverse *magit-lines*))
                    (reverse *magit-faces*))
@@ -640,8 +642,9 @@
 ;; Refresh re-runs git for the SAME repo (never re-resolves).
 (define (magit-refresh) (magit-render))
 
-;; H: toggle the history block (stashes / unpushed / unpulled / recent commits).
-;; Hidden by default so the common refresh skips its 4 `git log`/`stash` calls.
+;; H: toggle the stashes / unpushed / unpulled block. Hidden by default so the
+;; common refresh skips its 3 extra `git log`/`stash` calls; recent commits
+;; always render regardless.
 (define (magit-toggle-history)
   (set! *magit-show-history* (not *magit-show-history*))
   (magit-refresh))
@@ -1095,11 +1098,12 @@
          (parts (filter (lambda (s) (>= (string-length s) 7)) (split-many line " "))))
     (if (null? parts) "" (car parts))))
 
-;; RET in a log buffer: show the commit whose short hash starts the line.
+;; RET in a log buffer: show the commit whose short hash starts the line, with
+;; the same colorized diff as the status buffer (see magit-show-commit).
 (define (magit-log-show)
   (let ((hash (magit-log-hash)))
     (when (not (equal? hash ""))
-      (render-buffer "*magit-commit*" "magit-log-mode" (git (list "show" hash)) '()))))
+      (magit-show-commit hash))))
 
 ;; A (cherry-pick / revert) onto the commit at point in a log buffer.
 (define (magit-log-cherry-pick)
@@ -1242,12 +1246,75 @@
             (loop (+ i 1)
                   (if (or (starts-with? l "+") (starts-with? l " ")) (+ k 1) k)))))))
 
+;; Whole-line face for a `git show` line. `in-diff` is #t once we've passed the
+;; first "diff --git"; before that we're in the commit metadata/message, where
+;; only Author/Date/Merge get a dim header tone (the subject/body stay default,
+;; the hash is accented separately). In the diff body we reuse the status
+;; buffer's added/removed/hunk/context faces.
+(define (magit-show-commit-face l in-diff)
+  (if (not in-diff)
+      (cond ((starts-with? l "Author:") "magit-header")
+            ((starts-with? l "Date:")   "magit-header")
+            ((starts-with? l "Merge:")  "magit-header")
+            ((starts-with? l "Commit:") "magit-header")
+            (else #f))                                  ; "commit <hash>", subject, body
+      (cond ((starts-with? l "diff --git") "magit-file")
+            ((starts-with? l "index ")     "magit-context")
+            ((starts-with? l "--- ")       "magit-context")
+            ((starts-with? l "+++ ")       "magit-context")
+            ((starts-with? l "old mode")   "magit-context")
+            ((starts-with? l "new mode")   "magit-context")
+            ((starts-with? l "new file")   "magit-context")
+            ((starts-with? l "deleted file") "magit-context")
+            ((starts-with? l "rename ")    "magit-context")
+            ((starts-with? l "similarity") "magit-context")
+            ((starts-with? l "@@")         "magit-hunk")
+            ((starts-with? l "+")          "magit-added")
+            ((starts-with? l "-")          "magit-removed")
+            (else                          "magit-context"))))  ; context (leading space)
+
+;; Render `git show <ref>` into *magit-commit* (magit-log-mode) with the same
+;; colorization as the status diffs: green/red bodies, accented +/- markers, an
+;; accented commit hash. Builds local accumulators (NOT the status buffer's
+;; render globals) so returning to *magit* leaves its navigation state intact.
+(define (magit-show-commit ref)
+  (let* ((raw   (trim-end (git (list "show" ref))))
+         (lines (split-many raw "\n")))
+    (let loop ((ls lines) (n 0) (byte 0) (in-diff #f) (faces '()) (accents '()))
+      (if (null? ls)
+          (begin
+            (render-buffer "*magit-commit*" "magit-log-mode" raw (reverse faces))
+            (clear-overlays)
+            (for-each (lambda (a) (overlay-set-face (nth a 0) (nth a 1) (nth a 2)))
+                      (reverse accents)))
+          (let* ((l    (car ls))
+                 (ind  (or in-diff (starts-with? l "diff --git")))
+                 (face (magit-show-commit-face l ind))
+                 (faces2 (if face (cons (list n face) faces) faces))
+                 ;; Accent the hash on the "commit <hash>" metadata line.
+                 (accents2
+                  (if (starts-with? l "commit ")
+                      (let ((hl (utf8-length
+                                 (car (split-many (substring l 7 (string-length l)) " ")))))
+                        (cons (list (+ byte 7) (+ byte 7 hl) "magit-hash") accents))
+                      accents))
+                 ;; Brighten the +/- marker on diff body lines (skip +++/--- headers).
+                 (accents3
+                  (cond ((not ind) accents2)
+                        ((or (starts-with? l "+++ ") (starts-with? l "--- ")) accents2)
+                        ((starts-with? l "+")
+                         (cons (list byte (+ byte 1) "magit-add-marker") accents2))
+                        ((starts-with? l "-")
+                         (cons (list byte (+ byte 1) "magit-remove-marker") accents2))
+                        (else accents2))))
+            (loop (cdr ls) (+ n 1) (+ byte (utf8-length l) 1) ind faces2 accents3))))))
+
 ;; RET: on a commit/stash line, show it; otherwise visit the file at point in a
 ;; split — landing on the exact line when point is inside a diff hunk.
 (define (magit-visit-file)
   (let ((ref (magit-commit-at-line (buffer-line))))
     (if ref
-        (render-buffer "*magit-commit*" "magit-log-mode" (git (list "show" ref)) '())
+        (magit-show-commit ref)
         (let ((s (magit-section-at-line (buffer-line))))
           (when s
             (let* ((h (magit-hunk-at-line (buffer-line)))
