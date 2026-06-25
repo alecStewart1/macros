@@ -24,7 +24,7 @@ include_dir = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
-# Lock-free snapshot publishing: the editor swaps a fresh snapshot in with one
+# Lock-free snapshot publishing: thme editor swaps a fresh snapshot in with one
 # atomic store; the Scheme read bridges load it without ever blocking the UI.
 arc-swap = "1"
 # Rope text storage: O(log n) edits, line indexing, and UTF-16 conversion.
