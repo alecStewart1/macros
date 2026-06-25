@@ -33,25 +33,30 @@ struct Colors {
     dim: gpui::Hsla,
 }
 
-/// What clicking the update notice does, decided by the launch-time check when
-/// it finds a newer release on macros.dev.
+/// The lifecycle of the title-bar update pill, advanced by the user's clicks.
+/// The launch-time check only ever sets [`UpdatePhase::Available`] — nothing is
+/// downloaded until the user asks for it.
 #[derive(Clone)]
-pub enum UpdateAction {
-    /// macOS: the newer build is already staged in place — relaunch to apply it.
-    /// Only constructed on macOS.
+enum UpdatePhase {
+    /// A newer release exists. Click to start downloading it (macOS) or open the
+    /// downloads page in a browser (other platforms).
+    Available,
+    /// macOS only: the artifact is downloading; `percent` is 0–100.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    Restart,
-    /// Windows/Linux: no in-place swap, so open the downloads page in a browser.
-    /// Never constructed on macOS (which stages in place).
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    OpenUrl(String),
+    Downloading { percent: u8 },
+    /// macOS only: the new build is staged in place. Click to relaunch into it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Ready,
 }
 
-/// A dismissible "update available" box painted in the top-right corner.
+/// The state behind the title-bar update pill: the resolved release plus the
+/// phase its click cycles through.
 #[derive(Clone)]
-struct UpdateNotice {
-    version: SharedString,
-    action: UpdateAction,
+struct UpdateStatus {
+    /// The newer release found by the check, carrying this platform's download
+    /// URL (used to install on macOS).
+    available: crate::update::UpdateAvailable,
+    phase: UpdatePhase,
 }
 
 /// The top-level frame: an editor filling the window above a status line. This
@@ -59,9 +64,9 @@ struct UpdateNotice {
 /// window and the mode line.
 pub struct Workspace {
     editor: Entity<Editor>,
-    /// Set by the launch-time update check; rendered as a top-right notice until
-    /// the user clicks it (restart / download) or dismisses it with the `✕`.
-    update_notice: Option<UpdateNotice>,
+    /// Set by the launch-time update check; rendered as a pill on the right of
+    /// the title bar that the user clicks to download, then restart.
+    update_status: Option<UpdateStatus>,
 }
 
 impl Workspace {
@@ -71,7 +76,7 @@ impl Workspace {
         cx.observe(&editor, |_, _, cx| cx.notify()).detach();
         Self {
             editor,
-            update_notice: None,
+            update_status: None,
         }
     }
 
@@ -83,36 +88,107 @@ impl Workspace {
             .update(cx, |editor, cx| editor.message(message, cx));
     }
 
-    /// Show the dismissible top-right "update available" notice. Called by the
-    /// launch-time update check once a newer release is staged (macOS) or
-    /// resolved (other platforms).
-    pub fn show_update_notice(
+    /// Announce that a newer release is available. Called by the launch-time
+    /// check once it resolves an update; nothing is downloaded yet — the pill
+    /// starts in [`UpdatePhase::Available`] and the user clicks to download.
+    pub fn show_update_available(
         &mut self,
-        version: impl Into<SharedString>,
-        action: UpdateAction,
+        available: crate::update::UpdateAvailable,
         cx: &mut Context<Self>,
     ) {
-        self.update_notice = Some(UpdateNotice {
-            version: version.into(),
-            action,
+        self.update_status = Some(UpdateStatus {
+            available,
+            phase: UpdatePhase::Available,
         });
         cx.notify();
     }
 
-    /// Act on the update notice: relaunch into the staged build (macOS) or open
-    /// the downloads page (other platforms). Dismisses the notice either way.
-    fn activate_update_notice(&mut self, action: &UpdateAction, cx: &mut Context<Self>) {
-        self.update_notice = None;
-        cx.notify();
-        match action {
-            UpdateAction::Restart => {
+    /// Advance the pill to a new phase and repaint.
+    fn set_update_phase(&mut self, phase: UpdatePhase, cx: &mut Context<Self>) {
+        if let Some(status) = self.update_status.as_mut() {
+            status.phase = phase;
+            cx.notify();
+        }
+    }
+
+    /// Handle a click on the update pill, dispatching on its current phase:
+    /// `Available` starts the download (macOS) or opens the browser (others),
+    /// `Downloading` is inert, and `Ready` relaunches into the staged build.
+    fn on_update_pill_click(&mut self, cx: &mut Context<Self>) {
+        let Some(status) = self.update_status.clone() else {
+            return;
+        };
+        match status.phase {
+            UpdatePhase::Available => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.start_update_download(status.available, cx);
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = crate::update::open_url("https://macros.dev/download/");
+                }
+            }
+            // A download is in flight; ignore clicks until it resolves.
+            UpdatePhase::Downloading { .. } => {}
+            UpdatePhase::Ready => {
                 let _ = crate::update::relaunch();
                 cx.quit();
             }
-            UpdateAction::OpenUrl(url) => {
-                let _ = crate::update::open_url(url);
-            }
         }
+    }
+
+    /// macOS: download + stage the update in the background, streaming the
+    /// percent-complete back to the pill, then flip it to [`UpdatePhase::Ready`]
+    /// (or back to `Available` so the user can retry on failure).
+    #[cfg(target_os = "macos")]
+    fn start_update_download(
+        &mut self,
+        available: crate::update::UpdateAvailable,
+        cx: &mut Context<Self>,
+    ) {
+        use futures::StreamExt;
+
+        self.set_update_phase(UpdatePhase::Downloading { percent: 0 }, cx);
+        self.log_message(
+            format!("Downloading Macros {}…", available.version),
+            cx,
+        );
+
+        cx.spawn(async move |this, cx| {
+            // The blocking install runs on the background executor and reports
+            // progress through an unbounded channel; the sender drops when the
+            // install returns, ending the loop below.
+            let (tx, mut rx) = futures::channel::mpsc::unbounded::<u8>();
+            let install = cx.background_executor().spawn(async move {
+                crate::update::install(&available, move |pct| {
+                    let _ = tx.unbounded_send(pct);
+                })
+            });
+
+            while let Some(percent) = rx.next().await {
+                this.update(cx, |ws, cx| {
+                    ws.set_update_phase(UpdatePhase::Downloading { percent }, cx)
+                })
+                .ok();
+            }
+
+            let outcome = install.await;
+            this.update(cx, |ws, cx| match outcome {
+                Ok(crate::update::InstallOutcome::Staged) => {
+                    ws.log_message("Update downloaded — restart Macros to finish.", cx);
+                    ws.set_update_phase(UpdatePhase::Ready, cx);
+                }
+                // Not reachable on macOS (always stages), but keep the pill sane.
+                Ok(_) => ws.set_update_phase(UpdatePhase::Ready, cx),
+                Err(err) => {
+                    ws.log_message(format!("Update download failed: {err}"), cx);
+                    ws.set_update_phase(UpdatePhase::Available, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Move keyboard focus to the editor. Called once after the window opens.
@@ -443,72 +519,97 @@ impl Workspace {
         col.into_any_element()
     }
 
-    /// The dismissible "update available" box anchored to the top-right of the
-    /// editor area. The message acts as the affirmative button (restart /
-    /// download); the trailing `✕` just hides the notice until next launch.
-    fn render_update_notice(
-        &self,
-        notice: UpdateNotice,
-        colors: Colors,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    /// The update pill that sits on the right of the title bar. `None` when no
+    /// update has been found. Its label and interactivity track the phase:
+    /// available (click to download), downloading (a live percent ticker, inert),
+    /// and ready (click to restart). The download/restart click is wired to
+    /// [`on_update_pill_click`]; a trailing `✕` dismisses the pill for this run
+    /// (the launch check resurfaces it on the next start while the update is
+    /// still pending).
+    fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let status = self.update_status.clone()?;
         let theme = cx.global::<Theme>();
         let foreground = theme.foreground();
-        let panel_bg = theme.color("completion-bg", colors.mode_line_bg);
-        let border = theme.color("dim", colors.dim);
-        let label: SharedString = match &notice.action {
-            UpdateAction::Restart => {
-                format!("Macros {} ready — click to restart", notice.version).into()
+        let dim = theme.color("dim", foreground);
+        let accent = theme.color("minibuffer-prompt", foreground);
+        let panel_bg = theme.color("mode-line-bg", theme.background());
+
+        // The label, plus whether a click does anything in this phase.
+        let (label, interactive): (SharedString, bool) = match &status.phase {
+            UpdatePhase::Available => ("Update available — click to download".into(), true),
+            UpdatePhase::Downloading { percent } => {
+                (format!("Downloading… {percent}%").into(), false)
             }
-            UpdateAction::OpenUrl(_) => {
-                format!("Macros {} available — click to download", notice.version).into()
-            }
+            UpdatePhase::Ready => ("Restart to update".into(), true),
         };
-        let action = notice.action;
-        div()
-            .absolute()
-            .top(px(8.))
-            .right(px(8.))
+        // Ready stands out (accent border); downloading is muted.
+        let border = if matches!(status.phase, UpdatePhase::Ready) {
+            accent
+        } else {
+            dim
+        };
+
+        // The label is its own click target (download / restart) so the trailing
+        // ✕ can dismiss independently of it.
+        let mut label_el = div().child(label);
+        if interactive {
+            label_el = label_el.cursor(gpui::CursorStyle::PointingHand).on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _ev, _window, cx| {
+                    this.on_update_pill_click(cx);
+                    cx.stop_propagation();
+                }),
+            );
+        }
+
+        // The dismiss ✕: hides the pill for this run. The launch check resurfaces
+        // it next time the app starts and finds the update still pending.
+        let close = div()
+            .pl_1()
+            .cursor(gpui::CursorStyle::PointingHand)
+            .text_color(dim)
+            .child(SharedString::from("✕"))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.update_status = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            );
+
+        let pill = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_1()
+            .gap_1()
+            .px_2()
+            .py(px(1.))
             .bg(panel_bg)
             .border_1()
             .border_color(border)
             .rounded_md()
-            .text_size(px(13.))
-            .text_color(foreground)
-            .child(
-                div()
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, _ev, _window, cx| {
-                            this.activate_update_notice(&action, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(label),
-            )
-            .child(
-                div()
-                    .px_1()
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .text_color(colors.dim)
-                    .child(SharedString::from("✕"))
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _ev, _window, cx| {
-                            this.update_notice = None;
-                            cx.notify();
-                            cx.stop_propagation();
-                        }),
-                    ),
-            )
-            .into_any_element()
+            .text_size(px(11.))
+            .text_color(if interactive { foreground } else { dim })
+            .child(label_el)
+            .child(close);
+
+        // Anchored to the right of the title bar, vertically centered. It sits
+        // above the draggable title layer; `occlude` blocks the drag hitbox
+        // behind it (a plain hitbox wouldn't — the hit test only stops on a
+        // blocking one), so clicking the pill never starts a window drag.
+        Some(
+            div()
+                .occlude()
+                .absolute()
+                .right(px(8.))
+                .top_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .child(pill)
+                .into_any_element(),
+        )
     }
 }
 
@@ -549,35 +650,42 @@ impl Render for Workspace {
 
         // Custom title-bar strip. The system title bar is transparent (see
         // `main.rs`), so we paint this ourselves in the theme's `title-bar-bg`
-        // and leave room on the left for the macOS traffic lights. The strip
-        // stays draggable like a native title bar.
+        // and leave room on the left for the macOS traffic lights. The centered
+        // title lives on a draggable layer; the update pill (if any) floats on
+        // the right, above and outside that drag area so it stays clickable.
         let theme = cx.global::<Theme>();
-        let editor = self.editor.read(cx);
-        let title: SharedString = format!("Macros — {}", editor.buffer_name()).into();
-        let title_bar = div()
+        let title_bar_bg = theme.title_bar_bg();
+        let title_bar_fg = theme.title_bar_fg();
+        let title: SharedString = format!("Macros — {}", self.editor.read(cx).buffer_name()).into();
+        let mut title_bar = div()
             .w_full()
             .h(px(28.))
             .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            // Leave space for the macOS traffic lights at the top-left.
-            .pl(px(72.))
-            .pr(px(72.))
-            .bg(theme.title_bar_bg())
-            .text_color(theme.title_bar_fg())
+            .relative()
+            .bg(title_bar_bg)
+            .text_color(title_bar_fg)
             .text_size(px(13.))
-            .window_control_area(gpui::WindowControlArea::Drag)
-            .child(title);
-
-        // The editor fills the central region; the update notice (if any) is
-        // overlaid in its top-right corner via absolute positioning, so it
-        // floats above the buffer without taking layout space.
-        let mut editor_area = div().flex_1().relative().child(self.editor.clone());
-        if let Some(notice) = self.update_notice.clone() {
-            editor_area = editor_area.child(self.render_update_notice(notice, colors, cx));
+            .child(
+                // The draggable layer: the centered title, with room for the
+                // macOS traffic lights at the top-left.
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .pl(px(72.))
+                    .pr(px(72.))
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .child(title),
+            );
+        if let Some(pill) = self.render_update_pill(cx) {
+            title_bar = title_bar.child(pill);
         }
+
+        // The editor fills the central region.
+        let editor_area = div().flex_1().relative().child(self.editor.clone());
 
         div()
             .flex()

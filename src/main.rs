@@ -299,68 +299,20 @@ fn main() {
                             }
                             Err(_) => return,
                         };
-                        let version = available.version.clone();
 
-                        // Decide what the notice's click will do. macOS can swap
-                        // the bundle in place, so stage the new build in the
-                        // background now and offer a one-click restart. Other
-                        // platforms can't, so the notice links to the downloads
-                        // page instead. Staging failures stay silent — we just
-                        // try again on the next launch.
-                        #[cfg(target_os = "macos")]
-                        let action = {
-                            _workspace
-                                .update(cx, |ws, cx| {
-                                    ws.log_message(
-                                        format!(
-                                            "Update v{version} available — downloading…"
-                                        ),
-                                        cx,
-                                    )
-                                })
-                                .ok();
-                            let to_install = available.clone();
-                            match cx
-                                .background_executor()
-                                .spawn(async move { update::install(&to_install) })
-                                .await
-                            {
-                                Ok(update::InstallOutcome::Staged) => {
-                                    _workspace
-                                        .update(cx, |ws, cx| {
-                                            ws.log_message(
-                                                "Update downloaded — restart Macros to finish.",
-                                                cx,
-                                            )
-                                        })
-                                        .ok();
-                                    Some(workspace::UpdateAction::Restart)
-                                }
-                                // Staging failed: note it (errors are otherwise
-                                // silent) and just retry on the next launch.
-                                _ => {
-                                    _workspace
-                                        .update(cx, |ws, cx| {
-                                            ws.log_message(
-                                                "Update download failed — will retry on next launch.",
-                                                cx,
-                                            )
-                                        })
-                                        .ok();
-                                    None
-                                }
-                            }
-                        };
-                        #[cfg(not(target_os = "macos"))]
-                        let action = Some(workspace::UpdateAction::OpenUrl(
-                            "https://macros.dev/download/".to_string(),
-                        ));
-
-                        if let Some(action) = action {
-                            _workspace
-                                .update(cx, |ws, cx| ws.show_update_notice(version, action, cx))
-                                .ok();
-                        }
+                        // Don't download anything yet — just surface the update
+                        // as a pill on the right of the title bar. The user clicks
+                        // it to download (with a live progress ticker) and then to
+                        // restart; that flow lives in `Workspace`.
+                        _workspace
+                            .update(cx, |ws, cx| {
+                                ws.log_message(
+                                    format!("Macros {} is available.", available.version),
+                                    cx,
+                                );
+                                ws.show_update_available(available, cx);
+                            })
+                            .ok();
                     })
                     .detach();
                 })

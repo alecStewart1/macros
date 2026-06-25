@@ -2714,7 +2714,7 @@ impl Editor {
         );
         let task = cx
             .background_executor()
-            .spawn(async move { crate::update::install(&available) });
+            .spawn(async move { crate::update::install(&available, |_| {}) });
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
             this.update(cx, |editor, cx| match outcome {

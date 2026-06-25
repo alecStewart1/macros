@@ -170,9 +170,16 @@ pub fn check_gated() -> Result<Option<UpdateAvailable>, String> {
 /// Windows/Linux: open the downloads page and return
 /// [`InstallOutcome::OpenedDownloadPage`].
 ///
+/// `on_progress` is called with the download's percent complete (0–100) as bytes
+/// arrive, so the caller can drive a progress indicator. It only fires during the
+/// macOS download; other platforms open the browser and never call it.
+///
 /// Blocking — run off-thread.
 #[cfg(target_os = "macos")]
-pub fn install(update: &UpdateAvailable) -> Result<InstallOutcome, String> {
+pub fn install(
+    update: &UpdateAvailable,
+    on_progress: impl FnMut(u8),
+) -> Result<InstallOutcome, String> {
     let url = update
         .url
         .as_deref()
@@ -182,13 +189,16 @@ pub fn install(update: &UpdateAvailable) -> Result<InstallOutcome, String> {
     let dest = dir.join(format!("Macros-{}-{}.zip", platform_key(), update.version));
 
     let expected = fetch_sha256(url)?;
-    download_verified(url, &expected, &dest)?;
+    download_verified(url, &expected, &dest, on_progress)?;
     macos::stage_in_place(&dest)?;
     Ok(InstallOutcome::Staged)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn install(_update: &UpdateAvailable) -> Result<InstallOutcome, String> {
+pub fn install(
+    _update: &UpdateAvailable,
+    _on_progress: impl FnMut(u8),
+) -> Result<InstallOutcome, String> {
     // No in-place swap for packaged installers (.msi/.deb/.rpm) while running —
     // hand the user the downloads page to run the installer themselves.
     open_url("https://macros.dev/download/")?;
@@ -285,8 +295,17 @@ const MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
 /// renames to `dest` once the SHA-256 matches `expected_sha256_hex`. Refuses
 /// non-`https` URLs (except `http` in debug builds, for local dev servers).
 /// Only the macOS in-place install path calls this.
+///
+/// `on_progress` receives the percent complete (0–100) each time it advances by a
+/// whole point, computed from the `Content-Length`; if the server sends no length
+/// it is never called (the caller leaves its indicator indeterminate).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn download_verified(url: &str, expected_sha256_hex: &str, dest: &Path) -> Result<(), String> {
+fn download_verified(
+    url: &str,
+    expected_sha256_hex: &str,
+    dest: &Path,
+    mut on_progress: impl FnMut(u8),
+) -> Result<(), String> {
     use sha2::{Digest, Sha256};
 
     let lc = url.to_ascii_lowercase();
@@ -307,9 +326,10 @@ fn download_verified(url: &str, expected_sha256_hex: &str, dest: &Path) -> Resul
         .call()
         .map_err(|e| format!("GET {url}: {e}"))?;
 
-    if let Some(len) = resp
+    let total = resp
         .header("Content-Length")
-        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if let Some(len) = total
         && len > MAX_DOWNLOAD_BYTES
     {
         return Err(format!(
@@ -323,6 +343,7 @@ fn download_verified(url: &str, expected_sha256_hex: &str, dest: &Path) -> Resul
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut written: u64 = 0;
+    let mut last_pct: u8 = 0;
 
     loop {
         let n = reader
@@ -337,6 +358,15 @@ fn download_verified(url: &str, expected_sha256_hex: &str, dest: &Path) -> Resul
             return Err(format!(
                 "update artifact exceeded the {MAX_DOWNLOAD_BYTES}-byte cap"
             ));
+        }
+        // Report progress only when the whole-percent figure advances, so the
+        // callback (and any channel behind it) isn't spammed every 64 KiB.
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let pct = ((written.min(total) * 100) / total) as u8;
+            if pct != last_pct {
+                last_pct = pct;
+                on_progress(pct);
+            }
         }
         hasher.update(&buf[..n]);
         use std::io::Write;
@@ -359,7 +389,9 @@ fn download_verified(url: &str, expected_sha256_hex: &str, dest: &Path) -> Resul
 }
 
 /// Open `url` in the user's default browser. Used by the non-macOS `install`
-/// path and by the update notice's "download" click action.
+/// path and by the update pill's "download" click on those platforms (macOS
+/// downloads in place instead, so it never calls this).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn open_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut cmd = {
