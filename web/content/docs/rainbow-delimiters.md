@@ -7,7 +7,7 @@ description: Depth-colored brackets driven by the live tree-sitter parse tree.
 
 Macros colors nested brackets by their **nesting depth** — rainbow delimiters — using the live **tree-sitter** parse tree rather than raw characters. Because it asks the grammar for bracket *nodes*, brackets inside strings and comments are skipped automatically. That makes it correct for non-Lisp languages (C, JS, Rust, …) as well as S-expression languages.
 
-It's **on by default**: it paints when a file opens and repaints (debounced) as you type.
+It's **off by default**. Once enabled, it paints when a file opens and repaints (debounced) as you type.
 
 ## Configuration
 
@@ -20,8 +20,8 @@ All settable from your `init.scm` (loaded after the built-in defaults):
 ;; Live-refresh debounce, in milliseconds.
 (rainbow-set-delay 150)
 
-;; Turn it off entirely.
-(rainbow-disable)
+;; Turn it on (it's off by default).
+(rainbow-enable)
 ```
 
 Interactively: <kbd>M-x</kbd> `rainbow-delimiters` toggles it, and `rainbow-refresh` repaints the current buffer.

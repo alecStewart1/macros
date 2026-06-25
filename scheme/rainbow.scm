@@ -4,8 +4,8 @@
 ;; inside strings or comments are skipped automatically, so this is correct for
 ;; non-S-expr languages (C, JS, Rust, …), not just Lisp.
 ;;
-;; ON BY DEFAULT. It paints when a file is opened and repaints (debounced) as you
-;; type. It uses overlay faces, so it shares the overlay-face layer with LSP
+;; OFF BY DEFAULT. Once enabled it paints when a file is opened and repaints
+;; (debounced) as you type. It uses overlay faces, so it shares the overlay-face layer with LSP
 ;; semantic tokens — if you enable semantic tokens for a language, disable rainbow
 ;; for that buffer (or vice versa) so they don't fight over the layer.
 ;;
@@ -13,14 +13,14 @@
 ;;   (rainbow-set-colors '("#ff5555" "#50fa7b" "#bd93f9"))  ; palette, any length
 ;;   (rainbow-set-delay 150)                                 ; live-refresh ms
 ;;   (rainbow-set-skip-extensions '(".org"))                 ; where to suppress it
-;;   (rainbow-disable)                                       ; turn it off
+;;   (rainbow-enable)                                        ; turn it on
 ;; Interactively: `M-x rainbow-delimiters` toggles, `M-x rainbow-refresh` repaints.
 
 ;; --- configuration (mutable; change via the setters below) ------------------
 (define *rainbow-colors*
   (list "#e6194b" "#f58231" "#ffe119" "#3cb44b" "#4363d8" "#911eb4" "#f032e6"))
 (define *rainbow-count* (length *rainbow-colors*))
-(define *rainbow-enabled* #t)       ; on by default
+(define *rainbow-enabled* #f)       ; off by default
 (define *rainbow-delay* 250)        ; debounce (ms) for live refresh
 
 ;; Register the palette as theme faces "rainbow-1".."rainbow-N" so
