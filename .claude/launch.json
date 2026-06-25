@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "macros-web",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd web && bun run dev"],
+      "port": 3001
+    }
+  ]
+}

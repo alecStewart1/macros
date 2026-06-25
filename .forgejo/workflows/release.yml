@@ -1,0 +1,423 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.2.3). Embedded into every artifact filename."
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TARGET_DIR: target
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: resolve
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            v="${{ inputs.version }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+            v="${tag#v}"
+          fi
+          if [ -z "$v" ]; then
+            echo "::error::Could not resolve a version from inputs or tag" >&2
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $v"
+
+  macos:
+    name: Build macOS .app (${{ matrix.arch }})
+    runs-on: osx-runner
+    needs: version
+    # Both legs run on the Apple Silicon osx-runner: aarch64 builds natively,
+    # x86_64 cross-compiles the Intel slice (RUST_TARGET=x86_64-apple-darwin).
+    # build_macos.sh nests cross-compiled output under target/<triple>/release,
+    # so each leg reads its bundle from a distinct bundle_dir. fail-fast: false
+    # so an Intel failure doesn't cancel the (independent) arm64 build.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            rust_target: ""
+            bundle_dir: target/release
+          - arch: x86_64
+            rust_target: x86_64-apple-darwin
+            bundle_dir: target/x86_64-apple-darwin/release
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      RUST_TARGET: ${{ matrix.rust_target }}
+      BUNDLE_DIR: ${{ matrix.bundle_dir }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ACCESS_TOKEN }}
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          actual=$(awk '
+            /^\[/ { sect = ($0 ~ /^\[package\]/) ? "pkg" : ""; next }
+            sect == "pkg" && /^version *= *"/ {
+              gsub(/^[^"]*"|"[^"]*$/, ""); print; exit
+            }
+          ' Cargo.toml)
+          if [ "$actual" != "$VERSION" ]; then
+            echo "::error::Cargo.toml [package].version is '$actual' but release says '$VERSION'"
+            echo "Fix locally with: cargo set-version $VERSION"
+            exit 1
+          fi
+          echo "Cargo.toml version matches: $VERSION"
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      # The Developer ID identity lives in a DEDICATED keychain that was set up
+      # once on the runner in a GUI session (see MACOS_NOTARIZATION.md):
+      #   ~/Library/Keychains/tukey-signing.keychain-db
+      # This is the SAME keychain the sigma/TukeySheets runner already uses — the
+      # Developer ID identity is per-team, not per-app, so one keychain signs
+      # every app built on this runner. Reusing it means no second one-time
+      # import; just set MACOS_KEYCHAIN_PASSWORD / MACOS_SIGN_IDENTITY in this
+      # repo's secrets to the same values sigma uses.
+      # The runner executes in a security session separate from the desktop
+      # login, so it can't reach the (locked) login keychain — but it CAN unlock
+      # this dedicated keychain with a password we control, then point codesign
+      # at it. The private key was imported in the GUI session, so it's really
+      # there; here we only unlock + search it (never import).
+      - name: Prepare signing keychain
+        env:
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "Running as user: $(whoami)"
+          KC="$HOME/Library/Keychains/tukey-signing.keychain-db"
+          if [ ! -f "$KC" ]; then
+            echo "::error::Signing keychain not found at $KC. Run the one-time setup on the runner (MACOS_NOTARIZATION.md → 'Dedicated signing keychain')."
+            exit 1
+          fi
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KC"
+          # No auto-lock, so it stays unlocked through the long cargo build.
+          security set-keychain-settings "$KC"
+          # Add it to this session's search list (dedup, keep the others).
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed -e 's/[" ]//g' | grep -v "$KC" || true)
+          echo "Keychains in search list:"
+          security list-keychains -d user
+          echo "Signing identities visible to codesign:"
+          security find-identity -v -p codesigning
+          if ! security find-identity -v -p codesigning | grep -q "Developer ID Application"; then
+            echo "::error::No 'Developer ID Application' identity visible after unlocking $KC. Re-run the one-time setup and confirm MACOS_KEYCHAIN_PASSWORD matches the keychain password."
+            exit 1
+          fi
+      - name: Build .app bundle
+        env:
+          # Sign with the Developer ID identity (e.g.
+          # "Developer ID Application: Your Name (TEAMID)"). build_macos.sh
+          # switches to a secure --timestamp automatically for a real identity.
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          # RUST_TARGET (job env) tells build_macos.sh which slice to build; it
+          # runs `rustup target add` for the cross target itself. Empty = host.
+        run: scripts/build_macos.sh
+      # Submit to Apple's notary service and staple the ticket so the app passes
+      # Gatekeeper on first launch, even offline. Uses an App Store Connect API
+      # key (recommended over an Apple ID + app-specific password for CI).
+      - name: Notarize and staple
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          cd "$BUNDLE_DIR"
+          # Apple-recommended archive format for notarytool submission.
+          ditto -c -k --keepParent Macros.app notarize.zip
+          echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > AuthKey.p8
+          # --wait blocks until Apple finishes; non-zero exit on rejection.
+          xcrun notarytool submit notarize.zip \
+            --key AuthKey.p8 \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          rm -f AuthKey.p8 notarize.zip
+          xcrun stapler staple Macros.app
+          xcrun stapler validate Macros.app
+          # Sanity check Gatekeeper's verdict (non-fatal log).
+          spctl --assess --verbose=4 --type execute Macros.app || true
+      - name: Zip .app
+        run: |
+          cd "$BUNDLE_DIR"
+          zip -ry "Macros-macos-${ARCH}-${VERSION}.zip" Macros.app
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Macros-macos-${{ matrix.arch }}-${{ needs.version.outputs.version }}
+          path: ${{ matrix.bundle_dir }}/Macros-macos-${{ matrix.arch }}-${{ needs.version.outputs.version }}.zip
+          if-no-files-found: error
+
+  linux:
+    name: Build Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runs_on }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runs_on: ubuntu-latest
+            nfpm_arch: arm64
+            # ubuntu-latest is a fresh container: install build deps + nfpm.
+            setup_deps: true
+          - arch: x86_64
+            runs_on: ubuntu-x86
+            nfpm_arch: amd64
+            # ubuntu-x86 is the SAME persistent self-hosted runner sigma uses —
+            # build deps, Rust, and nfpm are already installed there (sigma's
+            # x86 job skips these steps too). Re-running `sudo apt-get` here just
+            # blocks on a sudo password prompt and hangs, so skip the setup.
+            setup_deps: false
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      NFPM_ARCH: ${{ matrix.nfpm_arch }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ACCESS_TOKEN }}
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          actual=$(awk '
+            /^\[/ { sect = ($0 ~ /^\[package\]/) ? "pkg" : ""; next }
+            sect == "pkg" && /^version *= *"/ {
+              gsub(/^[^"]*"|"[^"]*$/, ""); print; exit
+            }
+          ' Cargo.toml)
+          if [ "$actual" != "$VERSION" ]; then
+            echo "::error::Cargo.toml [package].version is '$actual' but release says '$VERSION'"
+            exit 1
+          fi
+          echo "Cargo.toml version matches: $VERSION"
+      - name: Install system dependencies
+        # Only on the fresh container leg; the self-hosted x86 runner already has
+        # these (see the matrix note). Guarded by passwordless-sudo so it never
+        # hangs on a password prompt — if sudo needs a password, the deps are
+        # assumed preinstalled and we skip rather than block.
+        if: ${{ matrix.setup_deps }}
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
+          NEEDRESTART_SUSPEND: "1"
+        run: |
+          if ! sudo -n true 2>/dev/null; then
+            echo "::warning::passwordless sudo unavailable — assuming build deps are preinstalled, skipping apt"
+            exit 0
+          fi
+          sudo -n apt-get update
+          sudo -n apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config perl zip \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libvulkan-dev libssl-dev
+      - name: Install Rust
+        # Self-hosted x86 already has Rust on PATH (sigma relies on this too);
+        # only bootstrap it on the container leg.
+        if: ${{ matrix.setup_deps }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Build
+        run: cargo build --release --bin macros
+      - name: Install nfpm
+        # Same as the deps step: only the container leg needs it; the self-hosted
+        # x86 runner already has nfpm on PATH (sigma's x86 job assumes it too).
+        if: ${{ matrix.setup_deps }}
+        env:
+          # Pinned: bump deliberately so a fresh release version can't change
+          # package layout without us noticing.
+          NFPM_VERSION: 2.41.0
+        run: |
+          case "$(uname -m)" in
+            aarch64|arm64) host_arch=arm64 ;;
+            x86_64|amd64)  host_arch=x86_64 ;;
+            *) echo "::error::unsupported host arch $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${host_arch}.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+          sudo chmod +x /usr/local/bin/nfpm
+          nfpm --version
+      - name: Build .deb and .rpm packages
+        run: |
+          mkdir -p dist
+          nfpm package --config nfpm.yaml --packager deb --target dist/
+          nfpm package --config nfpm.yaml --packager rpm --target dist/
+          ls -lh dist/
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Macros-linux-${{ matrix.arch }}-${{ needs.version.outputs.version }}-deb
+          path: dist/*.deb
+          if-no-files-found: error
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Macros-linux-${{ matrix.arch }}-${{ needs.version.outputs.version }}-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows .msi
+    runs-on: windows
+    needs: version
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ACCESS_TOKEN }}
+      - name: Verify Cargo.toml version matches tag
+        shell: pwsh
+        run: |
+          $inPkg = $false
+          $actual = $null
+          foreach ($line in Get-Content Cargo.toml) {
+            if ($line -match '^\[') { $inPkg = ($line -match '^\[package\]'); continue }
+            if ($inPkg -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $actual = $Matches[1]; break }
+          }
+          if ($actual -ne $env:VERSION) {
+            Write-Error "Cargo.toml [package].version is '$actual' but release says '$env:VERSION'. Fix locally with: cargo set-version $env:VERSION"
+            exit 1
+          }
+          Write-Host "Cargo.toml version matches: $env:VERSION"
+      # Rust/cargo are preinstalled on this self-hosted Windows runner, and its
+      # native target is already x86_64-pc-windows-msvc, so no toolchain-install
+      # step is needed.
+      #
+      # NOTE: do NOT add Swatinem/rust-cache here. Its post-run cleanup deletes
+      # the rustup shims in ~/.cargo/bin to shrink the cache — harmless on
+      # ephemeral GitHub-hosted runners, but on this PERSISTENT self-hosted
+      # runner it permanently removes cargo. The runner's filesystem already
+      # persists between jobs, so cargo's incremental caching suffices.
+      # WiX v4 ships as a .NET tool. We invoke `wix build` directly in the Build
+      # MSI step below (main.wxs is authored in the WiX v4 schema).
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.*
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          # main.wxs uses the WixUI dialog set, so `wix build` needs the WixUI
+          # extension installed globally. Pin it to the exact installed wix
+          # version (WiX ships tool + extensions in lockstep).
+          $wixVer = (wix --version).Split('+')[0]
+          wix extension add -g "WixToolset.UI.wixext/$wixVer"
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --release --bin macros
+      # ── Sign the EXE before packaging, so the installed app is signed too ──
+      - name: Sign macros.exe (Azure Trusted Signing)
+        uses: https://github.com/Azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\target\release
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      # Build the installer with `wix build` directly. It picks up the signed exe
+      # from target\release and writes the .msi to the artifact-convention name
+      # the publish script expects: Macros-windows-x86_64-<version>.msi
+      - name: Build MSI
+        id: msi
+        shell: pwsh
+        run: |
+          # $env:GITHUB_PATH from the install step doesn't reliably propagate to
+          # later steps on this self-hosted Forgejo runner, so put the dotnet
+          # global-tools dir (where wix.exe lives) on PATH here too.
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          # Use an absolute path: the Azure Trusted Signing step rejects a
+          # relative path ("The file path ... is not rooted.").
+          $wixDir = Join-Path (Get-Location).Path "target\wix"
+          New-Item -ItemType Directory -Force -Path $wixDir | Out-Null
+          $dest = Join-Path $wixDir "Macros-windows-x86_64-$env:VERSION.msi"
+          # -d Version / -d CargoTargetBinDir supply the preprocessor variables
+          # main.wxs references via $(var.*). CargoTargetBinDir is target\release
+          # because CARGO_TARGET_DIR=target.
+          wix build wix\main.wxs `
+            -ext WixToolset.UI.wixext `
+            -arch x64 `
+            -d "Version=$env:VERSION" `
+            -d "CargoTargetBinDir=target\release" `
+            -o $dest
+          if (-not (Test-Path $dest)) { Write-Error "No MSI produced at $dest"; exit 1 }
+          "path=$dest" >> $env:GITHUB_OUTPUT
+          Write-Host "MSI: $dest"
+      # ── Sign the MSI itself ──
+      - name: Sign MSI (Azure Trusted Signing)
+        uses: https://github.com/Azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+          files: ${{ steps.msi.outputs.path }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Verify signature
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature "${{ steps.msi.outputs.path }}"
+          Write-Host "Status: $($sig.Status); Signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "MSI signature not valid: $($sig.Status)" }
+      - name: Upload .msi artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Macros-windows-x86_64-${{ needs.version.outputs.version }}
+          path: ${{ steps.msi.outputs.path }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish to Cloudflare R2
+    runs-on: ubuntu-latest
+    needs: [version, macos, linux, windows]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      UPDATE_DOWNLOAD_BASE: ${{ secrets.UPDATE_DOWNLOAD_BASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install publish deps
+        run: cd scripts && npm ci
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dist
+      - name: Publish to R2
+        run: cd scripts && node publish-release.mjs --dir ../dist --version "$VERSION"

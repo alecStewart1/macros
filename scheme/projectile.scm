@@ -1,0 +1,167 @@
+;; Projectile — project-aware navigation, the projectile.el pattern. The root
+;; resolver (`project-root`, walk-up-to-marker) lives in core.scm (Emacs's
+;; project.el concept); this file adds the interactive surface — find-file,
+;; switch-project, grep — plus a mode-line indicator, built on Helm,
+;; call-process, and set-modeline-project.
+
+(set-face "projectile-modeline" "#66d9ef")
+
+(define *projectile-current* #f)
+
+;; --- file listing -----------------------------------------------------------
+
+;; Project files as absolute paths, via ripgrep's gitignore-aware walker
+;; (`walk-files`). Works in non-git dirs too, and is tuned by the search-*
+;; options (see init.scm). The result is a STATIC Helm source — walked once when
+;; the picker opens, then filtered in memory as you type.
+(define (project-files root)
+  (walk-files root))
+
+;; --- commands ---------------------------------------------------------------
+
+(define (projectile-find-file-in root)
+  (helm (list (list (string-append "Find file in " (basename root))
+                    (project-files root)
+                    "open-file"))))
+
+(define (projectile-find-file)
+  (let ((root (project-root (buffer-directory))))
+    (if root (projectile-find-file-in root) (message "Not in a project"))))
+
+;; Open another known project: pick its root, set it current, find a file there.
+(define (projectile-switch-to root)
+  (set! *projectile-current* root)
+  (set-modeline-project (basename root))
+  (projectile-recent-add root)
+  (projectile-find-file-in root))
+
+(define (projectile-switch-project)
+  (if (null? *project-known*)
+      (message "No known projects yet — open a file in one first")
+      (helm (list (list "Switch project" *project-known* "projectile-switch-to")))))
+
+;; Grep across the project with ripgrep's content searcher (`grep-files`,
+;; gitignore-aware and honouring the search-* options). Two surfaces:
+;;
+;;   projectile-grep        (C-c p g)  LIVE Helm picker — type a regexp and the
+;;                                     matches narrow in the panel as you go;
+;;                                     RET jumps to the file at that line. This
+;;                                     is the helm-ag / counsel-rg experience.
+;;   projectile-grep-buffer (C-c p G)  one-shot dump into a read-only *grep*
+;;                                     buffer, walkable with next-error /
+;;                                     previous-error (`g` re-runs it).
+;;
+;; The pattern is a regexp in both.
+
+;; Live: a RAW (self-filtered) Helm source re-runs the searcher on every
+;; keystroke — Rust does no extra filtering, Scheme alone decides the list. We
+;; guard to >=2 chars so the first keystroke doesn't grep the whole tree for a
+;; single letter. Candidates come back as `path:line:text`; we split off the
+;; path and line and jump. (Absolute paths from the searcher carry no colon —
+;; the same assumption shell.scm's compile-match makes for grep output.)
+(define (projectile-grep-candidates pattern)
+  (let ((root (project-root (buffer-directory))))
+    (if (or (not root) (< (string-length pattern) 2))
+        '()
+        (grep-files root pattern))))
+
+(define (projectile-grep-goto sel)
+  (let* ((parts (split-many sel ":"))
+         (ln (and (>= (length parts) 2) (string->number (nth parts 1)))))
+    (when ln
+      (open-file (car parts))
+      ;; grep-files reports 1-based line numbers; goto-line is 0-based.
+      (goto-line (max 0 (- ln 1))))))
+
+(define (projectile-grep)
+  (if (project-root (buffer-directory))
+      (helm (list (list "Grep project"
+                        (list 'raw "projectile-grep-candidates")
+                        "projectile-grep-goto")))
+      (message "Not in a project")))
+
+;; One-shot buffer grep — the previous behaviour, kept for next-error walking.
+(define (projectile-grep-buffer)
+  (read-string "Grep project (regexp): " "projectile-grep-buffer-run"))
+
+(define (projectile-grep-buffer-run pattern)
+  (let ((root (project-root (buffer-directory))))
+    (if (not root)
+        (message "Not in a project")
+        (let ((matches (grep-files root pattern)))
+          (render-buffer "*grep*" "grep-mode"
+                         (if (null? matches)
+                             (string-append "No matches for " pattern)
+                             (join-lines matches))
+                         '())))))
+
+;; --- recent projects (persisted) --------------------------------------------
+;; A ring of project roots, newest-first, written through to
+;; ~/.config/macros/projects (one root per line) so the welcome/home screen can
+;; list recently-opened projects on the NEXT launch — unlike *project-known*,
+;; which is session-only. Reuses persistence.scm's config dir and helm.scm's
+;; helm-take; both load before this file.
+(define *projectile-recent* '())
+(define *projectile-recent-max* 20)
+(define (projectile-recent-file) (string-append (persistence-dir) "/projects"))
+
+;; Promote `root` to the front of the ring; persist immediately if it changed,
+;; so a project survives a restart as soon as you open a file in it (no save or
+;; clean quit required).
+(define (projectile-recent-add root)
+  (when (and root (not (equal? root "")))
+    (let ((new (helm-take (cons root (filter (lambda (p) (not (equal? p root)))
+                                             *projectile-recent*))
+                          *projectile-recent-max*)))
+      (when (not (equal? new *projectile-recent*))
+        (set! *projectile-recent* new)
+        (projectile-recent-save)))))
+
+(define (projectile-recent-save)
+  (write-file (projectile-recent-file) (join-lines *projectile-recent*)))
+
+;; Load the ring at startup, dropping roots that no longer exist, and seed
+;; *project-known* so switch-project lists them before any file is opened.
+(define (projectile-recent-load)
+  (when (file-exists? (projectile-recent-file))
+    (set! *projectile-recent*
+          (helm-take (filter (lambda (p) (file-exists? p))
+                             (non-empty-lines (read-file (projectile-recent-file))))
+                     *projectile-recent-max*))
+    (for-each (lambda (root)
+                (when (not (member root *project-known*))
+                  (set! *project-known* (cons root *project-known*))))
+              *projectile-recent*)))
+
+;; find-file-hook: record the visited file's project as recently opened.
+(define (projectile-track)
+  (let ((root (project-root (buffer-directory))))
+    (when root (projectile-recent-add root))))
+
+;; --- mode-line indicator ----------------------------------------------------
+;; Recompute the project on every file visit (find-file-hook) and show its name.
+(define (projectile-update-modeline)
+  (let ((root (project-root (buffer-directory))))
+    (set-modeline-project (if root (basename root) ""))))
+
+(add-hook "find-file-hook" "projectile-update-modeline")
+(add-hook "find-file-hook" "projectile-track")
+
+;; Restore the persisted recent-project list at startup.
+(projectile-recent-load)
+
+;; --- keymap (projectile's C-c p prefix) -------------------------------------
+(define-key "fundamental" "ctrl-c p f" "projectile-find-file")
+(define-key "fundamental" "ctrl-c p p" "projectile-switch-project")
+(define-key "fundamental" "ctrl-c p g" "projectile-grep")
+(define-key "fundamental" "ctrl-c p G" "projectile-grep-buffer")
+
+;; grep results buffer: q to close, g to grep again.
+(define-key "grep-mode" "q" "kill-buffer")
+(define-key "grep-mode" "g" "projectile-grep-buffer")
+
+;; M-x discoverability for the projectile entry points.
+(register-command "projectile-find-file")
+(register-command "projectile-grep")
+(register-command "projectile-grep-buffer")
+(register-command "projectile-switch-project")

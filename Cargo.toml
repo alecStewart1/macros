@@ -1,0 +1,130 @@
+[package]
+name = "macros"
+version = "0.1.3"
+edition = "2024"
+description = "Macros — an Emacs-style GPUI editor scripted in Steel"
+repository = "https://codeberg.org/likelihood/macros"
+authors = ["Likelihood LLC"]
+license = "GPL-3.0-or-later"
+
+[dependencies]
+# Zed's GPU-accelerated UI framework. Pinned to the published crates.io release:
+# git `main` split the platform into `gpui_macos`, whose glyph rasterization
+# renders nothing in our build (all text invisible while quads render). 0.2.2 is
+# the self-contained, text-working version.
+gpui = "0.2.2"
+# Steel: an embeddable Scheme, used here as the extension ("elisp") language.
+# The crate is published as `steel-core` but its library is named `steel`.
+steel = { package = "steel-core", version = "0.8.2" }
+# Grapheme-aware cursor movement.
+unicode-segmentation = "1"
+# Embed the `scheme/` Steel runtime into the binary at compile time.
+include_dir = "0.7"
+# LSP client: JSON-RPC messages and an async channel from the reader thread.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+# Lock-free snapshot publishing: the editor swaps a fresh snapshot in with one
+# atomic store; the Scheme read bridges load it without ever blocking the UI.
+arc-swap = "1"
+# Rope text storage: O(log n) edits, line indexing, and UTF-16 conversion.
+ropey = "1.6"
+# Syntax highlighting: tree-sitter + the Scheme grammar (for highlighting Steel).
+# We drive tree-sitter directly (not tree-sitter-highlight) for incremental
+# reparsing. `streaming-iterator` is needed to iterate QueryCursor matches.
+tree-sitter = "0.26"
+tree-sitter-scheme = "=0.24.7-1"
+streaming-iterator = "0.1"
+# Regex engine for evil-mode `/` search and `:%s` substitute.
+regex = "1"
+# Text diffing for ediff: line-level hunks + inline (word) refinement. Powers
+# the `diff-strings` / `diff-inline` primitives behind scheme/ediff.scm.
+similar = "2"
+# ripgrep, as a library: `ignore` is its gitignore-aware parallel directory
+# walker; `grep` is its content searcher. Drives the Scheme-configurable
+# `walk-files` / `grep-files` primitives (no external `rg` binary needed).
+ignore = "0.4"
+grep = "0.3"
+nucleo-matcher = "0.3.1"
+tree-sitter-language = "0.1.7"
+tree-sitter-rust = "0.24.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-go = "0.25.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25.0"
+tree-sitter-bash = "0.25.1"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-lua = "0.5.0"
+tree-sitter-yaml = "0.7.2"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-md = "0.5.3"
+tree-sitter-zig = "1.1.2"
+tree-sitter-r = "1.3.0"
+tree-sitter-ocaml = "0.25.0"
+tree-sitter-haskell = "0.23.1"
+# LaTeX and Typst grammars. No upstream crate exposes the modern `LanguageFn`
+# API against tree-sitter 0.26, so we use the `codebook-*` forks (from the
+# Codebook spellchecker), which publish a `LANGUAGE: LanguageFn` const built on
+# `tree-sitter-language ^0.1`. These crates bundle only the parser, not a
+# highlights query, so we vendor nvim-treesitter's under `grammars/queries/`.
+# Mermaid has no equivalent crate and is vendored from C source — see build.rs.
+codebook-tree-sitter-latex = "0.6.1"
+codebook-tree-sitter-typst = "0.12.1"
+# Terminal emulator core: PTY management, VT/ANSI parser, and the scrollback
+# grid extracted from Alacritty. We drive it as a library (it has no renderer of
+# its own) for the embedded terminal — see `src/terminal.rs`.
+alacritty_terminal = "0.26.0"
+# Decode raster images (PNG/JPEG/GIF/…) for Org inline-image display. Same
+# version GPUI uses, so `image::Frame` matches what `RenderImage::new` expects.
+image = "0.25"
+# Unique node IDs for org-roam (`(org-id-new)`) and local-time formatting for
+# timestamps / agenda "today" (`(current-time fmt)`). Both already in the tree
+# transitively via gpui; promoted to direct deps for the Scheme primitives.
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+# Self-update (src/update.rs). `ureq` is a small blocking HTTP/1.1 client with
+# rustls TLS baked in — no tokio runtime required, so it slots cleanly into
+# gpui's background executor for the one-shot manifest fetch + artifact
+# download. `semver` compares the manifest version against this build's
+# CARGO_PKG_VERSION; `sha2`/`hex` verify the downloaded artifact's digest
+# (fetched as a `.sha256` sidecar next to the artifact on R2).
+ureq = "2"
+semver = "1"
+sha2 = "0.10"
+hex = "0.4"
+# Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
+# for staging update downloads.
+dirs = "5"
+
+# macOS-only: `libc::statfs` to detect a read-only volume (DMG / App
+# Translocation) and `renamex_np` for the atomic in-place bundle swap. Only the
+# self-update path on macOS touches these.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+# Compiles the vendored Mermaid tree-sitter parser (grammars/tree-sitter-mermaid)
+# from C at build time. No upstream crate exposes Mermaid against tree-sitter
+# 0.26, so we link `tree_sitter_mermaid()` directly — see build.rs and the
+# `LanguageFn` binding in src/highlight.rs.
+[build-dependencies]
+cc = "1"
+
+[profile.dev]
+# gpui + steel are large; a touch of opt keeps the editor responsive while
+# still building reasonably fast during development.
+opt-level = 1
+
+# Windows-only build dependency: embeds the application icon (and version
+# metadata) into macros.exe so the Start-menu / taskbar shortcut shows a real
+# icon. The WiX installer (wix/main.wxs) deliberately sets NO Shortcut/@Icon and
+# resolves the icon from the exe instead — see build.rs and the shortcut note in
+# main.wxs. `winresource` only runs when targeting Windows, so non-Windows
+# builds never pull or invoke it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

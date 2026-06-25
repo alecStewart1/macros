@@ -1,0 +1,24 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Macros — seamless ember anvil, no spark</title>
+  <desc>A clean single-silhouette ember anvil on a deep indigo squircle.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2039"/>
+      <stop offset="1" stop-color="#14111d"/>
+    </linearGradient>
+    <linearGradient id="em" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb347"/>
+      <stop offset="1" stop-color="#ff5e3a"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
+  <path fill="url(#em)" d="M252,460
+    L356,418 L724,418 L724,494
+    C706,530 648,530 612,570
+    C590,606 582,616 582,636
+    C582,666 700,672 742,692
+    L742,736 L330,736 L330,692
+    C372,672 442,666 442,636
+    C442,616 434,606 412,570
+    C396,536 380,520 356,496 Z"/>
+</svg>

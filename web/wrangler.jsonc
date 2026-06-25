@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "macros-web",
+  "compatibility_date": "2025-03-01",
+  // Pure static site: no `main` Worker entrypoint. `next build` (output:
+  // "export") emits `out/`, which Cloudflare serves directly from the edge.
+  "assets": {
+    "directory": "./out",
+    // With `trailingSlash: true` every route is `<route>/index.html`; serve a
+    // styled 404 for anything that misses.
+    "not_found_handling": "404-page"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

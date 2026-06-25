@@ -1,0 +1,13 @@
+{
+  "name": "macros-release-tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Release publishing tooling for Macros (uploads artifacts to Cloudflare R2).",
+  "scripts": {
+    "publish-release": "node publish-release.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0"
+  }
+}

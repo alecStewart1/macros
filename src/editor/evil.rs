@@ -1,0 +1,318 @@
+//! Evil (modal editing) + search/ex-command methods for [`Editor`].
+
+use regex::Regex;
+
+use super::*;
+
+impl Editor {
+    /// True in Normal/Visual, where plain keys are commands (not self-insert).
+    pub(super) fn evil_intercepts(&self) -> bool {
+        matches!(self.evil, EvilState::Normal | EvilState::Visual)
+    }
+
+    /// The keymap name plain keys resolve against in the current evil state.
+    pub(super) fn evil_keymap(&self) -> &'static str {
+        match self.evil {
+            EvilState::Visual => "evil-visual",
+            _ => "evil-normal",
+        }
+    }
+
+    /// Whether the `"auto"` cursor style should be a block: always, except in
+    /// evil insert mode (a bar signals insertion, the vim convention). With evil
+    /// disabled this is a plain block — matching the default cursor shape.
+    pub fn wants_block_cursor(&self) -> bool {
+        !matches!(self.evil, EvilState::Insert)
+    }
+
+    /// Short mode-line tag for the current state (None when disabled).
+    pub fn evil_label(&self) -> Option<&'static str> {
+        match self.evil {
+            EvilState::Disabled => None,
+            EvilState::Normal => Some("<N>"),
+            EvilState::Insert => Some("<I>"),
+            EvilState::Visual => Some("<V>"),
+        }
+    }
+
+    pub(super) fn evil_enable(&mut self, cx: &mut Context<Self>) {
+        self.evil = EvilState::Normal;
+        self.mark_active = false;
+        cx.notify();
+    }
+
+    pub(super) fn evil_normal_state(&mut self, cx: &mut Context<Self>) {
+        let was_insert = matches!(self.evil, EvilState::Insert);
+        self.evil = EvilState::Normal;
+        // Leaving visual/insert clears any selection (vim's Escape behaviour).
+        self.mark_active = false;
+        // Vim nudges the cursor one column left when leaving Insert (the caret
+        // sat *after* the last typed char), but not past the line's start.
+        let mut point = self.point();
+        if was_insert {
+            let line_start = self.buffer.line_range_at(point).start;
+            if point > line_start {
+                point = self.buffer.prev_grapheme(point);
+            }
+        }
+        self.collapse_to(point);
+        cx.notify();
+    }
+
+    pub(super) fn evil_insert_state(&mut self, cx: &mut Context<Self>) {
+        self.evil = EvilState::Insert;
+        self.mark_active = false;
+        cx.notify();
+    }
+
+    pub(super) fn evil_visual_state(&mut self, cx: &mut Context<Self>) {
+        self.evil = EvilState::Visual;
+        // Anchor the selection at point; motions extend it (mark is active).
+        self.mark_active = true;
+        cx.notify();
+    }
+
+    pub(super) fn evil_disable(&mut self, cx: &mut Context<Self>) {
+        self.evil = EvilState::Disabled;
+        cx.notify();
+    }
+
+    // --- evil paste (`p` / `P`) ------------------------------------------
+
+    /// Vim `p` (after) / `P` (before). Pastes the most recent kill, choosing
+    /// line-wise or character-wise placement from the flag set by the last
+    /// yank/delete (`evil_yank_linewise`).
+    pub(super) fn evil_paste(&mut self, after: bool, cx: &mut Context<Self>) {
+        let Some(text) = self.kill_ring.last().cloned() else {
+            self.echo("Kill ring is empty", cx);
+            return;
+        };
+        if self.evil_yank_linewise {
+            self.evil_paste_linewise(&text, after, cx);
+        } else {
+            self.evil_paste_charwise(&text, after, cx);
+        }
+    }
+
+    /// Character-wise paste: insert after (vim `p`) or before (`P`) the grapheme
+    /// under the cursor, leaving the cursor on the last grapheme pasted.
+    fn evil_paste_charwise(&mut self, text: &str, after: bool, cx: &mut Context<Self>) {
+        let p = self.point();
+        let at = if after {
+            self.buffer.next_grapheme(p).min(self.buffer.len())
+        } else {
+            p
+        };
+        let end = self.edit(at..at, text);
+        // Vim leaves the cursor on the last character of the inserted text.
+        let cursor = if end > at {
+            self.buffer.prev_grapheme(end)
+        } else {
+            end
+        };
+        self.collapse_to(cursor);
+        cx.notify();
+    }
+
+    /// Line-wise paste: drop the killed line(s) on a fresh line below (vim `p`)
+    /// or above (`P`) the current one, cursor at the first non-blank.
+    fn evil_paste_linewise(&mut self, text: &str, after: bool, cx: &mut Context<Self>) {
+        let line = self.buffer.line_range_at(self.point());
+        let line_start = if after {
+            if line.end < self.buffer.len() {
+                // Insert at the start of the following line; `text` ends in '\n'.
+                let at = self.buffer.next_grapheme(line.end);
+                self.edit(at..at, text);
+                at
+            } else {
+                // Last line (no trailing newline): add the break ourselves and
+                // drop the trailing one from `text` so we don't leave a blank.
+                let body = text.strip_suffix('\n').unwrap_or(text);
+                let at = line.end;
+                self.edit(at..at, &format!("\n{body}"));
+                self.buffer.next_grapheme(at)
+            }
+        } else {
+            let at = line.start;
+            self.edit(at..at, text);
+            at
+        };
+        self.collapse_to(self.first_non_blank(line_start));
+        cx.notify();
+    }
+
+    /// The first non-whitespace byte on the line containing `offset` (or the
+    /// line's end if it's all blank) — where vim parks the cursor after a
+    /// line-wise paste or `^`.
+    fn first_non_blank(&self, offset: usize) -> usize {
+        let line = self.buffer.line_range_at(offset);
+        let text = self.buffer.slice_to_string(line.clone());
+        match text.find(|c: char| !c.is_whitespace()) {
+            Some(i) => line.start + i,
+            None => line.start,
+        }
+    }
+
+    // --- evil search (`/` `?` `n` `N`) and ex commands (`:`) --------------
+
+    pub(super) fn evil_search_forward(&mut self, cx: &mut Context<Self>) {
+        self.open_minibuffer("/", MinibufferPurpose::SearchForward, "", cx);
+    }
+
+    pub(super) fn evil_search_backward(&mut self, cx: &mut Context<Self>) {
+        self.open_minibuffer("?", MinibufferPurpose::SearchBackward, "", cx);
+    }
+
+    /// `n` — repeat the last search in its original direction (vim semantics:
+    /// after `?`, `n` keeps going backward).
+    pub(super) fn evil_search_next(&mut self, cx: &mut Context<Self>) {
+        self.do_search(self.evil_search_forward, cx);
+    }
+
+    /// `N` — repeat the last search in the opposite direction.
+    pub(super) fn evil_search_previous(&mut self, cx: &mut Context<Self>) {
+        self.do_search(!self.evil_search_forward, cx);
+    }
+
+    /// Move point to the next/previous regex match of the stored query, wrapping
+    /// around the buffer. The cursor lands on the start of the match.
+    pub(super) fn do_search(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(query) = self.search_query.clone() else {
+            return;
+        };
+        let regex = match Regex::new(&query) {
+            Ok(r) => r,
+            Err(err) => {
+                self.echo(format!("Invalid regex: {err}"), cx);
+                return;
+            }
+        };
+        let text = self.buffer.full_text();
+        let point = self.point();
+        let starts: Vec<usize> = regex.find_iter(&text).map(|m| m.start()).collect();
+        if starts.is_empty() {
+            self.echo(format!("No match for /{query}/"), cx);
+            return;
+        }
+        let target = if forward {
+            starts
+                .iter()
+                .find(|&&s| s > point)
+                .copied()
+                .unwrap_or(starts[0]) // wrap to first
+        } else {
+            starts
+                .iter()
+                .rev()
+                .find(|&&s| s < point)
+                .copied()
+                .unwrap_or(*starts.last().unwrap()) // wrap to last
+        };
+        self.move_to(target, cx);
+    }
+
+    /// Run an ex command line (the text after `:`): `%s/…/…/`, `s/…/…/`, `w`,
+    /// `q`, `wq`/`x`, `q!`.
+    pub(super) fn run_ex_command(&mut self, input: &str, cx: &mut Context<Self>) {
+        let cmd = input.trim();
+        if let Some(rest) = cmd.strip_prefix("%s") {
+            self.ex_substitute(true, rest, cx);
+        } else if let Some(rest) = cmd.strip_prefix('s').filter(|r| r.starts_with('/')) {
+            self.ex_substitute(false, rest, cx);
+        } else if let Ok(n) = cmd.parse::<usize>() {
+            // `:N` — jump to (1-based) line N.
+            let last = self.buffer.line_count().saturating_sub(1);
+            let offset = self.buffer.line_range(n.saturating_sub(1).min(last)).start;
+            self.move_to(offset, cx);
+        } else {
+            // Split a verb from its optional argument (`:e file`, `:b name`, …).
+            let (verb, arg) = match cmd.split_once(char::is_whitespace) {
+                Some((v, a)) => (v, a.trim()),
+                None => (cmd, ""),
+            };
+            match verb {
+                // Write / quit.
+                "w" | "write" if !arg.is_empty() => self.write_buffer_to(arg, cx),
+                "w" | "write" => self.save_buffer(cx),
+                "q" | "quit" => self.quit(cx),
+                "q!" | "quit!" => cx.quit(),
+                "wq" | "wq!" | "x" | "xit" => {
+                    self.save_buffer(cx);
+                    cx.quit();
+                }
+                "qa" | "qall" | "quitall" | "qa!" | "qall!" => cx.quit(),
+                "wqa" | "wqall" | "xa" | "xall" => {
+                    self.save_buffer(cx);
+                    cx.quit();
+                }
+                // Files.
+                "e!" | "edit!" => self.revert_buffer(cx),
+                "e" | "edit" if !arg.is_empty() => self.find_file(arg, cx),
+                "e" | "edit" => self.echo("Usage: :e <file>", cx),
+                // Clear search highlighting.
+                "noh" | "nohl" | "nohlsearch" => {
+                    self.search_query = None;
+                    cx.notify();
+                }
+                // Buffers.
+                "b" | "bu" | "buf" | "buffer" if !arg.is_empty() => self.switch_to_buffer(arg, cx),
+                "bn" | "bnext" => self.next_buffer(cx),
+                "bp" | "bN" | "bprev" | "bprevious" | "bNext" => self.previous_buffer(cx),
+                "bd" | "bdel" | "bdelete" => self.kill_buffer(cx),
+                // Windows (Vim abbreviations): :split / :vsplit and friends.
+                "split" | "sp" | "spl" => self.split_window(true, cx),
+                "vsplit" | "vs" | "vsp" | "vspl" => self.split_window(false, cx),
+                "only" | "on" => self.delete_other_windows(cx),
+                "close" | "clo" => self.delete_window(cx),
+                other => self.echo(format!("Unknown ex command: {other}"), cx),
+            }
+        }
+    }
+
+    /// `:%s/pat/rep/[g]` (whole buffer) or `:s/pat/rep/[g]` (current line).
+    /// `g` replaces every match on a line; otherwise the first per line. Vim
+    /// backreferences (`\1`) are translated to the regex crate's `${1}`.
+    pub(super) fn ex_substitute(&mut self, whole_buffer: bool, spec: &str, cx: &mut Context<Self>) {
+        let body = spec.strip_prefix('/').unwrap_or(spec);
+        let mut parts = body.splitn(3, '/');
+        let pattern = parts.next().unwrap_or("");
+        let replacement = translate_backrefs(parts.next().unwrap_or(""));
+        let global = parts.next().unwrap_or("").contains('g');
+        if pattern.is_empty() {
+            self.echo("Empty pattern", cx);
+            return;
+        }
+        let regex = match Regex::new(pattern) {
+            Ok(r) => r,
+            Err(err) => {
+                self.echo(format!("Invalid regex: {err}"), cx);
+                return;
+            }
+        };
+
+        let substitute = |line: &str| -> String {
+            if global {
+                regex.replace_all(line, replacement.as_str()).into_owned()
+            } else {
+                regex.replace(line, replacement.as_str()).into_owned()
+            }
+        };
+
+        if whole_buffer {
+            let text = self.buffer.full_text();
+            // split('\n') preserves the line structure (incl. a trailing empty).
+            let new: Vec<String> = text.split('\n').map(substitute).collect();
+            let new = new.join("\n");
+            let len = self.buffer.len();
+            let cursor = self.edit(0..len, &new);
+            self.collapse_to(cursor.min(self.buffer.len()));
+        } else {
+            let range = self.buffer.line_range_at(self.point());
+            let line = self.buffer.slice_to_string(range.clone());
+            let new = substitute(&line);
+            let cursor = self.edit(range, &new);
+            self.collapse_to(cursor);
+        }
+        cx.notify();
+    }
+}

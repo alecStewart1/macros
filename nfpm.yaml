@@ -1,0 +1,97 @@
+# nfpm configuration for building Macros .deb and .rpm packages.
+#
+# Usage (CI):
+#   VERSION=0.1.0 NFPM_ARCH=arm64 \
+#     nfpm package --config nfpm.yaml --packager deb --target dist/
+#   VERSION=0.1.0 NFPM_ARCH=arm64 \
+#     nfpm package --config nfpm.yaml --packager rpm --target dist/
+#
+# nfpm resolves all `src:` paths relative to this file, so it MUST live at the
+# repo root. VERSION and NFPM_ARCH come from the env (release.yml fills them in).
+# Local builds need `cargo build --release --bin macros` first.
+
+name: macros
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+section: editors
+priority: optional
+maintainer: Likelihood LLC <support@macros.dev>
+description: |
+  Macros — an Emacs-style, GPU-accelerated text editor scripted in
+  Steel (an embeddable Scheme). Modal editing, LSP, tree-sitter highlighting,
+  an embedded terminal, and a fully programmable runtime — at native speed.
+vendor: Likelihood LLC
+homepage: https://github.com/kgwinnup/macros
+license: GPL-3.0-or-later
+
+contents:
+  - src: target/release/macros
+    dst: /usr/bin/macros
+    file_info:
+      mode: 0755
+  - src: assets/linux/macros.desktop
+    dst: /usr/share/applications/macros.desktop
+  - src: assets/brand/icon_16x16.png
+    dst: /usr/share/icons/hicolor/16x16/apps/macros.png
+  - src: assets/brand/icon_24x24.png
+    dst: /usr/share/icons/hicolor/24x24/apps/macros.png
+  - src: assets/brand/icon_32x32.png
+    dst: /usr/share/icons/hicolor/32x32/apps/macros.png
+  - src: assets/brand/icon_48x48.png
+    dst: /usr/share/icons/hicolor/48x48/apps/macros.png
+  - src: assets/brand/icon_64x64.png
+    dst: /usr/share/icons/hicolor/64x64/apps/macros.png
+  - src: assets/brand/icon_128x128.png
+    dst: /usr/share/icons/hicolor/128x128/apps/macros.png
+  - src: assets/brand/icon_256x256.png
+    dst: /usr/share/icons/hicolor/256x256/apps/macros.png
+  - src: assets/brand/icon_512x512.png
+    dst: /usr/share/icons/hicolor/512x512/apps/macros.png
+  - src: assets/brand/icon_1024x1024.png
+    dst: /usr/share/icons/hicolor/1024x1024/apps/macros.png
+  # Bundled third-party license text (Lilex editor font, SIL OFL).
+  - src: assets/fonts/Lilex-OFL.txt
+    dst: /usr/share/doc/macros/OFL-Lilex.txt
+
+scripts:
+  postinstall: scripts/linux/postinst.sh
+  postremove: scripts/linux/postrm.sh
+
+# Debian and Fedora ship the same upstream libraries under different package
+# names. Keep these two lists in sync whenever a new runtime dep is added.
+# These mirror gpui's Linux backend requirements (Wayland/X11 + xkbcommon,
+# fontconfig/freetype for text, and Vulkan for the GPU renderer).
+overrides:
+  deb:
+    depends:
+      - libxkbcommon-x11-0
+      - libxkbcommon0
+      - libwayland-client0
+      - libwayland-cursor0
+      - libwayland-egl1
+      - libxcb1
+      - libfontconfig1
+      - libfreetype6
+      - libasound2
+      - libgl1
+      - libegl1
+      - libgbm1
+      - libvulkan1
+      - libssl3
+  rpm:
+    depends:
+      - libxkbcommon-x11
+      - libxkbcommon
+      - libwayland-client
+      - libwayland-cursor
+      - libwayland-egl
+      - libxcb
+      - fontconfig
+      - freetype
+      - alsa-lib
+      - mesa-libGL
+      - mesa-libEGL
+      - mesa-libgbm
+      - vulkan-loader
+      - openssl-libs

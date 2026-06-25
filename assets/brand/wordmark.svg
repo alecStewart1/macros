@@ -1,0 +1,10 @@
+<svg width="960" height="220" viewBox="0 0 960 220" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>macros.dev</title>
+  <desc>The macros.dev wordmark: "(macros.dev)" in monospace.</desc>
+  <text x="480" y="110"
+        text-anchor="middle" dominant-baseline="central"
+        font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace"
+        font-size="120" font-weight="600" letter-spacing="2">
+    <tspan fill="#16140f">(</tspan><tspan fill="#16140f">macros</tspan><tspan fill="#8a8170">.dev</tspan><tspan fill="#16140f">)</tspan>
+  </text>
+</svg>

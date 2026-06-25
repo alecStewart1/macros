@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX v4 installer for Macros.
+
+  Built with `wix build` directly (see the `windows` job in
+  .forgejo/workflows/release.yml). The Version and CargoTargetBinDir
+  preprocessor variables are supplied on the command line with `-d`:
+
+    wix build wix\main.wxs -ext WixToolset.UI.wixext -arch x64 \
+      -d Version=<x.y.z> -d CargoTargetBinDir=target\release -o <out.msi>
+
+  The two GUIDs below are STABLE IDENTITIES — never change them, or Windows will
+  treat upgrades as separate products (leaving two copies in Add/Remove
+  Programs):
+
+    * UpgradeCode  — the product family. Fixed forever.
+    * The Shortcut Guid — fixed so the Start-menu shortcut upgrades cleanly.
+
+  Per-file Component IDs use `*` (auto-GUID): fine because each component holds
+  exactly one file and the file's keypath path is stable, so MajorUpgrade
+  remove-then-install handles versioning.
+
+  Signing is NOT done here — CI signs the produced .msi (and the .exe before
+  packaging) with Azure Trusted Signing. See the `windows` job in
+  .forgejo/workflows/release.yml.
+-->
+<!-- The `ui` namespace is declared on the root <Wix> element so the WixUI
+     extension dependency is detected; `wix build` is invoked with
+     `-ext WixToolset.UI.wixext`. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+      Name="Macros"
+      Manufacturer="Likelihood LLC"
+      Version="$(var.Version)"
+      UpgradeCode="705A19AE-4067-4EDD-9568-0F2E44CFAAB0"
+      Language="1033"
+      Codepage="1252"
+      Scope="perMachine"
+      InstallerVersion="500">
+
+    <SummaryInformation
+        Keywords="editor,emacs,steel,scheme,installer"
+        Description="Macros Installer"
+        Manufacturer="Likelihood LLC" />
+
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        DowngradeErrorMessage="A newer version of Macros is already installed. Setup will now exit." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- App icon used in Add/Remove Programs (only — see shortcut note below). -->
+    <Icon Id="ProductICO" SourceFile="assets\brand\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ProductICO" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/kgwinnup/macros" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/kgwinnup/macros" />
+    <!-- Note: ARPNOMODIFY is set by the WixUI_InstallDir dialog set, so we do
+         not define it here (doing so triggers WIX0091 duplicate-symbol). -->
+
+    <!-- Directory layout: %ProgramFiles%\Macros\macros.exe -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLDIR" Name="Macros">
+        <Component Id="MainExecutable" Guid="*">
+          <File
+              Id="MacrosEXE"
+              Name="macros.exe"
+              Source="$(var.CargoTargetBinDir)\macros.exe"
+              KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start-menu shortcut (fixed GUID so it upgrades, not duplicates).
+         Deliberately NO Icon attribute: an explicit Icon makes Windows write
+         the shortcut's IconLocation as a path into the per-ProductCode MSI
+         cache (C:\Windows\Installer\{ProductCode}\ProductICO). MajorUpgrade
+         assigns a new ProductCode each release and deletes the old cache
+         folder, so any taskbar-pinned copy of the .lnk keeps a dead icon path
+         and turns into a blank document icon. With no Icon attribute the shell
+         resolves the icon from the target exe (embedded via build.rs +
+         winresource), whose path is stable across upgrades. -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="ApplicationShortcut" Guid="F8EF6AAA-2E36-4799-84A5-BDB3E7A7AB29">
+        <Shortcut
+            Id="StartMenuShortcut"
+            Name="Macros"
+            Description="An Emacs-style editor scripted in Steel"
+            Target="[INSTALLDIR]macros.exe"
+            WorkingDirectory="INSTALLDIR" />
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\Likelihood LLC\Macros"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="MainApplication" Title="Macros" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+
+    <!-- License dialog (RTF required by WixUI). -->
+    <WixVariable Id="WixUILicenseRtf" Value="wix\License.rtf" />
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLDIR" />
+  </Package>
+</Wix>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Macros
+GenericName=Text Editor
+Comment=An Emacs-style GPUI editor scripted in Steel
+Exec=macros %F
+Icon=macros
+Terminal=false
+Categories=Development;TextEditor;Utility;
+StartupWMClass=macros
+MimeType=text/plain;text/x-csrc;text/x-rust;text/x-python;application/json;
+Keywords=editor;emacs;steel;scheme;code;text;

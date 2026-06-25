@@ -1,0 +1,161 @@
+---
+title: Scripting with Steel
+description: Define commands, keymaps, and modes in Steel — the same language the editor is written in.
+---
+
+# Scripting with Steel
+
+Macros is scripted in **Steel**, a fast embedded Scheme. This isn't a plugin API bolted onto a closed core — the editor's own features (evil-mode, Magit, LSP commands, dired, org-mode) are written in the *same* Steel that you write your config in, using the *same* primitives. If the editor can do it, your scripts can too.
+
+Your code lives in `~/.config/macros/init.scm` (see [Configuration](/docs/configuration)). Evaluate snippets live with <kbd>M-:</kbd> (`eval-expression`).
+
+## Defining a command
+
+Any zero-argument function is callable by name from <kbd>M-x</kbd> and bindable to a key:
+
+```scheme
+(define (insert-date)
+  (insert-string (call-process "date" '("+%Y-%m-%d"))))
+
+;; Now: M-x insert-date, or bind it.
+(bind-key "fundamental" "ctrl-c d" insert-date)
+```
+
+## Keymaps
+
+`bind-key` is the recommended way to bind a key — pass the command itself:
+
+```scheme
+;; (bind-key "<map>" "<chord>" <command>)
+(bind-key "fundamental" "ctrl-c g" magit-status)   ; global map
+(bind-key "org-mode"    "ctrl-c x" org-todo)       ; mode-local map
+```
+
+Passing the function directly turns a typo into a load-time error and lets go-to-definition follow the binding. Built-in commands work the same way (they're functions too); a string command name is also accepted. `bind-key` is a thin wrapper over the lower-level `define-key` primitive, which takes a command **name** string only.
+
+The global map is `"fundamental"`; major modes have maps named after them. See [Keybindings](/docs/keybindings).
+
+## Reading & editing buffers
+
+Macros exposes Emacs-style primitives. Point and the buffer are addressed by **byte** offsets:
+
+```scheme
+(point)               ; current cursor position
+(goto-char n)         ; move point (queued, so save-excursion restores it)
+(buffer-string)       ; whole buffer text
+(insert-string "x")   ; insert at point
+(message "hello")     ; echo-area message
+```
+
+`save-excursion` runs a body and restores point afterward, just like Emacs:
+
+```scheme
+(save-excursion
+  (beginning-of-buffer)
+  (insert-string ";; generated\n"))
+```
+
+Other building blocks you'll reach for: `range-edit` (replace a byte range), regexp search, undo grouping (a command's edits coalesce into one undo step), buffer-local variables, marker tracking, and minibuffer reads for prompting the user.
+
+## Running processes
+
+```scheme
+;; Synchronous — returns stdout as a string:
+(call-process "git" '("rev-parse" "--abbrev-ref" "HEAD"))
+
+;; Asynchronous — make-process / run-with-timer for long-running work
+;; without blocking the UI.
+```
+
+`call-process` is the foundation of Magit, compile, grep, and dired.
+
+## Special (read-only) buffers
+
+The faced, read-only buffers used by Magit, LSP results, dired, and the diagnostics list are built from a small set of primitives you can use too:
+
+- `render-buffer` — draw a read-only buffer with per-line faces.
+- `set-line-icon` — put an icon beside a line (Treemacs uses this).
+- `buffer-line` / `goto-line` — find and restore the item at point.
+- overlay faces — color sub-line spans (diff accents, semantic tokens, rainbow).
+
+This is exactly how a "list buffer" UI (a results list with <kbd>n</kbd>/<kbd>p</kbd>/<kbd>Enter</kbd>/<kbd>q</kbd>) is built — pick a Scheme module like `dired.scm` or `lsp.scm` in the source as a template.
+
+## Display overlays & tree-sitter queries
+
+Display-only overlays change how text *renders* without touching the buffer. They're the building blocks behind markdown/org heading concealment, the Org indent look, inlay hints, and rainbow brackets — and they work in any buffer, whatever its major mode. All ranges are **byte** offsets.
+
+| Primitive | Effect |
+| --- | --- |
+| `(overlay-set-face start end "face")` | color a byte range |
+| `(overlay-hide start end)` | conceal a byte range (revealed while point is on the line) |
+| `(set-line-scale line n)` | render a line at `n`× the font size (e.g. headings) |
+| `(set-line-indent line cols)` | shift a line right by `cols` columns (display-only) |
+| `(put-text-property start end "key" "val")` | attach a property to a byte range |
+| `(clear-overlay-faces)` / `(clear-overlay-hides)` | reset faces / hides (each owner clears only its own) |
+| `(clear-line-scales)` / `(clear-line-indents)` | reset scaling / indentation |
+
+To target *syntax* rather than regex matches, query the buffer's tree-sitter grammar. `(tree-sitter-query "<query>" "callback")` runs the query against whatever grammar the current buffer uses and calls `callback` with the captures — one `name⇥start⇥end⇥kind` record per line (tab-separated, byte offsets). `(tree-sitter-node-at byte "callback")` reports the node chain at a position ("what am I inside?").
+
+Combined, they let you conceal — or recolor, or enlarge — a node type in *any* language. This is the markdown `## `-hiding machinery, generalized:
+
+```scheme
+;; Hide every node captured by `query` in the current buffer (any grammar).
+(define (hide-nodes query)
+  (clear-overlay-hides)
+  (tree-sitter-query query "hide-nodes--apply"))
+
+(define (hide-nodes--apply records)        ; "name\tstart\tend\tkind" per line
+  (for-each
+    (lambda (rec)
+      (let ((f (split-many rec "\t")))
+        (when (>= (length f) 3)
+          (overlay-hide (string->number (nth f 1))
+                        (string->number (nth f 2))))))
+    (split-many records "\n")))
+
+;; Hide TypeScript type annotations, or Rust visibility modifiers:
+(hide-nodes "(type_annotation) @h")
+(hide-nodes "(visibility_modifier) @h")
+```
+
+For a live effect, re-run on edit by scheduling from `after-change-functions` (debounced) — see how `org.scm` and `markdown.scm` drive their fontify passes, and gate the repaint on a structural signature so it doesn't run on every keystroke. Tree-sitter queries return matches only for buffers that have a bundled grammar.
+
+## Modes, faces, and themes
+
+Define a major mode by giving it a keymap and activating it from `find-file-hook` based on the file. Set syntax/UI colors with faces and load themes — see [Themes & faces](/docs/themes-and-faces). For the full recipe — tree-sitter syntax highlighting, bundling a new grammar, and a worked major-mode example — see [Languages & modes](/docs/languages).
+
+## Editing Steel & evaluating it live
+
+Plain `.scm` files open in `steel-mode`. Editor-aware config and extension code — anything under `~/.config/macros`, or a file named `*.macros.scm` — opens in `macros-steel-mode`, the same mode with the editor API seeded for completion and docs. Both let you push code into the running editor without restarting:
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c C-e</kbd> | `eval-last-sexp` | Evaluate the expression before point |
+| <kbd>C-c C-b</kbd> | `eval-buffer` | Evaluate the whole buffer |
+
+In `macros-steel-mode` you also get one-key documentation for the API symbol at point:
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c C-d</kbd> | `macros-eldoc` | Echo a one-line summary of the symbol at point |
+| <kbd>C-c C-f</kbd> | `macros-describe-point` | Open the symbol's full docs in `*help*` |
+
+So the workflow is: edit a function in your `init.scm`, press <kbd>C-c C-e</kbd> on it, and keep going — the redefinition is live. <kbd>M-:</kbd> (`eval-expression`) evaluates a one-off expression in the minibuffer.
+
+## Discoverability is part of the API
+
+Function docs are scraped from the `;;` comments above each definition, so anything you document is searchable from inside the editor:
+
+```scheme
+;; Insert today's date in ISO format.
+(define (insert-date) ...)
+
+(function-list)            ; all documented commands
+(function-doc "insert-date")
+```
+
+Then <kbd>C-h f</kbd>, <kbd>C-h a</kbd> (`apropos`), and the live <kbd>C-h C-a</kbd> (`helm-apropos`) find it — the last jumps straight back to this definition on <kbd>Enter</kbd>. See [Getting help](/docs/getting-help).
+
+## Learn by reading the source
+
+The best reference is the runtime itself: the `scheme/` directory ships as readable source. `magit.scm` shows transients and faced buffers, `lsp.scm` shows request/response wiring and list buffers, `helm.scm` shows custom pickers, `org.scm` shows a parser-backed mode. Copy the patterns, then make them yours.

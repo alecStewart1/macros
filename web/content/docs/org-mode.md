@@ -1,0 +1,116 @@
+---
+title: Org mode
+description: Headings, TODOs, agenda, capture, tables, and babel — a full org-mode in Scheme.
+---
+
+# Org mode
+
+Macros implements **Org mode** entirely in Scheme on the editor primitives. Opening a `.org` file activates it automatically (via `find-file-hook`), turning on fontification and the `org-mode` keymap.
+
+It's built in five independently useful layers:
+
+1. **Fontification + visibility cycling** — colored headings you fold and unfold.
+2. **Structure editing** — TODO/tag/priority cycling, promote/demote, move subtree, insert heading, toggle checkbox.
+3. **An Org AST parser** (`org-parse`) that both export and the agenda consume.
+4. **Agenda + capture** across a set of `.org` files.
+5. **Tables** (alignment) and **babel** (executing source blocks).
+
+## Visibility & headings
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>Tab</kbd> | `org-cycle` | Cycle the heading at point: folded → children → subtree |
+| <kbd>S-Tab</kbd> | `org-global-cycle` | Cycle the whole buffer: overview → contents → show-all |
+| <kbd>M-Enter</kbd> | `org-insert-heading` | Insert a sibling heading |
+| <kbd>M-←</kbd> / <kbd>M-→</kbd> | `org-promote` / `org-demote` | Change the heading's level (only on a heading line) |
+| <kbd>M-↑</kbd> / <kbd>M-↓</kbd> | `org-move-subtree-up` / `org-move-subtree-down` | Move the subtree up / down (only on a heading line) |
+
+Leading stars are hidden, so a heading shows only its colored title (all stars collapse from display — the buffer text is untouched). Toggle it with `M-x org-toggle-leading-stars`, or set `(set! *org-hide-leading-stars* #f)` in `init.scm`.
+
+Headings and their body text are **virtually indented** by depth, like Emacs `org-indent-mode`: a level-N heading is indented `(N-1)` levels and its body one level further. The indentation is display-only — no spaces are written to the file, so there is nothing for the cursor to step through (there is no "indent wall"; `C-a`, backspace, etc. behave exactly as on flush text). Toggle with `M-x org-toggle-indent`, set the step (default 4) with `(set! *org-indent-per-level* 4)`, or disable with `(set! *org-indent* #f)` in `init.scm`. When the cursor is on a heading line, its stars are revealed so you can edit the level.
+
+## TODOs, tags, priorities
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c C-t</kbd> | `org-todo` | Cycle the TODO state |
+| <kbd>C-c C-q</kbd> | `org-set-tags` | Set tags |
+| <kbd>C-c ,</kbd> | `org-set-priority` | Set priority |
+| <kbd>C-c C-c</kbd> | `org-ctrl-c-ctrl-c` | Context action (toggle checkbox, align table, run block…) |
+
+## Agenda & capture
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c a</kbd> | `org-agenda` | Open the agenda across your org files |
+| <kbd>C-c t</kbd> | `org-todo-list` | List all TODOs |
+| <kbd>C-c c</kbd> | `org-capture` | Capture a new note/task |
+
+In the agenda buffer: <kbd>Enter</kbd> visits the entry, <kbd>g</kbd> refreshes, <kbd>n</kbd>/<kbd>p</kbd> move, <kbd>q</kbd> closes.
+
+## Tables & babel
+
+Tables are interactive, like Emacs. Inside a table:
+
+| Key | Action |
+| --- | --- |
+| <kbd>Tab</kbd> / <kbd>S-Tab</kbd> | Re-align and move to the next / previous cell (a new row is created past the last cell) |
+| <kbd>Enter</kbd> | Re-align and move to the first cell of the next row (creating one) |
+| <kbd>M-←</kbd> / <kbd>M-→</kbd> | Move the current column left / right |
+| <kbd>M-↑</kbd> / <kbd>M-↓</kbd> | Move the current row up / down |
+| <kbd>M-S-→</kbd> / <kbd>M-S-←</kbd> | Insert / delete a column |
+| <kbd>M-S-↓</kbd> / <kbd>M-S-↑</kbd> | Insert / delete a row |
+| <kbd>C-c C-c</kbd> | Re-align the table |
+
+Outside a table these keys keep their heading meanings (fold, promote/demote, move subtree). `C-c C-c` also executes the source block at point. The Org AST parser drives tables, babel, and export, so they all see the same structure.
+
+## Export & previews
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c C-e</kbd> | `org-export-html` | Export the buffer to HTML |
+| <kbd>C-c C-x C-v</kbd> | `org-toggle-inline-images` | Toggle inline image display |
+| <kbd>C-c C-x C-l</kbd> | `org-toggle-latex-preview` | Toggle LaTeX fragment previews |
+
+## Org-roam (linked notes)
+
+A Zettelkasten layer over your org files — the Macros port of Emacs **org-roam**. Each note is an `.org` file with an `:ID:` property and a `#+title:`, and you link notes to each other by ID. Backlinks and a graph view come for free.
+
+Notes live in `~/org-roam` by default. Point it somewhere else from `init.scm`:
+
+```scheme
+(org-roam-set-directory "~/notes")
+```
+
+### Nodes
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c n f</kbd> | `org-roam-node-find` | Find a node by title — creates it if the title is new |
+| <kbd>C-c n c</kbd> | `org-roam-capture` | Create a new node, then open it |
+| <kbd>C-c n i</kbd> | `org-roam-node-insert` | Insert an `[[id:…]]` link to a node (org buffers only) |
+| <kbd>C-c n s</kbd> | `org-roam-db-sync` | Re-scan the directory and rebuild the index |
+
+`C-c n f`, `C-c n c`, `C-c n s`, and `C-c n g` are bound globally as well as in org buffers; `C-c n i` and the backlinks toggle are org-mode only.
+
+### Links & backlinks
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c C-o</kbd> | `org-open-at-point` | Follow the link at point — `id:` (node), `file:`, or `http(s)://` |
+| <kbd>C-c n l</kbd> | `org-roam-buffer-toggle` | Show notes that link **to** the current node in a side buffer |
+
+In the `*org-roam-backlinks*` buffer: <kbd>Enter</kbd> visits the entry, <kbd>g</kbd> refreshes, <kbd>n</kbd>/<kbd>p</kbd> move, <kbd>q</kbd> closes.
+
+### Graph
+
+<kbd>C-c n g</kbd> (`org-roam-graph`) renders the note network with Graphviz and shows it inline as an image, so it needs the `dot` command (`graphviz`) on your `PATH`. In the graph buffer, <kbd>g</kbd> re-renders and <kbd>q</kbd> closes. Tune the render from `init.scm`:
+
+```scheme
+(set! *org-roam-graph-width* 1600)  ; display width in px (default 1200)
+(set! *org-roam-graph-dpi* 200)     ; Graphviz DPI (default 150)
+```
+
+## Fontification & the overlay layer
+
+Org's heading colors paint the shared overlay-face layer (the same layer used by [rainbow delimiters](/docs/rainbow-delimiters) and LSP semantic tokens). Rainbow deliberately skips `.org` buffers so the two don't fight over that layer.

@@ -1,0 +1,134 @@
+---
+title: Keybindings
+description: The default keymap, the chord notation, and how to rebind any key.
+---
+
+# Keybindings
+
+Every key in Macros is bound in Steel and every binding is overridable. Keymaps are named (`"fundamental"` is the global map; major modes add their own), and you set one with `(bind-key "<map>" "<chord>" <command>)`.
+
+## Notation
+
+- <kbd>C-x</kbd> — hold **Control**, press **x**.
+- <kbd>M-x</kbd> — hold **Meta** (Alt/Option), press **x**; or press <kbd>Esc</kbd> then **x**.
+- <kbd>C-x C-f</kbd> — a chord: <kbd>C-x</kbd> followed by <kbd>C-f</kbd>.
+- <kbd>cmd-c</kbd> — the macOS Command key (system clipboard).
+
+In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x ctrl-f"`.
+
+## Motion (fundamental map)
+
+| Key | Command |
+| --- | --- |
+| <kbd>C-f</kbd> / <kbd>C-b</kbd> | `forward-char` / `backward-char` |
+| <kbd>C-n</kbd> / <kbd>C-p</kbd> | `next-line` / `previous-line` |
+| <kbd>C-a</kbd> / <kbd>C-e</kbd> | `move-beginning-of-line` / `move-end-of-line` |
+| <kbd>M-f</kbd> / <kbd>M-b</kbd> | `forward-word` / `backward-word` |
+| <kbd>M-&lt;</kbd> / <kbd>M-&gt;</kbd> | `beginning-of-buffer` / `end-of-buffer` |
+| <kbd>C-v</kbd> / <kbd>M-v</kbd> | `scroll-up` / `scroll-down` |
+| <kbd>C-l</kbd> | `recenter` |
+| <kbd>M-g g</kbd> | `goto-line-cmd` |
+
+## Editing, kill & yank
+
+| Key | Command |
+| --- | --- |
+| <kbd>C-d</kbd> | `delete-char` |
+| <kbd>C-k</kbd> | `kill-line` |
+| <kbd>M-d</kbd> / <kbd>M-Backspace</kbd> | `kill-word` / `backward-kill-word` |
+| <kbd>C-Space</kbd> | `set-mark` |
+| <kbd>C-w</kbd> / <kbd>M-w</kbd> | `kill-region` / `kill-ring-save` |
+| <kbd>C-y</kbd> / <kbd>M-y</kbd> | `yank` / `yank-pop` |
+| <kbd>C-/</kbd> | `undo` |
+| <kbd>C-?</kbd> | `redo` |
+| <kbd>C-t</kbd> | `transpose-chars` |
+| <kbd>C-o</kbd> | `open-line` |
+| <kbd>M-;</kbd> | `comment-dwim` |
+
+The system clipboard always works, including inside modal states: <kbd>cmd-c</kbd> / <kbd>cmd-x</kbd> / <kbd>cmd-v</kbd> (`clipboard-copy` / `-cut` / `-paste`).
+
+## Files, buffers & windows
+
+| Key | Command |
+| --- | --- |
+| <kbd>C-x C-f</kbd> | `find-file` |
+| <kbd>C-x C-s</kbd> | `save-buffer` |
+| <kbd>C-x b</kbd> | `switch-buffer` |
+| <kbd>C-x C-b</kbd> | `ibuffer` (the buffer manager) |
+| <kbd>C-x k</kbd> | `kill-buffer` |
+| <kbd>C-x 2</kbd> / <kbd>C-x 3</kbd> | `split-window-below` / `split-window-right` |
+| <kbd>C-x o</kbd> | `other-window` |
+| <kbd>C-x 0</kbd> / <kbd>C-x 1</kbd> | `delete-window` / `delete-other-windows` |
+| <kbd>C-x ^</kbd> / <kbd>C-x }</kbd> / <kbd>C-x {</kbd> | resize windows |
+| <kbd>C-x C-c</kbd> | `quit` |
+
+## Search, command, eval
+
+| Key | Command |
+| --- | --- |
+| <kbd>C-s</kbd> / <kbd>C-r</kbd> | `isearch-forward` / `isearch-backward` |
+| <kbd>M-%</kbd> | `replace-string` |
+| <kbd>C-c o</kbd> | `occur` |
+| <kbd>M-x</kbd> | `execute-extended-command` (command palette) |
+| <kbd>M-:</kbd> | `eval-expression` |
+| <kbd>M-i</kbd> | `completion-at-point` |
+| <kbd>C-g</kbd> | `keyboard-quit` |
+
+## Keyboard macros
+
+| Key | Command |
+| --- | --- |
+| <kbd>C-x (</kbd> / <kbd>C-x )</kbd> | `start-kbd-macro` / `end-kbd-macro` |
+| <kbd>C-x e</kbd> | `call-last-kbd-macro` |
+
+Feature-specific prefixes live in their own pages: <kbd>C-c C-l …</kbd> for [LSP](/docs/lsp), <kbd>C-c p …</kbd> for [projects](/docs/projects), and <kbd>C-h …</kbd> for [help](/docs/getting-help). Vim-style [modal editing](/docs/modal-editing) is available too, but off by default.
+
+## Prefix arguments
+
+A numeric prefix repeats the next command, Emacs-style:
+
+| Key | Effect |
+| --- | --- |
+| <kbd>C-u</kbd> *N* <kbd>cmd</kbd> | run `cmd` *N* times — e.g. <kbd>C-u 10 C-n</kbd> moves down 10 lines |
+| <kbd>M-*N*</kbd> <kbd>cmd</kbd> | shorthand for the same — <kbd>M-10 C-n</kbd> |
+| <kbd>C-u</kbd> <kbd>cmd</kbd> | <kbd>C-u</kbd> alone means 4; <kbd>C-u C-u</kbd> means 16, and so on |
+| <kbd>C-u 5 a</kbd> | self-insert works too — inserts `aaaaa` |
+
+The argument applies to motions and simple edits (move, kill, yank, delete, newline, undo/redo). Modal or one-shot commands (<kbd>M-x</kbd>, save, quit, toggles) ignore it and run once. Negative arguments aren't supported yet.
+
+## Rebinding
+
+Add `bind-key` calls to your `init.scm` — it's the recommended way to bind a key. The map name for the global map is `"fundamental"`; mode maps are named after the mode (`"org-mode"`, `"magit-status"`, `"dired-mode"`, …).
+
+```scheme
+;; Rebind in the global map — pass the command itself
+(bind-key "fundamental" "ctrl-x n" next-buffer)
+
+;; Rebind only inside a mode
+(bind-key "org-mode" "ctrl-c x" org-todo)
+
+;; Bind a command of your own, or an inline lambda
+(define (hello) (message "hi"))
+(bind-key "fundamental" "ctrl-c h" hello)
+(bind-key "fundamental" "ctrl-c !" (lambda () (insert-string "!")))
+```
+
+Prefer passing the command **directly**: a typo becomes an error when your config loads (instead of a silently dead key), and editor tooling like go-to-definition follows the binding. Both your own `define`d commands and the built-in commands (`next-buffer`, `find-file`, `magit-status`, …) are functions you can name this way.
+
+`bind-key` also accepts a **string** command name, handy when you'd rather not evaluate the symbol (or are pasting straight from a command list):
+
+```scheme
+(bind-key "fundamental" "ctrl-x ctrl-f" "find-file")
+```
+
+### define-key (the primitive)
+
+`bind-key` is a thin wrapper over `define-key`, the lower-level primitive the keymap is built on. `define-key` takes a command **name** (a string) only — it can't take a function or a `lambda`:
+
+```scheme
+(define-key "fundamental" "ctrl-c d" "lsp-find-definition")
+```
+
+You'll see `define-key` throughout the bundled config and it's fully supported — reach for it when you specifically want the primitive or the exact Emacs spelling. For everyday rebinding, `bind-key` does everything it does and takes functions too.
+
+To see what a key currently does, press <kbd>C-h k</kbd> (`describe-key`) and then the key. To list everything active, <kbd>C-h b</kbd> (`describe-bindings`). See [Getting help](/docs/getting-help).
