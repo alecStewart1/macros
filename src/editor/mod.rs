@@ -3082,7 +3082,12 @@ impl Editor {
     /// Open files dropped onto the window from the OS (Finder, a terminal, etc.).
     /// Each dropped file is visited in its own buffer; the last one ends up
     /// active. Directories are skipped — `find_file` only reads regular files.
-    fn on_drop_files(&mut self, paths: &ExternalPaths, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_drop_files(
+        &mut self,
+        paths: &ExternalPaths,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut skipped = 0;
         for path in paths.paths() {
             if path.is_dir() {

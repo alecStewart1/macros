@@ -3758,7 +3758,10 @@ mod magit_tests {
             v(r#"(ends-with? (car (function-source "save-excursion")) ".scm")"#),
             "#true"
         );
-        assert_eq!(v(r#"(> (cadr (function-source "save-excursion")) 0)"#), "#true");
+        assert_eq!(
+            v(r#"(> (cadr (function-source "save-excursion")) 0)"#),
+            "#true"
+        );
         // An unknown name has no location.
         assert_eq!(v(r#"(null? (function-source "no-such-fn-xyz"))"#), "#true");
 
@@ -4183,9 +4186,18 @@ mod magit_tests {
         assert_eq!(v(r#"(org--heading-level "** TODO x")"#), "2");
         assert_eq!(v(r#"(if (org--heading-level "plain line") 1 0)"#), "0");
         // C-c C-t rotates the full cycle: nothing → first keyword → … → "".
-        assert_eq!(v(r#"(org--next-keyword #f (org--cycle-keywords))"#), "\"TODO\"");
-        assert_eq!(v(r#"(org--next-keyword "TODO" (org--cycle-keywords))"#), "\"NEXT\"");
-        assert_eq!(v(r#"(org--next-keyword "CANCELLED" (org--cycle-keywords))"#), "\"\""); // last → clear
+        assert_eq!(
+            v(r#"(org--next-keyword #f (org--cycle-keywords))"#),
+            "\"TODO\""
+        );
+        assert_eq!(
+            v(r#"(org--next-keyword "TODO" (org--cycle-keywords))"#),
+            "\"NEXT\""
+        );
+        assert_eq!(
+            v(r#"(org--next-keyword "CANCELLED" (org--cycle-keywords))"#),
+            "\"\""
+        ); // last → clear
         // Custom keywords are user-defined: the built-in ships none, so a word is
         // recognized only after the user adds it to *org-custom-keywords*.
         assert_eq!(v(r#"(length *org-custom-keywords*)"#), "0");
@@ -4197,11 +4209,26 @@ mod magit_tests {
         // cycle, after the TODO vocabulary: …→CANCELLED→BUG→FEATURE→"".
         assert_eq!(v(r#"(if (org--custom-keyword? "BUG") 1 0)"#), "1");
         assert_eq!(v(r#"(if (org--custom-keyword? "TODO") 1 0)"#), "0");
-        assert_eq!(v(r#"(org--leading-keyword "BUG crash on save")"#), "\"BUG\"");
-        assert_eq!(v(r#"(nth (car (org-parse "* FEATURE dark mode")) 2)"#), "\"FEATURE\"");
-        assert_eq!(v(r#"(org--next-keyword "CANCELLED" (org--cycle-keywords))"#), "\"BUG\"");
-        assert_eq!(v(r#"(org--next-keyword "BUG" (org--cycle-keywords))"#), "\"FEATURE\"");
-        assert_eq!(v(r#"(org--next-keyword "FEATURE" (org--cycle-keywords))"#), "\"\""); // last → clear
+        assert_eq!(
+            v(r#"(org--leading-keyword "BUG crash on save")"#),
+            "\"BUG\""
+        );
+        assert_eq!(
+            v(r#"(nth (car (org-parse "* FEATURE dark mode")) 2)"#),
+            "\"FEATURE\""
+        );
+        assert_eq!(
+            v(r#"(org--next-keyword "CANCELLED" (org--cycle-keywords))"#),
+            "\"BUG\""
+        );
+        assert_eq!(
+            v(r#"(org--next-keyword "BUG" (org--cycle-keywords))"#),
+            "\"FEATURE\""
+        );
+        assert_eq!(
+            v(r#"(org--next-keyword "FEATURE" (org--cycle-keywords))"#),
+            "\"\""
+        ); // last → clear
         // A custom keyword has no color (inherits the title) until the user sets
         // one, then re-registers the faces.
         assert_eq!(v(r#"(if (org--keyword-color "BUG") 1 0)"#), "0");
@@ -4209,7 +4236,9 @@ mod magit_tests {
         engine
             .eval(r##"(set! *org-custom-keyword-colors* (list (cons "BUG" "#ff0000")))"##)
             .unwrap();
-        engine.eval(r#"(org--register-custom-keyword-faces)"#).unwrap();
+        engine
+            .eval(r#"(org--register-custom-keyword-faces)"#)
+            .unwrap();
         assert_eq!(v(r#"(org--keyword-color "BUG")"#), "\"#ff0000\"");
         assert_eq!(v(r#"(if (org--keyword-color "FEATURE") 1 0)"#), "0"); // still uncolored
 
@@ -4343,7 +4372,9 @@ mod magit_tests {
 
         // --- Layer 7b: property drawers -------------------------------------
         assert_eq!(
-            v(r#"(cdr (org--assoc-ci (org--drawer-props (list ":PROPERTIES:" ":ID: abc" ":END:") 0 2) "id"))"#),
+            v(
+                r#"(cdr (org--assoc-ci (org--drawer-props (list ":PROPERTIES:" ":ID: abc" ":END:") 0 2) "id"))"#
+            ),
             "\"abc\""
         );
         assert_eq!(
@@ -4396,13 +4427,21 @@ mod magit_tests {
         );
         assert_eq!(v(r#"(org--inline->md "*x*")"#), "\"**x**\"");
         assert_eq!(
-            v(r#"(if (string-contains? (org--ast->latex (org-parse "* Hi")) "\\section{Hi}") 1 0)"#),
+            v(
+                r#"(if (string-contains? (org--ast->latex (org-parse "* Hi")) "\\section{Hi}") 1 0)"#
+            ),
             "1"
         );
 
         // --- Layer 7k/l: columns + list-item prefix ------------------------
-        assert_eq!(v(r#"(cdr (car (org--parse-columns "%40ITEM %TODO")))"#), "\"ITEM\"");
-        assert_eq!(v(r#"(car (car (org--parse-columns "%40ITEM %TODO")))"#), "40");
+        assert_eq!(
+            v(r#"(cdr (car (org--parse-columns "%40ITEM %TODO")))"#),
+            "\"ITEM\""
+        );
+        assert_eq!(
+            v(r#"(car (car (org--parse-columns "%40ITEM %TODO")))"#),
+            "40"
+        );
         assert_eq!(v(r#"(if (org--list-line-prefix "- item") 1 0)"#), "1");
         assert_eq!(v(r#"(if (org--list-line-prefix "plain") 1 0)"#), "0");
     }
@@ -4413,18 +4452,23 @@ mod magit_tests {
     #[test]
     fn org_roam_extended_helpers() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).expect("core.scm");
-        engine.eval(include_str!("../scheme/folding.scm")).expect("folding.scm");
-        engine.eval(include_str!("../scheme/org.scm")).expect("org.scm");
-        engine.eval(include_str!("../scheme/org-roam.scm")).expect("org-roam.scm");
+        engine
+            .eval(include_str!("../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../scheme/folding.scm"))
+            .expect("folding.scm");
+        engine
+            .eval(include_str!("../scheme/org.scm"))
+            .expect("org.scm");
+        engine
+            .eval(include_str!("../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
         // Slug + tag splitting.
         assert_eq!(v(r#"(org-roam--slug "Hello, World!")"#), "\"hello-world\"");
-        assert_eq!(
-            v(r#"(org-roam--split-tags ":a:b:")"#),
-            "(\"a\" \"b\")"
-        );
+        assert_eq!(v(r#"(org-roam--split-tags ":a:b:")"#), "(\"a\" \"b\")");
         // Alias/ref value parsing: quoted tokens, else whitespace split.
         assert_eq!(
             v(r#"(org-roam--parse-quoted-list "\"alpha one\" \"beta\"")"#),

@@ -330,7 +330,11 @@ mod tests {
         // Source location is captured: a real bundled file, on a sane 1-based
         // line. This is what lets helm-apropos jump to the implementation.
         let se = entry("save-excursion").unwrap();
-        assert!(se.file.ends_with(".scm"), "file should be a .scm: {:?}", se.file);
+        assert!(
+            se.file.ends_with(".scm"),
+            "file should be a .scm: {:?}",
+            se.file
+        );
         assert!(se.line >= 1, "line should be 1-based, got {}", se.line);
     }
 
