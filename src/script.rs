@@ -4323,6 +4323,137 @@ mod magit_tests {
             v(r"(length (org--fold-ranges-for HS 6 5 (quote folded)))"),
             "0"
         );
+
+        // --- Layer 7: dates -------------------------------------------------
+        assert_eq!(v(r"(org--ymd->days 1970 1 1)"), "0");
+        assert_eq!(v(r"(org--days->ymd 0)"), "(1970 1 1)");
+        assert_eq!(v(r#"(org--dow-name 0)"#), "\"Thu\"");
+        assert_eq!(
+            v(r#"(org--days->date-str (org--ymd->days 2026 6 25))"#),
+            "\"2026-06-25 Thu\""
+        );
+        assert_eq!(v(r#"(org--read-date "+1w" 10)"#), "17");
+        assert_eq!(v(r#"(org--read-date "today" 42)"#), "42");
+        assert_eq!(v(r#"(org--apply-offset "+2d" 0)"#), "2");
+        // Repeater shift on a "+" stamp advances from the stamp's own date.
+        assert_eq!(
+            v(r#"(org--shift-stamp "<2026-06-25 Thu +1d>")"#),
+            "\"<2026-06-26 Fri +1d>\""
+        );
+
+        // --- Layer 7b: property drawers -------------------------------------
+        assert_eq!(
+            v(r#"(cdr (org--assoc-ci (org--drawer-props (list ":PROPERTIES:" ":ID: abc" ":END:") 0 2) "id"))"#),
+            "\"abc\""
+        );
+        assert_eq!(
+            v(r#"(car (org--render-drawer (list (cons "ID" "x"))))"#),
+            "\":PROPERTIES:\""
+        );
+
+        // --- Layer 7d: clock duration --------------------------------------
+        assert_eq!(v(r#"(org--fmt-duration 90)"#), "\"1:30\"");
+        assert_eq!(v(r#"(org--stamp-minutes "[1970-01-01 Thu 01:30]")"#), "90");
+
+        // --- Layer 7f: capture templates -----------------------------------
+        assert_eq!(
+            v(r#"(org--expand-template-final "* TODO %?" "buy milk")"#),
+            "\"* TODO buy milk\""
+        );
+
+        // --- Layer 7g: tag matching ----------------------------------------
+        assert_eq!(v(r#"(if (org--tag-match "a+b" (list "a" "b")) 1 0)"#), "1");
+        assert_eq!(v(r#"(if (org--tag-match "a+b" (list "a")) 1 0)"#), "0");
+        assert_eq!(v(r#"(if (org--tag-match "a|c" (list "c")) 1 0)"#), "1");
+        assert_eq!(v(r#"(if (org--tag-match "-x" (list "a")) 1 0)"#), "1");
+        assert_eq!(v(r#"(if (org--tag-match "-x" (list "x")) 1 0)"#), "0");
+
+        // --- Layer 7h/6: markup export -------------------------------------
+        assert_eq!(
+            v(r#"(if (string-contains? (org--inline->html "+x+") "<del>") 1 0)"#),
+            "1"
+        );
+
+        // --- Layer 7i: table formula evaluation ----------------------------
+        assert_eq!(v(r#"(org--eval-arith "1+2*3")"#), "7");
+        assert_eq!(v(r#"(org--eval-arith "(1+2)*3")"#), "9");
+        assert_eq!(v(r#"(org--fmt-num (org--eval-arith "10/4"))"#), "\"2.5\"");
+        assert_eq!(v(r#"(org--fmt-num (org--eval-arith "2+3"))"#), "\"5\"");
+        assert_eq!(v(r#"(org--fmt-num (org--eval-arith "-3+1"))"#), "\"-2\"");
+        assert_eq!(
+            v(r#"(org--row-set (list "1" "2") 3 "9")"#),
+            "(\"1\" \"2\" \"9\")"
+        );
+        assert_eq!(
+            v(r#"(nth (car (org--apply-formula (list (list "1" "2" "")) "$3=$1+$2")) 2)"#),
+            "\"3\""
+        );
+
+        // --- Layer 7j: export backends -------------------------------------
+        assert_eq!(
+            v(r##"(if (string-contains? (org--ast->md (org-parse "* Hi")) "# Hi") 1 0)"##),
+            "1"
+        );
+        assert_eq!(v(r#"(org--inline->md "*x*")"#), "\"**x**\"");
+        assert_eq!(
+            v(r#"(if (string-contains? (org--ast->latex (org-parse "* Hi")) "\\section{Hi}") 1 0)"#),
+            "1"
+        );
+
+        // --- Layer 7k/l: columns + list-item prefix ------------------------
+        assert_eq!(v(r#"(cdr (car (org--parse-columns "%40ITEM %TODO")))"#), "\"ITEM\"");
+        assert_eq!(v(r#"(car (car (org--parse-columns "%40ITEM %TODO")))"#), "40");
+        assert_eq!(v(r#"(if (org--list-line-prefix "- item") 1 0)"#), "1");
+        assert_eq!(v(r#"(if (org--list-line-prefix "plain") 1 0)"#), "0");
+    }
+
+    /// org-roam.scm loads on top of core + org and its new pure helpers behave.
+    /// (Its references to org.scm functions are all in call position, so loading
+    /// it after org.scm resolves them.)
+    #[test]
+    fn org_roam_extended_helpers() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../scheme/core.scm")).expect("core.scm");
+        engine.eval(include_str!("../scheme/folding.scm")).expect("folding.scm");
+        engine.eval(include_str!("../scheme/org.scm")).expect("org.scm");
+        engine.eval(include_str!("../scheme/org-roam.scm")).expect("org-roam.scm");
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // Slug + tag splitting.
+        assert_eq!(v(r#"(org-roam--slug "Hello, World!")"#), "\"hello-world\"");
+        assert_eq!(
+            v(r#"(org-roam--split-tags ":a:b:")"#),
+            "(\"a\" \"b\")"
+        );
+        // Alias/ref value parsing: quoted tokens, else whitespace split.
+        assert_eq!(
+            v(r#"(org-roam--parse-quoted-list "\"alpha one\" \"beta\"")"#),
+            "(\"alpha one\" \"beta\")"
+        );
+        assert_eq!(
+            v(r#"(org-roam--parse-quoted-list "alpha beta")"#),
+            "(\"alpha\" \"beta\")"
+        );
+        // file-meta reads :KEY: front matter and #+KEY: keywords.
+        assert_eq!(
+            v(r#"(org-roam--file-meta ":ROAM_REFS: https://x.test" "ROAM_REFS")"#),
+            "\"https://x.test\""
+        );
+        // Template expansion fills ${title}/${slug}/${id}.
+        assert_eq!(
+            v(r#"(org-roam--expand-tmpl "${slug}.org" "My Note" "my-note" "ID1")"#),
+            "\"my-note.org\""
+        );
+        // Daily date arithmetic (self-contained calendar).
+        assert_eq!(
+            v(r#"(org-roam--date-str (+ 1 (org-roam--date-str->days "2026-06-25")))"#),
+            "\"2026-06-26\""
+        );
+        // Link-description rewrite for rename.
+        assert_eq!(
+            v(r#"(org-roam--rewrite-links "see [[id:ID1][Old]] end" "ID1" "New")"#),
+            "\"see [[id:ID1][New]] end\""
+        );
     }
 
     /// folding.scm's indentation model: which lines are fold headers and how far

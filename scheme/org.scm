@@ -43,6 +43,9 @@
 (set-face "org-code" "#b8bb26")
 (set-face "org-checkbox" "#fabd2f")
 (set-face "org-checkbox-done" "#8ec07c")
+(set-face "org-strike" "#928374")
+(set-face "org-underline" "#83a598")
+(set-face "org-footnote" "#d3869b")
 
 ;; The TODO keyword vocabulary, and the order C-c C-t rotates through it. Like
 ;; Emacs `org-todo-keywords`, every keyword here is part of the cycle, so active
@@ -312,6 +315,10 @@
   (org--paint lstart line "/[^ \t\n/][^/\n]*/" "org-italic")
   (org--paint lstart line "=[^ \t\n=][^=\n]*=" "org-verbatim")
   (org--paint lstart line "~[^ \t\n~][^~\n]*~" "org-code")
+  (org--paint lstart line "\\+[^ \t\n+][^+\n]*\\+" "org-strike")
+  (org--paint lstart line "_[^ \t\n_][^_\n]*_" "org-underline")
+  ;; footnote references [fn:label]
+  (org--paint lstart line "\\[fn:[^]\n]*\\]" "org-footnote")
   ;; links [[target]] / [[target][desc]]
   (org--paint lstart line "\\[\\[[^]\n]*\\](\\[[^]\n]*\\])?\\]" "org-link")
   ;; active <…> and inactive [...] timestamps
@@ -627,9 +634,14 @@
 ;; (nothing → each TODO/custom keyword → nothing).
 (define (org-todo)
   (let ((H (org--heading-line-at-point)))
-    (if H
-        (org--apply-keyword H (org--next-keyword (org-keyword-at-point) (org--cycle-keywords)))
-        (message "Not on a heading"))))
+    (if (not H)
+        (message "Not on a heading")
+        (let ((next (org--next-keyword (org-keyword-at-point) (org--cycle-keywords))))
+          ;; Marking a repeating task DONE shifts its planning stamps to the next
+          ;; occurrence and resets the keyword instead (Emacs `org-todo-repeat`).
+          (if (and (org--done-keyword? next) (org--has-repeater? H))
+              (org--repeat-task H)
+              (org--apply-keyword H next))))))
 
 ;; Set a specific keyword on the headline at point, or clear it if that same
 ;; keyword is already there (so a binding toggles it). Unlike org-todo's rotate,
@@ -893,7 +905,10 @@
          (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "<strong>$1</strong>" s))
          (s (replace-regexp-in-string "/([^/\n]+)/" "<em>$1</em>" s))
          (s (replace-regexp-in-string "=([^=\n]+)=" "<code>$1</code>" s))
-         (s (replace-regexp-in-string "~([^~\n]+)~" "<code>$1</code>" s)))
+         (s (replace-regexp-in-string "~([^~\n]+)~" "<code>$1</code>" s))
+         (s (replace-regexp-in-string "\\+([^+\n]+)\\+" "<del>$1</del>" s))
+         (s (replace-regexp-in-string "_([^_\n]+)_" "<u>$1</u>" s))
+         (s (replace-regexp-in-string "\\[fn:([^]\n]*)\\]" "<sup>$1</sup>" s)))
     s))
 
 (define (org--list->html e tag)
@@ -984,28 +999,42 @@
   (let ((c (regexp-captures "(SCHEDULED|DEADLINE):[ \t]*[<\\[]([0-9]{4}-[0-9]{2}-[0-9]{2})" line)))
     (if (null? c) #f (cons (nth c 2) (nth c 1)))))
 
-;; Scan one file → entries (path line date kind todo title) for headlines that
-;; carry a TODO keyword and/or a planning date.
+;; ":a:b:" / "a:b" → ("a" "b").
+(define (org--split-tag-string s)
+  (filter (lambda (x) (not (equal? x ""))) (split-many s ":")))
+;; a ∪ b, preserving a's order then b's new tags.
+(define (org--union a b) (append a (filter (lambda (x) (not (member x a))) b)))
+
+;; Scan one file → entries (path line date kind todo title tags) for headlines
+;; that carry a TODO keyword and/or a planning date. `tags` includes tags
+;; inherited from ancestor headings (Emacs `org-use-tag-inheritance`). A `stack`
+;; of (level . inherited-tags) tracks the heading ancestry as we descend.
 (define (org--scan-file path)
-  (let loop ((ls (split-many (read-file path) "\n")) (i 0) (acc '()))
+  (let loop ((ls (split-many (read-file path) "\n")) (i 0) (stack '()) (acc '()))
     (if (null? ls)
         (reverse acc)
         (let ((line (car ls)))
           (if (org--heading-level line)
-              (let* ((sr (org--heading-split line))
+              (let* ((lvl (org--heading-level line))
+                     (sr (org--heading-split line))
                      (rest (nth sr 1))
                      (kw (org--leading-keyword rest))
                      (title (org--heading-title rest kw))
+                     (own (org--split-tag-string
+                           (let ((c (regexp-captures ":([A-Za-z0-9_@#%:]+):[ \t]*$" rest)))
+                             (if (null? c) "" (nth c 1)))))
+                     (stack2 (filter (lambda (e) (< (car e) lvl)) stack))
+                     (tags (org--union (if (null? stack2) '() (cdr (car stack2))) own))
                      (plan (if (null? (cdr ls)) #f (org--planning-info (nth ls 1)))))
                 (if (or kw plan)
-                    (loop (cdr ls) (+ i 1)
+                    (loop (cdr ls) (+ i 1) (cons (cons lvl tags) stack2)
                           (cons (list path i
                                       (if plan (car plan) "")
                                       (if plan (cdr plan) "")
-                                      (or kw "") title)
+                                      (or kw "") title tags)
                                 acc))
-                    (loop (cdr ls) (+ i 1) acc)))
-              (loop (cdr ls) (+ i 1) acc))))))
+                    (loop (cdr ls) (+ i 1) (cons (cons lvl tags) stack2) acc)))
+              (loop (cdr ls) (+ i 1) stack acc))))))
 
 (define (org--all-entries)
   (let loop ((files (org--agenda-file-list)) (acc '()))
@@ -1029,11 +1058,14 @@
         (render-buffer "*Org Agenda*" "org-agenda-mode" (join-lines (reverse lines)) (reverse faces))
         (let* ((e (car es))
                (date (nth e 2)) (kind (nth e 3)) (todo (nth e 4)) (title (nth e 5))
+               (tags (if (> (length e) 6) (nth e 6) '()))
                (text (string-append
                        (if (equal? date "") "             " (string-append date "  "))
                        (if (equal? kind "") "" (string-append (substring kind 0 (min 4 (string-length kind))) ": "))
                        (if (equal? todo "") "" (string-append todo " "))
-                       title "   " (basename (nth e 0)))))
+                       title
+                       (if (null? tags) "" (string-append "  :" (string-join tags ":") ":"))
+                       "   " (basename (nth e 0)))))
           (set! *org-agenda-targets* (cons (cons i (cons (nth e 0) (nth e 1))) *org-agenda-targets*))
           (loop (cdr es) (+ i 1) (cons text lines)
                 (cons (list i (if (org--done-keyword? todo) "org-done" "org-todo")) faces))))))
@@ -1056,7 +1088,15 @@
   (or *org-capture-target*
       (let ((files (org--agenda-file-list)))
         (if (null? files) (path-join (buffer-directory) "inbox.org") (car files)))))
-(define (org-capture) (read-string "Capture (TODO headline): " "org--capture-finish"))
+;; Capture templates (see Layer 7f for the engine). Defined here so org-capture,
+;; below, can test it; populate from init.scm.
+(define *org-capture-templates* '())
+;; C-c c — capture. With no templates configured this is the simple "* TODO"
+;; prompt; configure *org-capture-templates* (see Layer 7f) for the full flow.
+(define (org-capture)
+  (if (null? *org-capture-templates*)
+      (read-string "Capture (TODO headline): " "org--capture-finish")
+      (org--capture-pick)))
 (define (org--capture-finish text)
   (when (not (equal? (org--trim text) ""))
     (let* ((path (org--capture-file))
@@ -1346,9 +1386,13 @@
 ;; M-arrows act on the table column/row, else on the heading *at point* — never on
 ;; an enclosing heading from body text (Emacs leaves plain body alone).
 (define (org-meta-right)
-  (cond ((org--in-table?) (org-table-move-column-right)) ((org--on-heading?) (org-demote)) (else #f)))
+  (cond ((org--in-table?) (org-table-move-column-right))
+        ((org--list-line-prefix (org--line-text (buffer-line))) (org-indent-item))
+        ((org--on-heading?) (org-demote)) (else #f)))
 (define (org-meta-left)
-  (cond ((org--in-table?) (org-table-move-column-left)) ((org--on-heading?) (org-promote)) (else #f)))
+  (cond ((org--in-table?) (org-table-move-column-left))
+        ((org--list-line-prefix (org--line-text (buffer-line))) (org-outdent-item))
+        ((org--on-heading?) (org-promote)) (else #f)))
 (define (org-meta-up)
   (cond ((org--in-table?) (org-table-move-row-up)) ((org--on-heading?) (org-move-subtree-up)) (else #f)))
 (define (org-meta-down)
@@ -1415,12 +1459,13 @@
 
 ;; C-c C-c inside a src block — run it, write a #+RESULTS block after it.
 (define (org-babel-execute)
-  (let ((b (org--src-block-bounds (buffer-line))))
+  (let ((L0 (buffer-line))
+        (b (org--src-block-bounds (buffer-line))))
     (if (not b)
         (message "Not in a src block")
         (let* ((el (nth b 1)) (lang (nth b 2))
                (lines (org--lines)) (n (length lines))
-               (body (join-lines (org--slice lines (+ (nth b 0) 1) (- el 1))))
+               (body (org--expand-noweb (join-lines (org--slice lines (+ (nth b 0) 1) (- el 1)))))
                (out (org--run-src lang body))
                (res-lines (cons "#+RESULTS:" (map (lambda (l) (string-append ": " l)) (split-many out "\n"))))
                (ex (org--existing-results lines (+ el 1) n))
@@ -1428,6 +1473,7 @@
                (before (org--slice lines 0 el))
                (rest (org--slice lines rest-start (- n 1))))
           (org--replace-all (join-lines (append before res-lines (list "") rest)))
+          (goto-line L0)
           (message "Block executed")))))
 
 ;; ===========================================================================
@@ -1554,7 +1600,8 @@
 (define (org-ctrl-c-ctrl-c)
   (let* ((L (buffer-line)) (line (org--line-text L)))
     (cond ((org--src-block-bounds L) (org-babel-execute))
-          ((org--table-line? line) (org-table-align))
+          ((org--table-line? line) (org-table-recalculate))
+          ((>= (string-match "src_[A-Za-z0-9]+(\\[[^]]*\\])?\\{" line) 0) (org-babel-execute-inline))
           ((org--heading-level line) (org-set-tags))
           ((org-toggle-checkbox) #t)
           (else (message "C-c C-c: nothing to do here")))))
@@ -1574,6 +1621,1198 @@
   (message (if *org-indent* "Org indent on" "Org indent off")))
 
 ;; ===========================================================================
+;; ===========================================================================
+;; Layer 7 — calendar / date arithmetic (pure)
+;; ===========================================================================
+;; Proleptic-Gregorian day count (days since 1970-01-01), via Howard Hinnant's
+;; algorithm. All our dates are positive years, so plain `quotient` suffices.
+;; This is the substrate for scheduling, repeaters, and relative date entry.
+(define (org--ymd->days y m d)
+  (let* ((y2 (if (<= m 2) (- y 1) y))
+         (era (quotient y2 400))
+         (yoe (- y2 (* era 400)))
+         (doy (+ (quotient (+ (* 153 (+ m (if (> m 2) -3 9))) 2) 5) (- d 1)))
+         (doe (+ (* yoe 365) (quotient yoe 4) (- (quotient yoe 100)) doy)))
+    (- (+ (* era 146097) doe) 719468)))
+
+(define (org--days->ymd z0)
+  (let* ((z (+ z0 719468))
+         (era (quotient z 146097))
+         (doe (- z (* era 146097)))
+         (yoe (quotient (+ (- doe (quotient doe 1460))
+                           (quotient doe 36524) (- (quotient doe 146096)))
+                        365))
+         (y (+ yoe (* era 400)))
+         (doy (- doe (+ (* 365 yoe) (quotient yoe 4) (- (quotient yoe 100)))))
+         (mp (quotient (+ (* 5 doy) 2) 153))
+         (d (+ (- doy (quotient (+ (* 153 mp) 2) 5)) 1))
+         (m (+ mp (if (< mp 10) 3 -9))))
+    (list (if (<= m 2) (+ y 1) y) m d)))
+
+(define (org--pad2 n) (if (< n 10) (string-append "0" (number->string n)) (number->string n)))
+(define *org-dow-names* (list "Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat"))
+;; 1970-01-01 (day 0) is a Thursday (index 4), so (days+4) mod 7 is the weekday.
+(define (org--dow-name days) (nth *org-dow-names* (modulo (+ days 4) 7)))
+
+;; "YYYY-MM-DD" (anywhere in `s`) → (y m d), or #f.
+(define (org--parse-date s)
+  (let ((c (regexp-captures "([0-9]{4})-([0-9]{2})-([0-9]{2})" s)))
+    (if (null? c) #f
+        (list (string->number (nth c 1)) (string->number (nth c 2)) (string->number (nth c 3))))))
+(define (org--date-str->days s)
+  (let ((ymd (org--parse-date s)))
+    (if ymd (org--ymd->days (nth ymd 0) (nth ymd 1) (nth ymd 2)) #f)))
+(define (org--days->date-str days)
+  (let ((ymd (org--days->ymd days)))
+    (string-append (number->string (nth ymd 0)) "-" (org--pad2 (nth ymd 1)) "-"
+                   (org--pad2 (nth ymd 2)) " " (org--dow-name days))))
+(define (org--today-days) (org--date-str->days (current-time "%Y-%m-%d")))
+
+(define (org--leap? y) (and (= 0 (modulo y 4)) (or (not (= 0 (modulo y 100))) (= 0 (modulo y 400)))))
+(define (org--month-days y m)
+  (cond ((or (= m 1) (= m 3) (= m 5) (= m 7) (= m 8) (= m 10) (= m 12)) 31)
+        ((= m 2) (if (org--leap? y) 29 28))
+        (else 30)))
+;; Add `n` calendar months to (y m d), clamping the day to the target month.
+(define (org--add-months y m d n)
+  (let* ((total (+ (* y 12) (- m 1) n))
+         (ny (quotient total 12))
+         (nm (+ 1 (modulo total 12))))
+    (list ny nm (min d (org--month-days ny nm)))))
+
+;; Apply a "+N", "+Nd/w/m/y" (or negative) offset to a base day count.
+(define (org--apply-offset s base)
+  (let* ((c (regexp-captures "^([+-])([0-9]+)([dwmy]?)$" s)))
+    (if (null? c) base
+        (let* ((sign (if (equal? (nth c 1) "-") -1 1))
+               (num (* sign (string->number (nth c 2))))
+               (unit (nth c 3)))
+          (cond ((or (equal? unit "") (equal? unit "d")) (+ base num))
+                ((equal? unit "w") (+ base (* 7 num)))
+                ((equal? unit "m")
+                 (let* ((ymd (org--days->ymd base))
+                        (r (org--add-months (nth ymd 0) (nth ymd 1) (nth ymd 2) num)))
+                   (org--ymd->days (nth r 0) (nth r 1) (nth r 2))))
+                ((equal? unit "y")
+                 (let* ((ymd (org--days->ymd base))
+                        (r (org--add-months (nth ymd 0) (nth ymd 1) (nth ymd 2) (* 12 num))))
+                   (org--ymd->days (nth r 0) (nth r 1) (nth r 2))))
+                (else base))))))
+
+;; Interpret a user date string against `base` (day count): "", ".", "today",
+;; "tomorrow"/"yesterday", an absolute YYYY-MM-DD, or a relative ±N[dwmy].
+(define (org--read-date input base)
+  (let ((s (org--trim input)))
+    (cond ((or (equal? s "") (equal? s ".") (equal? (string-downcase s) "today")) base)
+          ((equal? (string-downcase s) "tomorrow") (+ base 1))
+          ((equal? (string-downcase s) "yesterday") (- base 1))
+          ((org--parse-date s) (org--date-str->days s))
+          ((>= (string-match "^[+-][0-9]+[dwmy]?$" s) 0) (org--apply-offset s base))
+          (else base))))
+
+;; ===========================================================================
+;; Layer 7b — properties drawers + the entry property API
+;; ===========================================================================
+(define (org--planning-line? line)
+  (>= (string-match "^[ \t]*(SCHEDULED|DEADLINE|CLOSED):" line) 0))
+
+;; (start . end) line indices of the :PROPERTIES: … :END: drawer belonging to
+;; heading H (it may follow a planning line), or #f.
+(define (org--property-drawer-bounds H)
+  (let* ((lines (org--lines)) (n (length lines)))
+    (let loop ((i (+ H 1)))
+      (cond ((>= i n) #f)
+            ((org--heading-level (nth lines i)) #f)
+            ((>= (string-match "^[ \t]*:PROPERTIES:[ \t]*$" (nth lines i)) 0)
+             (let end ((j (+ i 1)))
+               (cond ((>= j n) #f)
+                     ((>= (string-match "^[ \t]*:END:[ \t]*$" (nth lines j)) 0) (cons i j))
+                     ((org--heading-level (nth lines j)) #f)
+                     (else (end (+ j 1))))))
+            ((org--planning-line? (nth lines i)) (loop (+ i 1)))
+            (else #f)))))
+
+;; Parse the property lines between drawer bounds [s,e] → alist (KEY . VALUE).
+(define (org--drawer-props lines s e)
+  (let loop ((i (+ s 1)) (acc '()))
+    (if (>= i e) (reverse acc)
+        (let ((c (regexp-captures "^[ \t]*:([A-Za-z0-9_@%-]+):[ \t]*(.*)$" (nth lines i))))
+          (if (null? c) (loop (+ i 1) acc)
+              (loop (+ i 1) (cons (cons (nth c 1) (org--trim (nth c 2))) acc)))))))
+
+;; Case-insensitive alist lookup → the (key . value) pair, or #f.
+(define (org--assoc-ci alist key)
+  (let ((k (string-upcase key)))
+    (let loop ((a alist))
+      (cond ((null? a) #f)
+            ((equal? (string-upcase (car (car a))) k) (car a))
+            (else (loop (cdr a)))))))
+
+;; The nearest ancestor heading line of H (level strictly shallower), or #f.
+(define (org--parent-heading H)
+  (let ((entry (org--find-heading (org--headings) H)))
+    (if (not entry) #f
+        (let ((lvl (nth entry 1)))
+          (let loop ((hs (org--headings)) (parent #f))
+            (cond ((null? hs) parent)
+                  ((>= (car (car hs)) H) parent)
+                  ((< (nth (car hs) 1) lvl) (loop (cdr hs) (car (car hs))))
+                  (else (loop (cdr hs) parent))))))))
+
+;; org-entry-get: the value of property KEY on heading H, or #f.
+(define (org--entry-get-local H key)
+  (let ((b (org--property-drawer-bounds H)))
+    (if (not b) #f
+        (let ((p (org--assoc-ci (org--drawer-props (org--lines) (car b) (cdr b)) key)))
+          (if p (cdr p) #f)))))
+(define (org-entry-get H key) (org--entry-get-local H key))
+
+;; Like org-entry-get with inheritance: search H and its ancestors.
+(define (org-entry-get-inherited H key)
+  (let loop ((h H))
+    (if (not h) #f
+        (let ((v (org--entry-get-local h key)))
+          (if v v (loop (org--parent-heading h)))))))
+
+(define (org--render-drawer props)
+  (append (list ":PROPERTIES:")
+          (map (lambda (p) (string-append ":" (car p) ": " (cdr p))) props)
+          (list ":END:")))
+
+;; Line after which a new drawer is inserted: the heading, or its planning line.
+(define (org--planning-end H)
+  (let ((lines (org--lines)))
+    (if (and (< (+ H 1) (length lines)) (org--planning-line? (nth lines (+ H 1)))) (+ H 1) H)))
+
+(define (org--insert-lines-after idx new-lines)
+  (let ((pos (+ (org--line-start idx) (utf8-length (org--line-text idx)))))
+    (insert-at pos (string-append "\n" (join-lines new-lines)))))
+
+;; org-entry-put: set property KEY=VALUE on heading H (creating the drawer).
+(define (org-entry-put H key value)
+  (let* ((lines (org--lines)) (b (org--property-drawer-bounds H)))
+    (if b
+        (let* ((s (car b)) (e (cdr b))
+               (props (org--drawer-props lines s e))
+               (existing (org--assoc-ci props key))
+               (newprops (if existing
+                             (map (lambda (p)
+                                    (if (equal? (string-upcase (car p)) (string-upcase key))
+                                        (cons (car p) value) p))
+                                  props)
+                             (append props (list (cons key value))))))
+          (org--replace-line-range s e (org--render-drawer newprops)))
+        (org--insert-lines-after (org--planning-end H)
+                                 (org--render-drawer (list (cons key value)))))))
+
+;; C-c C-x p — set a property interactively.
+(define *org--prop-target* -1)
+(define *org--prop-key* "")
+(define (org-set-property)
+  (let ((H (org--heading-line-at-point)))
+    (if (not H) (message "Not on a heading")
+        (begin (set! *org--prop-target* H)
+               (read-string "Property: " "org--set-property-key")))))
+(define (org--set-property-key key)
+  (when (not (equal? (org--trim key) ""))
+    (set! *org--prop-key* (org--trim key))
+    (read-string (string-append (org--trim key) ": ") "org--set-property-value"
+                 (or (org--entry-get-local *org--prop-target* (org--trim key)) ""))))
+(define (org--set-property-value val)
+  (org-entry-put *org--prop-target* *org--prop-key* (org--trim val))
+  (message (string-append "Set " *org--prop-key*)))
+
+;; org-id-get-create — return the heading's :ID:, minting and storing one if absent.
+(define (org-id-get-create)
+  (let ((H (org--heading-line-at-point)))
+    (if (not H) (begin (message "Not on a heading") #f)
+        (let ((existing (org--entry-get-local H "ID")))
+          (if existing existing
+              (let ((id (org-id-new))) (org-entry-put H "ID" id) id))))))
+
+;; ===========================================================================
+;; Layer 7c — scheduling / deadlines / timestamps (+ repeaters)
+;; ===========================================================================
+;; The planning line right below heading H (SCHEDULED/DEADLINE/CLOSED), or #f.
+(define (org--planning-line-index H)
+  (let ((lines (org--lines)))
+    (if (and (< (+ H 1) (length lines)) (org--planning-line? (nth lines (+ H 1)))) (+ H 1) #f)))
+
+;; The "<…>"/"[…]" stamp for KIND on a planning line, or #f.
+(define (org--planning-get line kind)
+  (let ((c (regexp-captures (string-append kind ":[ \t]*([<\\[][^]>\n]*[>\\]])") line)))
+    (if (null? c) #f (nth c 1))))
+
+(define (org--render-planning sched dead closed)
+  (org--trim (string-append
+              (if closed (string-append "CLOSED: " closed " ") "")
+              (if dead (string-append "DEADLINE: " dead " ") "")
+              (if sched (string-append "SCHEDULED: " sched " ") ""))))
+
+(define *org--plan-target* -1)
+(define *org--plan-kind* "SCHEDULED")
+(define (org-schedule) (org--plan-read "SCHEDULED"))
+(define (org-deadline) (org--plan-read "DEADLINE"))
+(define (org--plan-read kind)
+  (let ((H (org--heading-line-at-point)))
+    (if (not H) (message "Not on a heading")
+        (begin (set! *org--plan-target* H) (set! *org--plan-kind* kind)
+               (read-string (string-append kind " (date / +Nd / today): ")
+                            "org--plan-finish" "")))))
+(define (org--plan-finish input)
+  (let* ((H *org--plan-target*) (kind *org--plan-kind*)
+         (stamp (string-append "<" (org--days->date-str (org--read-date input (org--today-days))) ">"))
+         (pidx (org--planning-line-index H))
+         (old (if pidx (org--line-text pidx) ""))
+         (sched (if (equal? kind "SCHEDULED") stamp (org--planning-get old "SCHEDULED")))
+         (dead (if (equal? kind "DEADLINE") stamp (org--planning-get old "DEADLINE")))
+         (closed (org--planning-get old "CLOSED"))
+         (newline (string-append "  " (org--render-planning sched dead closed))))
+    (if pidx (org--replace-line pidx newline) (org--insert-lines-after H (list newline)))
+    (message (string-append kind " set"))))
+
+;; Insert an active/inactive timestamp at point.
+(define (org-time-stamp)
+  (insert (string-append "<" (org--days->date-str (org--today-days)) ">")))
+(define (org-time-stamp-inactive)
+  (insert (string-append "[" (org--days->date-str (org--today-days)) "]")))
+
+;; --- repeaters --------------------------------------------------------------
+;; A planning line carries a repeater (+N / ++N / .+N with a unit)?
+(define (org--has-repeater? H)
+  (let ((p (org--planning-line-index H)))
+    (and p (>= (string-match "(\\.\\+|\\+\\+|\\+)[0-9]+[dwmy]" (org--line-text p)) 0))))
+
+;; Shift one timestamp string forward per its repeater, preserving brackets and
+;; the repeater cookie. `+N`/`++N` advance from the stamp's date (`++` until past
+;; today); `.+N` advances from today.
+(define (org--shift-stamp stamp)
+  (let ((rc (regexp-captures "(\\.\\+|\\+\\+|\\+)([0-9]+)([dwmy])" stamp))
+        (days (org--date-str->days stamp)))
+    (if (or (null? rc) (not days)) stamp
+        (let* ((mark (nth rc 1)) (num (string->number (nth rc 2))) (unit (nth rc 3))
+               (offset (string-append "+" (number->string num) unit))
+               (today (org--today-days))
+               (newdays (cond ((equal? mark ".+") (org--apply-offset offset today))
+                              ((equal? mark "++")
+                               (let lp ((d (org--apply-offset offset days)))
+                                 (if (> d today) d (lp (org--apply-offset offset d)))))
+                              (else (org--apply-offset offset days)))))
+          (string-append (substring stamp 0 1)
+                         (org--days->date-str newdays) " " mark (number->string num) unit
+                         (substring stamp (- (string-length stamp) 1) (string-length stamp)))))))
+
+;; Shift every repeating active timestamp on a planning line.
+(define (org--shift-planning line)
+  (let loop ((s line) (acc ""))
+    (let ((m (string-match "<[^>\n]*(\\.\\+|\\+\\+|\\+)[0-9]+[dwmy][^>\n]*>" s)))
+      (if (< m 0) (string-append acc s)
+          (let* ((c (regexp-captures "<[^>\n]*(\\.\\+|\\+\\+|\\+)[0-9]+[dwmy][^>\n]*>" s))
+                 (whole (car c))
+                 (before (substring s 0 m))
+                 (after (org--byte-drop s (+ m (utf8-length whole)))))
+            (loop after (string-append acc before (org--shift-stamp whole))))))))
+
+(define (org--repeat-task H)
+  (let* ((p (org--planning-line-index H)) (line (org--line-text p)))
+    (org--replace-line p (org--shift-planning line))
+    (org--apply-keyword H (if (null? *org-todo-keywords*) "" (car *org-todo-keywords*)))
+    (message "Repeating task shifted to next occurrence")))
+
+;; ===========================================================================
+;; Layer 7d — clocking (CLOCK lines in a LOGBOOK drawer) + clock table
+;; ===========================================================================
+;; Minutes since the epoch for an Org stamp "[YYYY-MM-DD … HH:MM]" (no time → 0).
+(define (org--stamp-minutes stamp)
+  (let ((days (org--date-str->days stamp))
+        (tc (regexp-captures "([0-9]{2}):([0-9]{2})" stamp)))
+    (if (not days) #f
+        (+ (* days 1440)
+           (if (null? tc) 0 (+ (* 60 (string->number (nth tc 1))) (string->number (nth tc 2))))))))
+(define (org--fmt-duration mins)
+  (string-append (number->string (quotient mins 60)) ":" (org--pad2 (modulo mins 60))))
+(define (org--now-stamp) (current-time "%Y-%m-%d %a %H:%M"))
+
+;; Last content line of H's own section (before its first child / next heading).
+(define (org--entry-content-end H)
+  (let ((lines (org--lines)) (n (org--total-lines)))
+    (let loop ((i (+ H 1)))
+      (cond ((>= i n) (- n 1))
+            ((org--heading-level (nth lines i)) (- i 1))
+            (else (loop (+ i 1)))))))
+
+;; (start . end) line indices of the :NAME: … :END: drawer in H's section, or #f.
+(define (org--named-drawer-bounds H name)
+  (let ((lines (org--lines)) (e (org--entry-content-end H))
+        (pat (string-append "^[ \t]*:" name ":[ \t]*$")))
+    (let loop ((i (+ H 1)))
+      (cond ((> i e) #f)
+            ((>= (string-match pat (nth lines i)) 0)
+             (let end ((j (+ i 1)))
+               (cond ((> j e) #f)
+                     ((>= (string-match "^[ \t]*:END:[ \t]*$" (nth lines j)) 0) (cons i j))
+                     (else (end (+ j 1))))))
+            (else (loop (+ i 1)))))))
+
+;; Prepend a LOGBOOK entry to H (creating the drawer below any PROPERTIES/planning).
+(define (org--logbook-add H entry)
+  (let ((b (org--named-drawer-bounds H "LOGBOOK")))
+    (if b
+        (org--insert-lines-after (car b) (list (string-append "  " entry)))
+        (let* ((pb (org--property-drawer-bounds H))
+               (after (cond (pb (cdr pb))
+                            ((org--planning-line-index H) (org--planning-line-index H))
+                            (else H))))
+          (org--insert-lines-after after (list "  :LOGBOOK:" (string-append "  " entry) "  :END:"))))))
+
+;; The line index of an open clock (CLOCK: [start] with no end) anywhere, or #f.
+(define (org--open-clock-line)
+  (let ((lines (org--lines)) (n (org--total-lines)))
+    (let loop ((i 0))
+      (cond ((>= i n) #f)
+            ((>= (string-match "^[ \t]*CLOCK:[ \t]*\\[[^]]*\\][ \t]*$" (nth lines i)) 0) i)
+            (else (loop (+ i 1)))))))
+
+;; C-c C-x C-i — start a clock on the heading at point.
+(define (org-clock-in)
+  (let ((H (org--heading-line-at-point)))
+    (if (not H) (message "Not on a heading")
+        (if (org--open-clock-line) (message "A clock is already running")
+            (begin (org--logbook-add H (string-append "CLOCK: [" (org--now-stamp) "]"))
+                   (message "Clock started"))))))
+
+;; C-c C-x C-o — stop the running clock, recording the elapsed time.
+(define (org-clock-out)
+  (let ((i (org--open-clock-line)))
+    (if (not i) (message "No running clock")
+        (let* ((line (org--line-text i))
+               (start (nth (regexp-captures "\\[([^]]*)\\]" line) 1))
+               (now (org--now-stamp))
+               (mins (max 0 (- (org--stamp-minutes (string-append "[" now "]"))
+                               (org--stamp-minutes (string-append "[" start "]"))))))
+          (org--replace-line i (string-append "  CLOCK: [" start "]--[" now "] =>  "
+                                              (org--fmt-duration mins)))
+          (message (string-append "Clocked " (org--fmt-duration mins)))))))
+
+(define (org--delete-lines a b)
+  (let* ((n (org--total-lines))
+         (sb (org--line-start a))
+         (be (+ (org--line-start b) (utf8-length (org--line-text b)))))
+    (cond ((< (+ b 1) n) (replace-region sb (+ be 1) ""))
+          ((> a 0) (replace-region (- sb 1) be ""))
+          (else (replace-region sb be "")))))
+
+;; C-c C-x C-x — discard the running clock.
+(define (org-clock-cancel)
+  (let ((i (org--open-clock-line)))
+    (if (not i) (message "No running clock")
+        (begin (org--delete-lines i i) (message "Clock canceled")))))
+
+;; --- clock table ------------------------------------------------------------
+(define (org--parse-clock-mins line)
+  (let ((c (regexp-captures "=>[ \t]*([0-9]+):([0-9]{2})" line)))
+    (if (null? c) #f (+ (* 60 (string->number (nth c 1))) (string->number (nth c 2))))))
+(define (org--acc-add acc key m)
+  (if (org--assoc-ci acc key)
+      (map (lambda (e) (if (equal? (car e) key) (cons (car e) (+ (cdr e) m)) e)) acc)
+      (append acc (list (cons key m)))))
+
+;; (total . ((title . minutes) …)) of all clocked time, attributed to the nearest
+;; enclosing heading.
+(define (org--clock-table-rows)
+  (let loop ((ls (org--lines)) (cur "(before first heading)") (acc '()) (total 0))
+    (if (null? ls)
+        (cons total acc)
+        (let* ((line (car ls)) (lvl (org--heading-level line)))
+          (if lvl
+              (let* ((rest (nth (org--heading-split line) 1))
+                     (kw (org--leading-keyword rest)))
+                (loop (cdr ls) (org--heading-title rest kw) acc total))
+              (let ((m (org--parse-clock-mins line)))
+                (if m (loop (cdr ls) cur (org--acc-add acc cur m) (+ total m))
+                    (loop (cdr ls) cur acc total))))))))
+
+(define (org--clocktable-lines)
+  (let* ((data (org--clock-table-rows)) (total (car data)) (rows (cdr data)))
+    (org--format-table
+     (append
+      (list "| Headline | Time |" "|-+-|"
+            (string-append "| *Total time* | *" (org--fmt-duration total) "* |"))
+      (map (lambda (e) (string-append "| " (car e) " | " (org--fmt-duration (cdr e)) " |")) rows)))))
+
+;; Bounds of a #+BEGIN: clocktable … #+END: block enclosing line L, or #f.
+(define (org--clocktable-bounds L)
+  (let ((lines (org--lines)) (n (org--total-lines)))
+    (let up ((i (min L (- n 1))))
+      (cond ((< i 0) #f)
+            ((>= (string-match "^[ \t]*#\\+BEGIN:[ \t]+clocktable" (nth lines i)) 0)
+             (let dn ((j (+ i 1)))
+               (cond ((>= j n) #f)
+                     ((>= (string-match "^[ \t]*#\\+END:" (nth lines j)) 0) (cons i j))
+                     (else (dn (+ j 1))))))
+            ((>= (string-match "^[ \t]*#\\+END:" (nth lines i)) 0) #f)
+            (else (up (- i 1)))))))
+
+;; C-c C-x C-r — insert or refresh a clock report (dynamic clocktable block).
+(define (org-clock-report)
+  (let* ((L (buffer-line)) (b (org--clocktable-bounds L))
+         (block (append (list "#+BEGIN: clocktable :maxlevel 3")
+                        (org--clocktable-lines) (list "#+END:"))))
+    (if b (org--replace-line-range (car b) (cdr b) block)
+        (org--insert-lines-after L block))
+    (message "Clock report updated")))
+
+;; ===========================================================================
+;; Layer 7e — refile + archive
+;; ===========================================================================
+(define (org--current-file-path) (path-join (buffer-directory) (current-buffer)))
+
+;; (root-level . subtree-lines) for the subtree rooted at heading H.
+(define (org--subtree-text H)
+  (let* ((headings (org--headings)) (total (org--total-lines))
+         (lvl (nth (org--find-heading headings H) 1))
+         (E (org--subtree-end H lvl headings total)))
+    (cons lvl (org--slice (org--lines) H E))))
+
+;; Shift the depth of every heading line in `lines` by `delta` (clamped ≥ 1 star).
+(define (org--shift-levels lines delta)
+  (map (lambda (l)
+         (let ((lvl (org--heading-level l)))
+           (cond ((not lvl) l)
+                 ((> delta 0) (string-append (org--stars delta) l))
+                 ((< delta 0) (substring l (min (- 0 delta) (- lvl 1)) (string-length l)))
+                 (else l))))
+       lines))
+
+(define (org--delete-subtree H)
+  (let* ((headings (org--headings)) (total (org--total-lines))
+         (lvl (nth (org--find-heading headings H) 1))
+         (E (org--subtree-end H lvl headings total)))
+    (org--delete-lines H E)))
+
+;; Insert `block` as the last child of the heading at `tline` (level `tlvl`) in
+;; the on-disk file `path`.
+(define (org--insert-into-file path tline tlvl block)
+  (let* ((lines (split-many (read-file path) "\n")) (n (length lines))
+         (E (let loop ((i (+ tline 1)))
+              (cond ((>= i n) (- n 1))
+                    ((let ((l (org--heading-level (nth lines i)))) (and l (<= l tlvl))) (- i 1))
+                    (else (loop (+ i 1))))))
+         (before (org--slice lines 0 E))
+         (after (org--slice lines (+ E 1) (- n 1))))
+    (write-file path (join-lines (append before block after)))))
+
+;; Reorder within the current buffer: move the subtree at H under heading tline.
+(define (org--inbuffer-refile H tline tlvl)
+  (let* ((lines (org--lines)) (total (length lines)) (headings (org--headings))
+         (slvl (nth (org--find-heading headings H) 1))
+         (E (org--subtree-end H slvl headings total))
+         (block (org--shift-levels (org--slice lines H E) (- (+ tlvl 1) slvl)))
+         (Et (org--subtree-end tline tlvl headings total))
+         (without (append (org--slice lines 0 (- H 1)) (org--slice lines (+ E 1) (- total 1))))
+         (blocklen (+ (- E H) 1))
+         (insert-idx (if (> tline H) (- (+ Et 1) blocklen) (+ Et 1)))
+         (newlines (append (org--slice without 0 (- insert-idx 1)) block
+                           (org--slice without insert-idx (- (length without) 1)))))
+    (org--replace-all (join-lines newlines))))
+
+;; Candidate "Title  (file)" → (path line level), rebuilt on each refile.
+(define *org-refile-map* '())
+(define *org--refile-source* -1)
+(define (org--refile-file-targets path)
+  (let ((lines (split-many (read-file path) "\n")) (bn (basename path)))
+    (let loop ((ls lines) (i 0) (acc '()))
+      (if (null? ls) (reverse acc)
+          (let ((lvl (org--heading-level (car ls))))
+            (if lvl
+                (let* ((rest (nth (org--heading-split (car ls)) 1))
+                       (kw (org--leading-keyword rest))
+                       (cand (string-append (org--heading-title rest kw) "  (" bn ")")))
+                  (set! *org-refile-map* (cons (cons cand (list path i lvl)) *org-refile-map*))
+                  (loop (cdr ls) (+ i 1) (cons cand acc)))
+                (loop (cdr ls) (+ i 1) acc)))))))
+(define (org--collect-refile-candidates)
+  (set! *org-refile-map* '())
+  (let loop ((files (org--agenda-file-list)) (acc '()))
+    (if (null? files) acc (loop (cdr files) (append acc (org--refile-file-targets (car files)))))))
+
+;; C-c C-w — refile the subtree at point under a chosen heading.
+(define (org-refile)
+  (let ((H (org--heading-line-at-point)))
+    (if (not H) (message "Not on a heading")
+        (begin (set! *org--refile-source* H)
+               (completing-read "Refile to: " (org--collect-refile-candidates)
+                                "org--refile-finish")))))
+(define (org--refile-finish cand)
+  (let ((tgt (alist-ref *org-refile-map* cand)))
+    (if (not tgt) (message "No such refile target")
+        (let* ((H *org--refile-source*)
+               (tpath (nth tgt 0)) (tline (nth tgt 1)) (tlvl (nth tgt 2)))
+          (if (equal? tpath (org--current-file-path))
+              (org--inbuffer-refile H tline tlvl)
+              (let* ((st (org--subtree-text H))
+                     (block (org--shift-levels (cdr st) (- (+ tlvl 1) (car st)))))
+                (org--insert-into-file tpath tline tlvl block)
+                (org--delete-subtree H)))
+          (message (string-append "Refiled to " (basename tpath)))))))
+
+;; C-c C-x C-a — archive the subtree to <file>_archive.
+(define (org--archive-file-path) (string-append (org--current-file-path) "_archive"))
+(define (org-archive-subtree)
+  (let ((H (org--heading-line-at-point)))
+    (if (not H) (message "Not on a heading")
+        (let* ((block (cdr (org--subtree-text H)))
+               (stamp (string-append "  :ARCHIVE_TIME: [" (org--now-stamp) "]"))
+               (with-time (append (list (car block)
+                                        "  :PROPERTIES:" stamp "  :END:")
+                                  (cdr block)))
+               (apath (org--archive-file-path))
+               (existing (if (file-exists? apath) (read-file apath) ""))
+               (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
+          (write-file apath (string-append existing sep (join-lines with-time) "\n"))
+          (org--delete-subtree H)
+          (message (string-append "Archived to " (basename apath)))))))
+
+;; ===========================================================================
+;; Layer 7f — capture templates
+;; ===========================================================================
+;; Each template is (KEY DESCRIPTION TARGET TEMPLATE-STRING) where TARGET is
+;;   (list "file" PATH)               → append to the file, or
+;;   (list "file+headline" PATH HEAD) → append under heading HEAD in PATH.
+;; The template string may contain %? (point / prompt), %t %T (active date),
+;; %u %U (inactive date / datetime). Example, from init.scm:
+;;   (set! *org-capture-templates*
+;;     (list (list "t" "Todo" (list "file" "~/org/inbox.org") "* TODO %?\n  %U")
+;;           (list "n" "Note" (list "file+headline" "~/org/notes.org" "Notes")
+;;                 "* %?\n  %U")))
+;; (*org-capture-templates* itself is defined back in Layer 4 so org-capture can
+;; see it.)
+(define *org--capture-tmpl* #f)
+(define *org--capture-expanded* "")
+
+(define (org--capture-template-by-key key)
+  (let loop ((es *org-capture-templates*))
+    (cond ((null? es) #f) ((equal? (nth (car es) 0) key) (car es)) (else (loop (cdr es))))))
+
+;; Non-interactive placeholder expansion (everything but %?).
+(define (org--expand-template s)
+  (let* ((today (org--days->date-str (org--today-days)))
+         (s (replace-regexp-in-string "%T" (string-append "<" today ">") s))
+         (s (replace-regexp-in-string "%t" (string-append "<" today ">") s))
+         (s (replace-regexp-in-string "%U" (string-append "[" (org--now-stamp) "]") s))
+         (s (replace-regexp-in-string "%u" (string-append "[" today "]") s)))
+    s))
+(define (org--expand-template-final s input) (replace-regexp-in-string "%\\?" input s))
+
+(define (org--capture-pick)
+  (completing-read "Template: "
+    (map (lambda (e) (string-append (nth e 0) " — " (nth e 1))) *org-capture-templates*)
+    "org--capture-chosen"))
+(define (org--capture-chosen cand)
+  (let* ((key (car (split-many cand " ")))
+         (tmpl (org--capture-template-by-key key)))
+    (if (not tmpl) (message "No such template")
+        (begin
+          (set! *org--capture-tmpl* tmpl)
+          (set! *org--capture-expanded* (org--expand-template (nth tmpl 3)))
+          (if (>= (string-match "%\\?" (nth tmpl 3)) 0)
+              (read-string "Capture: " "org--capture-fill")
+              (org--capture-commit (org--expand-template-final *org--capture-expanded* "")))))))
+(define (org--capture-fill input)
+  (org--capture-commit (org--expand-template-final *org--capture-expanded* input)))
+
+(define (org--capture-append path text)
+  (let* ((existing (if (file-exists? path) (read-file path) ""))
+         (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
+    (write-file path (string-append existing sep text "\n"))))
+(define (org--capture-under-headline path headline text)
+  (let* ((lines (if (file-exists? path) (split-many (read-file path) "\n") '()))
+         (n (length lines))
+         (hidx (let loop ((i 0))
+                 (cond ((>= i n) #f)
+                       ((let ((l (nth lines i)))
+                          (and (org--heading-level l)
+                               (equal? (org--heading-title (nth (org--heading-split l) 1)
+                                                           (org--leading-keyword (nth (org--heading-split l) 1)))
+                                       headline))) i)
+                       (else (loop (+ i 1)))))))
+    (if (not hidx)
+        (org--capture-append path text)
+        (let* ((hlvl (org--heading-level (nth lines hidx)))
+               (E (let loop ((i (+ hidx 1)))
+                    (cond ((>= i n) (- n 1))
+                          ((let ((l (org--heading-level (nth lines i)))) (and l (<= l hlvl))) (- i 1))
+                          (else (loop (+ i 1))))))
+               (before (org--slice lines 0 E))
+               (after (org--slice lines (+ E 1) (- n 1))))
+          (write-file path (join-lines (append before (list text) after)))))))
+(define (org--capture-commit text)
+  (let* ((target (nth *org--capture-tmpl* 2))
+         (path (org--resolve-path (nth target 1))))
+    (if (equal? (car target) "file+headline")
+        (org--capture-under-headline path (nth target 2) text)
+        (org--capture-append path text))
+    (message "Captured")))
+
+;; ===========================================================================
+;; Layer 7g — tag search + custom agenda views
+;; ===========================================================================
+;; Match a tag expression against a tag list. "a+b" = AND, "a|b" = OR, a leading
+;; "-" on a term negates it. Combine with care: "|" splits first.
+(define (org--tag-match expr tags)
+  (cond
+    ((>= (string-match "\\|" expr) 0)
+     (let any ((as (split-many expr "|")))
+       (cond ((null? as) #f) ((org--tag-match (org--trim (car as)) tags) #t) (else (any (cdr as))))))
+    (else
+     (let all ((ts (filter (lambda (x) (not (equal? x ""))) (split-many expr "+"))))
+       (cond ((null? ts) #t)
+             (else (let* ((t (car ts)) (neg (>= (string-match "^-" t) 0))
+                          (name (if neg (substring t 1 (string-length t)) t))
+                          (present (and (member name tags) #t)))
+                     (if (if neg (not present) present) (all (cdr ts)) #f))))))))
+
+;; C-c \ — show every entry whose (inherited) tags match an expression.
+(define (org-tags-view) (read-string "Match tags (work+urgent, a|b, -done): " "org--tags-view-finish"))
+(define (org--tags-view-finish expr)
+  (org--render-agenda
+   (org--sort-entries
+    (filter (lambda (e) (and (> (length e) 6) (org--tag-match (org--trim expr) (nth e 6))))
+            (org--all-entries)))))
+
+;; Custom agenda commands: each is (KEY DESCRIPTION TYPE ARG), TYPE one of
+;; "agenda", "todo" (ARG = keyword), "tags" (ARG = tag expression). e.g.
+;;   (set! *org-agenda-custom-commands*
+;;     (list (list "w" "Waiting" "todo" "WAITING")
+;;           (list "u" "Urgent"  "tags" "urgent")))
+(define *org-agenda-custom-commands* '())
+(define (org-agenda-dispatch)
+  (if (null? *org-agenda-custom-commands*)
+      (org-agenda)
+      (completing-read "Agenda command: "
+        (map (lambda (c) (string-append (nth c 0) " — " (nth c 1))) *org-agenda-custom-commands*)
+        "org--agenda-dispatch-run")))
+(define (org--agenda-dispatch-run cand)
+  (let* ((key (car (split-many cand " ")))
+         (c (let loop ((cs *org-agenda-custom-commands*))
+              (cond ((null? cs) #f) ((equal? (nth (car cs) 0) key) (car cs)) (else (loop (cdr cs)))))))
+    (if (not c) (message "No such command")
+        (let ((type (nth c 2)) (arg (if (> (length c) 3) (nth c 3) "")))
+          (cond ((equal? type "tags") (org--tags-view-finish arg))
+                ((equal? type "todo")
+                 (org--render-agenda
+                  (org--sort-entries (filter (lambda (e) (equal? (nth e 4) arg)) (org--all-entries)))))
+                (else (org-agenda)))))))
+
+;; ===========================================================================
+;; Layer 7h — link store/insert + footnotes
+;; ===========================================================================
+;; A ring of (TARGET . DESCRIPTION) links, pushed by org-store-link.
+(define *org-stored-links* '())
+;; C-c l — store a link to the current location (an id: link if the heading has
+;; an :ID:, else a file: link).
+(define (org-store-link)
+  (let* ((H (org--heading-line-at-point))
+         (link (if H
+                   (let* ((rest (nth (org--heading-split (org--line-text H)) 1))
+                          (title (org--heading-title rest (org--leading-keyword rest)))
+                          (id (org--entry-get-local H "ID")))
+                     (if id (cons (string-append "id:" id) title)
+                         (cons (string-append "file:" (org--current-file-path)) title)))
+                   (cons (string-append "file:" (org--current-file-path)) (current-buffer)))))
+    (set! *org-stored-links* (cons link *org-stored-links*))
+    (message (string-append "Stored link: " (car link)))))
+
+;; C-c C-l — insert a link, choosing from the stored ring or typing a target.
+(define (org-insert-link)
+  (if (null? *org-stored-links*)
+      (read-string "Link target: " "org--insert-link-target")
+      (completing-read "Link: " (map car *org-stored-links*) "org--insert-link-chosen")))
+(define (org--insert-link-target target)
+  (when (not (equal? (org--trim target) ""))
+    (insert (string-append "[[" (org--trim target) "]]"))))
+(define (org--insert-link-chosen target)
+  (let ((p (let loop ((ls *org-stored-links*))
+             (cond ((null? ls) #f) ((equal? (car (car ls)) target) (car ls)) (else (loop (cdr ls)))))))
+    (if p (insert (string-append "[[" (car p) "][" (cdr p) "]]"))
+        (insert (string-append "[[" target "]]")))))
+
+;; The largest numeric footnote label in the buffer (0 if none).
+(define (org--max-fn-number)
+  (let loop ((s (buffer-string)) (mx 0))
+    (let ((m (string-match "\\[fn:([0-9]+)\\]" s)))
+      (if (< m 0) mx
+          (let* ((c (regexp-captures "\\[fn:([0-9]+)\\]" s))
+                 (consumed (+ m (utf8-length (car c)))))
+            (loop (org--byte-drop s consumed) (max mx (string->number (nth c 1)))))))))
+;; C-c C-x f — insert a numbered footnote reference and a definition stub at EOF.
+(define (org-footnote-new)
+  (let ((label (string-append "fn:" (number->string (+ 1 (org--max-fn-number))))))
+    (insert-at (point-max) (string-append "\n[" label "] "))
+    (insert (string-append "[" label "]"))
+    (message (string-append "Footnote [" label "] — definition added at end of file"))))
+
+;; ===========================================================================
+;; Layer 7i — table formulas (#+TBLFM:)
+;; ===========================================================================
+;; A small arithmetic evaluator (+ - * / parens, unary minus) over a tokenized
+;; expression, driven by shunting-yard → RPN. Field references ($C, @R$C) are
+;; substituted with their numeric values (wrapped in parens) before evaluation.
+(define (org--char->str ch) (list->string (list ch)))
+(define (org--digit-char? ch) (let ((cp (char->integer ch))) (or (and (>= cp 48) (<= cp 57)) (= cp 46))))
+(define (org--op-char? ch)
+  (let ((cp (char->integer ch))) (or (= cp 43) (= cp 45) (= cp 42) (= cp 47) (= cp 40) (= cp 41))))
+(define (org--ws-char? ch) (let ((cp (char->integer ch))) (or (= cp 32) (= cp 9))))
+
+(define (org--tokenize s)
+  (let loop ((chars (string->list s)) (acc '()) (cur ""))
+    (cond
+      ((null? chars) (reverse (if (equal? cur "") acc (cons cur acc))))
+      (else
+       (let ((ch (car chars)) (rest (cdr chars)) (flushed (if (equal? cur "") acc (cons cur acc))))
+         (cond
+           ((org--digit-char? ch) (loop rest acc (string-append cur (org--char->str ch))))
+           ((org--op-char? ch) (loop rest (cons (org--char->str ch) flushed) ""))
+           ((org--ws-char? ch) (loop rest flushed ""))
+           (else (loop rest acc (string-append cur (org--char->str ch))))))))))
+
+(define (org--num-tok? t) (and (string->number t) #t))
+(define (org--op-tok? t)
+  (or (equal? t "+") (equal? t "-") (equal? t "*") (equal? t "/") (equal? t "u-")))
+(define (org--prec op)
+  (cond ((or (equal? op "+") (equal? op "-")) 1)
+        ((or (equal? op "*") (equal? op "/")) 2)
+        ((equal? op "u-") 3) (else 0)))
+
+(define (org--to-rpn tokens)
+  (let loop ((ts tokens) (prev #f) (out '()) (ops '()))
+    (cond
+      ((null? ts) (append (reverse out) ops))
+      (else
+       (let ((t (car ts)))
+         (cond
+           ((org--num-tok? t) (loop (cdr ts) t (cons t out) ops))
+           ((equal? t "(") (loop (cdr ts) t out (cons t ops)))
+           ((equal? t ")")
+            (let pop ((o ops) (acc out))
+              (cond ((null? o) (loop (cdr ts) t acc '()))
+                    ((equal? (car o) "(") (loop (cdr ts) t acc (cdr o)))
+                    (else (pop (cdr o) (cons (car o) acc))))))
+           ((or (equal? t "+") (equal? t "-") (equal? t "*") (equal? t "/"))
+            (let* ((unary (and (or (equal? t "-") (equal? t "+"))
+                               (or (not prev) (equal? prev "(") (org--op-tok? prev))))
+                   (tok (cond ((and unary (equal? t "-")) "u-")
+                              ((and unary (equal? t "+")) "u+")
+                              (else t))))
+              (if (equal? tok "u+")
+                  (loop (cdr ts) t out ops)
+                  (let pop ((o ops) (acc out))
+                    (cond ((and (not (null? o)) (not (equal? (car o) "("))
+                                (not (equal? tok "u-"))
+                                (>= (org--prec (car o)) (org--prec tok)))
+                           (pop (cdr o) (cons (car o) acc)))
+                          (else (loop (cdr ts) t acc (cons tok o))))))))
+           (else (loop (cdr ts) t out ops))))))))
+
+(define (org--apply-op op a b)
+  (cond ((equal? op "+") (+ a b)) ((equal? op "-") (- a b)) ((equal? op "*") (* a b))
+        ((equal? op "/") (if (= b 0) 0 (/ (* 1.0 a) (* 1.0 b)))) (else 0)))
+(define (org--eval-rpn rpn)
+  (let loop ((ts rpn) (stack '()))
+    (cond
+      ((null? ts) (if (null? stack) 0 (car stack)))
+      (else
+       (let ((t (car ts)))
+         (cond
+           ((equal? t "u-") (loop (cdr ts) (cons (- 0 (car stack)) (cdr stack))))
+           ((org--op-tok? t)
+            (let ((b (car stack)) (a (car (cdr stack))) (rest (cdr (cdr stack))))
+              (loop (cdr ts) (cons (org--apply-op t a b) rest))))
+           (else (loop (cdr ts) (cons (string->number t) stack)))))))))
+(define (org--eval-arith expr) (org--eval-rpn (org--to-rpn (org--tokenize expr))))
+
+;; Format a number for a cell: integers bare, others rounded to 6 dp, trailing
+;; ".0" stripped.
+(define (org--fmt-num n)
+  (let* ((n2 (if (integer? n) n (/ (round (* n 1000000.0)) 1000000.0)))
+         (s (number->string n2)))
+    (if (ends-with? s ".0") (substring s 0 (- (string-length s) 2)) s)))
+
+;; --- grid evaluation --------------------------------------------------------
+(define (org--cell-num grid r c)
+  (let* ((row (if (and (>= r 1) (<= r (length grid))) (nth grid (- r 1)) '()))
+         (v (if (and (>= c 1) (<= c (length row))) (nth row (- c 1)) ""))
+         (n (string->number (org--trim v))))
+    (if n n 0)))
+(define (org--subst-at grid expr)
+  (let loop ((s expr) (acc ""))
+    (let ((m (string-match "@([0-9]+)\\$([0-9]+)" s)))
+      (if (< m 0) (string-append acc s)
+          (let* ((c (regexp-captures "@([0-9]+)\\$([0-9]+)" s))
+                 (whole (car c)) (r (string->number (nth c 1))) (col (string->number (nth c 2)))
+                 (before (substring s 0 m)) (after (org--byte-drop s (+ m (utf8-length whole)))))
+            (loop after (string-append acc before "(" (org--fmt-num (org--cell-num grid r col)) ")")))))))
+(define (org--subst-dollar grid curr expr)
+  (let loop ((s expr) (acc ""))
+    (let ((m (string-match "\\$([0-9]+)" s)))
+      (if (< m 0) (string-append acc s)
+          (let* ((c (regexp-captures "\\$([0-9]+)" s))
+                 (whole (car c)) (col (string->number (nth c 1)))
+                 (before (substring s 0 m)) (after (org--byte-drop s (+ m (utf8-length whole)))))
+            (loop after (string-append acc before "(" (org--fmt-num (org--cell-num grid curr col)) ")")))))))
+(define (org--subst-refs expr grid curr) (org--subst-dollar grid curr (org--subst-at grid expr)))
+
+(define (org--row-set cells col val)
+  (let ((n (max col (length cells))))
+    (let loop ((i 1) (acc '()))
+      (if (> i n) (reverse acc) (loop (+ i 1) (cons (if (= i col) val (org--cell cells (- i 1))) acc))))))
+(define (org--grid-set grid r col val)
+  (let loop ((g grid) (i 1) (acc '()))
+    (cond ((null? g) (reverse acc))
+          ((= i r) (loop (cdr g) (+ i 1) (cons (org--row-set (car g) col val) acc)))
+          (else (loop (cdr g) (+ i 1) (cons (car g) acc))))))
+
+(define (org--apply-formula grid fstr)
+  (let ((c (regexp-captures "^[ \t]*(@?[0-9]*\\$[0-9]+)[ \t]*=[ \t]*(.*)$" fstr)))
+    (if (null? c) grid
+        (let* ((lhs (nth c 1)) (rhs (nth c 2)) (atc (regexp-captures "@([0-9]+)\\$([0-9]+)" lhs)))
+          (if (not (null? atc))
+              (org--grid-set grid (string->number (nth atc 1)) (string->number (nth atc 2))
+                             (org--fmt-num (org--eval-arith (org--subst-refs rhs grid (string->number (nth atc 1))))))
+              (let ((col (string->number (nth (regexp-captures "\\$([0-9]+)" lhs) 1))))
+                (let loop ((r 1) (g grid))
+                  (if (> r (length grid)) g
+                      (loop (+ r 1)
+                            (org--grid-set g r col
+                                           (org--fmt-num (org--eval-arith (org--subst-refs rhs g r)))))))))))))
+
+;; (slice-index . cells) for each non-separator row of a table slice.
+(define (org--table-grid slice)
+  (let loop ((ls slice) (i 0) (acc '()))
+    (cond ((null? ls) (reverse acc))
+          ((org--table-sep? (car ls)) (loop (cdr ls) (+ i 1) acc))
+          (else (loop (cdr ls) (+ i 1) (cons (cons i (org--table-cells (car ls))) acc))))))
+(define (org--grid->slice slice rows grid2)
+  (let loop ((ls slice) (i 0) (rs rows) (gs grid2) (acc '()))
+    (cond ((null? ls) (reverse acc))
+          ((and (not (null? rs)) (= (car (car rs)) i))
+           (loop (cdr ls) (+ i 1) (cdr rs) (cdr gs) (cons (org--row-from-cells (car gs)) acc)))
+          (else (loop (cdr ls) (+ i 1) rs gs (cons (car ls) acc))))))
+
+(define (org--tblfm-after end)
+  (let ((lines (org--lines)) (n (org--total-lines)))
+    (if (and (< (+ end 1) n) (>= (string-match "^[ \t]*#\\+TBLFM:" (nth lines (+ end 1))) 0)) (+ end 1) #f)))
+(define (org--tblfm-formulas line)
+  (let ((c (regexp-captures "#\\+TBLFM:[ \t]*(.*)$" line)))
+    (if (null? c) '() (filter (lambda (x) (not (equal? (org--trim x) ""))) (split-many (nth c 1) "::")))))
+
+;; Recompute the table at point from its #+TBLFM: line (or just re-align it).
+(define (org-table-recalculate)
+  (let* ((L (buffer-line)) (b (org--table-bounds L)))
+    (if (not b) (message "Not in a table")
+        (let* ((start (nth b 0)) (end (nth b 1)) (fl (org--tblfm-after end)))
+          (if (not fl) (org-table-align)
+              (let* ((slice (org--slice (org--lines) start end))
+                     (rows (org--table-grid slice))
+                     (grid (map cdr rows))
+                     (formulas (org--tblfm-formulas (org--line-text fl)))
+                     (grid2 (let loop ((fs formulas) (g grid))
+                              (if (null? fs) g (loop (cdr fs) (org--apply-formula g (car fs)))))))
+                (org--replace-line-range start end (org--format-table (org--grid->slice slice rows grid2)))
+                (message "Table recalculated")))))))
+
+;; ===========================================================================
+;; Layer 7j — export backends: Markdown, LaTeX, ASCII (walk the org-parse AST)
+;; ===========================================================================
+(define (org--range n) (let loop ((i 0) (acc '())) (if (>= i n) (reverse acc) (loop (+ i 1) (cons i acc)))))
+(define (org--indent-lines text prefix)
+  (join-lines (map (lambda (l) (string-append prefix l)) (split-many text "\n"))))
+(define (org--ast-table->rows e)
+  (map (lambda (r) (if (equal? (car r) "sep") "|-|" (org--row-from-cells (cdr r)))) (nth e 1)))
+(define (org--output-path ext)
+  (let* ((b (current-buffer)) (stem (if (ends-with? b ".org") (substring b 0 (- (string-length b) 4)) b)))
+    (path-join (buffer-directory) (string-append stem ext))))
+
+;; --- Markdown (GitHub-flavored) ---------------------------------------------
+(define (org--inline->md s)
+  (let* ((s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "[$2]($1)" s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "[$1]($1)" s))
+         (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "**$1**" s))
+         (s (replace-regexp-in-string "/([^/\n]+)/" "_$1_" s))
+         (s (replace-regexp-in-string "=([^=\n]+)=" "`$1`" s))
+         (s (replace-regexp-in-string "~([^~\n]+)~" "`$1`" s))
+         (s (replace-regexp-in-string "\\+([^+\n]+)\\+" "~~$1~~" s))
+         (s (replace-regexp-in-string "\\[fn:([^]\n]*)\\]" "[^$1]" s)))
+    s))
+(define (org--md-hashes n) (if (<= n 0) "" (string-append "#" (org--md-hashes (- n 1)))))
+(define (org--list->md e ordered)
+  (let loop ((its (nth e 1)) (i 1) (acc ""))
+    (if (null? its) acc
+        (let ((it (car its)))
+          (loop (cdr its) (+ i 1)
+                (string-append acc (if ordered (string-append (number->string i) ". ") "- ")
+                               (if (equal? (car it) "") "" (string-append "[" (car it) "] "))
+                               (org--inline->md (cdr it)) "\n"))))))
+(define (org--md-row cells ncols)
+  (string-append "|"
+    (org--concat (map (lambda (i) (string-append " " (org--inline->md (org--cell cells i)) " |")) (org--range ncols)))
+    "\n"))
+(define (org--table->md e)
+  (let* ((rows (filter (lambda (r) (not (equal? (car r) "sep"))) (nth e 1)))
+         (ncols (let loop ((rs rows) (m 1)) (if (null? rs) m (loop (cdr rs) (max m (length (cdr (car rs)))))))))
+    (if (null? rows) ""
+        (string-append (org--md-row (cdr (car rows)) ncols)
+                       "|" (org--concat (map (lambda (i) " --- |") (org--range ncols))) "\n"
+                       (org--concat (map (lambda (r) (org--md-row (cdr r) ncols)) (cdr rows)))))))
+(define (org--block->md e)
+  (let ((type (car e)))
+    (cond
+      ((equal? type "heading")
+       (string-append (org--md-hashes (min 6 (nth e 1))) " "
+                      (if (equal? (nth e 2) "") "" (string-append (nth e 2) " "))
+                      (org--inline->md (nth e 4))
+                      (if (equal? (nth e 5) "") "" (string-append "  :" (nth e 5) ":")) "\n\n"))
+      ((equal? type "para") (string-append (org--inline->md (nth e 1)) "\n\n"))
+      ((equal? type "src") (string-append "```" (nth e 1) "\n" (nth e 2) "\n```\n\n"))
+      ((equal? type "example") (string-append "```\n" (nth e 1) "\n```\n\n"))
+      ((equal? type "quote") (string-append "> " (replace-regexp-in-string "\n" "\n> " (org--inline->md (nth e 1))) "\n\n"))
+      ((equal? type "hr") "---\n\n")
+      ((equal? type "ulist") (string-append (org--list->md e #f) "\n"))
+      ((equal? type "olist") (string-append (org--list->md e #t) "\n"))
+      ((equal? type "table") (string-append (org--table->md e) "\n"))
+      (else ""))))
+(define (org--ast->md ast)
+  (let ((title (org--doc-title ast)))
+    (string-append (if (equal? title "Untitled") "" (string-append "# " title "\n\n"))
+                   (org--concat (map org--block->md ast)))))
+
+;; --- LaTeX ------------------------------------------------------------------
+(define (org--escape-latex s)
+  (let* ((s (replace-regexp-in-string "%" "\\%" s))
+         (s (replace-regexp-in-string "&" "\\&" s))
+         (s (replace-regexp-in-string "#" "\\#" s))
+         (s (replace-regexp-in-string "_" "\\_" s)))
+    s))
+(define (org--inline->latex s)
+  (let* ((s (org--escape-latex s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "\\href{$1}{$2}" s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "\\url{$1}" s))
+         (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "\\textbf{$1}" s))
+         (s (replace-regexp-in-string "/([^/\n]+)/" "\\emph{$1}" s))
+         (s (replace-regexp-in-string "=([^=\n]+)=" "\\texttt{$1}" s))
+         (s (replace-regexp-in-string "~([^~\n]+)~" "\\texttt{$1}" s)))
+    s))
+(define (org--latex-section-cmd lvl)
+  (cond ((= lvl 1) "\\section") ((= lvl 2) "\\subsection") ((= lvl 3) "\\subsubsection")
+        ((= lvl 4) "\\paragraph") (else "\\subparagraph")))
+(define (org--list->latex e ordered)
+  (let ((env (if ordered "enumerate" "itemize")))
+    (string-append "\\begin{" env "}\n"
+      (org--concat (map (lambda (it) (string-append "\\item " (org--inline->latex (cdr it)) "\n")) (nth e 1)))
+      "\\end{" env "}\n\n")))
+(define (org--table->latex e)
+  (let* ((rows (filter (lambda (r) (not (equal? (car r) "sep"))) (nth e 1)))
+         (ncols (let loop ((rs rows) (m 1)) (if (null? rs) m (loop (cdr rs) (max m (length (cdr (car rs)))))))))
+    (string-append "\\begin{tabular}{" (org--concat (map (lambda (i) "l") (org--range ncols))) "}\n"
+      (org--concat (map (lambda (r)
+        (string-append (string-join (map (lambda (i) (org--inline->latex (org--cell (cdr r) i))) (org--range ncols)) " & ")
+                       " \\\\\n")) rows))
+      "\\end{tabular}\n\n")))
+(define (org--block->latex e)
+  (let ((type (car e)))
+    (cond
+      ((equal? type "heading")
+       (string-append (org--latex-section-cmd (nth e 1)) "{" (org--inline->latex (nth e 4)) "}\n\n"))
+      ((equal? type "para") (string-append (org--inline->latex (nth e 1)) "\n\n"))
+      ((equal? type "src") (string-append "\\begin{verbatim}\n" (nth e 2) "\n\\end{verbatim}\n\n"))
+      ((equal? type "example") (string-append "\\begin{verbatim}\n" (nth e 1) "\n\\end{verbatim}\n\n"))
+      ((equal? type "quote") (string-append "\\begin{quote}\n" (org--inline->latex (nth e 1)) "\n\\end{quote}\n\n"))
+      ((equal? type "hr") "\\hrulefill\n\n")
+      ((equal? type "ulist") (org--list->latex e #f))
+      ((equal? type "olist") (org--list->latex e #t))
+      ((equal? type "table") (org--table->latex e))
+      (else ""))))
+(define (org--ast->latex ast)
+  (string-append
+   "\\documentclass{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage{hyperref}\n"
+   "\\title{" (org--escape-latex (org--doc-title ast)) "}\n\\begin{document}\n\\maketitle\n\n"
+   (org--concat (map org--block->latex ast))
+   "\\end{document}\n"))
+
+;; --- ASCII ------------------------------------------------------------------
+(define (org--inline->ascii s)
+  (let* ((s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "$2 ($1)" s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "$1" s))
+         (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "$1" s))
+         (s (replace-regexp-in-string "/([^/\n]+)/" "$1" s))
+         (s (replace-regexp-in-string "=([^=\n]+)=" "$1" s))
+         (s (replace-regexp-in-string "~([^~\n]+)~" "$1" s))
+         (s (replace-regexp-in-string "\\+([^+\n]+)\\+" "$1" s)))
+    s))
+(define (org--ascii-rule ch n) (if (<= n 0) "" (string-append ch (org--ascii-rule ch (- n 1)))))
+(define (org--list->ascii e ordered)
+  (let loop ((its (nth e 1)) (i 1) (acc ""))
+    (if (null? its) acc
+        (let ((it (car its)))
+          (loop (cdr its) (+ i 1)
+                (string-append acc (if ordered (string-append (number->string i) ". ") "- ")
+                               (if (equal? (car it) "") "" (string-append "[" (car it) "] "))
+                               (org--inline->ascii (cdr it)) "\n"))))))
+(define (org--block->ascii e)
+  (let ((type (car e)))
+    (cond
+      ((equal? type "heading")
+       (let* ((title (string-append (if (equal? (nth e 2) "") "" (string-append (nth e 2) " "))
+                                    (org--inline->ascii (nth e 4))))
+              (ch (cond ((= (nth e 1) 1) "=") ((= (nth e 1) 2) "-") (else "~"))))
+         (string-append title "\n" (org--ascii-rule ch (utf8-length title)) "\n\n")))
+      ((equal? type "para") (string-append (org--inline->ascii (nth e 1)) "\n\n"))
+      ((equal? type "src") (string-append (org--indent-lines (nth e 2) "    ") "\n\n"))
+      ((equal? type "example") (string-append (org--indent-lines (nth e 1) "    ") "\n\n"))
+      ((equal? type "quote") (string-append (org--indent-lines (org--inline->ascii (nth e 1)) "  ") "\n\n"))
+      ((equal? type "hr") "----------------------------------------\n\n")
+      ((equal? type "ulist") (string-append (org--list->ascii e #f) "\n"))
+      ((equal? type "olist") (string-append (org--list->ascii e #t) "\n"))
+      ((equal? type "table") (string-append (join-lines (org--format-table (org--ast-table->rows e))) "\n\n"))
+      (else ""))))
+(define (org--ast->ascii ast) (org--concat (map org--block->ascii ast)))
+
+;; Export commands (C-c C-e m / l / a).
+(define (org-export-markdown)
+  (let ((p (org--output-path ".md")))
+    (write-file p (org--ast->md (org-parse (buffer-string)))) (message (string-append "Exported to " p))))
+(define (org-export-latex)
+  (let ((p (org--output-path ".tex")))
+    (write-file p (org--ast->latex (org-parse (buffer-string)))) (message (string-append "Exported to " p))))
+(define (org-export-ascii)
+  (let ((p (org--output-path ".txt")))
+    (write-file p (org--ast->ascii (org-parse (buffer-string)))) (message (string-append "Exported to " p))))
+
+;; ===========================================================================
+;; Layer 7k — column view (read-only, driven by #+COLUMNS:)
+;; ===========================================================================
+(define *org-columns-default* "%40ITEM %TODO %PRIORITY %TAGS")
+(define (org--columns-spec)
+  (let loop ((ls (org--lines)))
+    (cond ((null? ls) *org-columns-default*)
+          (else (let ((c (regexp-captures "^[ \t]*#\\+COLUMNS:[ \t]*(.*)$" (car ls))))
+                  (if (null? c) (loop (cdr ls)) (nth c 1)))))))
+;; "%[width]NAME" tokens → list of (width . name).
+(define (org--parse-columns spec)
+  (let loop ((toks (filter (lambda (x) (not (equal? x ""))) (split-many spec " "))) (acc '()))
+    (if (null? toks) (reverse acc)
+        (let ((c (regexp-captures "^%([0-9]*)([A-Za-z_]+)" (car toks))))
+          (if (null? c) (loop (cdr toks) acc)
+              (loop (cdr toks)
+                    (cons (cons (if (equal? (nth c 1) "") 0 (string->number (nth c 1))) (nth c 2)) acc)))))))
+
+;; Total clocked minutes in heading H's own section.
+(define (org--heading-clocksum H)
+  (let ((e (org--entry-content-end H)))
+    (let loop ((i (+ H 1)) (sum 0))
+      (if (> i e) sum
+          (let ((m (org--parse-clock-mins (org--line-text i)))) (loop (+ i 1) (if m (+ sum m) sum)))))))
+
+(define (org--column-value H name)
+  (let* ((line (org--line-text H)) (rest (nth (org--heading-split line) 1))
+         (kw (org--leading-keyword rest)))
+    (cond
+      ((equal? name "ITEM") (org--heading-title rest kw))
+      ((equal? name "TODO") (or kw ""))
+      ((equal? name "PRIORITY") (let ((c (regexp-captures "\\[#([A-Z])\\]" rest))) (if (null? c) "" (nth c 1))))
+      ((equal? name "TAGS")
+       (let ((c (regexp-captures ":([A-Za-z0-9_@#%:]+):[ \t]*$" rest))) (if (null? c) "" (nth c 1))))
+      ((equal? name "CLOCKSUM") (org--fmt-duration (org--heading-clocksum H)))
+      (else (or (org-entry-get-inherited H name) "")))))
+
+;; M-x org-columns — tabulate every heading's column values in a side buffer.
+(define (org-columns)
+  (let* ((names (map cdr (org--parse-columns (org--columns-spec))))
+         (header (string-append "| " (string-join names " | ") " |"))
+         (rows (map (lambda (h)
+                      (let ((H (car h)) (lvl (nth h 1)))
+                        (string-append "| "
+                          (string-join
+                           (map (lambda (nm)
+                                  (let ((v (org--column-value H nm)))
+                                    (if (equal? nm "ITEM") (string-append (org--spaces (* 2 (- lvl 1))) v) v)))
+                                names)
+                           " | ")
+                          " |")))
+                    (org--headings))))
+    (render-buffer "*Org Columns*" "org-columns-mode"
+                   (join-lines (org--format-table (append (list header "|-|") rows))) '())
+    (message "Org columns")))
+
+;; ===========================================================================
+;; Layer 7l — babel noweb / named blocks / inline + list-item editing
+;; ===========================================================================
+;; Body of the src block named NAME (via a #+name: line), or #f.
+(define (org--named-block-body name)
+  (let ((lines (org--lines)) (n (org--total-lines)))
+    (let loop ((i 0))
+      (cond ((>= i n) #f)
+            ((>= (string-match (string-append "^[ \t]*#\\+name:[ \t]*" (regexp-quote name) "[ \t]*$")
+                               (nth lines i)) 0)
+             (let skip ((j (+ i 1)))
+               (cond ((>= j n) #f)
+                     ((org--block-begin? (nth lines j))
+                      (let end ((k (+ j 1)) (acc '()))
+                        (cond ((>= k n) (join-lines (reverse acc)))
+                              ((org--block-end? (nth lines k)) (join-lines (reverse acc)))
+                              (else (end (+ k 1) (cons (nth lines k) acc))))))
+                     ((equal? (org--trim (nth lines j)) "") (skip (+ j 1)))
+                     (else #f))))
+            (else (loop (+ i 1)))))))
+;; Expand <<name>> noweb references in a block body.
+(define (org--expand-noweb body)
+  (let loop ((s body) (acc ""))
+    (let ((m (string-match "<<([A-Za-z0-9_-]+)>>" s)))
+      (if (< m 0) (string-append acc s)
+          (let* ((c (regexp-captures "<<([A-Za-z0-9_-]+)>>" s))
+                 (whole (car c)) (name (nth c 1))
+                 (before (substring s 0 m)) (after (org--byte-drop s (+ m (utf8-length whole)))))
+            (loop after (string-append acc before (or (org--named-block-body name) ""))))))))
+
+;; C-c C-c on an inline `src_lang{code}` runs it and appends {{{results(…)}}}.
+(define (org-babel-execute-inline)
+  (let* ((L (buffer-line)) (line (org--line-text L))
+         (m (string-match "src_([A-Za-z0-9]+)(\\[[^]]*\\])?\\{([^}]*)\\}" line)))
+    (if (< m 0) (message "No inline src at point")
+        (let* ((c (regexp-captures "src_([A-Za-z0-9]+)(\\[[^]]*\\])?\\{([^}]*)\\}" line))
+               (whole (car c)) (out (trim-end (org--run-src (nth c 1) (nth c 3))))
+               (pos (+ (org--line-start L) m (utf8-length whole))))
+          (insert-at pos (string-append " {{{results(" out ")}}}"))
+          (message "Inline src executed")))))
+
+;; --- list-item editing ------------------------------------------------------
+;; (whole indent bullet) for a plain-list line, or #f.
+(define (org--list-line-prefix line)
+  (let ((c (regexp-captures "^([ \t]*)([-+*]|[0-9]+[.)])[ \t]+" line)))
+    (if (null? c) #f c)))
+;; M-RET on a list item — insert a sibling item below (incrementing an ordinal).
+(define (org-insert-item)
+  (let* ((L (buffer-line)) (line (org--line-text L)) (c (org--list-line-prefix line)))
+    (if (not c) #f
+        (let* ((indent (nth c 1)) (bullet (nth c 2))
+               (n (regexp-captures "^([0-9]+)([.)])$" bullet))
+               (newbullet (if (null? n) bullet
+                              (string-append (number->string (+ 1 (string->number (nth n 1)))) (nth n 2))))
+               (pos (+ (org--line-start L) (utf8-length line))))
+          (insert-at pos (string-append "\n" indent newbullet " "))
+          (goto-char (+ pos 1 (utf8-length indent) (utf8-length newbullet) 1))
+          #t))))
+(define (org-indent-item)
+  (let* ((L (buffer-line)) (line (org--line-text L)))
+    (when (org--list-line-prefix line) (org--replace-line L (string-append "  " line)))))
+(define (org-outdent-item)
+  (let* ((L (buffer-line)) (line (org--line-text L)))
+    (when (and (org--list-line-prefix line) (>= (string-match "^  " line) 0))
+      (org--replace-line L (substring line 2 (string-length line))))))
+;; M-RET dispatcher: a list item on a list line, else a heading.
+(define (org-meta-return)
+  (if (org--list-line-prefix (org--line-text (buffer-line))) (org-insert-item) (org-insert-heading)))
+
 ;; Activation
 ;; ===========================================================================
 ;; Turn the active buffer into an Org buffer (M-x org-mode, or auto for .org).
@@ -1610,7 +2849,7 @@
 (define-key "org-mode" "ctrl-c ctrl-c" "org-ctrl-c-ctrl-c")
 (define-key "org-mode" "ctrl-c ctrl-q" "org-set-tags")
 (define-key "org-mode" "ctrl-c ," "org-set-priority")
-(define-key "org-mode" "alt-enter" "org-insert-heading")
+(define-key "org-mode" "alt-enter" "org-meta-return")
 (define-key "org-mode" "alt-left" "org-meta-left")
 (define-key "org-mode" "alt-right" "org-meta-right")
 (define-key "org-mode" "alt-up" "org-meta-up")
@@ -1620,16 +2859,40 @@
 (define-key "org-mode" "alt-shift-left" "org-table-delete-column")
 (define-key "org-mode" "alt-shift-down" "org-table-insert-row")
 (define-key "org-mode" "alt-shift-up" "org-table-delete-row")
-(define-key "org-mode" "ctrl-c ctrl-e" "org-export-html")
+;; Export dispatcher prefix C-c C-e: h html, m markdown, l latex, a ascii.
+(define-key "org-mode" "ctrl-c ctrl-e h" "org-export-html")
+(define-key "org-mode" "ctrl-c ctrl-e m" "org-export-markdown")
+(define-key "org-mode" "ctrl-c ctrl-e l" "org-export-latex")
+(define-key "org-mode" "ctrl-c ctrl-e a" "org-export-ascii")
 (define-key "org-mode" "ctrl-c a" "org-agenda")
+(define-key "org-mode" "ctrl-c shift-a" "org-agenda-dispatch")
 (define-key "org-mode" "ctrl-c t" "org-todo-list")
 (define-key "org-mode" "ctrl-c c" "org-capture")
+;; Scheduling / properties / links / footnotes.
+(define-key "org-mode" "ctrl-c ctrl-s" "org-schedule")
+(define-key "org-mode" "ctrl-c ctrl-d" "org-deadline")
+(define-key "org-mode" "ctrl-c ." "org-time-stamp")
+(define-key "org-mode" "ctrl-c ctrl-w" "org-refile")
+(define-key "org-mode" "ctrl-c \\" "org-tags-view")
+(define-key "org-mode" "ctrl-c ctrl-l" "org-insert-link")
+(define-key "org-mode" "ctrl-c l" "org-store-link")
+;; Clocking / properties / archive / columns / footnote / inline images / latex
+;; live under the C-c C-x prefix.
+(define-key "org-mode" "ctrl-c ctrl-x ctrl-i" "org-clock-in")
+(define-key "org-mode" "ctrl-c ctrl-x ctrl-o" "org-clock-out")
+(define-key "org-mode" "ctrl-c ctrl-x ctrl-x" "org-clock-cancel")
+(define-key "org-mode" "ctrl-c ctrl-x ctrl-r" "org-clock-report")
+(define-key "org-mode" "ctrl-c ctrl-x ctrl-a" "org-archive-subtree")
+(define-key "org-mode" "ctrl-c ctrl-x ctrl-c" "org-columns")
+(define-key "org-mode" "ctrl-c ctrl-x p" "org-set-property")
+(define-key "org-mode" "ctrl-c ctrl-x f" "org-footnote-new")
 (define-key "org-mode" "ctrl-c ctrl-x ctrl-v" "org-toggle-inline-images")
 (define-key "org-mode" "ctrl-c ctrl-x ctrl-l" "org-toggle-latex-preview")
 
-;; Agenda / capture are useful from any buffer too.
+;; Agenda / capture / store-link are useful from any buffer too.
 (define-key "fundamental" "ctrl-c a" "org-agenda")
 (define-key "fundamental" "ctrl-c c" "org-capture")
+(define-key "fundamental" "ctrl-c l" "org-store-link")
 
 ;; *Org Agenda* buffer.
 (define-key "org-agenda-mode" "enter" "org-agenda-visit")
@@ -1674,3 +2937,31 @@
 (register-command "org-toggle-latex-preview")
 (register-command "org-toggle-leading-stars")
 (register-command "org-toggle-indent")
+(register-command "org-schedule")
+(register-command "org-deadline")
+(register-command "org-time-stamp")
+(register-command "org-time-stamp-inactive")
+(register-command "org-set-property")
+(register-command "org-id-get-create")
+(register-command "org-clock-in")
+(register-command "org-clock-out")
+(register-command "org-clock-cancel")
+(register-command "org-clock-report")
+(register-command "org-refile")
+(register-command "org-archive-subtree")
+(register-command "org-tags-view")
+(register-command "org-agenda-dispatch")
+(register-command "org-store-link")
+(register-command "org-insert-link")
+(register-command "org-footnote-new")
+(register-command "org-table-recalculate")
+(register-command "org-export-markdown")
+(register-command "org-export-latex")
+(register-command "org-export-ascii")
+(register-command "org-columns")
+(register-command "org-babel-execute-inline")
+(register-command "org-insert-item")
+
+;; *Org Columns* buffer.
+(define-key "org-columns-mode" "q" "kill-buffer")
+(set-option "line-numbers:org-columns-mode" "false")

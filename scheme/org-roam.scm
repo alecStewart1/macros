@@ -23,6 +23,14 @@
 (define *org-roam-nodes* '())
 ;; Whether the index has been scanned this session.
 (define *org-roam-synced* #f)
+;; Alias and ref indexes, (alias/ref . node), populated by org-roam-db-sync.
+(define *org-roam-aliases* '())
+(define *org-roam-refs* '())
+;; Sub-directory (under the roam dir) holding daily notes.
+(define *org-roam-dailies-directory* "daily")
+;; Capture templates: (KEY DESC FILENAME-TEMPLATE BODY-TEMPLATE). Templates may
+;; use ${title} ${slug} ${id} ${date} ${time}. Empty ⇒ the simple title prompt.
+(define *org-roam-capture-templates* '())
 
 ;; ===========================================================================
 ;; Configuration + small helpers
@@ -141,29 +149,67 @@
                         (if id (cons (list id ht path '() i) acc) acc)))
                 (loop (cdr ls) (+ i 1) acc)))))))
 
-;; C-c n s — (re)scan the roam directory into the index.
+;; The value of a file-level meta line (:KEY: … in front matter, or #+KEY: …).
+(define (org-roam--file-meta text key)
+  (let ((c (regexp-captures (string-append "(?im)^[ \t]*:" key ":[ \t]+(.*)$") text)))
+    (if (not (null? c)) (org-roam--trim (nth c 1))
+        (let ((c2 (regexp-captures (string-append "(?im)^#\\+" key ":[ \t]*(.*)$") text)))
+          (if (null? c2) "" (org-roam--trim (nth c2 1)))))))
+;; A ROAM_ALIASES/ROAM_REFS value → list: "quoted" tokens, else whitespace split.
+(define (org-roam--parse-quoted-list s)
+  (let loop ((str s) (acc '()))
+    (let ((m (string-match "\"([^\"]*)\"" str)))
+      (if (< m 0)
+          (if (null? acc)
+              (filter (lambda (x) (not (equal? x ""))) (split-many (org-roam--trim s) " "))
+              (reverse acc))
+          (let* ((c (regexp-captures "\"([^\"]*)\"" str)) (whole (car c)))
+            (loop (org-roam--byte-drop str (+ m (utf8-length whole))) (cons (nth c 1) acc)))))))
+(define (org-roam--file-level-of nodes)
+  (let loop ((ns nodes))
+    (cond ((null? ns) #f) ((= (org-roam--node-line (car ns)) 0) (car ns)) (else (loop (cdr ns))))))
+
+;; C-c n s — (re)scan the roam directory into the index (nodes + aliases + refs).
 (define (org-roam-db-sync)
   (set! *org-roam-nodes* '())
+  (set! *org-roam-aliases* '())
+  (set! *org-roam-refs* '())
   (let ((dir (org-roam-directory)))
     (when (file-exists? dir)
-      (for-each (lambda (f)
-                  (when (ends-with? f ".org")
-                    (for-each (lambda (n) (set! *org-roam-nodes* (cons n *org-roam-nodes*)))
-                              (org-roam--scan-file f))))
-                (walk-files dir))))
+      (for-each
+       (lambda (f)
+         (when (ends-with? f ".org")
+           (let ((nodes (org-roam--scan-file f)))
+             (for-each (lambda (n) (set! *org-roam-nodes* (cons n *org-roam-nodes*))) nodes)
+             (let ((fl (org-roam--file-level-of nodes)))
+               (when fl
+                 (let ((text (read-file f)))
+                   (for-each (lambda (a) (set! *org-roam-aliases* (cons (cons a fl) *org-roam-aliases*)))
+                             (org-roam--parse-quoted-list (org-roam--file-meta text "ROAM_ALIASES")))
+                   (for-each (lambda (r) (set! *org-roam-refs* (cons (cons r fl) *org-roam-refs*)))
+                             (org-roam--parse-quoted-list (org-roam--file-meta text "ROAM_REFS")))))))))
+       (walk-files dir))))
   (set! *org-roam-synced* #t)
-  (message (string-append "org-roam: indexed " (int->string (length *org-roam-nodes*)) " node(s)")))
+  (message (string-append "org-roam: indexed " (int->string (length *org-roam-nodes*)) " node(s), "
+                          (int->string (length *org-roam-aliases*)) " alias(es)")))
 
 (define (org-roam--ensure-index)
   (when (not *org-roam-synced*) (org-roam-db-sync)))
 
-(define (org-roam--titles) (map (lambda (n) (nth n 1)) *org-roam-nodes*))
+;; Completion titles include node titles and any registered aliases.
+(define (org-roam--titles)
+  (append (map (lambda (n) (nth n 1)) *org-roam-nodes*) (map car *org-roam-aliases*)))
 (define (org-roam--node-by-id id)
   (let loop ((ns *org-roam-nodes*))
     (cond ((null? ns) #f) ((equal? (car (car ns)) id) (car ns)) (else (loop (cdr ns))))))
+;; Resolve a title, falling back to the alias index.
 (define (org-roam--node-by-title t)
   (let loop ((ns *org-roam-nodes*))
-    (cond ((null? ns) #f) ((equal? (nth (car ns) 1) t) (car ns)) (else (loop (cdr ns))))))
+    (cond ((null? ns)
+           (let al ((as *org-roam-aliases*))
+             (cond ((null? as) #f) ((equal? (car (car as)) t) (cdr (car as))) (else (al (cdr as))))))
+          ((equal? (nth (car ns) 1) t) (car ns))
+          (else (loop (cdr ns))))))
 (define (org-roam--node-by-file f)
   (let loop ((ns *org-roam-nodes*))
     (cond ((null? ns) #f) ((equal? (nth (car ns) 2) f) (car ns)) (else (loop (cdr ns))))))
@@ -209,12 +255,24 @@
                  (org-roam--create-node (org-roam--trim title)))))
       (insert (string-append "[[id:" (car n) "][" (nth n 1) "]]")))))
 
-;; C-c n c — capture a brand-new node and open it.
-(define (org-roam-capture)
-  (read-string "Title: " "org-roam--capture-finish"))
+;; C-c n c — capture a brand-new node and open it. With capture templates
+;; configured, the title prompt is followed by a template chooser.
+(define (org-roam-capture) (read-string "Title: " "org-roam--capture-finish"))
+(define *org-roam--cap-title* "")
 (define (org-roam--capture-finish title)
   (when (not (equal? (org-roam--trim title) ""))
-    (open-file (nth (org-roam--create-node (org-roam--trim title)) 2))))
+    (if (null? *org-roam-capture-templates*)
+        (open-file (nth (org-roam--create-node (org-roam--trim title)) 2))
+        (begin (set! *org-roam--cap-title* (org-roam--trim title))
+               (completing-read "Template: "
+                 (map (lambda (t) (string-append (nth t 0) " — " (nth t 1))) *org-roam-capture-templates*)
+                 "org-roam--capture-tmpl-pick")))))
+(define (org-roam--capture-tmpl-pick cand)
+  (let* ((key (car (split-many cand " ")))
+         (t (let loop ((ts *org-roam-capture-templates*))
+              (cond ((null? ts) #f) ((equal? (nth (car ts) 0) key) (car ts)) (else (loop (cdr ts)))))))
+    (if (not t) (message "No such template")
+        (open-file (nth (org-roam--create-node-templated *org-roam--cap-title* t) 2)))))
 
 ;; ===========================================================================
 ;; Following links (id: / file: / http)
@@ -398,6 +456,221 @@
               (message "org-roam graph rendered"))))))
 
 ;; ===========================================================================
+;; Daily notes (org-roam-dailies)
+;; ===========================================================================
+;; Dailies live in <roam>/<*org-roam-dailies-directory*>/YYYY-MM-DD.org. Date
+;; arithmetic reuses org.scm's helpers (both files load together in the editor).
+(define (org-roam--dailies-dir) (path-join (org-roam-directory) *org-roam-dailies-directory*))
+(define (org-roam--daily-file date) (path-join (org-roam--dailies-dir) (string-append date ".org")))
+;; Self-contained Gregorian day arithmetic (org-roam stays independent of
+;; org.scm, which the runtime loads *after* this file). Mirrors org.scm's.
+(define (org-roam--ymd->days y m d)
+  (let* ((y2 (if (<= m 2) (- y 1) y))
+         (era (quotient y2 400))
+         (yoe (- y2 (* era 400)))
+         (doy (+ (quotient (+ (* 153 (+ m (if (> m 2) -3 9))) 2) 5) (- d 1)))
+         (doe (+ (* yoe 365) (quotient yoe 4) (- (quotient yoe 100)) doy)))
+    (- (+ (* era 146097) doe) 719468)))
+(define (org-roam--days->ymd z0)
+  (let* ((z (+ z0 719468))
+         (era (quotient z 146097))
+         (doe (- z (* era 146097)))
+         (yoe (quotient (+ (- doe (quotient doe 1460)) (quotient doe 36524) (- (quotient doe 146096))) 365))
+         (y (+ yoe (* era 400)))
+         (doy (- doe (+ (* 365 yoe) (quotient yoe 4) (- (quotient yoe 100)))))
+         (mp (quotient (+ (* 5 doy) 2) 153))
+         (d (+ (- doy (quotient (+ (* 153 mp) 2) 5)) 1))
+         (m (+ mp (if (< mp 10) 3 -9))))
+    (list (if (<= m 2) (+ y 1) y) m d)))
+(define (org-roam--pad2 n) (if (< n 10) (string-append "0" (number->string n)) (number->string n)))
+(define (org-roam--date-str->days s)
+  (let ((c (regexp-captures "([0-9]{4})-([0-9]{2})-([0-9]{2})" s)))
+    (if (null? c) 0 (org-roam--ymd->days (string->number (nth c 1)) (string->number (nth c 2)) (string->number (nth c 3))))))
+(define (org-roam--date-str days)
+  (let ((ymd (org-roam--days->ymd days)))
+    (string-append (number->string (nth ymd 0)) "-" (org-roam--pad2 (nth ymd 1)) "-" (org-roam--pad2 (nth ymd 2)))))
+(define (org-roam--ensure-daily date)
+  (let ((f (org-roam--daily-file date)))
+    (when (not (file-exists? f))
+      (call-process "mkdir" (list "-p" (org-roam--dailies-dir)))
+      (write-file f (string-append ":PROPERTIES:\n:ID:       " (org-id-new) "\n:END:\n#+title: " date "\n\n")))
+    (set! *org-roam-synced* #f)
+    f))
+;; C-c n d t — open today's daily note (creating it).
+(define (org-roam-dailies-goto-today) (open-file (org-roam--ensure-daily (current-time "%Y-%m-%d"))))
+(define (org-roam-dailies-capture-today) (org-roam-dailies-goto-today))
+;; C-c n d d — open a specific date's note.
+(define (org-roam-dailies-goto-date) (read-string "Date (YYYY-MM-DD): " "org-roam--dailies-date-finish"))
+(define (org-roam--dailies-date-finish input)
+  (let ((d (if (>= (string-match "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" (org-roam--trim input)) 0)
+               (org-roam--trim input) (current-time "%Y-%m-%d"))))
+    (open-file (org-roam--ensure-daily d))))
+;; The date of the daily note in the current buffer, or #f.
+(define (org-roam--current-daily-date)
+  (let ((c (regexp-captures "([0-9]{4}-[0-9]{2}-[0-9]{2})\\.org$" (current-buffer))))
+    (if (null? c) #f (nth c 1))))
+(define (org-roam--dailies-step delta)
+  (let ((d (org-roam--current-daily-date)))
+    (if (not d) (message "Not in a daily note")
+        (open-file (org-roam--ensure-daily (org-roam--date-str (+ delta (org-roam--date-str->days d))))))))
+;; C-c n d f / b — next / previous day.
+(define (org-roam-dailies-goto-next) (org-roam--dailies-step 1))
+(define (org-roam-dailies-goto-previous) (org-roam--dailies-step -1))
+
+;; ===========================================================================
+;; Tag filtering + subtree (headline) nodes
+;; ===========================================================================
+(define (org-roam--add-unique lst x) (if (member x lst) lst (cons x lst)))
+(define (org-roam--all-tags)
+  (let loop ((ns *org-roam-nodes*) (acc '()))
+    (if (null? ns) acc
+        (loop (cdr ns)
+              (let inner ((ts (nth (car ns) 3)) (a acc))
+                (if (null? ts) a (inner (cdr ts) (org-roam--add-unique a (car ts)))))))))
+;; C-c n t — pick a tag, then a node carrying it.
+(define (org-roam-tag-find)
+  (org-roam--ensure-index)
+  (if (null? (org-roam--all-tags))
+      (message "org-roam: no tags indexed")
+      (completing-read "Tag: " (org-roam--all-tags) "org-roam--tag-find-pick")))
+(define (org-roam--tag-find-pick tag)
+  (completing-read "Node: "
+    (map (lambda (n) (nth n 1)) (filter (lambda (n) (member tag (nth n 3))) *org-roam-nodes*))
+    "org-roam--find-finish"))
+
+;; C-c n h — make the heading at point a node by giving it an :ID: property, so
+;; it is indexed as a subtree node on the next sync. Self-contained (doesn't lean
+;; on org.scm's org-id-get-create) since this file loads first.
+(define (org-roam--list-drop lst n) (if (or (<= n 0) (null? lst)) lst (org-roam--list-drop (cdr lst) (- n 1))))
+(define (org-roam--line-start lines i)
+  (let loop ((k 0) (acc 0)) (if (>= k i) acc (loop (+ k 1) (+ acc (utf8-length (nth lines k)) 1)))))
+(define (org-roam-node-from-heading)
+  (let* ((lines (split-many (buffer-string) "\n")) (L (buffer-line))
+         (H (let loop ((i L))
+              (cond ((< i 0) #f)
+                    ((>= (string-match "^\\*+[ \t]" (nth lines i)) 0) i)
+                    (else (loop (- i 1)))))))
+    (if (not H) (message "Not on a heading")
+        (let ((existing (org-roam--drawer-id (org-roam--list-drop lines (+ H 1)))))
+          (if existing (message (string-append "Already a node: " existing))
+              (let ((id (org-id-new))
+                    (pos (+ (org-roam--line-start lines H) (utf8-length (nth lines H)))))
+                (insert-at pos (string-append "\n:PROPERTIES:\n:ID:       " id "\n:END:"))
+                (set! *org-roam-synced* #f)
+                (message (string-append "org-roam node id: " id))))))))
+
+;; ===========================================================================
+;; Renaming a node (updates #+title and every inbound link description)
+;; ===========================================================================
+(define *org-roam--rename-id* "")
+(define (org-roam--rewrite-links text id newtitle)
+  (replace-regexp-in-string
+   (string-append "\\[\\[id:" (regexp-quote id) "\\]\\[[^]]*\\]\\]")
+   (string-append "[[id:" id "][" newtitle "]]") text))
+;; C-c n r — rename the current node.
+(define (org-roam-rename-node)
+  (let ((id (org-roam--current-id)))
+    (if (not id) (message "Not in an org-roam node")
+        (begin (set! *org-roam--rename-id* id)
+               (read-string "New title: " "org-roam--rename-finish"
+                            (let ((n (org-roam--node-by-id id))) (if n (nth n 1) "")))))))
+(define (org-roam--rename-finish newtitle)
+  (let ((id *org-roam--rename-id*) (nt (org-roam--trim newtitle)))
+    (when (not (equal? nt ""))
+      ;; current buffer: rewrite #+title and any self-links
+      (let* ((text (buffer-string))
+             (t2 (replace-regexp-in-string "(?im)^#\\+title:[ \t]*.*$" (string-append "#+title: " nt) text)))
+        (replace-region 0 (point-max) (org-roam--rewrite-links t2 id nt)))
+      ;; every other file: rewrite inbound link descriptions
+      (let ((cur (path-join (buffer-directory) (current-buffer))))
+        (for-each (lambda (f)
+                    (when (and (ends-with? f ".org") (not (equal? f cur)))
+                      (let* ((t (read-file f)) (t2 (org-roam--rewrite-links t id nt)))
+                        (when (not (equal? t t2)) (write-file f t2)))))
+                  (walk-files (org-roam-directory))))
+      (set! *org-roam-synced* #f)
+      (message (string-append "Renamed to: " nt)))))
+
+;; ===========================================================================
+;; Unlinked references (mentions of this node's title that are not links)
+;; ===========================================================================
+(define *org-roam-unlinked-targets* '())
+(define (org-roam-unlinked-references)
+  (org-roam--ensure-index)
+  (let* ((id (org-roam--current-id)) (n (and id (org-roam--node-by-id id))))
+    (if (not n) (message "Not in an org-roam node")
+        (let* ((title (nth n 1))
+               (hits (grep-files (org-roam-directory) (regexp-quote title))))
+          (set! *org-roam-unlinked-targets* '())
+          (let loop ((hs hits) (i 2) (out '()))
+            (if (null? hs)
+                (render-buffer "*org-roam-unlinked*" "org-roam-unlinked-mode"
+                  (join-lines (append (list (string-append "Unlinked references to: " title) "")
+                                      (reverse out))) '())
+                (let ((p (org-roam--parse-hit (car hs))))
+                  (if (or (not p)
+                          (>= (string-match (string-append "id:" (regexp-quote id)) (nth p 2)) 0)
+                          (>= (string-match "(?i)^#\\+title:" (org-roam--trim (nth p 2))) 0))
+                      (loop (cdr hs) i out)
+                      (let* ((path (nth p 0)) (lnum (nth p 1)) (txt (nth p 2))
+                             (src (org-roam--node-by-file path))
+                             (label (if src (nth src 1) (basename path))))
+                        (set! *org-roam-unlinked-targets*
+                              (cons (cons i (cons path (- lnum 1))) *org-roam-unlinked-targets*))
+                        (loop (cdr hs) (+ i 1)
+                              (cons (string-append label "  :  " (org-roam--trim txt)) out)))))))))))
+
+;; ===========================================================================
+;; Persistent index cache (TSV: id <tab> title <tab> file <tab> tags <tab> line)
+;; ===========================================================================
+(define (org-roam--cache-file) (path-join (org-roam-directory) ".org-roam-cache.tsv"))
+(define (org-roam-db-save)
+  (org-roam--ensure-index)
+  (write-file (org-roam--cache-file)
+    (join-lines (map (lambda (n)
+                       (string-join (list (nth n 0) (nth n 1) (nth n 2)
+                                          (string-join (nth n 3) ",")
+                                          (int->string (org-roam--node-line n))) "\t"))
+                     *org-roam-nodes*)))
+  (message "org-roam: cache saved"))
+(define (org-roam-db-load)
+  (let ((f (org-roam--cache-file)))
+    (if (not (file-exists? f)) (message "org-roam: no cache (run C-c n s)")
+        (begin
+          (set! *org-roam-nodes*
+            (filter (lambda (x) x)
+              (map (lambda (line)
+                     (let ((parts (split-many line "\t")))
+                       (if (< (length parts) 5) #f
+                           (list (nth parts 0) (nth parts 1) (nth parts 2)
+                                 (filter (lambda (x) (not (equal? x ""))) (split-many (nth parts 3) ","))
+                                 (string->number (nth parts 4))))))
+                   (filter (lambda (l) (not (equal? l ""))) (split-many (read-file f) "\n")))))
+          (set! *org-roam-synced* #t)
+          (message (string-append "org-roam: loaded " (int->string (length *org-roam-nodes*)) " node(s) from cache"))))))
+
+;; ===========================================================================
+;; Templated node creation
+;; ===========================================================================
+(define (org-roam--expand-tmpl s title slug id)
+  (let* ((s (replace-regexp-in-string "\\$\\{title\\}" title s))
+         (s (replace-regexp-in-string "\\$\\{slug\\}" slug s))
+         (s (replace-regexp-in-string "\\$\\{id\\}" id s))
+         (s (replace-regexp-in-string "\\$\\{date\\}" (current-time "%Y-%m-%d") s))
+         (s (replace-regexp-in-string "\\$\\{time\\}" (current-time "%Y%m%d%H%M%S") s)))
+    s))
+(define (org-roam--create-node-templated title tmpl)
+  (org-roam--ensure-index)
+  (let* ((dir (org-roam-directory)) (id (org-id-new)) (slug (org-roam--slug title))
+         (file (path-join dir (org-roam--expand-tmpl (nth tmpl 2) title slug id)))
+         (body (org-roam--expand-tmpl (nth tmpl 3) title slug id))
+         (node (list id title file '() 0)))
+    (call-process "mkdir" (list "-p" (parent-directory file)))
+    (write-file file body)
+    (set! *org-roam-nodes* (cons node *org-roam-nodes*))
+    node))
+
+;; ===========================================================================
 ;; Keymap + M-x
 ;; ===========================================================================
 ;; The C-c n prefix, available globally and in org buffers.
@@ -412,6 +685,19 @@
 (define-key "org-mode" "ctrl-c n s" "org-roam-db-sync")
 (define-key "org-mode" "ctrl-c n g" "org-roam-graph")
 (define-key "org-mode" "ctrl-c ctrl-o" "org-open-at-point")
+;; Tagging, subtree nodes, rename, unlinked refs, persistent cache.
+(define-key "org-mode" "ctrl-c n t" "org-roam-tag-find")
+(define-key "fundamental" "ctrl-c n t" "org-roam-tag-find")
+(define-key "org-mode" "ctrl-c n h" "org-roam-node-from-heading")
+(define-key "org-mode" "ctrl-c n r" "org-roam-rename-node")
+(define-key "org-mode" "ctrl-c n u" "org-roam-unlinked-references")
+;; Daily notes (C-c n d …).
+(define-key "org-mode" "ctrl-c n d t" "org-roam-dailies-goto-today")
+(define-key "org-mode" "ctrl-c n d d" "org-roam-dailies-goto-date")
+(define-key "org-mode" "ctrl-c n d f" "org-roam-dailies-goto-next")
+(define-key "org-mode" "ctrl-c n d b" "org-roam-dailies-goto-previous")
+(define-key "fundamental" "ctrl-c n d t" "org-roam-dailies-goto-today")
+(define-key "fundamental" "ctrl-c n d d" "org-roam-dailies-goto-date")
 
 ;; *org-roam-backlinks* buffer.
 (define-key "org-roam-backlinks-mode" "enter" "org-roam-backlinks-visit")
@@ -426,6 +712,13 @@
 (define-key "org-roam-graph-mode" "q" "kill-buffer")
 (set-option "line-numbers:org-roam-graph-mode" "false")
 
+;; *org-roam-unlinked* buffer.
+(define-key "org-roam-unlinked-mode" "enter" "org-roam-unlinked-visit")
+(define-key "org-roam-unlinked-mode" "n" "next-line")
+(define-key "org-roam-unlinked-mode" "p" "previous-line")
+(define-key "org-roam-unlinked-mode" "q" "kill-buffer")
+(set-option "line-numbers:org-roam-unlinked-mode" "false")
+
 (register-command "org-roam-node-find")
 (register-command "org-roam-node-insert")
 (register-command "org-roam-capture")
@@ -434,3 +727,20 @@
 (register-command "org-roam-graph")
 (register-command "org-roam-set-directory")
 (register-command "org-open-at-point")
+(register-command "org-roam-tag-find")
+(register-command "org-roam-node-from-heading")
+(register-command "org-roam-rename-node")
+(register-command "org-roam-unlinked-references")
+(register-command "org-roam-dailies-goto-today")
+(register-command "org-roam-dailies-capture-today")
+(register-command "org-roam-dailies-goto-date")
+(register-command "org-roam-dailies-goto-next")
+(register-command "org-roam-dailies-goto-previous")
+(register-command "org-roam-db-save")
+(register-command "org-roam-db-load")
+
+;; *org-roam-unlinked* reuses the backlinks keymap; map RET to its visitor.
+(define (org-roam-unlinked-visit)
+  (let ((t (alist-ref *org-roam-unlinked-targets* (buffer-line))))
+    (when t (open-file (car t)) (goto-line (cdr t)))))
+(register-command "org-roam-unlinked-visit")
