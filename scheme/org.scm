@@ -44,11 +44,60 @@
 (set-face "org-checkbox" "#fabd2f")
 (set-face "org-checkbox-done" "#8ec07c")
 
-;; The TODO keyword vocabulary. The cycle nothing→TODO→DONE→nothing is fixed
-;; (see `org--next-todo`); these only control fontification recognition.
+;; The TODO keyword vocabulary, and the order C-c C-t rotates through it. Like
+;; Emacs `org-todo-keywords`, every keyword here is part of the cycle, so active
+;; states come first and "done" states last (DONE/CANCELLED — see below). The
+;; cycle is nothing → each of these → each custom keyword → nothing. Trim or
+;; reorder this list from init.scm to shape the cycle.
 (define *org-todo-keywords*
-  (list "TODO" "DONE" "NEXT" "WAITING" "DOING" "CANCELLED" "HOLD"))
+  (list "TODO" "NEXT" "WAITING" "DOING" "HOLD" "DONE" "CANCELLED"))
+;; Keywords that count as closed (green face, treated as done in the agenda).
 (define *org-done-keywords* (list "DONE" "CANCELLED"))
+
+;; Custom heading keywords: a user-defined array of labels, appended to the
+;; C-c C-t cycle after the TODO vocabulary above. Empty by default — the
+;; built-in ships no labels; define your own from init.scm. Each is recognized
+;; on a headline like a TODO word but carries NO color of its own (it renders in
+;; the heading title color) unless one is set in *org-custom-keyword-colors*.
+;; A typical init.scm:
+;;   (set! *org-custom-keywords* (list "BUG" "FEATURE" "IDEA"))
+;;   (set! *org-custom-keyword-colors*               ; optional per-label colors
+;;     (list (cons "BUG" "#fb4934") (cons "FEATURE" "#83a598")))
+;;   (org--register-custom-keyword-faces)            ; apply the colors
+;; They join the C-c C-t rotation automatically; bind a key only if you also
+;; want to jump straight to one, e.g.
+;;   (define (org-toggle-bug) (org-set-keyword "BUG"))
+;;   (define-key "org-mode" "ctrl-c ctrl-b" "org-toggle-bug")
+;;   (register-command "org-toggle-bug")
+(define *org-custom-keywords* '())
+
+;; Per-keyword colors: an alist (LABEL . "#rrggbb"). Empty by default, so every
+;; custom keyword inherits the title color. Set from init.scm, then call
+;; `org--register-custom-keyword-faces` to apply.
+(define *org-custom-keyword-colors* '())
+
+;; The face name carrying a custom keyword's color (e.g. "org-kw-BUG").
+(define (org--keyword-face-name kw) (string-append "org-kw-" kw))
+
+(define (org--custom-keyword? kw) (and (member kw *org-custom-keywords*) #t))
+
+;; The user-defined color for `kw`, or #f if none is set (⇒ inherit the title).
+(define (org--keyword-color kw)
+  (let loop ((es *org-custom-keyword-colors*))
+    (cond ((null? es) #f)
+          ((equal? (car (car es)) kw) (cdr (car es)))
+          (else (loop (cdr es))))))
+
+;; Recognized on a headline: a TODO word or any custom keyword.
+(define (org--known-keyword? kw)
+  (or (member kw *org-todo-keywords*) (org--custom-keyword? kw)))
+
+;; Register (or refresh) one face per *colored* custom keyword. Call again after
+;; re-setting *org-custom-keyword-colors* to apply new colors.
+(define (org--register-custom-keyword-faces)
+  (for-each (lambda (e) (set-face (org--keyword-face-name (car e)) (cdr e)))
+            *org-custom-keyword-colors*))
+(org--register-custom-keyword-faces)
 
 ;; Collapse the leading stars on every headline from display (the text stays in
 ;; the buffer), so a heading shows only its colored title — all stars hidden, not
@@ -169,7 +218,7 @@
 ;; The first whitespace-delimited token of `s` if it is a known TODO keyword.
 (define (org--leading-keyword s)
   (let ((caps (regexp-captures "^([A-Z]+)([ \t]|$)" s)))
-    (if (and (not (null? caps)) (member (nth caps 1) *org-todo-keywords*))
+    (if (and (not (null? caps)) (org--known-keyword? (nth caps 1)))
         (nth caps 1)
         #f)))
 
@@ -226,13 +275,22 @@
     (when *org-hide-leading-stars*
       (let ((hide (if (> (utf8-length line) level) (+ level 1) level)))
         (overlay-hide lstart (+ lstart hide))))
-    ;; TODO / DONE keyword (stars + one space are ASCII, so byte = char here).
+    ;; Keyword (stars + one space are ASCII, so byte = char here). A custom
+    ;; keyword paints in its own color only if the user defined one — otherwise
+    ;; it inherits the heading title color (no overlay). DONE-words are green and
+    ;; the remaining TODO words share the org-todo red.
     (let* ((rest (substring line (min (+ level 1) (string-length line)) (string-length line)))
            (kw (org--leading-keyword rest)))
       (when kw
         (let ((ks (+ lstart level 1)))
-          (overlay-set-face ks (+ ks (string-length kw))
-                            (if (org--done-keyword? kw) "org-done" "org-todo")))))
+          (cond
+            ((org--custom-keyword? kw)
+             (when (org--keyword-color kw)
+               (overlay-set-face ks (+ ks (string-length kw)) (org--keyword-face-name kw))))
+            ((org--done-keyword? kw)
+             (overlay-set-face ks (+ ks (string-length kw)) "org-done"))
+            (else
+             (overlay-set-face ks (+ ks (string-length kw)) "org-todo"))))))
     ;; priority cookie [#A]
     (let ((b (string-match "\\[#[A-Z]\\]" line)))
       (when (>= b 0) (overlay-set-face (+ lstart b) (+ lstart b 4) "org-priority")))
@@ -526,30 +584,60 @@
                 ((org--heading-level (org--line-text i)) i)
                 (else (loop (- i 1))))))))
 
-(define (org--next-todo kw)
-  (cond ((not kw) "TODO")
-        ((equal? kw "TODO") "DONE")
-        (else "")))
+;; The keyword on the heading at point, or #f (a public accessor, so configs
+;; need not reach into the org--* internals to read it).
+(define (org-keyword-at-point)
+  (let ((H (org--heading-line-at-point)))
+    (if H (org--leading-keyword (nth (org--heading-split (org--line-text H)) 1)) #f)))
 
-;; C-c C-t — cycle the TODO state of the headline at point.
+;; The full ordered cycle C-c C-t rotates through: the TODO vocabulary followed
+;; by the user's custom keywords. Like Emacs `org-todo-keywords`, every keyword
+;; that is recognized is part of the rotation.
+(define (org--cycle-keywords) (append *org-todo-keywords* *org-custom-keywords*))
+
+;; The keyword following `cur` in `seq`, Emacs-style: #f (none) → first entry;
+;; the last entry → "" (clear); otherwise the next entry. A `cur` not in `seq`
+;; restarts the cycle at the first entry.
+(define (org--next-keyword cur seq)
+  (cond ((null? seq) "")
+        ((not cur) (car seq))
+        (else
+         (let loop ((ls seq))
+           (cond ((null? ls) (car seq))
+                 ((equal? (car ls) cur) (if (null? (cdr ls)) "" (car (cdr ls))))
+                 (else (loop (cdr ls))))))))
+
+;; Rewrite heading H to carry keyword `kw` ("" clears it), preserving the
+;; priority cookie and trailing tags. Shared by org-todo and org-set-keyword.
+(define (org--apply-keyword H kw)
+  (let* ((sr (org--heading-split (org--line-text H)))
+         (stars (nth sr 0)) (rest (nth sr 1))
+         (title (org--heading-title rest (org--leading-keyword rest)))
+         (tags (let ((c (regexp-captures "(:[A-Za-z0-9_@#%:]+:)[ \t]*$" rest)))
+                 (if (null? c) "" (nth c 1))))
+         (prio (let ((c (regexp-captures "\\[#[A-Z]\\]" rest))) (if (null? c) "" (car c)))))
+    (org--replace-line H
+      (string-append stars " "
+        (if (equal? kw "") "" (string-append kw " "))
+        (if (equal? prio "") "" (string-append prio " "))
+        title
+        (if (equal? tags "") "" (string-append " " tags))))))
+
+;; C-c C-t — rotate the headline at point through the full keyword cycle
+;; (nothing → each TODO/custom keyword → nothing).
 (define (org-todo)
   (let ((H (org--heading-line-at-point)))
     (if H
-        (let* ((line (org--line-text H))
-               (sr (org--heading-split line))
-               (stars (nth sr 0)) (rest (nth sr 1))
-               (kw (org--leading-keyword rest))
-               (title (org--heading-title rest kw))
-               (tags (let ((c (regexp-captures "(:[A-Za-z0-9_@#%:]+:)[ \t]*$" rest)))
-                       (if (null? c) "" (nth c 1))))
-               (prio (let ((c (regexp-captures "\\[#[A-Z]\\]" rest))) (if (null? c) "" (car c))))
-               (next (org--next-todo kw)))
-          (org--replace-line H
-            (string-append stars " "
-              (if (equal? next "") "" (string-append next " "))
-              (if (equal? prio "") "" (string-append prio " "))
-              title
-              (if (equal? tags "") "" (string-append " " tags)))))
+        (org--apply-keyword H (org--next-keyword (org-keyword-at-point) (org--cycle-keywords)))
+        (message "Not on a heading"))))
+
+;; Set a specific keyword on the headline at point, or clear it if that same
+;; keyword is already there (so a binding toggles it). Unlike org-todo's rotate,
+;; this jumps straight to one keyword — handy for direct per-label bindings.
+(define (org-set-keyword kw)
+  (let ((H (org--heading-line-at-point)))
+    (if H
+        (org--apply-keyword H (if (equal? (org-keyword-at-point) kw) "" kw))
         (message "Not on a heading"))))
 
 ;; M-right — demote (one deeper): add a star.

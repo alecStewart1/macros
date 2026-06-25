@@ -4182,8 +4182,36 @@ mod magit_tests {
         // Heading detection + TODO cycle.
         assert_eq!(v(r#"(org--heading-level "** TODO x")"#), "2");
         assert_eq!(v(r#"(if (org--heading-level "plain line") 1 0)"#), "0");
-        assert_eq!(v(r#"(org--next-todo "TODO")"#), "\"DONE\"");
-        assert_eq!(v(r"(org--next-todo #f)"), "\"TODO\"");
+        // C-c C-t rotates the full cycle: nothing → first keyword → … → "".
+        assert_eq!(v(r#"(org--next-keyword #f (org--cycle-keywords))"#), "\"TODO\"");
+        assert_eq!(v(r#"(org--next-keyword "TODO" (org--cycle-keywords))"#), "\"NEXT\"");
+        assert_eq!(v(r#"(org--next-keyword "CANCELLED" (org--cycle-keywords))"#), "\"\""); // last → clear
+        // Custom keywords are user-defined: the built-in ships none, so a word is
+        // recognized only after the user adds it to *org-custom-keywords*.
+        assert_eq!(v(r#"(length *org-custom-keywords*)"#), "0");
+        assert_eq!(v(r#"(if (org--custom-keyword? "BUG") 1 0)"#), "0");
+        engine
+            .eval(r#"(set! *org-custom-keywords* (list "BUG" "FEATURE"))"#)
+            .unwrap();
+        // Now recognized for fontification/parsing AND folded into the C-c C-t
+        // cycle, after the TODO vocabulary: …→CANCELLED→BUG→FEATURE→"".
+        assert_eq!(v(r#"(if (org--custom-keyword? "BUG") 1 0)"#), "1");
+        assert_eq!(v(r#"(if (org--custom-keyword? "TODO") 1 0)"#), "0");
+        assert_eq!(v(r#"(org--leading-keyword "BUG crash on save")"#), "\"BUG\"");
+        assert_eq!(v(r#"(nth (car (org-parse "* FEATURE dark mode")) 2)"#), "\"FEATURE\"");
+        assert_eq!(v(r#"(org--next-keyword "CANCELLED" (org--cycle-keywords))"#), "\"BUG\"");
+        assert_eq!(v(r#"(org--next-keyword "BUG" (org--cycle-keywords))"#), "\"FEATURE\"");
+        assert_eq!(v(r#"(org--next-keyword "FEATURE" (org--cycle-keywords))"#), "\"\""); // last → clear
+        // A custom keyword has no color (inherits the title) until the user sets
+        // one, then re-registers the faces.
+        assert_eq!(v(r#"(if (org--keyword-color "BUG") 1 0)"#), "0");
+        assert_eq!(v(r#"(org--keyword-face-name "BUG")"#), "\"org-kw-BUG\"");
+        engine
+            .eval(r##"(set! *org-custom-keyword-colors* (list (cons "BUG" "#ff0000")))"##)
+            .unwrap();
+        engine.eval(r#"(org--register-custom-keyword-faces)"#).unwrap();
+        assert_eq!(v(r#"(org--keyword-color "BUG")"#), "\"#ff0000\"");
+        assert_eq!(v(r#"(if (org--keyword-color "FEATURE") 1 0)"#), "0"); // still uncolored
 
         // Parser: a heading + a paragraph; heading fields are extracted.
         assert_eq!(v(r#"(length (org-parse "* A\nbody text\n"))"#), "2");
