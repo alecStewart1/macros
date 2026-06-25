@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    App, Bounds, Context, CursorStyle, EntityInputHandler, FocusHandle, Focusable, KeyDownEvent,
-    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    RenderImage, ScrollWheelEvent, SharedString, Task, UTF16Selection, Window, actions, div, point,
-    prelude::*, px,
+    App, Bounds, Context, CursorStyle, EntityInputHandler, ExternalPaths, FocusHandle, Focusable,
+    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, RenderImage, ScrollWheelEvent, SharedString, Task, UTF16Selection, Window, actions, div,
+    point, prelude::*, px,
 };
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
@@ -3077,6 +3077,26 @@ impl Editor {
         self.run_mode_hooks_once(cx);
         self.echo(format!("Visiting {name}"), cx);
         self.run_hook("find-file-hook"); // Emacs find-file-hook
+    }
+
+    /// Open files dropped onto the window from the OS (Finder, a terminal, etc.).
+    /// Each dropped file is visited in its own buffer; the last one ends up
+    /// active. Directories are skipped — `find_file` only reads regular files.
+    fn on_drop_files(&mut self, paths: &ExternalPaths, _window: &mut Window, cx: &mut Context<Self>) {
+        let mut skipped = 0;
+        for path in paths.paths() {
+            if path.is_dir() {
+                skipped += 1;
+                continue;
+            }
+            self.find_file(&path.to_string_lossy(), cx);
+        }
+        if skipped > 0 {
+            self.echo(
+                format!("Skipped {skipped} folder(s) — can only open files"),
+                cx,
+            );
+        }
     }
 
     /// `:w <file>` — write the buffer's text to a given path (Vim save-as). The
@@ -7762,6 +7782,10 @@ impl Render for Editor {
             // the capturing window even outside its bounds).
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            // Open files dragged onto the window from the OS. gpui turns an
+            // external file drop into an `ExternalPaths` drag, so a plain
+            // `on_drop` of that type fires once the user releases over us.
+            .on_drop::<ExternalPaths>(cx.listener(Self::on_drop_files))
             .child(self.render_layout(&self.layout, &[], cx))
     }
 }
