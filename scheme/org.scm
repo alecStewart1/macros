@@ -324,10 +324,22 @@
   ;; active <…> and inactive [...] timestamps
   (org--paint lstart line "[<\\[][0-9]{4}-[0-9]{2}-[0-9]{2}[^]>\n]*[>\\]]" "org-date"))
 
+;; Fontification, indent, and fold-marker passes each walk every line of the
+;; buffer (re-splitting `org--lines` as they go) in interpreted Scheme on the
+;; engine thread. On a very large .org file that blocks the engine long enough
+;; that M-x and every other Scheme command stop responding, even though cursor
+;; movement (handled in Rust) still works. Past a line threshold we skip the
+;; auto passes — the Emacs `so-long` move. The mode, fold-style, and keymap are
+;; still set, so editing works; only the org face/indent/chevron decoration is
+;; dropped. Mirrors folding.scm's *fold-auto-limit* and markdown's guard.
+(define *org-fontify-line-limit* 20000)
+(define (org--fontify-ok?)
+  (and (org--active?) (<= (line-count) *org-fontify-line-limit*)))
+
 ;; Repaint the whole buffer's faces. One pass; carries a flag for src-block
 ;; interiors (which are painted as a literal block, not parsed for emphasis).
 (define (org--fontify)
-  (when (org--active?)
+  (when (org--fontify-ok?)
     (clear-overlay-faces)
     (clear-overlay-hides)   ; clear-overlay-faces no longer clears hides
     (let loop ((lines (org--lines)) (off 0) (insrc #f))
@@ -381,7 +393,7 @@
 ;; timer; only the last to fire repaints.
 (define *org-fontify-pending* 0)
 (define (org--fontify-schedule)
-  (when (org--active?)
+  (when (org--fontify-ok?)
     (set! *org-fontify-pending* (+ *org-fontify-pending* 1))
     (run-with-timer 200 "org--fontify-fire")))
 (define (org--fontify-fire)
@@ -2832,7 +2844,9 @@
     ;; than the generic indentation folder.
     (buffer-local-set "fold-style" "org")
     (org--fontify)
-    (org--refresh-fold-markers)))
+    ;; Fold chevrons walk every heading (another whole-buffer pass); skip on
+    ;; oversized files, same threshold as fontify so neither hangs the engine.
+    (when (org--fontify-ok?) (org--refresh-fold-markers))))
 (add-hook "find-file-hook" "org--maybe-activate")
 (add-hook "after-change-functions" "org--fontify-schedule")
 

@@ -63,13 +63,25 @@
                     (string-append acc (int->string lvl) ";")
                     acc))))))
 
+;; Whole-buffer fontification walks every line twice and rebuilds the fold
+;; markers — O(lines) work in interpreted Scheme, run synchronously on the engine
+;; thread. On a very large file (e.g. a multi-MB THIRD-PARTY-LICENSES.md) that
+;; blocks the engine long enough that M-x and every other Scheme command stop
+;; responding, even though cursor movement (handled in Rust) still works. Past a
+;; line threshold we skip it — the Emacs `so-long` move. tree-sitter still colors
+;; the visible region; only the heading hide/scale and fold chevrons are dropped.
+;; Mirrors folding.scm's *fold-auto-limit*.
+(define *markdown-fontify-line-limit* 20000)
+(define (md--fontify-ok?)
+  (and (md--active?) (<= (line-count) *markdown-fontify-line-limit*)))
+
 ;; Repaint heading overlays across the buffer, but only when the heading
 ;; structure actually changed (see the signature note above). Clear our own hides
 ;; and scales (not overlay FACES — markdown's colors come from tree-sitter, and
 ;; clearing faces would fight rainbow-delimiters / LSP highlight, which repaint
 ;; faces on every edit).
 (define (md--fontify)
-  (when (md--active?)
+  (when (md--fontify-ok?)
     (let* ((lines (md-lines))
            (sig (md--heading-signature lines)))
       (when (not (equal? sig *md-heading-signature*))
@@ -102,7 +114,7 @@
 ;; timer; only the last to fire repaints.
 (define *markdown-fontify-pending* 0)
 (define (md--fontify-schedule)
-  (when (md--active?)
+  (when (md--fontify-ok?)
     (set! *markdown-fontify-pending* (+ *markdown-fontify-pending* 1))
     (run-with-timer 200 "md--fontify-fire")))
 (define (md--fontify-fire)
