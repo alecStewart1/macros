@@ -1,0 +1,52 @@
+# cargo-deny configuration — license compliance gate.
+#
+# Macros is MIT-licensed (see LICENSE). This file enforces that every crate we
+# link is available under a license compatible with redistributing Macros under
+# the MIT License. CI runs `cargo deny check licenses`.
+#
+# How the check works: each crate's SPDX expression is evaluated against the
+# `allow` list below. For an OR expression (e.g. "Apache-2.0 OR GPL-2.0-only"),
+# the crate passes if AT LEAST ONE arm is allowed. Because no GPL/AGPL/LGPL
+# identifier is in the allow list, a dual-licensed crate is only accepted via
+# its permissive arm — and any crate offered SOLELY under a copyleft license
+# that conflicts with MIT will FAIL the build.
+#
+# To intentionally permit a single crate under a license not listed here, add a
+# scoped entry to `exceptions` rather than widening `allow` for everything.
+
+[licenses]
+# Reject a license match we are less than this confident about, rather than
+# guessing. 0.8 is cargo-deny's default and is plenty for these well-known SPDX
+# identifiers.
+confidence-threshold = 0.8
+
+# Permissive, MIT-compatible licenses present in the dependency tree.
+# NOTE: deliberately ABSENT — GPL-2.0, GPL-3.0, LGPL-*, AGPL-* and any other
+# strong copyleft. Their absence is what makes this a real gate: do not add them.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "BlueOak-1.0.0",
+    "NCSA",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # MPL-2.0 is FILE-LEVEL (weak) copyleft: it does not conflict with shipping
+    # Macros under MIT — MPL §3.3 explicitly permits distributing MPL files
+    # inside a larger work under other terms, as long as those files stay MPL.
+    # Several deps (bitmaps, im-rc, nucleo-matcher, ...) rely on this.
+    "MPL-2.0",
+]
+
+# Per-crate license exceptions go here, e.g.:
+#   { crate = "some-crate", allow = ["LicenseRef-Foo"] }
+exceptions = []

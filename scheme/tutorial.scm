@@ -1,310 +1,252 @@
-;; tutorial.scm — an interactive Emacs-style tutorial (help-with-tutorial, C-h t).
+;; tutorial.scm — an interactive, hands-on tutorial (help-with-tutorial, C-h t).
 ;;
-;; Like Emacs's TUTORIAL, this opens a normal *editable* buffer: you read the
-;; text and practice the commands right here, on this copy. Lines beginning with
-;; ">>" tell you a command to try at that spot. Loaded after help.scm so the
-;; help-mode/C-h prefix already exists.
-
-;; The tutorial body. Kept faithful to the GNU Emacs TUTORIAL, but every key it
-;; teaches is a binding that actually exists in Macros (see fundamental.scm).
-;; Conventions: C-<chr> = hold Control + <chr>; M-<chr> = hold Meta (Alt/Option)
-;; + <chr>, or press ESC then <chr>.
+;; This opens a normal *editable* buffer: you read the text and practice the
+;; commands right here, on this copy. Lines that begin with ">>" tell you a
+;; command to try at that spot. Loaded after help.scm so the C-h prefix exists.
+;;
+;; The text is original to Macros. Every key it teaches is a binding that
+;; actually exists (see fundamental.scm / undo-tree.scm). The lessons follow a
+;; vimtutor-style progression: move, then how to leave, then delete (small to
+;; large), undo, paste, navigate and search, files, and finally selecting and
+;; copying text.
+;;
+;; Conventions used in the text: C-<chr> = hold Control + <chr>; M-<chr> = hold
+;; Meta (Alt, or Option on a Mac) + <chr>, or press Esc, release, then <chr>.
 (define *tutorial-text* "\
-MACROS TUTORIAL.  See the end for copying conditions.
+MACROS TUTORIAL
 
-Welcome to Macros — an Emacs-style editor.  Macros commands generally
-involve the CONTROL key (sometimes
-labeled CTRL) or the META key (labeled ALT, or Option on a Mac).  Rather than
-write that out in full each time, we use the following abbreviations:
+Welcome.  This is a hands-on tour of Macros.  You are reading it inside an
+ordinary, editable buffer, so you can practice every command right here, on this
+text, as you go.  Nothing you do is permanent: this copy is rebuilt fresh each
+time you open the tutorial (C-h t), so experiment freely.
 
- C-<chr>  means hold the CONTROL key while typing the character <chr>.
-          Thus, C-f would be: hold the CONTROL key and type f.
- M-<chr>  means hold the META (ALT or Option) key while typing <chr>.
-          If there is no META key, you can type ESC, release it, then <chr>.
+A couple of keys are written in shorthand:
 
-IMPORTANT: to end this tutorial, type C-x C-c (kill Macros) or C-x k (just kill
-this buffer).  Don't worry: you cannot break anything by experimenting below.
+ C-x   hold Control and press x.
+ M-x   hold Meta and press x.  Meta is Alt on most keyboards, or Option on a
+       Mac.  No Meta key?  Press Esc, let go, then the next key.
 
-The lines that begin \">>\" are directions for you to try a command.  For
-instance:
+Some commands are two keystrokes in a row, like C-x C-s.  Just type them in
+order.  To type ordinary text, simply type it; Backspace removes the character
+before the cursor.
 
->> Now type C-l (control-L) to clear the screen and redraw it, centering the
-   line the cursor is on.  (If your terminal scrolls, this is handy.)
+Lines that begin with >> are things to try.  When you reach one, do what it says
+before reading on.  Like this:
 
-Note: typing C-l a second and third time moves the current line to the top
-and bottom of the window.
+>> Press the Down arrow a few times, until the cursor sits on this line.
 
 
-* BASIC CURSOR CONTROL
-----------------------
-
-Moving from screenful to screenful is useful, but how do you reposition the
-cursor to a specific place on the screen?
-
-There are several ways you can do this.  The most basic is to use the commands
-C-p, C-n, C-b, and C-f.  Each of these moves the cursor one row or column in a
-particular direction:
-
-                          Previous line, C-p
-                                  :
-                                  :
-     Backward, C-b .... Current cursor position .... Forward, C-f
-                                  :
-                                  :
-                            Next line, C-n
-
->> Move the cursor to the line in the diagram above using C-n or C-p.  Then
-   type C-l to see the whole diagram centered in the screen.
-
-You'll probably find it easy to think of these by letter: P for previous, N for
-next, B for backward, and F for forward.  These are the basic cursor-positioning
-commands, and you'll use them ALL the time, so learn them now.
-
->> Type a few C-n's to bring the cursor down to this line.
-
->> Move into the line with C-f's and then up with C-p's.  See what C-p does
-   when the cursor is in the middle of the line.
-
-Two other simple cursor-motion commands are M-b (backward-word) and M-f
-(forward-word), which move backward or forward by whole words.
-
->> Type a few M-f's and M-b's, mixed in with some C-f's and C-b's, so you can
-   see what they do to and between words.
-
-C-a and C-e move to the beginning and end of a line.
-
->> Try a couple of C-a's, and then a couple of C-e's.  Notice that repeating
-   C-a or C-e at the same place does nothing more.
-
-Two other very important cursor-motion commands are M-< (Meta Less-than), which
-moves to the beginning of the whole text, and M-> (Meta Greater-than), which
-moves to the end of the whole text.
-
->> Try M-< now, to move to the beginning of the tutorial.  Then use C-n
-   repeatedly to move back here.
-
-The cursor's position in the text is also called \"point\".  Most commands
-operate relative to point.
-
-
-* IF MACROS STOPS RESPONDING
+* LESSON 1.1: MOVING AROUND
 ---------------------------
+Macros calls the cursor's position 'point', and almost every command acts from
+there.  The four arrow keys move it the obvious way:
 
-If Macros is waiting for you in the middle of a multi-key command (like C-x ...)
-and you change your mind, you can quit with the command C-g.
+   Up      previous line
+   Down    next line
+   Left    one character back
+   Right   one character forward
 
->> Type C-g now.  The echo area at the bottom should show \"Quit\".
+>> Spend a moment steering.  Move Up and Down through this paragraph, then Left
+   and Right along a line.  Notice that point sits between characters.
 
-C-g also stops a command that is taking too long, and clears a partial key
-sequence that you started by mistake.
+If you would rather keep your hands on the home row, Macros gives you the same
+four moves without reaching for the arrows:
 
+   C-p   up    (previous line)        C-n   down  (next line)
+   C-b   left  (back one char)        C-f   right (forward one char)
 
-* WINDOWS
----------
-
-Macros can have several panes (\"windows\"), each showing its own text.
-
->> Type C-x 1 (digit one) to delete every window except the one the cursor is
-   in, so you get a single full-size window again.  (This won't lose any text.)
-
-The command is Control-x followed by the digit 1.  C-x is a \"prefix\": several
-commands begin with it.
-
->> Try C-x 2 to split the window in two, then C-x o (other-window) to hop the
-   cursor between them.  When done, C-x 1 collapses back to one window.
+>> Walk down and up these lines with C-n and C-p, then slide across one with C-f
+   and C-b.  They do exactly what the arrows do; use whichever you prefer.
 
 
-* INSERTING AND DELETING
-------------------------
+* LESSON 1.2: LEAVING AND CANCELLING
+------------------------------------
+Before going further, learn how to get out of trouble.  If a command seems
+half-finished, or you started one by accident, press C-g.  It cancels the
+half-typed command and returns you to a known state.
 
-To insert text, just type it.  Characters you can see, like A, 7, *, etc., are
-inserted as you type them.  Type <Return> (the Enter key) to insert a newline.
+>> Type C-x to begin a command, then change your mind and press C-g.  The echo
+   area at the bottom confirms the quit.
 
-To delete the character just before the cursor, type <Backspace>.  To delete
-the character the cursor is ON (after it), type C-d.
-
->> Do some typing on this line, then use <Backspace> to delete it again.
-   Don't worry about changing this file; you won't affect the original tutorial.
-
->> Now start typing text until you reach the right margin, and keep typing.
-   When a line gets too long, it continues onto the next screen row.
-
->> Use C-d's to delete characters at the cursor, until the line fits again.
-
-When you delete more than one character at a time, it is handy to delete a
-whole word at once:
-
- M-<Backspace>  Cut the word just BEFORE the cursor (backward-kill-word)
- M-d            Cut the next word AFTER the cursor (kill-word)
-
->> Type a few words, then try M-<Backspace> and M-d on them.
-
-C-k cuts (\"kills\") from the cursor to the end of the line.
-
->> Put the cursor at the start of this line and type C-k.  Type C-k again to
-   kill the newline too.
-
-Notice that <Backspace>, C-d, M-d, M-<Backspace>, and C-k all save the killed
-text so it can be brought back.  Killing something big saves it; deleting a
-single character does not.
+When you are done with a buffer, C-x k closes it.  To quit Macros entirely, type
+C-x C-c.  (You do not need to leave now; this is just so you are never stuck.)
 
 
-* THE KILL RING AND YANKING
+* LESSON 1.3: DELETING TEXT
 ---------------------------
+Macros can delete in bites of any size.  Smallest first:
 
-Killed text is saved on the \"kill ring\".  To bring it back, type C-y (yank).
+   Backspace      delete the character before point
+   C-d            delete the character under point
+   M-Backspace    delete the whole word before point
 
->> Try it: type C-k to kill a line, then C-y to bring it back.
+>> Type a few junk words on this line, then clean them up with Backspace, C-d,
+   and M-Backspace.
 
-C-y yanks the most recently killed text.  To replace it with text you killed
-earlier, type M-y after a C-y to cycle through the ring.
+To remove a line at a time, use C-k.  It deletes from point to the end of the
+line; press it a second time and it removes the now-empty line too, pulling the
+following line up.
 
-You can also mark a region and copy it without deleting:
+>> Put point at the very start of the next line, then press C-k twice:
+This is a throwaway practice line.  Kill it and watch the text close up.
 
- C-<Space>   Set the mark here (one end of a region)
- C-w         Cut (kill) the region between mark and cursor
- M-w         Copy the region to the kill ring, leaving the text in place
-
->> Type C-<Space> here, move down a few lines with C-n, then C-w to cut the
-   region.  Bring it back with C-y.
-
-
-* UNDO
-------
-
-If you change text and then decide it was a mistake, undo the change with C-/
-(or C-x C-u; both run undo).
-
->> Kill this line with C-k, then type C-/ to bring it back.
-
-Repeating undo keeps undoing earlier changes.
+Deleting more than a character is called 'killing', and it is not destructive:
+the text is set aside so you can get it back.  That is the next two lessons.
 
 
-* FILES
--------
+* LESSON 1.4: UNDO AND REDO
+---------------------------
+Made a mess?  Undo it with C-/.  Each press steps one change further back.
 
-To make your edits to a file permanent, you must \"visit\" the file, edit it,
-and save it.
+>> Kill this line with C-k, then press C-/ to bring it back.
 
-To visit a file, type C-x C-f (find-file), then type the file name in the
-minibuffer at the bottom of the screen, and press <Return>.
+Changed your mind about an undo?  Redo with C-?, which re-applies the change you
+just took back.
 
->> Type C-x C-f.  Then type C-g to cancel the prompt (we don't actually want to
-   open a file right now).
+>> Undo a few of your edits with C-/, then walk forward through them with C-?.
 
-When you have made changes, save them with C-x C-s (save-buffer).  The text is
-copied into the file, and the buffer is marked as no longer modified.
-
-
-* BUFFERS
----------
-
-Each file you visit is held in its own \"buffer\".  Even buffers that aren't
-files (like this tutorial, or *Messages*) live in buffers.
-
->> Type C-x b (switch-buffer).  A list pops up; type the name of a buffer to
-   switch to it, or C-g to cancel.
-
->> Type C-x C-b (list-buffers) to see all your buffers in one list.
-
->> Move between buffers in order with C-x C-<Left> and C-x C-<Right>.
-
->> Type C-x k (kill-buffer) to remove a buffer when you're done with it.
+Undo in Macros never loses work: even edits you undo and then type over are kept
+on a branch you can return to.  (If you prefer, C-x C-u also undoes.)
 
 
-* SEARCHING
------------
+* LESSON 1.5: PASTING (PUTTING TEXT BACK)
+-----------------------------------------
+Whatever you kill is saved.  To paste the most recent kill at point, press C-y
+(this is called a 'yank').
 
-Macros can search incrementally for a string.  \"Incremental\" means the search
-happens as you type: it jumps to the first match while you're still typing.
+>> Kill the next line with C-k (point at its start), then press C-y to paste it
+   straight back where it was:
+Kill me, then yank me back, and I should return unchanged.
 
-The command to start a forward search is C-s, and C-r starts a backward search.
-BUT WAIT!  Don't try them yet.
+A yank is a copy, so you can repeat it: move elsewhere and press C-y again to
+drop another copy.  Macros keeps a history of your kills.  Right after a yank,
+press M-y to swap in the kill before it, and again to keep stepping back.
 
-When you type C-s you'll see the string \"I-search\" appear in the echo area at
-the bottom.  This tells you Macros is waiting for you to type what to search for.
-<Return> ends the search and leaves the cursor on the match.
+>> Kill two different lines with C-k, press C-y to paste the most recent, then
+   M-y to replace it with the earlier one.
 
->> Now type C-s to start a search.  SLOWLY, one letter at a time, type the word
-   \"cursor\", pausing after each letter to notice where the cursor goes.  You
-   have now searched for \"cursor\", one character at a time!
-
->> Type C-s again, to search for the next occurrence of \"cursor\".
-
->> Now type <Backspace> four times and see how the cursor moves back to earlier
-   matches as you shorten the search string.
-
->> Type <Return> to finish the search and leave the cursor on the match.
-
-If you search and the string is not found, the echo area shows \" [failing]\".
-C-g cancels a search, returning the cursor to where it was when you started.
-
->> Type C-s to begin a search, type \"xyzzy\" (which probably isn't here), see
-   the \" [failing]\" hint, then type C-g and watch the cursor jump back.
-
-To repeat a search for the same string, type C-s C-s: the first C-s starts a
-search, and the second recalls the string you searched for last time.
-
-To search backward, use C-r in place of C-s.  Within a search, C-r reverses the
-direction and C-s sets it forward again.
+That is the core loop: move, delete, undo, paste.  Everything below makes you
+faster and helps you work across a whole project.
 
 
-* EXTENDING THE COMMAND SET (M-x)
----------------------------------
+* LESSON 2.1: MOVING FASTER
+---------------------------
+Stepping one line or character at a time gets old.  These jump farther:
 
-There are many, many more commands than there are keys to bind them to.  To run
-any command by name, type M-x, then the command name, then <Return>.  A
-fuzzy-matching list helps you find it.
+   C-a   start of line        C-e   end of line
+   M-f   forward one word     M-b   backward one word
+   M-<   top of the buffer    M->   bottom of the buffer
 
->> Type M-x and start typing \"apropos\".  Pick apropos and press <Return>;
-   then type a word like \"line\" to list commands whose names contain it.
-
-Some useful commands you can reach this way:
-
- M-x replace-string    Replace all occurrences of one string with another.
- M-x occur             List every line in the buffer matching a pattern.
- M-x comment-dwim      Comment or uncomment the current line/region (M-;).
+>> Try C-a and C-e to snap to the ends of this line.  Then sweep across a
+   sentence with a few M-f's and M-b's.  Finish with M-< and M-> to leap to the
+   top and bottom of the tutorial (then come back here).
 
 
-* GETTING MORE HELP
+* LESSON 2.2: FINDING TEXT
+--------------------------
+C-s searches forward as you type ('incremental' search): it jumps to the first
+match while you are still typing, and refines as you add letters.  C-s again
+finds the next match; Return leaves point on the match; C-g cancels and returns
+point to where you started.  C-r searches backward.
+
+>> Press C-s and slowly type the word region, letter by letter, watching point
+   chase the match.  Press C-s once more to find the next one, then Return.
+
+
+* LESSON 3.1: FILES
 -------------------
+To keep your edits, you visit a file, change it, and save it.
 
-All help in Macros starts with the C-h prefix.  The most useful ones:
+   C-x C-f   open (visit) a file by name
+   C-x C-s   save the current buffer back to its file
 
- C-h k <key>   Describe what a key does (describe-key).
- C-h b         List every key binding in effect (describe-bindings).
- C-h a         Search command names for a word (apropos).
- C-h t         Start this tutorial again (help-with-tutorial).
-
->> Type C-h k C-p to see that C-p runs the command next-line... er, previous
-   line.  (Try C-h k on a few keys you've learned.)
-
->> Type C-h b to see the full list of bindings.  Type q to close that buffer.
+>> Press C-x C-f to start opening a file, then C-g to cancel the prompt (we are
+   not really opening one right now).
 
 
-* MORE FEATURES
----------------
+* LESSON 3.2: BUFFERS
+---------------------
+Every file you open lives in its own 'buffer'.  Buffers that are not files (this
+tutorial, the *Messages* log) are buffers too.
 
-Macros has much more: LSP-powered code navigation, a magit-style git interface,
-projectile project search, dired, multiple windows, keyboard macros, themes,
-and a full Steel (Scheme) extension language.  Explore with C-h a and M-x.
+   C-x b     switch to another buffer by name
+   C-x C-b   list every open buffer
+   C-x k     kill (close) a buffer you are done with
 
-This is the end of the tutorial.
+>> Press C-x C-b to see your buffers, then C-x b to switch between them (C-g
+   cancels the prompt).
 
-To delete this buffer, type C-x k <Return>.  To quit Macros, type C-x C-c.
+
+* LESSON 3.3: WINDOWS
+---------------------
+Macros can show several panes at once; it calls them 'windows'.
+
+   C-x 2   split the current window into two
+   C-x o   move point to the other window
+   C-x 1   collapse back to a single window (this loses no text)
+
+>> Try C-x 2 to split, C-x o to hop between the panes, and C-x 1 to return to
+   one window.
 
 
-* COPYING
----------
+* LESSON 4.1: SELECTING AND COPYING (A REGION)
+----------------------------------------------
+So far you have worked one line at a time.  To act on several lines at once,
+mark a 'region': set one end, move point to the other, and the span between them
+is selected.
 
-This tutorial descends from a long line of Emacs tutorials.  The original GNU
-Emacs tutorial is Copyright (C) the Free Software Foundation and distributed
-under the GNU GPL; this adaptation follows Macros' own license.
+   C-Space   set the mark here (one end of the region)
+   (move)    point becomes the other end as you move
+   M-w       copy the region  (leaves the text in place, ready to yank)
+   C-w       cut the region   (kills it; yank it back with C-y)
+
+>> Put point at the start of this paragraph and press C-Space to set the mark.
+   Press Down a few times to stretch the selection over several lines.  Press
+   M-w to copy them, move to the end of the buffer, and C-y to paste the block.
+
+>> Now the cutting version: mark a few lines with C-Space and Down, press C-w to
+   cut them, then C-y to put them back.  C-w followed by C-y elsewhere is how
+   you move a block of text from one place to another.
+
+
+* LESSON 4.2: RUNNING ANY COMMAND BY NAME
+-----------------------------------------
+There are far more commands than there are keys.  To run one by name, press M-x,
+type the command (a fuzzy list helps you find it), and press Return.  Everything
+you have learned has a name reachable this way, plus much that has no key.
+
+>> Press M-x and start typing apropos; choose it, press Return, then type a word
+   like line to list commands whose names mention it.
+
+
+* LESSON 4.3: GETTING HELP
+--------------------------
+Help starts with the C-h prefix:
+
+   C-h k <key>   describe what a key does
+   C-h b         list every key binding currently in effect
+   C-h a         search command names for a word
+   C-h t         start this tutorial again
+
+>> Press C-h k and then C-n to confirm that C-n runs next-line.  Try C-h k on a
+   few other keys you have learned.
+
+
+* WHERE TO GO NEXT
+------------------
+You now know enough to edit comfortably.  From here, Macros has much more to
+explore: LSP-powered code navigation, a magit-style git interface, project-wide
+search, dired for files, org-mode, keyboard macros, themes, and a full Steel
+(Scheme) extension language you can reshape the editor with.  Browse it all with
+C-h a and M-x.
+
+This is the end of the tutorial.  To close this buffer, type C-x k Return.  To
+quit Macros, type C-x C-c.
 ")
 
 ;; help-with-tutorial (C-h t): open a fresh, editable copy of the tutorial and
 ;; put point at the top so the reader starts from the beginning. Rebuilding from
-;; scratch each time gives a clean slate (Emacs prompts to reuse; we just reset).
+;; scratch each time gives a clean slate.
 (define (help-with-tutorial)
   (kill-buffer-named "*TUTORIAL*")
   (append-to-buffer "*TUTORIAL*" *tutorial-text*)

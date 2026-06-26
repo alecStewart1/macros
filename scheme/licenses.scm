@@ -7,9 +7,8 @@
   "Macros — License & Acknowledgments
 ====================================
 
-Macros is free software, licensed under the GNU General Public License,
-version 3 or later (GPL-3.0-or-later). See the LICENSE file distributed with
-Macros for the full text.
+Macros is free software, licensed under the MIT License. Copyright (c) 2026
+Kyle Gwinnup. See the LICENSE file distributed with Macros for the full text.
 
 
 Magit, Treemacs, Org mode, and Helm
@@ -19,20 +18,13 @@ Magit, Treemacs, Org mode, and Helm. These are original reimplementations
 written in Scheme on Macros' own primitives — no source code from those
 packages is copied or included, and Macros is not affiliated with or endorsed
 by them. They are named only to credit the work that inspired them, and are
-covered by Macros' own GPL-3.0-or-later license.
+covered by Macros' own MIT License.
 
 
 Lilex font
 ----------
 Macros bundles the Lilex typeface (Copyright 2019 The Lilex Project Authors),
 licensed under the SIL Open Font License, Version 1.1.
-
-
-GNU Emacs tutorial
-------------------
-The built-in tutorial (C-h t) descends from the GNU Emacs tutorial, Copyright
-(C) the Free Software Foundation and distributed under the GNU GPL; this
-adaptation follows Macros' own license.
 
 
 Third-party Rust crates

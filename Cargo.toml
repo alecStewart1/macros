@@ -5,7 +5,7 @@ edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://codeberg.org/likelihood/macros"
 authors = ["Kyle Gwinnup"]
-license = "GPL-3.0-or-later"
+license = "MIT"
 
 [dependencies]
 # Zed's GPU-accelerated UI framework. Pinned to the published crates.io release:

@@ -73,7 +73,7 @@ In help/list buffers (`*Help*`, the diagnostics list, xref results, …) the sta
 
 ## License & credits
 
-<kbd>M-x</kbd> `licenses` opens a read-only `*licenses*` buffer with Macros' license (GPL-3.0-or-later) and its third-party acknowledgments — the Lilex font, the GNU Emacs tutorial heritage, and a note that Magit, Treemacs, Org mode, and Helm are original reimplementations, not the Emacs packages themselves. The full text of every bundled Rust crate license is in `THIRD-PARTY-LICENSES.md`.
+<kbd>M-x</kbd> `licenses` opens a read-only `*licenses*` buffer with Macros' license (MIT) and its third-party acknowledgments — the Lilex font, and a note that Magit, Treemacs, Org mode, and Helm are original reimplementations, not the Emacs packages themselves. The full text of every bundled Rust crate license is in `THIRD-PARTY-LICENSES.md`.
 
 ## Still stuck?
 

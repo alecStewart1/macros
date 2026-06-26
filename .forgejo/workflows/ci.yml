@@ -41,6 +41,35 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  licenses:
+    # Dependency license gate: fail if any crate is only available under a
+    # license that conflicts with redistributing Macros under MIT (GPL/AGPL/
+    # LGPL/etc.). Policy lives in deny.toml. No project compile needed, so this
+    # job is light — just cargo metadata + cargo-deny.
+    runs-on: ubuntu-latest
+    env:
+      CARGO_DENY_VERSION: "0.19.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (cargo)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-deny
+        run: |
+          target="x86_64-unknown-linux-musl"
+          tarball="cargo-deny-${CARGO_DENY_VERSION}-${target}"
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}.tar.gz"
+          curl --proto '=https' --tlsv1.2 -sSfL "$url" \
+            | tar -xz --strip-components=1 -C "$HOME/.cargo/bin" "${tarball}/cargo-deny"
+          cargo-deny --version
+
+      - name: Check dependency licenses
+        run: cargo deny check licenses
+
   clippy:
     runs-on: ubuntu-latest
     steps:

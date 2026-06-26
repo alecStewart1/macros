@@ -1,6 +1,6 @@
 # NOTICE
 
-Macros is free software licensed under **GPL-3.0-or-later**. The full license
+Macros is free software licensed under the **MIT License**. The full license
 text is in [`LICENSE`](LICENSE).
 
 This file documents third-party material and acknowledgments. The licenses of
@@ -14,7 +14,7 @@ packages **Magit**, **Treemacs**, **Org mode**, and **Helm**. These are
 **original reimplementations written in Scheme** on Macros' own editor
 primitives; **no source code from those Emacs packages is copied or included**.
 They therefore carry no separate license — like the rest of Macros they are
-covered by GPL-3.0-or-later. They are named here only to credit the projects
+covered by the MIT License. They are named here only to credit the projects
 that inspired them.
 
 ## Lilex font
@@ -23,12 +23,6 @@ Macros bundles the **Lilex** typeface (Copyright 2019 The Lilex Project
 Authors), licensed under the **SIL Open Font License, Version 1.1**. The full
 license text ships in the repository at
 [`assets/fonts/Lilex-OFL.txt`](assets/fonts/Lilex-OFL.txt).
-
-## GNU Emacs tutorial
-
-The built-in tutorial (`C-h t`) descends from the GNU Emacs tutorial, which is
-Copyright (C) the Free Software Foundation and distributed under the GNU GPL.
-This adaptation is distributed under Macros' own GPL-3.0-or-later license.
 
 ## Vendored tree-sitter Mermaid grammar
 

@@ -208,7 +208,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>$APP_NAME $VERSION. Copyright (C) Likelihood LLC. Licensed under GPL-3.0-or-later.</string>
+    <string>$APP_NAME $VERSION. Copyright (c) 2026 Kyle Gwinnup. Licensed under the MIT License.</string>
 </dict>
 </plist>
 PLIST

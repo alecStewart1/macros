@@ -23,7 +23,7 @@ description: |
   an embedded terminal, and a fully programmable runtime — at native speed.
 vendor: Likelihood LLC
 homepage: https://github.com/kgwinnup/macros
-license: GPL-3.0-or-later
+license: MIT
 
 contents:
   - src: target/release/macros

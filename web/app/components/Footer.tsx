@@ -33,7 +33,7 @@ export function Footer() {
             }}
           >
             An Emacs-style, GPU-rendered editor scripted in Steel. Free software,
-            licensed GPL-3.0-or-later.
+            licensed MIT.
           </p>
         </div>
 
