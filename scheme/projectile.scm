@@ -120,14 +120,33 @@
 (define (projectile-recent-save)
   (write-file (projectile-recent-file) (join-lines *projectile-recent*)))
 
-;; Load the ring at startup, dropping roots that no longer exist, and seed
-;; *project-known* so switch-project lists them before any file is opened.
+;; #t when `child` lives inside `parent` (a strict sub-directory), so a
+;; workspace member that was recorded before VCS-preference resolution can be
+;; dropped in favor of the enclosing repo root.
+(define (projectile-subpath? child parent)
+  (and (not (equal? child parent))
+       (starts-with? child (path-join parent ""))))
+
+(define (projectile-nested-in? p roots)
+  (cond ((null? roots) #f)
+        ((projectile-subpath? p (car roots)) #t)
+        (else (projectile-nested-in? p (cdr roots)))))
+
+;; Drop any root that is a sub-directory of another root in the same list.
+(define (projectile-prune-nested roots)
+  (filter (lambda (p) (not (projectile-nested-in? p roots))) roots))
+
+;; Load the ring at startup, dropping roots that no longer exist or that nest
+;; inside another root, and seed *project-known* so switch-project lists them
+;; before any file is opened. Re-persist if pruning changed the list.
 (define (projectile-recent-load)
   (when (file-exists? (projectile-recent-file))
-    (set! *projectile-recent*
-          (helm-take (filter (lambda (p) (file-exists? p))
-                             (non-empty-lines (read-file (projectile-recent-file))))
-                     *projectile-recent-max*))
+    (let ((loaded (helm-take (filter (lambda (p) (file-exists? p))
+                                     (non-empty-lines (read-file (projectile-recent-file))))
+                             *projectile-recent-max*)))
+      (set! *projectile-recent* (projectile-prune-nested loaded))
+      (when (not (equal? *projectile-recent* loaded))
+        (projectile-recent-save)))
     (for-each (lambda (root)
                 (when (not (member root *project-known*))
                   (set! *project-known* (cons root *project-known*))))

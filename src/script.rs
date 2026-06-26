@@ -100,6 +100,13 @@ pub enum EditorCommand {
     /// Set the active (editable) buffer's major mode by name, so its keymap
     /// applies (e.g. shell-mode rebinding RET). Does not make the buffer special.
     SetMajorMode(String),
+    /// Switch the active buffer into the editor-aware `macros-steel` major mode:
+    /// stack it on `fundamental`, attach the `macros-scheme` language (Scheme
+    /// highlighting plus the built-in editor-API server), and re-run mode hooks
+    /// so its LSP comes up. The interactive escape hatch for editing this
+    /// editor's own Scheme outside the auto-detected config paths — unlike
+    /// `set-major-mode`, it re-attaches the language, not just the keymap.
+    EnterMacrosSteel,
     NextBuffer,
     PreviousBuffer,
     SaveBuffer,
@@ -1512,6 +1519,7 @@ fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("helm-actions", HelmActions),
         ("helm-mark", HelmToggleMark),
         ("enable-lsp", EnableLsp),
+        ("macros-steel-mode", EnterMacrosSteel),
         ("evil-mode", EvilMode),
         ("evil-normal-state", EvilNormalState),
         ("evil-insert-state", EvilInsertState),
@@ -6221,6 +6229,33 @@ mod search_e2e {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn project_root_prefers_outermost_vcs_root() {
+        // Repo root has .git; a nested member crate has its own Cargo.toml.
+        // Resolution from inside the member must return the repo root, not the
+        // member dir, so workspace members don't show up as separate projects.
+        let dir = std::env::temp_dir().join(format!("macros-projroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/member/src")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap(); // marker presence is enough
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(dir.join("crates/member/Cargo.toml"), "[package]\n").unwrap();
+        let d = dir.to_str().unwrap();
+
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("startup script");
+        }
+        let root = engine
+            .eval(&format!("(project-root \"{d}/crates/member/src\")"))
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(root, format!("\"{d}\""), "member resolves to repo root");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -6732,6 +6767,29 @@ mod revert_cmd {
         assert!(matches!(
             engine.eval("(revert-buffer)").unwrap().commands.as_slice(),
             [EditorCommand::RevertBuffer]
+        ));
+    }
+
+    #[test]
+    fn macros_steel_mode_is_a_builtin_command() {
+        let (engine, _rx) = ScriptEngine::new();
+        // Nullary builtin → in command-list → M-x discoverable, so you can switch
+        // any .scm buffer into the editor-aware mode by hand.
+        assert_eq!(
+            engine
+                .eval(r#"(if (member "macros-steel-mode" (command-list)) "y" "n")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"y\"")
+        );
+        assert!(matches!(
+            engine
+                .eval("(macros-steel-mode)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::EnterMacrosSteel]
         ));
     }
 }

@@ -101,6 +101,10 @@
 ;; free identifiers at definition time, so the shared resolver must precede them.
 
 ;; Files/dirs whose presence marks a project root (git first, like projectile).
+;; VCS markers win over build-tool markers: a workspace member crate (its own
+;; Cargo.toml) resolves to the enclosing repo, not itself, so sub-folders don't
+;; show up as separate projects in switch-project.
+(define *vcs-markers* (list ".git" ".hg"))
 (define *project-markers* (list ".git" ".hg" ".projectile" "Cargo.toml" "package.json" "go.mod"))
 (define *project-cache* '())     ; dir -> resolved-root
 (define *project-known* '())     ; roots we've seen (for switch-project)
@@ -110,13 +114,21 @@
         ((file-exists? (path-join dir (car markers))) #t)
         (else (project-has-marker? dir (cdr markers)))))
 
-;; Walk up from `dir` to the nearest project marker, or #f outside any project.
+;; Walk up from `dir`, tracking two candidates: the OUTERMOST dir with a VCS
+;; marker, and the NEAREST dir with any marker. Prefer the VCS root when one
+;; exists (so nested build-tool roots collapse into the repo); otherwise fall
+;; back to the nearest build marker. #f outside any project.
 (define (project-root-walk dir)
-  (cond ((equal? dir "") #f)
-        ((project-has-marker? dir *project-markers*) dir)
-        (else
-         (let ((parent (parent-directory dir)))
-           (if (equal? parent dir) #f (project-root-walk parent))))))
+  (let loop ((d dir) (vcs-root #f) (nearest #f))
+    (if (equal? d "")
+        (or vcs-root nearest)
+        (let* ((vcs-root* (if (project-has-marker? d *vcs-markers*) d vcs-root))
+               (nearest*  (if (and (not nearest) (project-has-marker? d *project-markers*))
+                              d nearest))
+               (parent (parent-directory d)))
+          (if (equal? parent d)
+              (or vcs-root* nearest*)
+              (loop parent vcs-root* nearest*))))))
 
 ;; Cached resolution; remembers each root for switch-project.
 (define (project-root dir)

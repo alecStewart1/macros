@@ -14,9 +14,14 @@
 ;; editor-aware affordances on top: eval into the live runtime, and one-key
 ;; documentation for the symbol at point.
 ;;
-;; Activation is automatic by path (see `is_macros_scheme_path` in Rust). Loaded
-;; after completion.scm and help.scm, whose `capf-word-char?`, `doc-summary`, and
-;; `describe-function-show` it reuses.
+;; Activation is automatic by path (see `is_macros_scheme_path` in Rust): files
+;; named *.macros.scm or living under the config dir. For editing this editor's
+;; OWN sources (the macros repo's scheme/*.scm), which match neither rule, run
+;; `M-x macros-steel-mode` — the Rust builtin re-attaches the `macros-scheme`
+;; language (highlighter + editor-API server), not just this keymap.
+;;
+;; Loaded after completion.scm and help.scm, whose `capf-word-char?`,
+;; `doc-summary`, and `describe-function-show` it reuses.
 
 ;; --- keymap -----------------------------------------------------------------
 ;; Evaluation targets the LIVE editor runtime (it can define commands, rebind

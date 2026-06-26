@@ -6181,6 +6181,23 @@ impl Editor {
                 self.modes = modes;
                 cx.notify();
             }
+            EnterMacrosSteel => {
+                let mut modes = ModeStack::default();
+                modes.push(Mode::new("fundamental"));
+                modes.push(Mode::new("macros-steel").with_language("macros-scheme"));
+                self.modes = modes;
+                // `macros-scheme` has no grammar of its own; it shares Scheme's,
+                // exactly as `make_document` wires it for auto-detected files.
+                self.highlighter = Highlighter::scheme();
+                self.parse_full();
+                // Re-run mode hooks so the `fundamental` `enable-lsp` hook brings
+                // up the `macros-scheme` server for the now-active language
+                // (idempotent: `maybe_start_lsp` skips an already-running server).
+                self.hooks_ran = false;
+                self.run_mode_hooks_once(cx);
+                self.echo("Entered macros-steel mode".to_string(), cx);
+                cx.notify();
+            }
             NextBuffer => self.next_buffer(cx),
             PreviousBuffer => self.previous_buffer(cx),
             SaveBuffer => self.save_buffer(cx),
