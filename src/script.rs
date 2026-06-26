@@ -3277,6 +3277,47 @@ mod tests {
     }
 
     #[test]
+    fn evil_collection_overlays_special_modes() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../scheme/core.scm"))
+            .expect("core.scm");
+        // evil.scm calls `(evil-collection-init)` at load, populating the
+        // `evil-normal:<mode>` overlay keymaps for every special mode.
+        let cmds = engine
+            .eval(include_str!("../scheme/evil.scm"))
+            .unwrap()
+            .commands;
+        for (mode, key, cmd) in [
+            ("evil-normal:magit-status", "j", "next-line"),
+            ("evil-normal:magit-status", "k", "previous-line"),
+            ("evil-normal:dired-mode", "k", "previous-line"),
+        ] {
+            assert!(
+                cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
+                    if m == mode && s == key && x == cmd)),
+                "evil-collection-init should bind {key}->{cmd} in {mode}"
+            );
+        }
+
+        // The overlay is configurable from Scheme — extend the mode list and
+        // re-run, and a newly added mode gets the same motion.
+        let cmds = engine
+            .eval(
+                r#"(begin
+                     (set! *evil-collection-modes* (cons "my-mode" *evil-collection-modes*))
+                     (evil-collection-init))"#,
+            )
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
+                if m == "evil-normal:my-mode" && s == "j" && x == "next-line")),
+            "re-running evil-collection-init should cover newly added modes"
+        );
+    }
+
+    #[test]
     fn isearch_commands_dispatch() {
         let (engine, _rx) = ScriptEngine::new();
         assert!(matches!(

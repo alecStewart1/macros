@@ -187,3 +187,42 @@
 (define (evil-leader-set-for-modes modes bindings)
   (evil-define-keys-for-modes "normal" modes
     (map (lambda (b) (cons (evil-leader-chord (car b)) (cdr b))) bindings)))
+
+;; --- evil-collection: special read-only buffers -----------------------------
+;; Macros' "special" buffers (magit, dired, treemacs, grep, …) drive their own
+;; keymaps, so the global evil keymaps don't apply there. Like Emacs's
+;; `evil-collection`, this layer overlays vim-style keys onto those buffers.
+;;
+;; The editor consults an `evil-normal:<major>` keymap for a special buffer ONLY
+;; when evil-mode is active, and BEFORE the buffer's own keymap. So whatever we
+;; bind here is (a) inert under plain Emacs — the buffer's Emacs-default keys
+;; show through untouched — and (b) able to shadow a default key under evil
+;; (e.g. magit's `k`=discard becomes `k`=up; magit then re-exposes discard on
+;; `x` in its own `evil-normal:magit-status` overlay). It's all just keymaps:
+;; override any of this in init.scm with `(define-key "evil-normal:<mode>" …)`.
+
+;; Read-only special modes that get vim motion. Extend in init.scm by
+;; `(set! *evil-collection-modes* (cons "my-mode" *evil-collection-modes*))`.
+;; (Editable special buffers like `git-commit-mode` are intentionally absent —
+;; you type into them, so they use the normal insert/normal states.)
+(define *evil-collection-modes*
+  (list "magit-status" "magit-log-mode" "dired-mode" "treemacs-mode"
+        "ibuffer-mode" "grep-mode" "occur-mode" "compile-mode"
+        "diagnostics-mode" "help-mode" "diff-mode" "welcome-mode"
+        "org-roam-backlinks-mode" "org-roam-unlinked-mode"
+        "org-roam-graph-mode"))
+
+;; Vim motion shared by every special buffer. Only `j`/`k` by default: single
+;; `g` is `refresh` in several of these modes, so a `g g` top-motion would
+;; shadow it — left out deliberately. `n`/`p` keep working from the base keymap.
+(define (evil-collection-bind-mode mode)
+  (let ((km (string-append "evil-normal:" mode)))
+    (define-key km "j" "next-line")
+    (define-key km "k" "previous-line")))
+
+;; Install the overlay across every mode in `*evil-collection-modes*`. Called
+;; once below as part of loading the evil layer; safe to re-run after extending
+;; the list.
+(define (evil-collection-init)
+  (for-each evil-collection-bind-mode *evil-collection-modes*))
+(evil-collection-init)

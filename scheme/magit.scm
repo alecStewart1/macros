@@ -1949,6 +1949,12 @@
 (define-key "magit-status" "shift-tab" "magit-cycle-all")
 (define-key "magit-status" "enter" "magit-visit-file")
 
+;; Evil-mode overlay (consulted only under evil, before the keymap above, so the
+;; Emacs defaults are untouched). `evil-collection-init` gives every special
+;; buffer `j`/`k` motion, which takes `k` over from discard — so re-expose
+;; discard on `x` here, the magit-specific half of the overlay.
+(define-key "evil-normal:magit-status" "x" "magit-discard")
+
 ;; Log / commit / stash-list buffers.
 (define-key "magit-log-mode" "enter" "magit-log-show")
 (define-key "magit-log-mode" "shift-a" "magit-log-cherry-pick")

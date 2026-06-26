@@ -6597,7 +6597,14 @@ impl Editor {
         // evil keymap (with prefix support for `g g`, leader `space …`). Ctrl/Alt
         // chords fall through to the normal Emacs dispatch, so e.g. C-x C-s still
         // works in normal mode.
+        //
+        // Special read-only buffers (magit, *Help*, …) are skipped: they are
+        // already fully modal via their own keymap, which binds plain keys like
+        // `s` (stage) that evil-normal doesn't know about. Without this guard the
+        // evil intercept would swallow those keys before the special-buffer
+        // dispatch below ever runs. Their keymap takes precedence over evil.
         if self.evil_intercepts()
+            && self.special.is_none()
             && !ks.modifiers.control
             && !ks.modifiers.alt
             && !ks.modifiers.platform
@@ -6655,7 +6662,26 @@ impl Editor {
         {
             self.pending_keys.push(chord_string(ks));
             let sequence = self.pending_keys.join(" ");
-            if let Some(expr) = self
+            // Emacs keybindings are the default: plain (non-evil) editing resolves
+            // straight against the buffer's own keymap, untouched. Under evil-mode
+            // ONLY, an `evil-normal:<major>` keymap is consulted FIRST, so the
+            // Scheme evil layer (`evil-collection-init` in evil.scm) can overlay
+            // vim keys on these read-only buffers — magit, dired, … — without
+            // disturbing their Emacs-default keymaps. The overlay is pure policy
+            // in Scheme; this is only the mechanism. Inert when evil is off.
+            let scoped: Option<String> = self
+                .evil_intercepts()
+                .then(|| self.modes.names().last().map(|m| format!("evil-normal:{m}")))
+                .flatten();
+            if let Some(expr) = scoped
+                .as_deref()
+                .and_then(|m| self.keymap.resolve_mode(m, &sequence))
+                .map(str::to_string)
+            {
+                self.pending_keys.clear();
+                self.status = SharedString::default();
+                self.dispatch_recorded(&expr, cx);
+            } else if let Some(expr) = self
                 .keymap
                 .resolve(&self.modes, &sequence)
                 .map(str::to_string)
@@ -6663,7 +6689,11 @@ impl Editor {
                 self.pending_keys.clear();
                 self.status = SharedString::default();
                 self.dispatch_recorded(&expr, cx);
-            } else if self.keymap.is_prefix(&self.modes, &sequence) {
+            } else if self.keymap.is_prefix(&self.modes, &sequence)
+                || scoped
+                    .as_deref()
+                    .is_some_and(|m| self.keymap.is_prefix_mode(m, &sequence))
+            {
                 self.status = format!("{sequence}-").into();
                 cx.notify();
             } else {
