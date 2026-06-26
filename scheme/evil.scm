@@ -9,7 +9,7 @@
 ;; --- composite operators (commands enqueue in order when a fn is called) ----
 (define (evil-append)      (forward-char) (evil-insert-state))
 (define (evil-append-line) (move-end-of-line) (evil-insert-state))
-(define (evil-insert-line) (move-beginning-of-line) (evil-insert-state))
+(define (evil-insert-line) (evil-first-non-blank) (evil-insert-state)) ; I — first non-blank
 (define (evil-open-below)  (move-end-of-line) (newline) (evil-insert-state))
 (define (evil-open-above)  (move-beginning-of-line) (open-line) (evil-insert-state))
 ;; dd — delete the whole line linewise (including its trailing newline) and
@@ -46,6 +46,114 @@
     (set-mark) (forward-word-start) (kill-ring-save) (evil-set-charwise)
     (goto-char p)))
 
+;; --- more operators & motions (the rest of the common Vim verbs) -------------
+;; NOTE on the snapshot model: a command script reads buffer state (point,
+;; line-bounds, buffer-substring, …) from a snapshot taken BEFORE it runs; the
+;; motion/edit commands it calls are queued and applied afterwards. So a helper
+;; must compute every position from synchronous reads up front — it can't move
+;; then read the new point. `goto-char` also COLLAPSES any selection (it's
+;; move-to), so the helpers that use it are bound in normal state only; visual
+;; motions go through the extend-aware command procs (backward-char, forward-word…).
+
+;; ^ — first non-blank of the current line. Where `^` and `I` land (Vim leaves
+;; the cursor on the first non-blank, not column 0).
+(define (evil-skip-blanks-to from end)   ; first non-blank byte in [from end), else end
+  (let loop ((i from))
+    (if (and (< i end)
+             (let ((c (buffer-substring i (+ i 1)))) (or (equal? c " ") (equal? c "\t"))))
+        (loop (+ i 1))
+        i)))
+(define (evil-first-non-blank)
+  (let* ((b (line-bounds)) (s (car b)) (e (cadr b)))
+    (goto-char (evil-skip-blanks-to s e))))
+
+;; gg / G — first / last line, on its first non-blank. Scanned directly: point
+;; reads are a pre-command snapshot, so we can't jump-then-read-the-new-line.
+(define (evil-goto-first-line)
+  (let* ((mx (point-max))
+         (end (let loop ((i 0))
+                (cond ((>= i mx) mx)
+                      ((equal? (buffer-substring i (+ i 1)) "\n") i)
+                      (else (loop (+ i 1)))))))
+    (goto-char (evil-skip-blanks-to 0 end))))
+(define (evil-goto-last-line)
+  (let* ((mx (point-max))
+         ;; ignore one trailing newline so a file ending in "\n" doesn't land us
+         ;; on a phantom empty line below the text.
+         (end (if (and (> mx 0) (equal? (buffer-substring (- mx 1) mx) "\n")) (- mx 1) mx))
+         (start (let loop ((i end))
+                  (cond ((<= i 0) 0)
+                        ((equal? (buffer-substring (- i 1) i) "\n") i)
+                        (else (loop (- i 1)))))))
+    (goto-char (evil-skip-blanks-to start end))))
+
+;; e — end of word: land ON the last char of the current/next word. Emacs
+;; `forward-word` stops just AFTER a word, so nudge in by one then step back; the
+;; leading forward-char also makes `e` advance when already sitting on a word end.
+(define (evil-forward-word-end) (forward-char) (forward-word) (backward-char))
+
+;; x — delete the char under the cursor INTO the register (Vim `x` = `dl`), so a
+;; following `p` can put it back. Char-wise; a no-op on an empty line.
+(define (evil-delete-char)
+  (let* ((b (line-bounds)) (eol (cadr b)) (p (point)))
+    (when (< p eol)
+      (set-mark) (forward-char) (kill-region) (evil-set-charwise))))
+
+;; D / d$ — delete to end of line.  C / c$ — change to end of line.
+(define (evil-delete-to-eol)
+  (set-mark) (move-end-of-line) (kill-region) (evil-set-charwise))
+(define (evil-change-to-eol)
+  (set-mark) (move-end-of-line) (kill-region) (evil-insert-state))
+
+;; cc / S — change the whole line: clear its text and insert (the line stays).
+(define (evil-change-line)
+  (move-beginning-of-line) (set-mark) (move-end-of-line) (kill-region) (evil-insert-state))
+
+;; s — substitute the char under the cursor (delete it, then insert).
+(define (evil-substitute-char) (evil-delete-char) (evil-insert-state))
+
+;; dw / db, cw / cb — word operators. `dw` runs to the next word start (Vim `w`,
+;; trailing space included); `cw` stops at the word end (Vim treats `cw` as `ce`).
+(define (evil-delete-word)      (set-mark) (forward-word-start) (kill-region) (evil-set-charwise))
+(define (evil-delete-word-back) (set-mark) (backward-word)      (kill-region) (evil-set-charwise))
+(define (evil-change-word)      (set-mark) (forward-word)       (kill-region) (evil-insert-state))
+(define (evil-change-word-back) (set-mark) (backward-word)      (kill-region) (evil-insert-state))
+
+;; ~ — toggle the case of the char under the cursor; the replace leaves the
+;; cursor on the next char, matching Vim's advance. Only cased letters change.
+(define (evil-toggle-case)
+  (let* ((b (line-bounds)) (eol (cadr b)) (p (point)))
+    (when (< p eol)
+      (let* ((c (buffer-substring p (+ p 1))) (up (string-upcase c)) (dn (string-downcase c)))
+        (when (not (equal? up dn))
+          (replace-region p (+ p 1) (if (equal? c up) dn up)))))))
+
+;; J — join the next line onto this one, collapsing its leading indentation to a
+;; single space (Vim `J`). Kept self-contained here (evil.scm must not depend on
+;; editing.scm: load order isn't guaranteed and the tests load evil.scm alone).
+(define (evil-join-line)
+  (let* ((b (line-bounds)) (e (cadr b)) (mx (point-max)))
+    (when (< e mx)
+      (let loop ((i (+ e 1)))
+        (if (and (< i mx)
+                 (let ((c (buffer-substring i (+ i 1)))) (or (equal? c " ") (equal? c "\t"))))
+            (loop (+ i 1))
+            (replace-region e i " "))))))
+
+;; Visual-mode change (charwise selection's exact range) and case folding. Case
+;; ops work the region text directly (builtins only) rather than via editing.scm.
+(define (evil-visual-change) (kill-region) (evil-set-charwise) (evil-insert-state))
+(define (evil-visual-fold-case folder)
+  (let ((s (region-beginning)) (e (region-end)))
+    (when (and (>= s 0) (< s e))
+      (replace-region s e (folder (buffer-substring s e)))))
+  (evil-normal-state))
+(define (evil-visual-downcase) (evil-visual-fold-case string-downcase)) ; u
+(define (evil-visual-upcase)   (evil-visual-fold-case string-upcase))   ; U
+;; Visual-LINE change: drop the whole-line selection, then open a fresh line in
+;; its place and insert (the selection already spans entire lines).
+(define (evil-visual-line-change) (kill-region) (evil-set-linewise) (evil-open-above))
+
 ;; --- normal state -----------------------------------------------------------
 ;; motion
 (define-key "evil-normal" "h" "backward-char")
@@ -58,8 +166,10 @@
 ;; macOS clears shift for non-letter keys and reports the produced char, so
 ;; bind the literal symbol ($, :, ?) — NOT shift-4 / shift-; / shift-/.
 (define-key "evil-normal" "$" "move-end-of-line")
-(define-key "evil-normal" "g g" "beginning-of-buffer")
-(define-key "evil-normal" "shift-g" "end-of-buffer")      ; G
+(define-key "evil-normal" "e" "evil-forward-word-end")    ; e — end of word
+(define-key "evil-normal" "^" "evil-first-non-blank")     ; ^ — first non-blank
+(define-key "evil-normal" "g g" "evil-goto-first-line")   ; gg — first line, first non-blank
+(define-key "evil-normal" "shift-g" "evil-goto-last-line"); G  — last line, first non-blank
 ;; enter insert
 (define-key "evil-normal" "i" "evil-insert-state")
 (define-key "evil-normal" "shift-i" "evil-insert-line")   ; I
@@ -68,8 +178,22 @@
 (define-key "evil-normal" "o" "evil-open-below")
 (define-key "evil-normal" "shift-o" "evil-open-above")    ; O
 ;; edit
-(define-key "evil-normal" "x" "delete-char")
+(define-key "evil-normal" "x" "evil-delete-char")         ; x — delete char (into register)
+(define-key "evil-normal" "r" "evil-replace-char")        ; r<char> — replace char under cursor
+(define-key "evil-normal" "s" "evil-substitute-char")     ; s — substitute char
+(define-key "evil-normal" "shift-s" "evil-change-line")   ; S — substitute line (= cc)
+(define-key "evil-normal" "~" "evil-toggle-case")         ; ~ — toggle case of char
+(define-key "evil-normal" "shift-j" "evil-join-line")     ; J — join next line up
 (define-key "evil-normal" "d d" "evil-delete-line")       ; dd
+(define-key "evil-normal" "d w" "evil-delete-word")       ; dw
+(define-key "evil-normal" "d b" "evil-delete-word-back")  ; db
+(define-key "evil-normal" "d $" "evil-delete-to-eol")     ; d$
+(define-key "evil-normal" "shift-d" "evil-delete-to-eol") ; D  (= d$)
+(define-key "evil-normal" "c c" "evil-change-line")       ; cc
+(define-key "evil-normal" "c w" "evil-change-word")       ; cw  (Vim treats as ce)
+(define-key "evil-normal" "c b" "evil-change-word-back")  ; cb
+(define-key "evil-normal" "c $" "evil-change-to-eol")     ; c$
+(define-key "evil-normal" "shift-c" "evil-change-to-eol") ; C  (= c$)
 (define-key "evil-normal" "y y" "evil-yank-line")         ; yy  (→ system clipboard)
 (define-key "evil-normal" "y w" "evil-yank-word")         ; yw
 (define-key "evil-normal" "y $" "evil-yank-to-eol")       ; y$
@@ -108,9 +232,15 @@
 (define-key "evil-visual" "$" "move-end-of-line")
 (define-key "evil-visual" "g g" "beginning-of-buffer")
 (define-key "evil-visual" "shift-g" "end-of-buffer")
+(define-key "evil-visual" "e" "evil-forward-word-end")          ; e — end of word (extends)
 (define-key "evil-visual" "d" "evil-visual-delete")
 (define-key "evil-visual" "x" "evil-visual-delete")
 (define-key "evil-visual" "y" "evil-visual-yank")
+(define-key "evil-visual" "c" "evil-visual-change")            ; c/s — change selection
+(define-key "evil-visual" "s" "evil-visual-change")
+(define-key "evil-visual" "o" "exchange-point-and-mark")       ; o — swap selection ends
+(define-key "evil-visual" "u" "evil-visual-downcase")          ; u — lowercase selection
+(define-key "evil-visual" "shift-u" "evil-visual-upcase")      ; U — uppercase selection
 (define-key "evil-visual" "escape" "evil-normal-state")
 
 ;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
@@ -131,6 +261,11 @@
 (define-key "evil-visual-line" "d" "evil-visual-line-delete")
 (define-key "evil-visual-line" "x" "evil-visual-line-delete")
 (define-key "evil-visual-line" "y" "evil-visual-line-yank")
+(define-key "evil-visual-line" "c" "evil-visual-line-change")   ; c/s — change selected lines
+(define-key "evil-visual-line" "s" "evil-visual-line-change")
+(define-key "evil-visual-line" "o" "exchange-point-and-mark")   ; o — swap selection ends
+(define-key "evil-visual-line" "u" "evil-visual-downcase")      ; u — lowercase selection
+(define-key "evil-visual-line" "shift-u" "evil-visual-upcase")  ; U — uppercase selection
 (define-key "evil-visual-line" "shift-i" "evil-visual-insert")  ; I — insert at each line start
 (define-key "evil-visual-line" "shift-a" "evil-visual-append")  ; A — append at each line end
 (define-key "evil-visual-line" "v" "evil-visual-state")         ; switch to charwise visual

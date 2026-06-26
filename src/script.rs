@@ -271,6 +271,9 @@ pub enum EditorCommand {
     /// flag set by the most recent yank/delete.
     EvilPasteAfter,
     EvilPasteBefore,
+    /// Vim `r`: arm replace-pending so the next printable key overwrites the
+    /// single character under the cursor (cursor stays put, mode stays Normal).
+    EvilReplaceChar,
     /// Mark the most recent yank/delete as line-wise / character-wise, so the
     /// next `p`/`P` knows whether to open a new line or insert inline.
     EvilSetLinewise,
@@ -1528,6 +1531,7 @@ fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("evil-ex-command", EvilExCommand),
         ("evil-paste-after", EvilPasteAfter),
         ("evil-paste-before", EvilPasteBefore),
+        ("evil-replace-char", EvilReplaceChar),
         ("evil-set-linewise", EvilSetLinewise),
         ("evil-set-charwise", EvilSetCharwise),
         ("isearch-forward", IsearchForward),
@@ -3356,6 +3360,55 @@ mod tests {
         // dispatch now consults it for Ctrl chords, so these actually fire).
         assert!(bound("evil-normal", "ctrl-d", "evil-scroll-down"));
         assert!(bound("evil-normal", "ctrl-u", "evil-scroll-up"));
+    }
+
+    #[test]
+    fn evil_edit_operators_and_motions_bound() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../scheme/core.scm"))
+            .expect("core.scm");
+        let cmds = engine
+            .eval(include_str!("../scheme/evil.scm"))
+            .expect("evil.scm")
+            .commands;
+        let bound = |mode: &str, chord: &str, to: &str| {
+            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                if m == mode && s == chord && cmd == to))
+        };
+        // Single-key edits: `x` must delete INTO the register (not the plain
+        // `delete-char`), and `r`/`s`/`S`/`~`/`J` must be bound.
+        assert!(bound("evil-normal", "x", "evil-delete-char"));
+        assert!(bound("evil-normal", "r", "evil-replace-char"));
+        assert!(bound("evil-normal", "s", "evil-substitute-char"));
+        assert!(bound("evil-normal", "shift-s", "evil-change-line"));
+        assert!(bound("evil-normal", "~", "evil-toggle-case"));
+        assert!(bound("evil-normal", "shift-j", "evil-join-line"));
+        // Motions: end-of-word, first-non-blank, and the Vim-correct gg/G.
+        assert!(bound("evil-normal", "e", "evil-forward-word-end"));
+        assert!(bound("evil-normal", "^", "evil-first-non-blank"));
+        assert!(bound("evil-normal", "g g", "evil-goto-first-line"));
+        assert!(bound("evil-normal", "shift-g", "evil-goto-last-line"));
+        // d / c operators over motions, plus the D / C shorthands.
+        assert!(bound("evil-normal", "d w", "evil-delete-word"));
+        assert!(bound("evil-normal", "d b", "evil-delete-word-back"));
+        assert!(bound("evil-normal", "d $", "evil-delete-to-eol"));
+        assert!(bound("evil-normal", "shift-d", "evil-delete-to-eol"));
+        assert!(bound("evil-normal", "c c", "evil-change-line"));
+        assert!(bound("evil-normal", "c w", "evil-change-word"));
+        assert!(bound("evil-normal", "c b", "evil-change-word-back"));
+        assert!(bound("evil-normal", "c $", "evil-change-to-eol"));
+        assert!(bound("evil-normal", "shift-c", "evil-change-to-eol"));
+        // Visual additions: change/substitute, swap-ends, and case folding.
+        assert!(bound("evil-visual", "c", "evil-visual-change"));
+        assert!(bound("evil-visual", "s", "evil-visual-change"));
+        assert!(bound("evil-visual", "o", "exchange-point-and-mark"));
+        assert!(bound("evil-visual", "u", "evil-visual-downcase"));
+        assert!(bound("evil-visual", "shift-u", "evil-visual-upcase"));
+        assert!(bound("evil-visual", "e", "evil-forward-word-end"));
+        assert!(bound("evil-visual-line", "c", "evil-visual-line-change"));
+        assert!(bound("evil-visual-line", "u", "evil-visual-downcase"));
+        assert!(bound("evil-visual-line", "shift-u", "evil-visual-upcase"));
     }
 
     #[test]

@@ -401,6 +401,10 @@ pub struct Editor {
     helm_action_context: Option<(String, Vec<(String, String)>)>,
     /// Modal-editing (evil) state.
     evil: EvilState,
+    /// Vim `r` replace-pending: armed by `evil-replace-char`, it makes the very
+    /// next printable keystroke overwrite the character under the cursor instead
+    /// of being dispatched as a command. Cleared by that keystroke or `Escape`.
+    evil_replace_pending: bool,
     /// True until startup config (bundled scripts + `init.scm`) has been applied.
     /// While set, plain keystrokes are swallowed so they can't self-insert before
     /// `(evil-mode)` runs — the window can be revealed by the load watchdog before
@@ -1433,6 +1437,7 @@ impl Editor {
             helm_query_counter: 0,
             helm_action_context: None,
             evil: EvilState::Disabled,
+            evil_replace_pending: false,
             config_pending: true,
             search_query: None,
             evil_search_forward: true,
@@ -2303,6 +2308,21 @@ impl Editor {
             p..self.buffer.next_grapheme(p)
         });
         self.delete_range(range, cx);
+    }
+
+    /// Vim `r<char>`: overwrite the single grapheme under the cursor with `ch`,
+    /// then keep the cursor on the replaced character (Normal mode unchanged).
+    /// A no-op — vim's "beep" — when point sits on the line break or past the
+    /// end of the buffer, since there is no character there to replace.
+    fn evil_replace_char(&mut self, ch: &str, cx: &mut Context<Self>) {
+        let p = self.point();
+        let line = self.buffer.line_range_at(p);
+        if p >= line.end {
+            return;
+        }
+        let end = self.buffer.next_grapheme(p);
+        self.replace_region(p, end, ch, cx);
+        self.move_to(p, cx);
     }
 
     fn delete_char_backward(&mut self, cx: &mut Context<Self>) {
@@ -6341,6 +6361,12 @@ impl Editor {
             EvilSearchPrevious => self.evil_search_previous(cx),
             EvilPasteAfter => self.evil_paste(true, cx),
             EvilPasteBefore => self.evil_paste(false, cx),
+            EvilReplaceChar => {
+                // Arm replace-pending; the dispatcher captures the next key.
+                self.evil_replace_pending = true;
+                self.status = "r-".into();
+                cx.notify();
+            }
             EvilSetLinewise => self.evil_yank_linewise = true,
             EvilSetCharwise => self.evil_yank_linewise = false,
             EvilExCommand => {
@@ -7027,6 +7053,29 @@ impl Editor {
         // `C-x C-s`, `C-g`, `M-x`, … keep working. Platform (cmd) chords always
         // fall through to the OS / Emacs.
         //
+        // Vim `r`: while replace-pending is armed (by `evil-replace-char`), the
+        // very next keystroke is consumed as the literal replacement character —
+        // it must NOT reach the evil keymap below, or `r` followed by `x`/`d`/…
+        // would run that command instead of overwriting with the letter. A
+        // printable key overwrites the char under the cursor; any other chord
+        // (Escape, a Ctrl/Alt combo, …) cancels with no edit, matching vim.
+        if self.evil_replace_pending {
+            self.evil_replace_pending = false;
+            self.status = SharedString::default();
+            let is_text = ks.key_char.is_some()
+                && !ks.modifiers.control
+                && !ks.modifiers.alt
+                && !ks.modifiers.platform;
+            if is_text
+                && let Some(ch) = ks.key_char.clone()
+            {
+                self.evil_replace_char(&ch, cx);
+            }
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
         // Special read-only buffers (magit, *Help*, …) are skipped: they are
         // already fully modal via their own keymap, which binds plain keys like
         // `s` (stage) that evil-normal doesn't know about. Without this guard the
