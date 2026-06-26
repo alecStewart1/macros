@@ -410,11 +410,17 @@ mod tests {
         let _ = block_on(outcomes.next()).unwrap();
         engine.query(AnvilQuery::Signature("sig-fn".into()), "cb");
         let bound = block_on(outcomes.next()).unwrap();
-        assert_eq!(bound.value(), Some("sig-fn: bound (no documentation in the image)"));
+        assert_eq!(
+            bound.value(),
+            Some("sig-fn: bound (no documentation in the image)")
+        );
         // An unknown symbol is reported as unbound, not silently empty.
         engine.query(AnvilQuery::Signature("no-such-binding".into()), "cb");
         let unbound = block_on(outcomes.next()).unwrap();
-        assert_eq!(unbound.value(), Some("no-such-binding: not bound in the image"));
+        assert_eq!(
+            unbound.value(),
+            Some("no-such-binding: not bound in the image")
+        );
     }
 
     #[test]

@@ -4383,7 +4383,10 @@ impl Editor {
             // there in place — output flows into the buffer's own window without
             // yanking focus away from what the user is editing (e.g. a streaming
             // *compilation* pane). Mirrors `render_buffer`'s follow-the-buffer rule.
-            if self.panes.iter().any(|p| p.buffer == name && p.id != self.selected_pane)
+            if self
+                .panes
+                .iter()
+                .any(|p| p.buffer == name && p.id != self.selected_pane)
                 && self.inactive.iter().any(|d| d.name == name)
             {
                 let (new_end, line_count) = {
@@ -8271,10 +8274,7 @@ fn pretty_key(key: &str) -> String {
 /// `"C-x C-t"`) for the pending-chord echo. Each chord is run through
 /// [`pretty_key`] so the per-chord shift→uppercase rule still applies.
 fn pretty_sequence(seq: &str) -> String {
-    seq.split(' ')
-        .map(pretty_key)
-        .collect::<Vec<_>>()
-        .join(" ")
+    seq.split(' ').map(pretty_key).collect::<Vec<_>>().join(" ")
 }
 
 /// Render a [`Keystroke`] as a chord string like `"ctrl-g"` or `"alt-shift-,"`.
