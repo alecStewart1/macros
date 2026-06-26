@@ -28,7 +28,8 @@
     (string-append
      ";; ANVIL — independent Steel REPL.  RET evaluates the current line.\n"
      ";; C-c C-c interrupt a runaway eval · C-c C-k restart the image.\n\n"))
-  (set-major-mode "anvil-repl-mode"))
+  (set-major-mode "anvil-repl-mode")
+  (anvil-eldoc-enable))
 
 ;; Render a result line into the REPL buffer. Errors keep their prefix; values
 ;; are shown as `;; => …`.
@@ -63,6 +64,33 @@
 (define-key "anvil-repl-mode" "enter" "anvil-send-input")
 (define-key "anvil-repl-mode" "ctrl-c ctrl-c" "anvil-repl-interrupt")
 (define-key "anvil-repl-mode" "ctrl-c ctrl-k" "anvil-repl-reset")
+
+;; --- eldoc: live-image signatures in the echo area --------------------------
+;; The image's one-line signature for the symbol at point. This is the REPL's
+;; answer to LSP signature-help: the builtin Steel LSP analyses source with a
+;; vanilla compile-only engine, so it can't see anything you `define`d this
+;; session — the live image can. (anvil-signature is a Rust bridge; see
+;; AnvilSignature.) The result streams back to `anvil-on-eldoc`, which echoes it.
+(define (anvil-on-eldoc text) (message text))
+
+;; eldoc refresh on cursor movement. `post-command-hook` fires once per
+;; cursor-line change, only while registered, so this costs nothing until the
+;; REPL turns it on. Guarded to the REPL buffer (the hook is global).
+(define (anvil-eldoc-refresh)
+  (when (equal? (current-buffer) anvil-repl-buffer) (anvil-signature)))
+
+;; Register the hook once per session (idempotent — opening the REPL again
+;; won't stack duplicates).
+(define *anvil-eldoc-on* #f)
+(define (anvil-eldoc-enable)
+  (when (not *anvil-eldoc-on*)
+    (set! *anvil-eldoc-on* #t)
+    (add-hook "post-command-hook" "anvil-eldoc-refresh")))
+
+;; On-demand variants too: C-c C-s for the one-line signature, C-c C-d for the
+;; full image docstring (popped to *anvil*).
+(define-key "anvil-repl-mode" "ctrl-c ctrl-s" "anvil-signature")
+(define-key "anvil-repl-mode" "ctrl-c ctrl-d" "anvil-doc")
 
 ;; --- evaluate from a Steel source buffer into the image ---------------------
 ;; Echo the result in the minibuffer without stealing focus to the REPL buffer.
@@ -112,7 +140,8 @@
   (define-key mode "ctrl-c ctrl-l" "anvil-load-file")
   (define-key mode "ctrl-c ctrl-d" "anvil-doc")
   (define-key mode "ctrl-c ctrl-x" "anvil-macroexpand")
-  (define-key mode "ctrl-c ctrl-a" "anvil-apropos-prompt"))
+  (define-key mode "ctrl-c ctrl-a" "anvil-apropos-prompt")
+  (define-key mode "ctrl-c ctrl-s" "anvil-signature"))
 (anvil-bind-image "steel")
 (anvil-bind-image "macros-steel")
 
@@ -124,5 +153,6 @@
 (register-command "anvil-eval-defun")
 (register-command "anvil-load-file")
 (register-command "anvil-doc")
+(register-command "anvil-signature")
 (register-command "anvil-macroexpand")
 (register-command "anvil-apropos-prompt")

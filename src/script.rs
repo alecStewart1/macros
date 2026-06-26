@@ -533,6 +533,8 @@ pub enum EditorCommand {
     AnvilMacroexpand,
     /// List live image bindings whose name contains `pattern` (SLIME `apropos`).
     AnvilApropos(String),
+    /// Echo the image's one-line signature for the symbol at point — eldoc.
+    AnvilSignature,
     // Terminal emulator.
     /// Open a terminal running `program` (login shell if empty) in a new
     /// `term-mode` buffer named `name`, backed by terminal `id`.
@@ -1000,6 +1002,7 @@ impl ScriptEngine {
                 "anvil-doc",
                 "anvil-macroexpand",
                 "anvil-apropos",
+                "anvil-signature",
                 "run-with-timer",
                 "delete-region",
                 "kill-region-between",
@@ -2683,6 +2686,10 @@ fn build_engine(
         let q = queue.clone();
         engine.register_fn("anvil-apropos", move |pattern: String| {
             q.lock().unwrap().push(EditorCommand::AnvilApropos(pattern));
+        });
+        let q = queue.clone();
+        engine.register_fn("anvil-signature", move || {
+            q.lock().unwrap().push(EditorCommand::AnvilSignature);
         });
     }
     {
@@ -5879,6 +5886,18 @@ mod magit_tests {
                 .value
                 .as_deref(),
             Some("\"v\"")
+        );
+
+        // steel-mode.scm registers an interactive `steel-mode` command so a
+        // buffer can be switched into the Steel keymap by hand (M-x steel-mode),
+        // mirroring the editor-aware `macros-steel-mode` builtin.
+        assert_eq!(
+            engine
+                .eval(r#"(if (member "steel-mode" *interactive-commands*) "y" "n")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"y\"")
         );
 
         // save-excursion macro expands and evaluates (point/goto-char are stubbed

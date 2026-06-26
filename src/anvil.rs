@@ -67,6 +67,10 @@ pub enum AnvilQuery {
     Doc(String),
     /// Fully macroexpand a form (SLIME `C-c RET`).
     Macroexpand(String),
+    /// One-line signature/summary for an identifier, for eldoc (SLIME echo-area
+    /// hint). The first non-empty line of the image's docstring, which by Steel's
+    /// `@doc` convention leads with the call signature.
+    Signature(String),
 }
 
 enum AnvilJob {
@@ -288,6 +292,24 @@ fn run_query(engine: &mut Engine, kind: AnvilQuery) -> String {
                 Err(e) => format!(";; macroexpand error: {e}"),
             }
         }
+        AnvilQuery::Signature(name) => {
+            if let Some(doc) = engine.get_doc_for_identifier(&name) {
+                // eldoc wants one line: the docstring's first non-empty line.
+                doc.lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{name}: documented but empty"))
+            } else if engine
+                .readable_globals(0)
+                .iter()
+                .any(|sym| sym.resolve().to_string() == name)
+            {
+                format!("{name}: bound (no documentation in the image)")
+            } else {
+                format!("{name}: not bound in the image")
+            }
+        }
     }
 }
 
@@ -377,6 +399,22 @@ mod tests {
             "`when` should expand to an `if`, got {:?}",
             m.value()
         );
+    }
+
+    #[test]
+    fn signature_reports_live_image_bindings() {
+        let (engine, mut outcomes) = AnvilEngine::new();
+        // A session define is "bound" to eldoc even without a docstring — the
+        // whole point of querying the live image rather than static source.
+        engine.eval("(define (sig-fn a b) (+ a b))", "cb");
+        let _ = block_on(outcomes.next()).unwrap();
+        engine.query(AnvilQuery::Signature("sig-fn".into()), "cb");
+        let bound = block_on(outcomes.next()).unwrap();
+        assert_eq!(bound.value(), Some("sig-fn: bound (no documentation in the image)"));
+        // An unknown symbol is reported as unbound, not silently empty.
+        engine.query(AnvilQuery::Signature("no-such-binding".into()), "cb");
+        let unbound = block_on(outcomes.next()).unwrap();
+        assert_eq!(unbound.value(), Some("no-such-binding: not bound in the image"));
     }
 
     #[test]

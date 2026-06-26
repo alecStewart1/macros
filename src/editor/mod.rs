@@ -6177,8 +6177,22 @@ impl Editor {
             SetMajorMode(mode) => {
                 let mut modes = ModeStack::default();
                 modes.push(Mode::new("fundamental"));
-                modes.push(Mode::new(mode));
+                modes.push(Mode::new(&mode));
                 self.modes = modes;
+                // The ANVIL REPL displays Scheme, so highlight it in place — no
+                // need to swap to `macros-steel`, which would discard the
+                // anvil-repl keymap (RET → anvil-send-input) and kill the REPL.
+                //
+                // Drive the highlighter DIRECTLY rather than tagging the mode
+                // with a `language`: a mode language also feeds `active_language`,
+                // which the `fundamental` `enable-lsp` hook keys off — so it would
+                // attach the builtin Steel LSP and lint the transcript (the
+                // `;; =>` scrollback isn't a program). The REPL introspects its
+                // live image instead (completion, doc, apropos — see steel-anvil).
+                if mode == "anvil-repl-mode" {
+                    self.highlighter = Highlighter::scheme();
+                    self.parse_full();
+                }
                 cx.notify();
             }
             EnterMacrosSteel => {
@@ -6696,6 +6710,18 @@ impl Editor {
                 crate::anvil::AnvilQuery::Apropos(pattern),
                 "anvil-on-describe",
             ),
+            AnvilSignature => {
+                let text = self.buffer.full_text();
+                match symbol_at(&text, self.point()) {
+                    Some(sym) => self
+                        .anvil
+                        .query(crate::anvil::AnvilQuery::Signature(sym), "anvil-on-eldoc"),
+                    // No symbol under point: clear any stale eldoc. The auto
+                    // refresh (post-command-hook) calls this on every cursor-line
+                    // move, so silence — not "no symbol" — is the right response.
+                    None => self.echo("", cx),
+                }
+            }
             MakeTerminal {
                 id,
                 name,
