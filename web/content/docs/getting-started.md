@@ -55,6 +55,7 @@ If you enable modal editing, you move around in Normal state with <kbd>h</kbd> <
 ## Where to go next
 
 - **[Configuration](/docs/configuration)** — your `init.scm`, editor options, and config file locations.
+- **[Example config](/docs/example-config)** — a real, annotated `init.scm` (evil + `SPC` leader) to read and crib from.
 - **[Keybindings](/docs/keybindings)** — the full default keymap and how to rebind any key.
 - **[Getting help](/docs/getting-help)** — discover commands and bindings without leaving the editor.
 - **[Scripting with Steel](/docs/scripting)** — define your own commands, keymaps, and modes.

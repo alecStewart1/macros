@@ -5,7 +5,8 @@
       "name": "macros-web",
       "runtimeExecutable": "bun",
       "runtimeArgs": ["run", "dev"],
-      "port": 3001
+      "port": 4001,
+      "autoPort": false
     }
   ]
 }

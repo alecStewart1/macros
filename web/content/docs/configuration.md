@@ -135,3 +135,5 @@ This is vanilla `evil-mode` — plain Vim keys, no leader. See [Modal editing](/
 ```
 
 Reload by restarting, or evaluate expressions live with <kbd>M-:</kbd> (`eval-expression`). For the full API, see [Scripting with Steel](/docs/scripting).
+
+For a complete, lived-in config — `evil-mode`, a Spacemacs-style `SPC` leader, custom commands, and per-mode LSP/Org bindings, annotated piece by piece — see [Example config](/docs/example-config).
