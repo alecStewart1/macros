@@ -681,6 +681,9 @@ pub struct EditorSnapshot {
     pub diagnostics: Vec<String>,
     /// Pane (window) ids in cycle order, for `(window-list)`.
     pub windows: Vec<usize>,
+    /// Each pane's `(id, buffer-name)`, for `(get-buffer-window name)` — lets
+    /// Scheme find which window (if any) is already showing a buffer.
+    pub window_buffers: Vec<(usize, String)>,
     /// The selected pane (window) id, for `(selected-window)`.
     pub selected_window: usize,
     /// Whether the active buffer has a ready, opened LSP server, for
@@ -1967,6 +1970,19 @@ fn build_engine(
         // focused pane id. Read bridges over the snapshot.
         register_snapshot_read(&mut engine, point, "window-list", |s| s.windows.clone());
         register_snapshot_read(&mut engine, point, "selected-window", |s| s.selected_window);
+        {
+            // `(get-buffer-window name)` → the pane id displaying buffer `name`,
+            // or -1 if it isn't shown in any window (Emacs's `get-buffer-window`).
+            let shared = point.clone();
+            engine.register_fn("get-buffer-window", move |name: String| -> isize {
+                shared
+                    .load()
+                    .window_buffers
+                    .iter()
+                    .find(|(_, b)| *b == name)
+                    .map_or(-1, |(id, _)| *id as isize)
+            });
+        }
         // `(visible-lines)` → (first-line last-line) currently on screen.
         register_snapshot_read(&mut engine, point, "visible-lines", |s| {
             let (a, b) = s.visible_lines;
@@ -6814,6 +6830,40 @@ mod window_targeting {
         assert!(
             matches!(engine.eval(r#"(open-file-other-window "/tmp/x.rs")"#).unwrap().commands.as_slice(),
             [EditorCommand::OpenFileOtherWindow(p)] if p == "/tmp/x.rs")
+        );
+    }
+
+    #[test]
+    fn get_buffer_window_finds_pane_or_minus_one() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.set_snapshot(EditorSnapshot {
+            window_buffers: vec![(2, "main.rs".into()), (5, "*compilation*".into())],
+            ..Default::default()
+        });
+        // A shown buffer reports its pane id; an unshown one reports -1.
+        assert_eq!(
+            engine
+                .eval(r#"(get-buffer-window "*compilation*")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("5")
+        );
+        assert_eq!(
+            engine
+                .eval(r#"(get-buffer-window "main.rs")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            engine
+                .eval(r#"(get-buffer-window "*scratch*")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("-1")
         );
     }
 }

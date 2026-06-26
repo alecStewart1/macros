@@ -39,6 +39,20 @@
   (if (starts-with? file "/") file (path-join *compile-dir* file)))
 
 (define (compile) (read-string "Compile command: " "compile-run" *compile-last*))
+
+;; Show *compilation* in a half-height window across the bottom of the screen,
+;; leaving the cursor in the buffer you ran `compile` from. If the window is
+;; already up (a recompile), just refresh it in place — `render-buffer` follows
+;; the buffer to whichever window shows it, so focus never jumps to it.
+(define (compile-display initial)
+  (if (>= (get-buffer-window "*compilation*") 0)
+      (render-buffer "*compilation*" "compile-mode" initial '())
+      (let ((orig (selected-window)))
+        (split-window-below)   ; the current pane stays selected (the top half)
+        (other-window)         ; descend into the fresh bottom pane
+        (render-buffer "*compilation*" "compile-mode" initial '())
+        (select-window orig)))); hand focus back to the original buffer
+
 (define (compile-run cmd)
   (when (not (equal? (trim-end cmd) ""))
     (set! *compile-dir* (buffer-directory))
@@ -48,7 +62,7 @@
     (set! *compile-line* 2)
     (set! *compile-idx* -1)
     (set! *next-error-source* "compile")
-    (render-buffer "*compilation*" "compile-mode" (string-append "$ " cmd "\n\n") '())
+    (compile-display (string-append "$ " cmd "\n\n"))
     ;; `2>&1`: make-process captures stdout only, but compilers report on stderr.
     (make-process "/bin/sh" (list "-c" (string-append "cd " *compile-dir* " && " cmd " 2>&1"))
                   "compile-output" "compile-done")))

@@ -417,3 +417,28 @@
 (define (evil-collection-init)
   (for-each evil-collection-bind-mode *evil-collection-modes*))
 (evil-collection-init)
+
+;; Plain-text result buffers (compile / grep / occur output) are read-only text
+;; you read and scroll like a file, so they earn the full read-only motion set on
+;; top of the shared `j`/`k`: `h`/`l`, word motions, line ends, `G`, and half-page
+;; `C-d`/`C-u` (the editor routes those ctrl chords through this overlay too).
+;; `g g` is deliberately left off so a single `g` stays free for each mode's own
+;; key (compile's recompile, grep's refresh); jump to the top with `C-u` or `k`.
+;; Not folded into the shared `evil-collection-bind-mode` because the modal
+;; buffers (magit/dired) already bind several of these keys (`b`, `l`, `$`, `^`).
+(define (evil-collection-bind-readonly-motion mode)
+  (let ((km (string-append "evil-normal:" mode)))
+    (define-key km "h" "backward-char")
+    (define-key km "l" "forward-char")
+    (define-key km "w" "forward-word-start")
+    (define-key km "b" "backward-word")
+    (define-key km "e" "evil-forward-word-end")
+    (define-key km "0" "move-beginning-of-line")
+    (define-key km "$" "move-end-of-line")
+    (define-key km "^" "evil-first-non-blank")
+    (define-key km "shift-g" "evil-goto-last-line")
+    (define-key km "ctrl-d" "evil-scroll-down")
+    (define-key km "ctrl-u" "evil-scroll-up")))
+
+(for-each evil-collection-bind-readonly-motion
+          (list "compile-mode" "grep-mode" "occur-mode"))

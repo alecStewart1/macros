@@ -4276,9 +4276,12 @@ impl Editor {
 
     // --- Special (read-only, program-generated) buffers & transients ------
 
-    /// Render `text` into the read-only buffer `name` (major mode `mode`),
-    /// switching to it. If it's already the active buffer this refreshes in
-    /// place, preserving the point line (magit's revert-and-keep-position).
+    /// Render `text` into the read-only buffer `name` (major mode `mode`). If the
+    /// buffer is already on screen — the active buffer, or shown in another pane
+    /// (e.g. a *compilation* window) — it refreshes in place wherever it lives,
+    /// preserving the point line and NOT stealing focus (magit's revert-and-keep-
+    /// position). Only when it isn't shown anywhere does it switch the selected
+    /// window to it.
     fn render_buffer(
         &mut self,
         name: String,
@@ -4287,34 +4290,24 @@ impl Editor {
         line_faces: Vec<(usize, String)>,
         cx: &mut Context<Self>,
     ) {
+        // Shown somewhere (active pane or another window): refresh it in place via
+        // the quiet path, which never changes focus.
+        if self.panes.iter().any(|p| p.buffer == name) {
+            self.render_buffer_quiet(name, mode, text, line_faces, cx);
+            return;
+        }
         let faces: HashMap<usize, SharedString> = line_faces
             .into_iter()
             .map(|(line, face)| (line, SharedString::from(face)))
             .collect();
-        // Icons are attached after render via `set-line-icon`; a (re)render of
-        // this buffer starts with a clean slate.
-        if self.active_name == name {
-            self.line_icons.clear();
-        }
-
-        if self.active_name == name {
-            // Refresh in place, keeping point on the same line.
-            let line = self.buffer.line_index_at_byte(self.point());
-            self.buffer = Buffer::new(&text);
-            self.line_faces = faces;
-            self.lines.clear();
-            let last = self.buffer.line_count().saturating_sub(1);
-            let offset = self.buffer.line_range(line.min(last)).start;
-            self.move_to(offset, cx);
-        } else {
-            let current = self.snapshot_active();
-            // Replace any stale buffer of the same name, then install fresh.
-            self.inactive.retain(|d| d.name != name);
-            self.inactive.push(current);
-            self.install_active(make_special_document(name, &mode, &text));
-            self.line_faces = faces;
-            self.move_to(0, cx);
-        }
+        // Not shown anywhere: switch the selected window to a fresh buffer.
+        let current = self.snapshot_active();
+        // Replace any stale buffer of the same name, then install fresh.
+        self.inactive.retain(|d| d.name != name);
+        self.inactive.push(current);
+        self.install_active(make_special_document(name, &mode, &text));
+        self.line_faces = faces;
+        self.move_to(0, cx);
         self.modified = false;
         cx.notify();
     }
@@ -4386,6 +4379,33 @@ impl Editor {
     /// Unlike `render-buffer`, the target is a normal editable buffer.
     fn append_to_buffer(&mut self, name: String, text: String, cx: &mut Context<Self>) {
         if self.active_name != name {
+            // If the buffer is displayed in another (non-selected) window, append
+            // there in place — output flows into the buffer's own window without
+            // yanking focus away from what the user is editing (e.g. a streaming
+            // *compilation* pane). Mirrors `render_buffer`'s follow-the-buffer rule.
+            if self.panes.iter().any(|p| p.buffer == name && p.id != self.selected_pane)
+                && self.inactive.iter().any(|d| d.name == name)
+            {
+                let (new_end, line_count) = {
+                    let doc = self.inactive.iter_mut().find(|d| d.name == name).unwrap();
+                    let end = doc.buffer.len();
+                    doc.buffer.replace(end..end, &text);
+                    (doc.buffer.len(), doc.buffer.line_count())
+                };
+                let line_h = f32::from(self.line_height).max(1.0);
+                let content_h = line_count as f32 * line_h;
+                for pane in self.panes.iter_mut().filter(|p| p.buffer == name) {
+                    // Point at the tail so focusing the window lands on the latest
+                    // output; scroll the (unfocused) pane to keep that tail in view
+                    // as it streams, so the window doesn't look frozen.
+                    pane.point = new_end;
+                    if let Some((_, b)) = self.pane_bounds.iter().find(|(pid, _)| *pid == pane.id) {
+                        pane.scroll = px((content_h - f32::from(b.size.height)).max(0.0));
+                    }
+                }
+                cx.notify();
+                return;
+            }
             if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
                 self.activate(idx, cx);
             } else {
@@ -4861,6 +4881,26 @@ impl Editor {
                 let mut leaves = Vec::new();
                 layout_leaves(&self.layout, &mut leaves);
                 leaves
+            },
+            window_buffers: {
+                let mut leaves = Vec::new();
+                layout_leaves(&self.layout, &mut leaves);
+                leaves
+                    .into_iter()
+                    .map(|id| {
+                        // The selected pane shows the live active buffer; others
+                        // show whatever their `pane.buffer` records.
+                        let name = if id == self.selected_pane {
+                            self.active_name.clone()
+                        } else {
+                            self.panes
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map_or_else(|| self.active_name.clone(), |p| p.buffer.clone())
+                        };
+                        (id, name)
+                    })
+                    .collect()
             },
             selected_window: self.selected_pane,
             lsp_ready: self.active_lsp_ready(),
@@ -7151,6 +7191,32 @@ impl Editor {
                 .map(str::to_string)
         {
             self.run_script(&expr, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        // Under evil, a special buffer may bind a Ctrl/Alt chord in its
+        // `evil-normal:<major>` overlay (e.g. `C-d`/`C-u` half-page scroll in a
+        // *compilation* window). Consult that overlay FIRST for a lone chord; an
+        // unbound one falls through to the normal dispatch below, so C-x C-c,
+        // C-g, and any ctrl-bound mode keys still work. Additive: nothing binds
+        // ctrl chords here unless the evil layer opted in.
+        if self.special.is_some()
+            && self.evil_intercepts()
+            && (ks.modifiers.control || ks.modifiers.alt)
+            && !ks.modifiers.platform
+            && self.pending_keys.is_empty()
+            && let Some(km) = self
+                .modes
+                .names()
+                .last()
+                .map(|m| format!("evil-normal:{m}"))
+            && let Some(expr) = self
+                .keymap
+                .resolve_mode(&km, &chord_string(ks))
+                .map(str::to_string)
+        {
+            self.dispatch_recorded(&expr, cx);
             cx.stop_propagation();
             return;
         }
