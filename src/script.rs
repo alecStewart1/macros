@@ -5571,6 +5571,180 @@ mod magit_tests {
             Some("#false")
         );
     }
+
+    /// Structural diff view: funcname-context extraction and hunk grouping are
+    /// pure reshapings of the line hunks (no git, no AST), the grouped emitter
+    /// lays out sub-headings + foldable spans, and group lookup over
+    /// *magit-groups* distinguishes a heading (whole-fn staging) from a body
+    /// line (fold). The view itself is a live global, line view by default.
+    #[test]
+    fn structural_diff_grouping() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("startup script failed to load");
+        }
+        let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
+
+        // Context = text after the second "@@" on the header, trimmed; the rest
+        // of the hunk body is ignored (only the first line is read).
+        assert_eq!(
+            v(r#"(magit-hunk-context "@@ -10,7 +10,8 @@ fn parse_expr(&mut self) {\n+  x")"#),
+            "\"fn parse_expr(&mut self) {\""
+        );
+        // No funcname (top-of-file change, or a language with no pattern) → ""
+        // → displayed as "(top level)".
+        assert_eq!(v(r#"(magit-hunk-context "@@ -1,3 +1,4 @@\n+x")"#), "\"\"");
+        assert_eq!(v(r#"(magit-group-display "")"#), "\"(top level)\"");
+
+        // Consecutive same-context hunks merge; a new context starts a new group.
+        engine
+            .eval(
+                r#"(define gtest
+                     (magit-group-hunks
+                       (list "@@ -1,2 +1,2 @@ fn a\n x"
+                             "@@ -9,2 +9,2 @@ fn a\n y"
+                             "@@ -20,2 +20,2 @@ fn b\n z")))"#,
+            )
+            .unwrap();
+        assert_eq!(v("(length gtest)"), "2"); // two groups
+        assert_eq!(v("(car (car gtest))"), "\"fn a\""); // first context
+        assert_eq!(v("(length (cdr (car gtest)))"), "2"); // fn a holds 2 hunks
+        assert_eq!(v("(car (cadr gtest))"), "\"fn b\""); // second context
+
+        // Group lookup over a fixed *magit-groups*
+        // (heading body-start body-end type path context).
+        engine
+            .eval(r#"(set! *magit-groups* (list (list 5 6 9 "unstaged" "a.rs" "fn a")))"#)
+            .unwrap();
+        // A body line resolves to its group (for TAB fold)…
+        assert_eq!(v("(grp-context (magit-group-at-line 6))"), "\"fn a\"");
+        // …but only the heading line is a staging target (s/u/k on a whole fn).
+        assert_eq!(v("(grp-context (magit-group-on-heading 5))"), "\"fn a\"");
+        assert_eq!(v(r#"(if (magit-group-on-heading 6) "y" "n")"#), "\"n\"");
+
+        // End-to-end render path: drive the grouped emitter over a 3-hunk diff
+        // (fn a ×2, fn b ×1) on a reset of the render globals, then inspect what
+        // it laid down — group count, the fn-a sub-heading text and its foldable
+        // body span, and that every hunk is still registered for per-hunk ops.
+        engine
+            .eval(
+                r#"(begin
+                     (set! *magit-n* 0) (set! *magit-byte* 0)
+                     (set! *magit-lines* '()) (set! *magit-faces* '())
+                     (set! *magit-accents* '())
+                     (set! *magit-groups* '()) (set! *magit-hunks* '())
+                     (magit-emit-hunks-grouped "hdr"
+                       (list "@@ -1,2 +1,2 @@ fn a\n ctx\n+a1"
+                             "@@ -9,2 +9,2 @@ fn a\n ctx\n+a2"
+                             "@@ -20,2 +20,2 @@ fn b\n ctx\n+b1")
+                       "unstaged" "a.rs"))"#,
+            )
+            .unwrap();
+        assert_eq!(v("(length *magit-groups*)"), "2"); // fn a, fn b
+        assert_eq!(v("(length *magit-hunks*)"), "3"); // all hunks still per-hunk
+        // The fn-a group: heading at line 0, body lines 1..7 (heading + 2×3-line
+        // hunks), and the sub-heading text reads "(2 hunks)".
+        assert_eq!(v("(grp-context (magit-group-at-line 0))"), "\"fn a\"");
+        assert_eq!(v("(grp-body-start (magit-group-at-line 0))"), "1");
+        assert_eq!(v("(grp-body-end (magit-group-at-line 0))"), "7");
+        assert_eq!(
+            v("(list-ref (reverse *magit-lines*) 0)"),
+            "\"    fn a  (2 hunks)\""
+        );
+        // fn b starts where fn a's body ends.
+        assert_eq!(v("(grp-context (magit-group-at-line 7))"), "\"fn b\"");
+
+        // The view is a live global (so a toggle takes effect on the next
+        // render), line view by default.
+        assert_eq!(v("(magit-structural?)"), "#false");
+        engine
+            .eval(r#"(set! *magit-diff-view* "structural")"#)
+            .unwrap();
+        assert_eq!(v("(magit-structural?)"), "#true");
+    }
+
+    /// Within-line word diff: common prefix/suffix trimming locates the changed
+    /// middle of a modified line, and the emit path paints exactly that span on
+    /// the word faces (leaving the rest of the line on the dim body face). The
+    /// hunk TEXT is never touched — this is overlay-only.
+    #[test]
+    fn word_diff_highlights_changed_span() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("startup script failed to load");
+        }
+        let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
+
+        // Prefix/suffix counts (char-indexed).
+        assert_eq!(v(r#"(magit-common-prefix "abc" "abx")"#), "2");
+        assert_eq!(v(r#"(magit-common-suffix "abc" "xbc" 3)"#), "2");
+        // The changed middle of a vs b, as a (start . end) char range. Here only
+        // the "-" vs " " at index 8 differs → a one-char span.
+        assert_eq!(
+            v(r#"(car (magit-change-span "An Emacs-style" "An Emacs style"))"#),
+            "8"
+        );
+        assert_eq!(
+            v(r#"(cdr (magit-change-span "An Emacs-style" "An Emacs style"))"#),
+            "9"
+        );
+        // A wholly-shared side (pure insertion on the other) yields an empty span.
+        assert_eq!(v(r#"(car (magit-change-span "foo" "foobar"))"#), "3");
+        assert_eq!(v(r#"(cdr (magit-change-span "foo" "foobar"))"#), "3");
+
+        // End-to-end: emit a paired -/+ body on a byte-offset reset, then check
+        // the accents. Line 0 "-An Emacs-style, x" (18 bytes) sits at byte 0, so
+        // line 1 "+An Emacs style, x" starts at byte 19. The changed char is at
+        // content index 8 → byte 9 (removed) / byte 28 (added), one byte wide.
+        engine
+            .eval(
+                r#"(begin
+                     (set! *magit-n* 0) (set! *magit-byte* 0)
+                     (set! *magit-lines* '()) (set! *magit-accents* '())
+                     (set! *magit-faces* '())
+                     (magit-emit-hunk-body
+                       (list "-An Emacs-style, x" "+An Emacs style, x")))"#,
+            )
+            .unwrap();
+        // The whole modified line sits on the DIM base face (only the change is
+        // re-brightened below), so unchanged text recedes.
+        assert_eq!(
+            v(r#"(if (member (list 0 "magit-removed-dim") *magit-faces*) "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(if (member (list 1 "magit-added-dim") *magit-faces*) "y" "n")"#),
+            "\"y\""
+        );
+        // The removed "-" and the added " " are each painted on their word face…
+        assert_eq!(
+            v(r#"(if (member (list 9 10 "magit-word-removed") *magit-accents*) "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(if (member (list 28 29 "magit-word-added") *magit-accents*) "y" "n")"#),
+            "\"y\""
+        );
+
+        // Unbalanced blocks (2 removed, 1 added) are NOT paired — no word accent.
+        engine
+            .eval(
+                r#"(begin
+                     (set! *magit-n* 0) (set! *magit-byte* 0)
+                     (set! *magit-lines* '()) (set! *magit-accents* '())
+                     (magit-emit-hunk-body (list "-aaa" "-bbb" "+ccc")))"#,
+            )
+            .unwrap();
+        // "y" = no word-face accent was recorded for the unbalanced block.
+        assert_eq!(
+            v(
+                r#"(if (null? (filter (lambda (a) (or (equal? (nth a 2) "magit-word-removed")
+                                                    (equal? (nth a 2) "magit-word-added")))
+                                    *magit-accents*)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+    }
 }
 
 #[cfg(test)]

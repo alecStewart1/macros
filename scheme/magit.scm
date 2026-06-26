@@ -8,7 +8,10 @@
 ;; This mirrors how `magit-section` + `transient` sit on top of plain Emacs
 ;; primitives. Folding-by-regeneration: a refresh just rebuilds the buffer text.
 
-;; Faces (fall back to the default fg if a theme doesn't define them).
+;; Faces (fall back to the default fg if a theme doesn't define them). Every
+;; "magit-*" face below is user-overridable: redefine any of them in init.scm
+;; with (set-face "<name>" "#rrggbb") — init.scm loads after this file, so your
+;; color wins (themes can set them too, via load-theme).
 (set-face "magit-section-heading" "#a6e22e")
 (set-face "magit-file" "#e6db74")
 (set-face "magit-key" "#66d9ef")
@@ -17,9 +20,21 @@
 (set-face "magit-removed" "#b34a5f")  ; dim red body for -lines
 (set-face "magit-hunk" "#66d9ef")     ; @@ hunk headers
 (set-face "magit-context" "#888888")  ; unchanged context lines
+;; Structural-view sub-heading: the enclosing function/scope a run of hunks
+;; lives in (git's `@@ … @@ <context>` funcname). Dim teal so it reads as a
+;; child of the yellow file name without competing with the green section title.
+(set-face "magit-group" "#7fb0a8")
 ;; Sub-line overlay accents: the leading +/- marker, brighter than its line.
 (set-face "magit-add-marker" "#a6e22e")
 (set-face "magit-remove-marker" "#f92672")
+;; Within-line word diff (delta / diff-highlight style). A MODIFIED line reads in
+;; three tiers: a dim base for the unchanged text, the bright marker, and the
+;; bright changed span. (A fully added/removed line — no pairing — keeps the
+;; medium body face above instead, so brand-new lines still read clearly.)
+(set-face "magit-added-dim" "#4e5e34")    ; unchanged text on a modified +line
+(set-face "magit-removed-dim" "#6e4651")  ; unchanged text on a modified -line
+(set-face "magit-word-added" "#cdee69")   ; the changed span on a +line
+(set-face "magit-word-removed" "#fc6a8a") ; the changed span on a -line
 ;; File-status labels in front of changed files (Emacs magit's "modified",
 ;; "new file", "deleted", …). Each label is overlay-colored by its status.
 (set-face "magit-label-modified" "#e2c08d")
@@ -291,6 +306,12 @@
                                ; file in Unstaged doesn't also expand its Staged
                                ; counterpart when it moves groups.
 (define *magit-hunks* '())     ; (start-line end-line file-header hunk-text type path)
+;; Structural view (see "structural grouping" below): runs of hunks grouped by
+;; their enclosing function. (heading-line body-start body-end type path context).
+(define *magit-groups* '())
+;; Groups the user has collapsed (default is expanded so a freshly-expanded file
+;; reads like the line view). Keyed (type path context), persists across refresh.
+(define *magit-collapsed-groups* '())
 (define *magit-commit-lines* '()) ; (line . ref) — commit/stash lines RET can show
 (define *magit-show-history* #f)  ; stashes/unpushed/unpulled — off = fewer git calls (recent commits always show)
 
@@ -353,6 +374,103 @@
       (set! *magit-accents*
             (cons (list byte (+ byte 1) (magit-diff-marker-face l)) *magit-accents*)))))
 
+;; --- within-line word diff --------------------------------------------------
+;; A `-`/`+` line pair usually differs in only part of the line. Highlight just
+;; that part: trim the shared head and tail, paint the middle on a brighter face.
+;; This is git's diff-highlight heuristic — it never changes the hunk TEXT (so
+;; staging is unaffected), only adds overlay accents on the changed byte span.
+;; Pairing happens only when a run of N removed lines is immediately followed by
+;; N added lines (same as diff-highlight); otherwise lines stay whole-line lit.
+
+;; Count of leading chars `a` and `b` share (char-indexed, UTF-8 safe).
+(define (magit-common-prefix a b)
+  (let ((la (string-length a)) (lb (string-length b)))
+    (let loop ((i 0))
+      (if (and (< i la) (< i lb)
+               (equal? (substring a i (+ i 1)) (substring b i (+ i 1))))
+          (loop (+ i 1))
+          i))))
+;; Count of trailing chars shared, capped at `limit` so head and tail can't
+;; overlap (e.g. a one-sided insertion).
+(define (magit-common-suffix a b limit)
+  (let ((la (string-length a)) (lb (string-length b)))
+    (let loop ((i 0))
+      (if (and (< i limit)
+               (equal? (substring a (- la i 1) (- la i))
+                       (substring b (- lb i 1) (- lb i))))
+          (loop (+ i 1))
+          i))))
+;; The changed middle of `a` relative to `b`, as a (start . end) CHAR range on
+;; `a`. Empty (start = end) when `a`'s content is wholly shared (pure insertion
+;; on the other side) — the caller then paints nothing.
+(define (magit-change-span a b)
+  (let* ((la (string-length a)) (lb (string-length b))
+         (p (magit-common-prefix a b))
+         (s (magit-common-suffix a b (min (- la p) (- lb p)))))
+    (cons p (- la s))))
+
+;; Emit diff line `l`, accenting its +/- marker AND its changed span vs the
+;; paired line `other`. `removed?` selects the removed vs added word face. The
+;; marker is one ASCII byte, so content starts at byte+1; the changed span's
+;; byte offsets come from utf8-length of the content prefix (UTF-8 safe).
+(define (magit-emit-intra-line l other removed?)
+  (let ((byte *magit-byte*))
+    ;; Dim the whole modified line; the marker and changed span are re-brightened
+    ;; by the overlays below. (Unpaired add/remove lines never reach here, so
+    ;; they keep the medium body face from magit-emit-diff-line.)
+    (magit-emit l (if removed? "magit-removed-dim" "magit-added-dim") #f #f)
+    (set! *magit-accents*
+          (cons (list byte (+ byte 1) (magit-diff-marker-face l)) *magit-accents*))
+    (let* ((c1 (substring l 1 (string-length l)))
+           (c2 (substring other 1 (string-length other)))
+           (span (magit-change-span c1 c2)))
+      (when (> (cdr span) (car span))
+        (let ((bs (+ byte 1 (utf8-length (substring c1 0 (car span)))))
+              (be (+ byte 1 (utf8-length (substring c1 0 (cdr span))))))
+          (set! *magit-accents*
+                (cons (list bs be (if removed? "magit-word-removed" "magit-word-added"))
+                      *magit-accents*)))))))
+
+;; The maximal leading run of `lines` whose members start with `prefix`, as
+;; (run . rest).
+(define (magit-split-run lines prefix)
+  (let loop ((ls lines) (run '()))
+    (if (and (not (null? ls)) (starts-with? (car ls) prefix))
+        (loop (cdr ls) (cons (car ls) run))
+        (cons (reverse run) ls))))
+
+;; Emit a paired removed-run + added-run: the removed lines first (in file
+;; order), each accented against its positional partner, then the added lines.
+(define (magit-emit-paired-lines rem add)
+  (let loop ((rs rem) (as add))
+    (when (not (null? rs))
+      (magit-emit-intra-line (car rs) (car as) #t)
+      (loop (cdr rs) (cdr as))))
+  (let loop ((rs rem) (as add))
+    (when (not (null? as))
+      (magit-emit-intra-line (car as) (car rs) #f)
+      (loop (cdr rs) (cdr as)))))
+
+;; Emit a hunk body (the lines after the @@ header) with within-line word diff:
+;; an N-removed / N-added block is paired and intra-highlighted; everything else
+;; (context, the @@ line, unbalanced blocks) is emitted whole-line as before.
+(define (magit-emit-hunk-body lines)
+  (cond
+    ((null? lines) #t)
+    ((starts-with? (car lines) "-")
+     (let* ((rsplit (magit-split-run lines "-"))
+            (rem (car rsplit)) (after-rem (cdr rsplit))
+            (asplit (magit-split-run after-rem "+"))
+            (add (car asplit)) (after-add (cdr asplit)))
+       (if (and (not (null? add)) (= (length rem) (length add)))
+           (begin (magit-emit-paired-lines rem add)
+                  (magit-emit-hunk-body after-add))
+           (begin (for-each magit-emit-diff-line rem)
+                  (magit-emit-hunk-body after-rem)))))
+    (else
+     (magit-emit-diff-line (car lines))
+     (magit-emit-hunk-body (cdr lines)))))
+
 ;; Split a `git diff` into (header . hunks): the file header (lines before the
 ;; first @@) and each @@-hunk as its own string. The header + one hunk form a
 ;; valid patch for `git apply` (hunk-level staging).
@@ -411,8 +529,94 @@
         ((equal? (car (car dmap)) path) (cadr (car dmap)))
         (else (diff-map-get (cdr dmap) path))))
 
+;; --- structural grouping ----------------------------------------------------
+;; `git diff` already names the enclosing function on every hunk header
+;; ("@@ -a,b +c,d @@ fn parse_expr"). The structural view groups a file's hunks
+;; by that context under a collapsible sub-heading, so review steps function by
+;; function (fold a reviewed fn, stage a whole fn) instead of hunk by hunk.
+;; It's a pure reshaping of the SAME line hunks — no AST, no extra git. Toggle
+;; with `v`. Live state is a plain global (like *magit-show-history*) so a toggle
+;; takes effect on the very next render; set it in init.scm to change the default:
+;;   (set! *magit-diff-view* "structural")
+(define *magit-diff-view* "line")  ; "line" | "structural"
+(define (magit-structural?) (equal? *magit-diff-view* "structural"))
+
+;; The funcname context of a hunk: everything after the second "@@" on its
+;; header line, trimmed. "" when git emitted no context (top-of-file changes, or
+;; a language with no funcname pattern) — those collapse into one "(top level)".
+(define (magit-ltrim s)
+  (if (and (> (string-length s) 0) (equal? (substring s 0 1) " "))
+      (magit-ltrim (substring s 1 (string-length s)))
+      s))
+(define (magit-hunk-context hunk-text)
+  (let ((parts (split-many (car (split-many hunk-text "\n")) "@@")))
+    (if (>= (length parts) 3)
+        (magit-ltrim (trim-end (string-join (cdr (cdr parts)) "@@")))
+        "")))
+(define (magit-group-display ctx) (if (equal? ctx "") "(top level)" ctx))
+
+;; Partition hunks into (context hunk…) groups, merging only CONSECUTIVE hunks
+;; that share a context (a function occupies a contiguous span in a diff, so its
+;; hunks are always adjacent). Preserves file order.
+(define (magit-group-hunks hunks)
+  (let loop ((hs hunks) (ctx #f) (cur '()) (acc '()))
+    (cond
+      ((null? hs)
+       (reverse (if (null? cur) acc (cons (cons ctx (reverse cur)) acc))))
+      (else
+       (let ((c (magit-hunk-context (car hs))))
+         (if (and ctx (equal? c ctx))
+             (loop (cdr hs) ctx (cons (car hs) cur) acc)
+             (loop (cdr hs) c (list (car hs))
+                   (if (null? cur) acc (cons (cons ctx (reverse cur)) acc)))))))))
+
+;; Emit one hunk's lines and record it in *magit-hunks* (shared by both views,
+;; so per-hunk `s`/`u`/`k` and partial-region staging work identically). The @@
+;; header is emitted plainly; the body goes through the word-diff emitter. Line
+;; count is unchanged (one emit per line), so hunk/group spans stay correct.
+(define (magit-emit-one-hunk header hunk type path)
+  (let ((hstart *magit-n*)
+        (lines (split-many hunk "\n")))
+    (magit-emit-diff-line (car lines))
+    (magit-emit-hunk-body (cdr lines))
+    (set! *magit-hunks*
+          (cons (list hstart *magit-n* header hunk type path) *magit-hunks*))))
+
+;; Line view: hunks back to back, exactly as before the structural view existed.
+(define (magit-emit-hunks-flat header hunks type path)
+  (for-each (lambda (hunk) (magit-emit-one-hunk header hunk type path)) hunks))
+
+;; A group sub-heading "    <context>  (N hunks)", indented under the file name.
+(define (magit-emit-group-heading ctx n)
+  (magit-emit (string-append "    " (magit-group-display ctx)
+                             "  (" (int->string n) (if (= n 1) " hunk)" " hunks)"))
+              "magit-group" #f #f))
+
+;; Structural view: a sub-heading per funcname group, its hunks foldable as a
+;; unit. Records each group's line span in *magit-groups* for fold/stage/nav.
+(define (magit-emit-hunks-grouped header hunks type path)
+  (for-each
+    (lambda (grp)
+      (let ((ctx (car grp)) (ghunks (cdr grp)) (ghead *magit-n*))
+        (magit-emit-group-heading ctx (length ghunks))
+        (let ((gbody *magit-n*))
+          (for-each (lambda (hunk) (magit-emit-one-hunk header hunk type path)) ghunks)
+          (set! *magit-groups*
+                (cons (list ghead gbody *magit-n* type path ctx) *magit-groups*)))))
+    (magit-group-hunks hunks)))
+
+;; Group accessors over (heading body-start body-end type path context).
+(define (grp-heading g) (nth g 0))
+(define (grp-body-start g) (nth g 1))
+(define (grp-body-end g) (nth g 2))
+(define (grp-type g) (nth g 3))
+(define (grp-path g) (nth g 4))
+(define (grp-context g) (nth g 5))
+(define (grp-key g) (list (grp-type g) (grp-path g) (grp-context g)))
+
 ;; Emit a file heading + its diff, one hunk at a time; record each hunk's line
-;; range + the patch material so `s`/`u`/`k` can act on a single hunk.
+;; range + the patch material so `s`/`u`/`k` can act on a single hunk. In the
+;; structural view the hunks are first grouped by enclosing function.
 ;; `entry` is (label path); `diff-text` is this file's slice of the section's
 ;; bulk diff (see build-diff-map).
 (define (magit-emit-diff entry type diff-text)
@@ -424,12 +628,9 @@
          (hunks (cdr parsed)))
     (magit-emit-file-heading label path type)
     (let ((body-start *magit-n*))
-      (for-each (lambda (hunk)
-                  (let ((hstart *magit-n*))
-                    (for-each magit-emit-diff-line (split-many hunk "\n"))
-                    (set! *magit-hunks*
-                          (cons (list hstart *magit-n* header hunk type path) *magit-hunks*))))
-                hunks)
+      (if (magit-structural?)
+          (magit-emit-hunks-grouped header hunks type path)
+          (magit-emit-hunks-flat header hunks type path))
       (set! *magit-sections*
             (cons (list heading path type body-start *magit-n*) *magit-sections*)))))
 
@@ -521,7 +722,16 @@
               (when (and (not (member (sec-key sec) *magit-expanded*))
                          (> (sec-body-end sec) (sec-body-start sec)))
                 (fold-lines (sec-body-start sec) (sec-body-end sec))))
-            *magit-sections*))
+            *magit-sections*)
+  ;; Then fold each collapsed group — but only inside an expanded file section,
+  ;; since a collapsed file already hides its groups (and double-folding an
+  ;; already-hidden range is needless).
+  (for-each (lambda (g)
+              (when (and (member (grp-key g) *magit-collapsed-groups*)
+                         (member (cons (grp-type g) (grp-path g)) *magit-expanded*)
+                         (> (grp-body-end g) (grp-body-start g)))
+                (fold-lines (grp-body-start g) (grp-body-end g))))
+            *magit-groups*))
 
 ;; --- point restore across refresh -------------------------------------------
 ;; A refresh rebuilds the buffer. Two cases:
@@ -567,6 +777,7 @@
     (set! *magit-accents* '())
     (set! *magit-sections* '())
     (set! *magit-hunks* '())
+    (set! *magit-groups* '())
     (set! *magit-commit-lines* '())
     ;; ONE status scan (`--branch`) feeds the working-tree sections AND the
     ;; branch/upstream/ahead-behind header — no separate rev-parse/rev-list calls.
@@ -683,6 +894,37 @@
     (cond ((null? hs) #f)
           ((let ((h (car hs))) (and (>= line (nth h 0)) (< line (nth h 1)))) (car hs))
           (else (loop (cdr hs))))))
+
+;; The group (heading or body lines) containing `line`, or #f. Structural view
+;; only — *magit-groups* is empty in the line view, so this is a no-op there.
+(define (magit-group-at-line line)
+  (let loop ((gs *magit-groups*))
+    (cond ((null? gs) #f)
+          ((let ((g (car gs)))
+             (or (= (grp-heading g) line)
+                 (and (>= line (grp-body-start g)) (< line (grp-body-end g)))))
+           (car gs))
+          (else (loop (cdr gs))))))
+;; The group whose heading is exactly `line`, or #f — used by `s`/`u`/`k` to act
+;; on a whole function when point sits on its sub-heading.
+(define (magit-group-on-heading line)
+  (let loop ((gs *magit-groups*))
+    (cond ((null? gs) #f)
+          ((= (grp-heading (car gs)) line) (car gs))
+          (else (loop (cdr gs))))))
+;; The hunks belonging to group `g`, in file order, as a single applyable patch
+;; (file header + each hunk body). #f when the group is somehow empty.
+(define (magit-group-hunks-of g)
+  (reverse
+    (filter (lambda (h) (and (>= (nth h 0) (grp-body-start g))
+                             (< (nth h 0) (grp-body-end g))))
+            *magit-hunks*)))
+(define (magit-group-patch g)
+  (let ((hs (magit-group-hunks-of g)))
+    (if (null? hs)
+        #f
+        (string-append (nth (car hs) 2) "\n"
+                       (string-join (map (lambda (h) (nth h 3)) hs) "\n") "\n"))))
 
 ;; --- error surfacing --------------------------------------------------------
 ;; Run git, refresh, echo `msg` on success — or pop the stderr into a buffer.
@@ -806,13 +1048,18 @@
               (if patch
                   (when (magit-apply-patch-text patch #t #f) (message "Staged region"))
                   (message "Nothing to stage in region")))))
-      (let ((h (magit-hunk-at-line (buffer-line))))
-        (if h
-            (when (magit-apply-hunk h #t #f) (message "Staged hunk"))
-            (let ((cur (magit-current)))
-              (if cur
-                  (magit-do (list "add" "--" (magit-newpath (cadr cur))) "Staged file")
-                  (message "Nothing to stage here")))))))
+      (let ((h (magit-hunk-at-line (buffer-line)))
+            (g (and (magit-structural?) (magit-group-on-heading (buffer-line)))))
+        (cond
+          (h (when (magit-apply-hunk h #t #f) (message "Staged hunk")))
+          (g (let ((patch (magit-group-patch g)))
+               (when (and patch (magit-apply-patch-text patch #t #f))
+                 (message (string-append "Staged " (magit-group-display (grp-context g)))))))
+          (else
+           (let ((cur (magit-current)))
+             (if cur
+                 (magit-do (list "add" "--" (magit-newpath (cadr cur))) "Staged file")
+                 (message "Nothing to stage here"))))))))
 
 ;; u: unstage the region (multiple files and/or selected lines), else hunk/file at point.
 (define (magit-unstage)
@@ -827,14 +1074,19 @@
               (if patch
                   (when (magit-apply-patch-text patch #t #t) (message "Unstaged region"))
                   (message "Nothing to unstage in region")))))
-      (let ((h (magit-hunk-at-line (buffer-line))))
-        (if h
-            (when (magit-apply-hunk h #t #t) (message "Unstaged hunk"))
-            (let ((cur (magit-current)))
-              (if cur
-                  (magit-do (append (list "reset" "-q" "HEAD" "--") (magit-pathspecs (cadr cur)))
-                            "Unstaged file")
-                  (message "Nothing to unstage here")))))))
+      (let ((h (magit-hunk-at-line (buffer-line)))
+            (g (and (magit-structural?) (magit-group-on-heading (buffer-line)))))
+        (cond
+          (h (when (magit-apply-hunk h #t #t) (message "Unstaged hunk")))
+          (g (let ((patch (magit-group-patch g)))
+               (when (and patch (magit-apply-patch-text patch #t #t))
+                 (message (string-append "Unstaged " (magit-group-display (grp-context g)))))))
+          (else
+           (let ((cur (magit-current)))
+             (if cur
+                 (magit-do (append (list "reset" "-q" "HEAD" "--") (magit-pathspecs (cadr cur)))
+                           "Unstaged file")
+                 (message "Nothing to unstage here"))))))))
 
 (define (magit-stage-all)   (magit-do (list "add" "-A") "Staged all changes"))
 (define (magit-unstage-all)
@@ -866,11 +1118,19 @@
                   (message "Nothing to discard in region")
                   (magit-confirm "Discard region?"
                     (lambda () (when (magit-apply-patch-text patch #f #t) (message "Discarded region"))))))))
-      (let ((h (magit-hunk-at-line (buffer-line))))
-        (if h
-            (magit-confirm "Discard hunk?"
-              (lambda () (when (magit-apply-hunk h #f #t) (message "Discarded hunk"))))
-            (let ((cur (magit-current)))
+      (let ((h (magit-hunk-at-line (buffer-line)))
+            (g (and (magit-structural?) (magit-group-on-heading (buffer-line)))))
+        (cond
+          (h (magit-confirm "Discard hunk?"
+               (lambda () (when (magit-apply-hunk h #f #t) (message "Discarded hunk")))))
+          (g (let ((patch (magit-group-patch g)))
+               (when patch
+                 (magit-confirm (string-append "Discard "
+                                               (magit-group-display (grp-context g)) "?")
+                   (lambda () (when (magit-apply-patch-text patch #f #t)
+                                (message "Discarded group")))))))
+          (else
+           (let ((cur (magit-current)))
               (if (not cur)
                   (message "Nothing to discard here")
                   (let ((type (car cur)) (path (cadr cur)))
@@ -880,7 +1140,7 @@
                             (magit-do (list "clean" "-f" "--" (magit-newpath path))
                                       (string-append "Removed " path))
                             (magit-do (append (list "checkout" "HEAD" "--") (magit-pathspecs path))
-                                      (string-append "Discarded " path))))))))))))
+                                      (string-append "Discarded " path)))))))))))))
 
 ;; --- commit (c): an editable *git-commit* buffer ----------------------------
 ;; Switch rows toggle commit flags; action rows read them. "Amend HEAD" reuses
@@ -1225,14 +1485,24 @@
 ;; just re-applies folds/accents to the EXISTING buffer — no git, no re-render
 ;; (the text and section data are unchanged, only which sections are folded).
 (define (magit-toggle-fold)
-  (let ((s (magit-section-at-line (buffer-line))))
-    (when s
-      (let ((key (sec-key s)))
-        (set! *magit-expanded*
-              (if (member key *magit-expanded*)
-                  (filter (lambda (k) (not (equal? k key))) *magit-expanded*)
-                  (cons key *magit-expanded*)))
-        (magit-apply-overlays)))))
+  (let ((g (and (magit-structural?) (magit-group-at-line (buffer-line)))))
+    (if g
+        ;; Structural view, point in a function group → fold just that function.
+        (let ((key (grp-key g)))
+          (set! *magit-collapsed-groups*
+                (if (member key *magit-collapsed-groups*)
+                    (filter (lambda (k) (not (equal? k key))) *magit-collapsed-groups*)
+                    (cons key *magit-collapsed-groups*)))
+          (magit-apply-overlays))
+        ;; Otherwise (file heading, or line view) → fold the whole file section.
+        (let ((s (magit-section-at-line (buffer-line))))
+          (when s
+            (let ((key (sec-key s)))
+              (set! *magit-expanded*
+                    (if (member key *magit-expanded*)
+                        (filter (lambda (k) (not (equal? k key))) *magit-expanded*)
+                        (cons key *magit-expanded*)))
+              (magit-apply-overlays)))))))
 
 ;; The new-file starting line ("c" in "@@ -a,b +c,d @@") of a hunk header.
 (define (magit-hunk-new-start header)
@@ -1537,7 +1807,11 @@
 ;; --- section navigation + visibility cycling --------------------------------
 ;; Navigation targets: every file-section heading + every commit/stash line.
 (define (magit-nav-lines)
-  (append (map sec-heading *magit-sections*) (map car *magit-commit-lines*)))
+  (append (map sec-heading *magit-sections*)
+          ;; In the structural view, function sub-headings are nav stops too, so
+          ;; M-n / M-p step function by function within a file.
+          (if (magit-structural?) (map grp-heading *magit-groups*) '())
+          (map car *magit-commit-lines*)))
 (define (magit-next-section)
   (let loop ((hs (magit-nav-lines)) (cur (buffer-line)) (best #f))
     (cond ((null? hs) (when best (goto-line best)))
@@ -1555,6 +1829,13 @@
   (set! *magit-expanded*
         (if (null? *magit-expanded*) (map sec-key *magit-sections*) '()))
   (magit-apply-overlays))
+
+;; v: switch between the line view and the structural (group-by-function) view.
+;; A full re-render is needed — the two lay the diff out differently.
+(define (magit-toggle-view)
+  (set! *magit-diff-view* (if (magit-structural?) "line" "structural"))
+  (magit-refresh)
+  (message (if (magit-structural?) "Structural diff view" "Line diff view")))
 
 ;; --- process buffer ($) + opportunistic refresh -----------------------------
 (define (magit-process-buffer)
@@ -1657,6 +1938,7 @@
 (define-key "magit-status" "shift-h" "magit-toggle-history")
 (define-key "magit-status" "?" "magit-dispatch")
 (define-key "magit-status" "g" "magit-refresh")
+(define-key "magit-status" "v" "magit-toggle-view")
 (define-key "magit-status" "n" "next-line")
 (define-key "magit-status" "p" "previous-line")
 (define-key "magit-status" "alt-n" "magit-next-section")
@@ -1704,3 +1986,4 @@
 (register-command "magit-blame-line-toggle")
 (register-command "magit-blame-show")
 (register-command "magit-blame-copy")
+(register-command "magit-toggle-view")
