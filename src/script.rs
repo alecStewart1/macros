@@ -2023,9 +2023,10 @@ fn build_engine(
         // dired live-refresh). Replace semantics: pass `'()` to drop them.
         let q = queue.clone();
         engine.register_fn("watch-directories", move |owner: String, dirs: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::WatchDirectories(owner, steel_string_list(&dirs)));
+            q.lock().unwrap().push(EditorCommand::WatchDirectories(
+                owner,
+                steel_string_list(&dirs),
+            ));
         });
     }
     {
@@ -3347,8 +3348,10 @@ mod tests {
             .expect("evil.scm")
             .commands;
         let bound = |mode: &str, chord: &str, to: &str| {
-            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
-                if m == mode && s == chord && cmd == to))
+            cmds.iter().any(|c| {
+                matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                if m == mode && s == chord && cmd == to)
+            })
         };
         // C-v must enter block-wise visual — otherwise it falls through to the
         // Emacs `ctrl-v` = scroll-up and the cursor jumps a page toward the bottom.
@@ -3373,8 +3376,10 @@ mod tests {
             .expect("evil.scm")
             .commands;
         let bound = |mode: &str, chord: &str, to: &str| {
-            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
-                if m == mode && s == chord && cmd == to))
+            cmds.iter().any(|c| {
+                matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                if m == mode && s == chord && cmd == to)
+            })
         };
         // Single-key edits: `x` must delete INTO the register (not the plain
         // `delete-char`), and `r`/`s`/`S`/`~`/`J` must be bound.
@@ -3427,14 +3432,17 @@ mod tests {
             .unwrap()
             .commands;
         assert!(
-            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
                 if m == "evil-normal" && s == "space n n" && cmd == "next-buffer")),
             "default leader should expand to 'space n n': {cmds:?}"
         );
 
         // Changing the leader moves subsequent bindings to the new prefix; a
         // per-mode leader binding scopes to "evil-normal:<mode>".
-        engine.eval(r#"(evil-set-leader "comma")"#).expect("set leader");
+        engine
+            .eval(r#"(evil-set-leader "comma")"#)
+            .expect("set leader");
         let cmds = engine
             .eval(
                 r#"(evil-leader-set-for-modes '("rust")
@@ -3443,7 +3451,8 @@ mod tests {
             .unwrap()
             .commands;
         assert!(
-            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
                 if m == "evil-normal:rust" && s == "comma g r" && cmd == "lsp-rename")),
             "reconfigured leader should expand to 'comma g r' in rust map: {cmds:?}"
         );
@@ -3467,7 +3476,8 @@ mod tests {
             ("evil-normal:dired-mode", "k", "previous-line"),
         ] {
             assert!(
-                cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
+                cmds.iter()
+                    .any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
                     if m == mode && s == key && x == cmd)),
                 "evil-collection-init should bind {key}->{cmd} in {mode}"
             );
@@ -3484,7 +3494,8 @@ mod tests {
             .unwrap()
             .commands;
         assert!(
-            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
                 if m == "evil-normal:my-mode" && s == "j" && x == "next-line")),
             "re-running evil-collection-init should cover newly added modes"
         );
@@ -3585,19 +3596,35 @@ mod tests {
         ));
         // The block operators: insert/append down a column, delete, yank.
         assert!(matches!(
-            engine.eval("(evil-block-insert)").unwrap().commands.as_slice(),
+            engine
+                .eval("(evil-block-insert)")
+                .unwrap()
+                .commands
+                .as_slice(),
             [EditorCommand::EvilBlockInsert]
         ));
         assert!(matches!(
-            engine.eval("(evil-block-append)").unwrap().commands.as_slice(),
+            engine
+                .eval("(evil-block-append)")
+                .unwrap()
+                .commands
+                .as_slice(),
             [EditorCommand::EvilBlockAppend]
         ));
         assert!(matches!(
-            engine.eval("(evil-block-delete)").unwrap().commands.as_slice(),
+            engine
+                .eval("(evil-block-delete)")
+                .unwrap()
+                .commands
+                .as_slice(),
             [EditorCommand::EvilBlockDelete]
         ));
         assert!(matches!(
-            engine.eval("(evil-block-yank)").unwrap().commands.as_slice(),
+            engine
+                .eval("(evil-block-yank)")
+                .unwrap()
+                .commands
+                .as_slice(),
             [EditorCommand::EvilBlockYank]
         ));
     }
@@ -3635,11 +3662,19 @@ mod tests {
         ));
         // Blockwise insert (`I`) and append (`A`) over the selection.
         assert!(matches!(
-            engine.eval("(evil-visual-insert)").unwrap().commands.as_slice(),
+            engine
+                .eval("(evil-visual-insert)")
+                .unwrap()
+                .commands
+                .as_slice(),
             [EditorCommand::EvilVisualInsert]
         ));
         assert!(matches!(
-            engine.eval("(evil-visual-append)").unwrap().commands.as_slice(),
+            engine
+                .eval("(evil-visual-append)")
+                .unwrap()
+                .commands
+                .as_slice(),
             [EditorCommand::EvilVisualAppend]
         ));
         // The line-wise delete/yank pattern from evil.scm: kill, mark line-wise,
@@ -6832,8 +6867,14 @@ mod fs_watch_lib {
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
         // The hook handlers exist and are wired to `directory-changed-hook`.
-        assert_eq!(v("(if (procedure? treemacs-on-fs-change) \"y\" \"n\")"), "\"y\"");
-        assert_eq!(v("(if (procedure? dired-on-fs-change) \"y\" \"n\")"), "\"y\"");
+        assert_eq!(
+            v("(if (procedure? treemacs-on-fs-change) \"y\" \"n\")"),
+            "\"y\""
+        );
+        assert_eq!(
+            v("(if (procedure? dired-on-fs-change) \"y\" \"n\")"),
+            "\"y\""
+        );
 
         // `(watch-directories owner dirs)` carries the owner + the full dir list.
         let cmds = engine
@@ -6889,8 +6930,9 @@ mod fs_watch_lib {
             .unwrap()
             .commands;
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*treemacs*")),
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*treemacs*")
+            ),
             "interactive treemacs refresh keeps the switching render-buffer"
         );
     }

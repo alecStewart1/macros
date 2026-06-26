@@ -2297,7 +2297,9 @@ impl Editor {
     /// Block-selection rectangle for pane `id`, for the renderer (selected pane
     /// only; `None` otherwise or when not in block-wise Visual).
     pub fn pane_visual_block(&self, id: usize) -> Option<(usize, usize, usize, usize)> {
-        (id == self.selected_pane).then(|| self.visual_block_rect()).flatten()
+        (id == self.selected_pane)
+            .then(|| self.visual_block_rect())
+            .flatten()
     }
 
     // --- Command implementations ------------------------------------------
@@ -3363,7 +3365,10 @@ impl Editor {
         // directory reports churn in files we don't have open, and reading those
         // would be pure waste.
         let visited = self.active_path.as_deref() == Some(path)
-            || self.inactive.iter().any(|d| d.path.as_deref() == Some(path));
+            || self
+                .inactive
+                .iter()
+                .any(|d| d.path.as_deref() == Some(path));
         if !visited {
             return;
         }
@@ -3387,7 +3392,10 @@ impl Editor {
             self.parse_full();
             self.move_to(point.min(self.buffer.len()), cx);
             self.modified = false;
-            self.echo(format!("Reverted {} (changed on disk)", self.active_name), cx);
+            self.echo(
+                format!("Reverted {} (changed on disk)", self.active_name),
+                cx,
+            );
             return;
         }
         if let Some(idx) = self
@@ -4346,7 +4354,11 @@ impl Editor {
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
             // Shown in a non-selected pane: rebuild that inactive buffer in place,
             // keeping the viewing pane's cursor on the same line (clamped).
-            let viewing_point = self.panes.iter().find(|p| p.buffer == name).map(|p| p.point);
+            let viewing_point = self
+                .panes
+                .iter()
+                .find(|p| p.buffer == name)
+                .map(|p| p.point);
             let doc = &mut self.inactive[idx];
             let old_line = viewing_point
                 .map(|pt| doc.buffer.line_index_at_byte(pt.min(doc.buffer.len())))
@@ -7066,9 +7078,7 @@ impl Editor {
                 && !ks.modifiers.control
                 && !ks.modifiers.alt
                 && !ks.modifiers.platform;
-            if is_text
-                && let Some(ch) = ks.key_char.clone()
-            {
+            if is_text && let Some(ch) = ks.key_char.clone() {
                 self.evil_replace_char(&ch, cx);
             }
             cx.notify();
@@ -7165,7 +7175,12 @@ impl Editor {
             // in Scheme; this is only the mechanism. Inert when evil is off.
             let scoped: Option<String> = self
                 .evil_intercepts()
-                .then(|| self.modes.names().last().map(|m| format!("evil-normal:{m}")))
+                .then(|| {
+                    self.modes
+                        .names()
+                        .last()
+                        .map(|m| format!("evil-normal:{m}"))
+                })
                 .flatten();
             if let Some(expr) = scoped
                 .as_deref()

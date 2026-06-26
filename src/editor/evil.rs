@@ -9,10 +9,7 @@ impl Editor {
     pub(super) fn evil_intercepts(&self) -> bool {
         matches!(
             self.evil,
-            EvilState::Normal
-                | EvilState::Visual
-                | EvilState::VisualLine
-                | EvilState::VisualBlock
+            EvilState::Normal | EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
         )
     }
 
