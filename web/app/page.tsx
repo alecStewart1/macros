@@ -238,15 +238,6 @@ function WhyIBuiltThis() {
           wanted to tinker again, to go back to where it all started, except
           this time I write in Scheme.
         </p>
-        <p style={{ margin: 0 }}>
-          It&apos;s{" "}
-          <strong style={{ color: "var(--text)", fontWeight: 600 }}>
-            GPL-3.0
-          </strong>
-          , same as Emacs, and that&apos;s on purpose. Macros only exists
-          because Emacs and packages like Magit, Org, and Helm are free.
-          Keeping it GPL keeps it that way.
-        </p>
       </div>
     </Section>
   );
