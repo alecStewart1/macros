@@ -273,6 +273,12 @@ pub enum EditorCommand {
     /// Register a Scheme completion-at-point function (tried by `M-x
     /// completion-at-point` before LSP): `(add-completion-at-point-function "f")`.
     AddCapf(String),
+    /// Replace the set of directories watched on behalf of `owner` with `dirs`
+    /// (`(watch-directories "treemacs" (list ...))`). Owner-namespaced with
+    /// replace semantics so a view re-declares its full watch set each render and
+    /// never has to unwatch individual paths; pass `'()` to drop them all (e.g. on
+    /// quit). A change under any watched dir fires `directory-changed-hook`.
+    WatchDirectories(String, Vec<String>),
     /// Configure a language server: `(set-lsp "rust" "rust-analyzer")`.
     SetLsp(String, String),
     /// Map a file extension to a server key / config language:
@@ -300,6 +306,15 @@ pub enum EditorCommand {
     /// per-line faces `(line, face)`, switching to it (creating it if needed,
     /// refreshing in place — point preserved — if already shown).
     RenderBuffer {
+        name: String,
+        mode: String,
+        text: String,
+        line_faces: Vec<(usize, String)>,
+    },
+    /// Like [`RenderBuffer`], but refresh the buffer wherever it already lives
+    /// without switching to it or moving focus — the auto-refresh path for the
+    /// treemacs/dired sidebar when a watched directory changes on disk.
+    RenderBufferQuiet {
         name: String,
         mode: String,
         text: String,
@@ -1948,6 +1963,17 @@ fn build_engine(
         EditorCommand::AddCapf,
     );
     {
+        // `(watch-directories owner dirs)` — replace `owner`'s watched dir set so
+        // a change under any of them fires `directory-changed-hook` (treemacs /
+        // dired live-refresh). Replace semantics: pass `'()` to drop them.
+        let q = queue.clone();
+        engine.register_fn("watch-directories", move |owner: String, dirs: SteelVal| {
+            q.lock()
+                .unwrap()
+                .push(EditorCommand::WatchDirectories(owner, steel_string_list(&dirs)));
+        });
+    }
+    {
         // `(helm sources)` where sources is a list of `(name candidates action)`.
         let q = queue.clone();
         engine.register_fn("helm", move |sources: SteelVal| {
@@ -1983,6 +2009,23 @@ fn build_engine(
             move |name: String, mode: String, text: String, faces: SteelVal| {
                 let line_faces = parse_line_faces(&faces);
                 q.lock().unwrap().push(EditorCommand::RenderBuffer {
+                    name,
+                    mode,
+                    text,
+                    line_faces,
+                });
+            },
+        );
+    }
+    {
+        // `(render-buffer-quiet name mode text faces)` — like render-buffer but
+        // refresh in place without switching/focusing (sidebar auto-refresh).
+        let q = queue.clone();
+        engine.register_fn(
+            "render-buffer-quiet",
+            move |name: String, mode: String, text: String, faces: SteelVal| {
+                let line_faces = parse_line_faces(&faces);
+                q.lock().unwrap().push(EditorCommand::RenderBufferQuiet {
                     name,
                     mode,
                     text,
@@ -6544,6 +6587,87 @@ mod icons {
                 .as_slice(),
             [EditorCommand::ClearLineIcons]
         ));
+    }
+}
+
+#[cfg(test)]
+mod fs_watch_lib {
+    use super::*;
+
+    /// The watch primitives and the sidebar auto-refresh path: `watch-directories`
+    /// and `render-buffer-quiet` map to their commands, and the treemacs/dired FS
+    /// hooks render *quietly* (no focus-stealing switch) while re-declaring the
+    /// directory set they want watched.
+    #[test]
+    fn watch_primitives_and_quiet_refresh() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // The hook handlers exist and are wired to `directory-changed-hook`.
+        assert_eq!(v("(if (procedure? treemacs-on-fs-change) \"y\" \"n\")"), "\"y\"");
+        assert_eq!(v("(if (procedure? dired-on-fs-change) \"y\" \"n\")"), "\"y\"");
+
+        // `(watch-directories owner dirs)` carries the owner + the full dir list.
+        let cmds = engine
+            .eval(r#"(watch-directories "treemacs" (list "/a" "/b"))"#)
+            .unwrap()
+            .commands;
+        match cmds.as_slice() {
+            [EditorCommand::WatchDirectories(owner, dirs)] => {
+                assert_eq!(owner, "treemacs");
+                assert_eq!(dirs, &vec!["/a".to_string(), "/b".to_string()]);
+            }
+            other => panic!("expected one WatchDirectories, got {other:?}"),
+        }
+
+        // `render-buffer-quiet` is its own command (never the focus-stealing one).
+        let cmds = engine
+            .eval(r#"(render-buffer-quiet "*x*" "m" "hi" '())"#)
+            .unwrap()
+            .commands;
+        assert!(matches!(
+            cmds.as_slice(),
+            [EditorCommand::RenderBufferQuiet { name, .. }] if name == "*x*"
+        ));
+
+        // A treemacs auto-refresh renders quietly and re-declares its watch set
+        // (root + expanded dirs) for the "treemacs" owner.
+        let cmds = engine
+            .eval(
+                r#"(begin
+                     (set! *treemacs-root* ".")
+                     (set! *treemacs-expanded* '())
+                     (set! *treemacs-quiet* #t)
+                     (treemacs-render))"#,
+            )
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::RenderBufferQuiet { name, .. } if name == "*treemacs*")),
+            "quiet treemacs refresh must use render-buffer-quiet"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                EditorCommand::WatchDirectories(owner, dirs) if owner == "treemacs" && dirs == &vec![".".to_string()]
+            )),
+            "treemacs render must re-declare its watched dirs"
+        );
+
+        // The interactive (non-quiet) path still uses the focus-switching render.
+        let cmds = engine
+            .eval(r#"(begin (set! *treemacs-quiet* #f) (treemacs-render))"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*treemacs*")),
+            "interactive treemacs refresh keeps the switching render-buffer"
+        );
     }
 }
 

@@ -12,6 +12,8 @@
 (define *treemacs-guides* '())     ; (start end face) — indent-guide overlay accents
 (define *treemacs-byte* 0)         ; byte offset of the next line's start
 (define *treemacs-n* 0)
+(define *treemacs-quiet* #f)       ; #t during an FS auto-refresh: render in place
+                                   ; without stealing focus from the editing pane
 
 ;; Colors come from faces the active theme already defines, so the tree tracks
 ;; the current theme (and any `load-theme` switch) instead of hardcoding hex:
@@ -102,9 +104,13 @@
   (set! *treemacs-n* 0)
   (treemacs-emit (basename *treemacs-root*) *treemacs-root* #t "folder-open" 0)
   (treemacs-walk *treemacs-root* 1)
-  (render-buffer "*treemacs*" "treemacs-mode"
-                 (join-lines (reverse *treemacs-lines*))
-                 (reverse *treemacs-faces*))
+  (if *treemacs-quiet*
+      (render-buffer-quiet "*treemacs*" "treemacs-mode"
+                           (join-lines (reverse *treemacs-lines*))
+                           (reverse *treemacs-faces*))
+      (render-buffer "*treemacs*" "treemacs-mode"
+                     (join-lines (reverse *treemacs-lines*))
+                     (reverse *treemacs-faces*)))
   (for-each (lambda (ic) (set-line-icon (nth ic 0) (nth ic 1) (nth ic 2)))
             (reverse *treemacs-icons*))
   ;; Indent rails: paint the leading "│" columns with the theme's "dim" face via
@@ -113,7 +119,11 @@
   ;; doesn't stack stale rails.
   (clear-overlays)
   (for-each (lambda (g) (overlay-set-face (nth g 0) (nth g 1) (nth g 2)))
-            (reverse *treemacs-guides*)))
+            (reverse *treemacs-guides*))
+  ;; Watch the root and every expanded directory so external file changes
+  ;; (create/rename/delete) refresh the tree live. Replace-per-owner: this one
+  ;; call re-declares the full set each render, so collapsed dirs drop off.
+  (watch-directories "treemacs" (cons *treemacs-root* *treemacs-expanded*)))
 
 ;; The pane id hosting the sidebar, so a repeat invocation focuses it instead of
 ;; splitting again.
@@ -141,9 +151,22 @@
         (treemacs-render))))
 (define (treemacs-refresh) (treemacs-render))
 
+;; directory-changed-hook handler: the editor calls this with a directory that
+;; changed on disk. Re-render only when the sidebar is live and the change is in
+;; a directory the tree is showing (root or an expanded subdir).
+(define (treemacs-on-fs-change dir)
+  (when (and (treemacs-live?)
+             (member (strip-slash dir)
+                     (cons *treemacs-root* *treemacs-expanded*)))
+    (set! *treemacs-quiet* #t)
+    (treemacs-render)
+    (set! *treemacs-quiet* #f)))
+(add-hook "directory-changed-hook" "treemacs-on-fs-change")
+
 ;; Close the sidebar: kill the tree buffer and collapse its window.
 (define (treemacs-quit)
   (set! *treemacs-window* #f)
+  (watch-directories "treemacs" '()) ; stop watching; nothing to refresh anymore
   (kill-buffer-and-window))
 
 ;; (path is-dir) of the entry on the current line, or #f.

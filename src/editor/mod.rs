@@ -13,6 +13,8 @@ use gpui::{
     Point, RenderImage, ScrollWheelEvent, SharedString, Task, UTF16Selection, Window, actions, div,
     point, prelude::*, px,
 };
+use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use regex::Regex;
@@ -507,6 +509,29 @@ pub struct Editor {
     /// Subscription to window activate/deactivate, set up lazily on first render
     /// (kept alive by storing it). Drives `window_active`.
     blink_observer: Option<gpui::Subscription>,
+
+    // --- Filesystem watching (auto-revert + treemacs/dired live refresh) ---
+    /// The debounced OS watcher. Its background thread forwards each coalesced
+    /// batch onto `fs_task`; dropping it stops all watches. `None` if the platform
+    /// watcher failed to initialise (the feature then silently no-ops).
+    fs_debouncer: Option<Debouncer<RecommendedWatcher>>,
+    /// Keeps the FS-event drain task alive.
+    fs_task: Option<Task<()>>,
+    /// Paths currently registered with the watcher (visiting files + watched
+    /// dirs), so `reconcile_watches` adds/removes only the delta.
+    fs_watched: HashSet<PathBuf>,
+    /// Directories to watch on behalf of each Scheme owner (`treemacs`, `dired`).
+    /// Replace-per-owner via `(watch-directories owner dirs)`.
+    fs_watch_owners: HashMap<String, Vec<PathBuf>>,
+    /// Flattened union of `fs_watch_owners`' values, for O(1) "is this changed
+    /// path inside a watched dir?" membership tests in `on_fs_events`.
+    fs_watch_dirs: HashSet<PathBuf>,
+    /// While `render-buffer` refreshes a special buffer that's shown in a
+    /// *non-selected* pane (the treemacs/dired sidebar during an auto-refresh), the
+    /// index of that inactive [`Document`] — so the icon/overlay commands in the
+    /// same batch target it instead of the active buffer, and focus never moves.
+    /// Reset to `None` after each applied command batch.
+    render_redirect: Option<usize>,
 }
 
 /// An open transient popup: a title and its `(key, label, command)` rows.
@@ -1294,6 +1319,25 @@ impl Editor {
             futures::channel::mpsc::unbounded::<(u64, TermEvent)>();
         let (lsp_flush_tx, mut lsp_flush_rx) = futures::channel::mpsc::unbounded::<()>();
 
+        // Filesystem watcher: the debouncer runs its own thread and hands us a
+        // coalesced batch of changed paths, which we forward (deduped) onto the
+        // foreground drain task below. Watches are added lazily by
+        // `reconcile_watches`; if the platform watcher won't start we keep `None`
+        // and the auto-revert / live-refresh features simply no-op.
+        let (fs_tx, mut fs_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        let fs_debouncer = new_debouncer(
+            Duration::from_millis(400),
+            move |res: DebounceEventResult| {
+                if let Ok(events) = res {
+                    let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
+                    if !paths.is_empty() {
+                        let _ = fs_tx.unbounded_send(paths);
+                    }
+                }
+            },
+        )
+        .ok();
+
         let mut editor = Self {
             buffer: Buffer::new(welcome),
             focus_handle: cx.focus_handle(),
@@ -1424,12 +1468,31 @@ impl Editor {
             blink_token: 0,
             window_active: true,
             blink_observer: None,
+            fs_debouncer,
+            fs_task: None,
+            fs_watched: HashSet::new(),
+            fs_watch_owners: HashMap::new(),
+            fs_watch_dirs: HashSet::new(),
+            render_redirect: None,
         };
         // Drain async script outcomes from the engine thread onto the foreground.
         editor.script_task = Some(cx.spawn(async move |this, cx| {
             while let Some(outcome) = script_outcomes.next().await {
                 if this
                     .update(cx, |editor, cx| editor.apply_script_outcome(outcome, cx))
+                    .is_err()
+                {
+                    break; // editor dropped
+                }
+            }
+        }));
+        // Drain debounced filesystem-change batches onto the foreground: revert
+        // unmodified buffers whose file changed, and fire `directory-changed-hook`
+        // for watched dirs (treemacs / dired refresh).
+        editor.fs_task = Some(cx.spawn(async move |this, cx| {
+            while let Some(paths) = fs_rx.next().await {
+                if this
+                    .update(cx, |editor, cx| editor.on_fs_events(paths, cx))
                     .is_err()
                 {
                     break; // editor dropped
@@ -1506,6 +1569,9 @@ impl Editor {
                 for command in commands {
                     self.apply_command(command, cx);
                 }
+                // `render-buffer` may have redirected icon/overlay writes to a
+                // sidebar buffer for this batch; that scope ends here.
+                self.render_redirect = None;
                 self.end_undo_group();
                 if let Some(message) = message {
                     self.echo(message, cx);
@@ -3100,6 +3166,7 @@ impl Editor {
         self.run_mode_hooks_once(cx);
         self.echo(format!("Visiting {name}"), cx);
         self.run_hook("find-file-hook"); // Emacs find-file-hook
+        self.reconcile_watches(cx); // watch the newly-visited file (auto-revert)
     }
 
     /// Open files dropped onto the window from the OS (Finder, a terminal, etc.).
@@ -3176,6 +3243,145 @@ impl Editor {
                 self.echo(format!("Reverted {}", self.active_name), cx);
             }
             Err(err) => self.echo(format!("Revert failed: {err}"), cx),
+        }
+    }
+
+    /// Foreground handler for a debounced batch of changed paths. For each path:
+    /// auto-revert the buffer visiting it (when `auto-revert` is on), and, if it
+    /// lives under a watched directory, schedule that dir's `directory-changed-hook`
+    /// (deduped so a 50-file change refreshes treemacs/dired once, not 50 times).
+    fn on_fs_events(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let auto_revert = cx.global::<crate::settings::Settings>().auto_revert();
+        let mut changed_dirs: Vec<PathBuf> = Vec::new();
+        for path in &paths {
+            if auto_revert {
+                self.auto_revert_file(path, cx);
+            }
+            // A non-recursive dir watch reports its immediate children, so the
+            // watched dir is the changed path's parent — or the path itself if a
+            // watched dir's own entry (rename/attrs) is what fired.
+            for dir in [path.parent(), Some(path.as_path())].into_iter().flatten() {
+                if self.fs_watch_dirs.contains(dir) && !changed_dirs.iter().any(|d| d == dir) {
+                    changed_dirs.push(dir.to_path_buf());
+                }
+            }
+        }
+        for dir in changed_dirs {
+            self.dispatch_dir_changed(&dir);
+        }
+    }
+
+    /// React to an external change to `path`: if a file-visiting buffer holds it
+    /// and has no unsaved edits, re-read it from disk. Buffers with unsaved changes
+    /// are left intact (a one-line warning is echoed) so we never lose the user's
+    /// work. Our own saves are absorbed for free: the on-disk text then equals the
+    /// buffer's, so the content check below short-circuits with no revert.
+    fn auto_revert_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        // Only touch disk if some buffer actually visits this path — a watched
+        // directory reports churn in files we don't have open, and reading those
+        // would be pure waste.
+        let visited = self.active_path.as_deref() == Some(path)
+            || self.inactive.iter().any(|d| d.path.as_deref() == Some(path));
+        if !visited {
+            return;
+        }
+        let Ok(disk) = std::fs::read_to_string(path) else {
+            return; // unreadable / mid-rename / deleted — leave the buffer as-is
+        };
+        if self.active_path.as_deref() == Some(path) {
+            if self.buffer.full_text() == disk {
+                return; // identical (e.g. our own write) — nothing to revert
+            }
+            if self.modified {
+                self.echo(
+                    format!("{} changed on disk (unsaved edits kept)", self.active_name),
+                    cx,
+                );
+                return;
+            }
+            let point = self.point().min(disk.len());
+            let len = self.buffer.len();
+            self.edit(0..len, &disk);
+            self.parse_full();
+            self.move_to(point.min(self.buffer.len()), cx);
+            self.modified = false;
+            self.echo(format!("Reverted {} (changed on disk)", self.active_name), cx);
+            return;
+        }
+        if let Some(idx) = self
+            .inactive
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path))
+        {
+            let doc = &self.inactive[idx];
+            if doc.buffer.full_text() == disk {
+                return;
+            }
+            let name = doc.name.clone();
+            if doc.modified {
+                self.echo(format!("{name} changed on disk (unsaved edits kept)"), cx);
+                return;
+            }
+            // An inactive buffer has no live cursor/view to preserve, so rebuild it
+            // wholesale — this also refreshes its mode/highlighter for the new text.
+            let doc_path = doc.path.clone();
+            self.inactive[idx] = make_document(name.clone(), doc_path, &disk);
+            self.echo(format!("Reverted {name} (changed on disk)"), cx);
+        }
+    }
+
+    /// Fire every `directory-changed-hook` function with `dir` as its argument, so
+    /// a Scheme view (treemacs/dired) can re-render if `dir` is the one it shows.
+    /// No-op — and no thread hop — when nothing is registered on the hook.
+    fn dispatch_dir_changed(&mut self, dir: &Path) {
+        let Some(functions) = self.hooks.get("directory-changed-hook") else {
+            return;
+        };
+        if functions.is_empty() {
+            return;
+        }
+        let functions = functions.clone();
+        self.publish_point();
+        let arg = dir.to_string_lossy();
+        for function in functions {
+            self.script.dispatch_action(&function, Some(&arg));
+        }
+    }
+
+    /// Sync the OS watcher with what should be watched right now: every Scheme-
+    /// requested directory, plus — when `auto-revert` is on — every file-visiting
+    /// buffer. Diffs against `fs_watched` so only the delta is (un)watched. Cheap
+    /// and idempotent; call it whenever the buffer set or the option changes.
+    fn reconcile_watches(&mut self, cx: &mut Context<Self>) {
+        if self.fs_debouncer.is_none() {
+            return;
+        }
+        let mut desired: HashSet<PathBuf> = self.fs_watch_dirs.clone();
+        if cx.global::<crate::settings::Settings>().auto_revert() {
+            if let Some(path) = &self.active_path {
+                desired.insert(path.clone());
+            }
+            for doc in &self.inactive {
+                if let Some(path) = &doc.path {
+                    desired.insert(path.clone());
+                }
+            }
+        }
+        let debouncer = self.fs_debouncer.as_mut().unwrap();
+        for path in &desired {
+            if !self.fs_watched.contains(path)
+                && debouncer
+                    .watcher()
+                    .watch(path, RecursiveMode::NonRecursive)
+                    .is_ok()
+            {
+                self.fs_watched.insert(path.clone());
+            }
+        }
+        let stale: Vec<PathBuf> = self.fs_watched.difference(&desired).cloned().collect();
+        for path in stale {
+            let _ = debouncer.watcher().unwatch(&path);
+            self.fs_watched.remove(&path);
         }
     }
 
@@ -3938,6 +4144,7 @@ impl Editor {
         self.parse_full();
         self.ensure_cursor_visible();
         self.echo(format!("Killed {killed}"), cx);
+        self.reconcile_watches(cx); // stop watching the killed buffer's file
     }
 
     /// Shut down and forget any embedded terminal backing buffer `name` (its
@@ -3967,6 +4174,7 @@ impl Editor {
             self.drop_terminal_for_buffer(name);
             self.sync_buffers();
             self.echo(format!("Killed {name}"), cx);
+            self.reconcile_watches(cx); // stop watching the killed buffer's file
         }
     }
 
@@ -4019,6 +4227,64 @@ impl Editor {
         }
         self.modified = false;
         cx.notify();
+    }
+
+    /// Like [`render_buffer`](Self::render_buffer), but never switches buffers or
+    /// moves focus: it refreshes the named buffer *wherever it already lives* —
+    /// in place if it's active, or in its inactive [`Document`] (the treemacs/dired
+    /// sidebar pane) otherwise — and no-ops if the buffer isn't shown at all. This
+    /// is the auto-refresh path (a watched directory changed on disk), so a passive
+    /// FS event never yanks the user out of the buffer they're editing. Icon/overlay
+    /// commands later in the same batch are redirected to the sidebar via
+    /// [`render_redirect`](Self::render_redirect).
+    fn render_buffer_quiet(
+        &mut self,
+        name: String,
+        mode: String,
+        text: String,
+        line_faces: Vec<(usize, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let faces: HashMap<usize, SharedString> = line_faces
+            .into_iter()
+            .map(|(line, face)| (line, SharedString::from(face)))
+            .collect();
+        if self.active_name == name {
+            // Active: identical to the in-place branch of `render_buffer`.
+            self.line_icons.clear();
+            let line = self.buffer.line_index_at_byte(self.point());
+            self.buffer = Buffer::new(&text);
+            self.line_faces = faces;
+            self.lines.clear();
+            let last = self.buffer.line_count().saturating_sub(1);
+            let offset = self.buffer.line_range(line.min(last)).start;
+            self.move_to(offset, cx);
+            self.modified = false;
+            self.render_redirect = None;
+        } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
+            // Shown in a non-selected pane: rebuild that inactive buffer in place,
+            // keeping the viewing pane's cursor on the same line (clamped).
+            let viewing_point = self.panes.iter().find(|p| p.buffer == name).map(|p| p.point);
+            let doc = &mut self.inactive[idx];
+            let old_line = viewing_point
+                .map(|pt| doc.buffer.line_index_at_byte(pt.min(doc.buffer.len())))
+                .unwrap_or(0);
+            doc.buffer = Buffer::new(&text);
+            doc.line_faces = faces;
+            doc.line_icons.clear();
+            doc.overlays = Overlays::default();
+            doc.modified = false;
+            doc.special = Some(mode);
+            let last = doc.buffer.line_count().saturating_sub(1);
+            let offset = doc.buffer.line_range(old_line.min(last)).start;
+            let new_len = doc.buffer.len();
+            for pane in self.panes.iter_mut().filter(|p| p.buffer == name) {
+                pane.point = offset.min(new_len);
+            }
+            self.render_redirect = Some(idx);
+            cx.notify();
+        }
+        // Not shown anywhere → nothing to refresh passively.
     }
 
     /// Append `text` to the end of buffer `name` (creating it if needed) and
@@ -5775,12 +6041,18 @@ impl Editor {
             SelectWindow(id) => self.select_pane(id, cx),
             OpenFileOtherWindow(path) => self.open_file_other_window(path, cx),
             SetLineIcon(line, col, name) => {
-                self.line_icons
-                    .insert(line, (col, SharedString::from(name)));
+                let icons = match self.render_redirect {
+                    Some(i) => &mut self.inactive[i].line_icons,
+                    None => &mut self.line_icons,
+                };
+                icons.insert(line, (col, SharedString::from(name)));
                 cx.notify();
             }
             ClearLineIcons => {
-                self.line_icons.clear();
+                match self.render_redirect {
+                    Some(i) => self.inactive[i].line_icons.clear(),
+                    None => self.line_icons.clear(),
+                }
                 cx.notify();
             }
             SetLineImage {
@@ -5882,12 +6154,28 @@ impl Editor {
                 self.language_ids.insert(ext, language_id);
             }
             SetOption(key, value) => {
+                // Toggling auto-revert changes which buffer files we watch.
+                let touched_auto_revert = key == "auto-revert";
                 cx.update_global::<crate::settings::Settings, _>(|settings, _| {
                     settings.set(key, value);
                 });
                 self.script
                     .set_options(cx.global::<crate::settings::Settings>().snapshot());
+                if touched_auto_revert {
+                    self.reconcile_watches(cx);
+                }
                 cx.notify();
+            }
+            WatchDirectories(owner, dirs) => {
+                let dirs: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+                if dirs.is_empty() {
+                    self.fs_watch_owners.remove(&owner);
+                } else {
+                    self.fs_watch_owners.insert(owner, dirs);
+                }
+                // Rebuild the flattened membership set, then sync the watcher.
+                self.fs_watch_dirs = self.fs_watch_owners.values().flatten().cloned().collect();
+                self.reconcile_watches(cx);
             }
             LspDefinition => self.lsp_goto("textDocument/definition", "definition", cx),
             LspDeclaration => self.lsp_goto("textDocument/declaration", "declaration", cx),
@@ -6037,6 +6325,12 @@ impl Editor {
                 text,
                 line_faces,
             } => self.render_buffer(name, mode, text, line_faces, cx),
+            RenderBufferQuiet {
+                name,
+                mode,
+                text,
+                line_faces,
+            } => self.render_buffer_quiet(name, mode, text, line_faces, cx),
             GotoLine(n) => {
                 let last = self.buffer.line_count().saturating_sub(1);
                 let offset = self.buffer.line_range(n.min(last)).start;
@@ -6107,7 +6401,20 @@ impl Editor {
             StartKbdMacro => self.start_kbd_macro(cx),
             EndKbdMacro => self.end_kbd_macro(cx),
             CallLastKbdMacro => self.call_last_kbd_macro(cx),
-            OverlayFace { start, end, face } => self.overlay_set_face(start, end, face, cx),
+            OverlayFace { start, end, face } => match self.render_redirect {
+                Some(i) => {
+                    let len = self.inactive[i].buffer.len();
+                    let (start, end) = (start.min(len), end.min(len));
+                    if start < end {
+                        self.inactive[i]
+                            .overlays
+                            .faces
+                            .push((start..end, SharedString::from(face)));
+                        cx.notify();
+                    }
+                }
+                None => self.overlay_set_face(start, end, face, cx),
+            },
             OverlayHide { start, end } => self.overlay_hide(start, end, cx),
             FoldLines {
                 start_line,
@@ -6116,7 +6423,13 @@ impl Editor {
             UnfoldAll => self.overlay_unfold_all(cx),
             SetFoldMarker { line, open } => self.overlay_set_fold_marker(line, open, cx),
             ClearFoldMarkers => self.overlay_clear_fold_markers(cx),
-            ClearOverlays => self.overlay_clear(cx),
+            ClearOverlays => match self.render_redirect {
+                Some(i) => {
+                    self.inactive[i].overlays = Overlays::default();
+                    cx.notify();
+                }
+                None => self.overlay_clear(cx),
+            },
             ClearOverlayFaces => {
                 // Faces only — NOT hides. Several features (rainbow-delimiters,
                 // LSP highlight) repaint their faces on every edit via this; if

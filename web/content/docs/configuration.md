@@ -60,6 +60,9 @@ Set options with `(set-option "name" value)`. Values are **typed** — pass a nu
 (set-option "scroll-bar"    #t)
 (set-option "divider-width" 1)      ; width of the split-window divider
 
+;; Files on disk
+(set-option "auto-revert"   #f)     ; re-read a buffer when its file changes on disk
+
 ;; Helm selection UI — see Helm
 (set-option "helm-fuzzy"  #t)       ; fuzzy (nucleo) vs substring matching
 (set-option "helm-height" 0.5)      ; fraction of the window height
@@ -81,6 +84,20 @@ Append `:mode-name` to scope an option to one major mode. For example, the treem
 ```scheme
 (set-option "line-numbers:treemacs-mode" #f)
 ```
+
+## Watching the filesystem
+
+Macros watches the filesystem so the editor stays in sync with changes made outside it (a `git checkout`, a code formatter, a build step, another editor).
+
+**Auto-revert** is opt-in (Emacs `global-auto-revert-mode`). Turn it on with:
+
+```scheme
+(set-option "auto-revert" #t)
+```
+
+When a file you're visiting changes on disk and the buffer has **no unsaved edits**, Macros re-reads it automatically, keeping point where it was. A buffer with unsaved changes is **never** clobbered — instead you get a one-line warning, and you can reconcile with `M-x revert-buffer` (`:e!`) when ready. Macros' own saves don't trigger a spurious revert (the on-disk text already matches the buffer).
+
+**Live treemacs/dired refresh** is always on — no option needed. While the file tree or a dired buffer is open, creating, renaming, or deleting files in the directories it shows refreshes the view automatically. The refresh never steals focus: if the sidebar is in another pane while you edit, it updates in place and your cursor stays put.
 
 ## Session state
 

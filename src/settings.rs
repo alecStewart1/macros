@@ -101,6 +101,7 @@ pub const KNOWN_OPTIONS: &[&str] = &[
     "line-numbers",
     "hl-line",
     "word-wrap",
+    "auto-revert",
 ];
 
 /// Type + numeric bounds for a known option, looked up by its base name (the
@@ -133,7 +134,8 @@ fn option_kind(key: &str) -> Option<(Kind, Option<f64>, Option<f64>)> {
         | "helm-fuzzy"
         | "line-numbers"
         | "hl-line"
-        | "word-wrap" => (Bool, None, None),
+        | "word-wrap"
+        | "auto-revert" => (Bool, None, None),
         _ => return None,
     };
     Some(spec)
@@ -421,6 +423,15 @@ impl Settings {
     /// Helm matching: fuzzy (nucleo, fzf-style ranking) vs plain substring.
     pub fn helm_fuzzy(&self) -> bool {
         self.bool_or("helm-fuzzy", true)
+    }
+
+    /// Auto-revert (Emacs `global-auto-revert-mode`): when a file-visiting buffer
+    /// with no unsaved edits changes on disk, re-read it automatically. Off by
+    /// default — enabled with `(set-option "auto-revert" #t)`. Buffers with unsaved
+    /// changes are never clobbered (a warning is echoed instead). Independent of the
+    /// always-on treemacs/dired directory refresh, which watches dirs, not buffers.
+    pub fn auto_revert(&self) -> bool {
+        self.bool_or("auto-revert", false)
     }
 
     /// Bevel edge width (px) for one side, default 1 (minimum 0 enforced on set).

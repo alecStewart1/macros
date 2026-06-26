@@ -6,6 +6,7 @@
 (define *dired-entries* '())  ; (line . fullpath)
 (define *dired-marks* '())    ; fullpaths marked for deletion
 (define *dired-n* 0)
+(define *dired-quiet* #f)     ; #t during an FS auto-refresh: render in place
 
 (define (dired-emit text path)
   (set! *dired-lines* (cons text *dired-lines*))
@@ -26,7 +27,12 @@
               (let ((mark (if (member full *dired-marks*) "D " "  ")))
                 (dired-emit (string-append mark (dired-display full)) full)))
             (list-directory *dired-dir*))
-  (render-buffer "*dired*" "dired-mode" (join-lines (reverse *dired-lines*)) '()))
+  (if *dired-quiet*
+      (render-buffer-quiet "*dired*" "dired-mode" (join-lines (reverse *dired-lines*)) '())
+      (render-buffer "*dired*" "dired-mode" (join-lines (reverse *dired-lines*)) '()))
+  ;; Watch the listed directory so external create/rename/delete refresh it live.
+  ;; Replace-per-owner: navigating (dired-in) re-points the watch to the new dir.
+  (watch-directories "dired" (list *dired-dir*)))
 
 (define (dired)
   (set! *dired-dir* (buffer-directory))
@@ -50,6 +56,26 @@
     (when p (if (ends-with? p "/") (dired-in p) (open-file p)))))
 (define (dired-up) (dired-in (parent-directory *dired-dir*)))
 (define (dired-refresh) (dired-render))
+
+;; basename/parent helpers keep a trailing "/", but the editor reports changed
+;; directories without one — strip both sides before comparing.
+(define (dired-strip-slash p)
+  (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
+
+;; directory-changed-hook handler: re-render when the directory dired is showing
+;; changes on disk, and only while the dired buffer is still alive.
+(define (dired-on-fs-change dir)
+  (when (and (member "*dired*" (buffer-names))
+             (equal? (dired-strip-slash dir) (dired-strip-slash *dired-dir*)))
+    (set! *dired-quiet* #t)
+    (dired-render)
+    (set! *dired-quiet* #f)))
+(add-hook "directory-changed-hook" "dired-on-fs-change")
+
+;; Close dired and stop watching its directory.
+(define (dired-quit)
+  (watch-directories "dired" '())
+  (kill-buffer))
 
 (define (dired-mark)
   (let ((p (dired-at-point)))
@@ -116,7 +142,7 @@
 (define-key "dired-mode" "+" "dired-mkdir")
 (define-key "dired-mode" "n" "next-line")
 (define-key "dired-mode" "p" "previous-line")
-(define-key "dired-mode" "q" "kill-buffer")
+(define-key "dired-mode" "q" "dired-quit")
 
 (define-key "fundamental" "ctrl-x d" "dired")
 (register-command "dired")
