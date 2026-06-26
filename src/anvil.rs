@@ -303,7 +303,7 @@ fn run_query(engine: &mut Engine, kind: AnvilQuery) -> String {
             } else if engine
                 .readable_globals(0)
                 .iter()
-                .any(|sym| sym.resolve().to_string() == name)
+                .any(|sym| sym.resolve() == name)
             {
                 format!("{name}: bound (no documentation in the image)")
             } else {
