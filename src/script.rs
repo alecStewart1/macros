@@ -250,6 +250,14 @@ pub enum EditorCommand {
     /// replicates to all of them.
     EvilVisualInsert,
     EvilVisualAppend,
+    /// Vim block-wise Visual (`C-v`): a rectangular column selection between two
+    /// corners; motions move one corner. `I`/`A` insert/append down the block's
+    /// left/right column; `d`/`x` delete and `y` yanks the rectangle.
+    EvilVisualBlockState,
+    EvilBlockInsert,
+    EvilBlockAppend,
+    EvilBlockDelete,
+    EvilBlockYank,
     EvilDisable,
     /// Scroll half a page down / up (evil `C-d` / `C-u`).
     EvilScrollDown,
@@ -1505,6 +1513,11 @@ fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("evil-visual-line-state", EvilVisualLineState),
         ("evil-visual-insert", EvilVisualInsert),
         ("evil-visual-append", EvilVisualAppend),
+        ("evil-visual-block-state", EvilVisualBlockState),
+        ("evil-block-insert", EvilBlockInsert),
+        ("evil-block-append", EvilBlockAppend),
+        ("evil-block-delete", EvilBlockDelete),
+        ("evil-block-yank", EvilBlockYank),
         ("evil-disable", EvilDisable),
         ("evil-scroll-down", EvilScrollDown),
         ("evil-scroll-up", EvilScrollUp),
@@ -3320,6 +3333,32 @@ mod tests {
     }
 
     #[test]
+    fn evil_ctrl_chords_bound_in_evil_keymap() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../scheme/core.scm"))
+            .expect("core.scm");
+        let cmds = engine
+            .eval(include_str!("../scheme/evil.scm"))
+            .expect("evil.scm")
+            .commands;
+        let bound = |mode: &str, chord: &str, to: &str| {
+            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                if m == mode && s == chord && cmd == to))
+        };
+        // C-v must enter block-wise visual — otherwise it falls through to the
+        // Emacs `ctrl-v` = scroll-up and the cursor jumps a page toward the bottom.
+        assert!(
+            bound("evil-normal", "ctrl-v", "evil-visual-block-state"),
+            "C-v should enter block-wise visual in evil-normal"
+        );
+        // The half-page scroll chords stay bound in the evil keymap (the Rust
+        // dispatch now consults it for Ctrl chords, so these actually fire).
+        assert!(bound("evil-normal", "ctrl-d", "evil-scroll-down"));
+        assert!(bound("evil-normal", "ctrl-u", "evil-scroll-up"));
+    }
+
+    #[test]
     fn evil_leader_key_configurable() {
         let (engine, _rx) = ScriptEngine::new();
         engine
@@ -3477,6 +3516,37 @@ mod tests {
         let (ok_cmds, ok_err) = engine.eval_collecting("(evil-mode)");
         assert!(matches!(ok_cmds.as_slice(), [EditorCommand::EvilMode]));
         assert!(ok_err.is_none());
+    }
+
+    #[test]
+    fn evil_visual_block_commands_resolve() {
+        let (engine, _rx) = ScriptEngine::new();
+        // `C-v` enters block-wise Visual.
+        assert!(matches!(
+            engine
+                .eval("(evil-visual-block-state)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::EvilVisualBlockState]
+        ));
+        // The block operators: insert/append down a column, delete, yank.
+        assert!(matches!(
+            engine.eval("(evil-block-insert)").unwrap().commands.as_slice(),
+            [EditorCommand::EvilBlockInsert]
+        ));
+        assert!(matches!(
+            engine.eval("(evil-block-append)").unwrap().commands.as_slice(),
+            [EditorCommand::EvilBlockAppend]
+        ));
+        assert!(matches!(
+            engine.eval("(evil-block-delete)").unwrap().commands.as_slice(),
+            [EditorCommand::EvilBlockDelete]
+        ));
+        assert!(matches!(
+            engine.eval("(evil-block-yank)").unwrap().commands.as_slice(),
+            [EditorCommand::EvilBlockYank]
+        ));
     }
 
     #[test]

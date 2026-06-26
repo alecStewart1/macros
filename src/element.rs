@@ -440,6 +440,10 @@ impl Element for EditorElement {
 
         let cursor = editor.pane_point(pane);
         let selection = editor.pane_selection(pane);
+        // Block-wise Visual (`C-v`): a rectangle (top_row, bottom_row, left_col,
+        // right_col) highlighted per line as a column strip rather than the
+        // contiguous `selection` range. `None` unless in block-wise Visual.
+        let block_sel = editor.pane_visual_block(pane);
         let diagnostics = editor.pane_diagnostics(pane);
         // Search matches highlight only in the selected pane (the active buffer),
         // and only over the visible line span — O(viewport), recomputed each
@@ -750,7 +754,30 @@ impl Element for EditorElement {
 
             let line_origin = point(lx, content_top);
 
-            if !selection.is_empty() && selection.start <= range.end && selection.end >= range.start
+            if let Some((top_row, bottom_row, left_col, right_col)) = block_sel {
+                // Block-wise Visual: highlight only the `[left_col, right_col]`
+                // column strip on each row within the rectangle (rows shorter
+                // than the strip contribute nothing).
+                if i >= top_row && i <= bottom_row {
+                    let s = char_col_byte_in(&text, left_col);
+                    let e = char_col_byte_in(&text, right_col + 1);
+                    if e > s {
+                        push_range_quads(
+                            &mut selections,
+                            &wrapped,
+                            0,
+                            to_display(s, &holes),
+                            to_display(e, &holes),
+                            line_origin,
+                            line_height,
+                            region_color,
+                            px(0.),
+                        );
+                    }
+                }
+            } else if !selection.is_empty()
+                && selection.start <= range.end
+                && selection.end >= range.start
             {
                 push_range_quads(
                     &mut selections,
@@ -1144,6 +1171,17 @@ impl Element for EditorElement {
 /// window space (text x already shifted for horizontal scroll). `min_width`
 /// widens a zero/near-zero span so it stays visible (used for diagnostics).
 #[allow(clippy::too_many_arguments)]
+/// Byte offset within `text` of character column `col`, clamped to the text's
+/// length (a column past the end lands at the end). Maps a block-Visual
+/// rectangle's columns to per-line byte ranges for highlighting.
+fn char_col_byte_in(text: &str, col: usize) -> usize {
+    text.char_indices()
+        .nth(col)
+        .map(|(b, _)| b)
+        .unwrap_or(text.len())
+}
+
+#[allow(clippy::too_many_arguments)] // a focused per-row highlight helper
 fn push_range_quads(
     out: &mut Vec<PaintQuad>,
     wrapped: &WrappedLine,

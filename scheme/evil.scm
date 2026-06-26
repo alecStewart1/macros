@@ -78,6 +78,7 @@
 (define-key "evil-normal" "u" "undo")
 (define-key "evil-normal" "v" "evil-visual-state")
 (define-key "evil-normal" "shift-v" "evil-visual-line-state") ; V (line-wise visual)
+(define-key "evil-normal" "ctrl-v" "evil-visual-block-state") ; C-v (block-wise)
 (define-key "evil-normal" ":" "evil-ex-command")          ; :  (e.g. :%s/a/b/g)
 (define-key "evil-normal" "escape" "keyboard-quit")
 ;; search
@@ -134,7 +135,33 @@
 (define-key "evil-visual-line" "shift-a" "evil-visual-append")  ; A — append at each line end
 (define-key "evil-visual-line" "v" "evil-visual-state")         ; switch to charwise visual
 (define-key "evil-visual-line" "shift-v" "evil-normal-state")   ; V again exits
+(define-key "evil-visual-line" "ctrl-v" "evil-visual-block-state") ; switch to block-wise
 (define-key "evil-visual-line" "escape" "evil-normal-state")
+
+;; --- visual block state (`C-v`: rectangular column selection) ----------------
+;; The selection is a rectangle between two corners; the renderer highlights only
+;; the column strip (not whole lines). Motions move the cursor corner. `I`/`A`
+;; insert/append down the block's left/right column on every row at once (vim's
+;; block-insert); `d`/`x` delete the rectangle and `y` yanks it.
+(define-key "evil-visual-block" "h" "backward-char")
+(define-key "evil-visual-block" "l" "forward-char")
+(define-key "evil-visual-block" "j" "next-line")
+(define-key "evil-visual-block" "k" "previous-line")
+(define-key "evil-visual-block" "w" "forward-word-start")
+(define-key "evil-visual-block" "b" "backward-word")
+(define-key "evil-visual-block" "0" "move-beginning-of-line")
+(define-key "evil-visual-block" "$" "move-end-of-line")
+(define-key "evil-visual-block" "g g" "beginning-of-buffer")
+(define-key "evil-visual-block" "shift-g" "end-of-buffer")
+(define-key "evil-visual-block" "d" "evil-block-delete")
+(define-key "evil-visual-block" "x" "evil-block-delete")
+(define-key "evil-visual-block" "y" "evil-block-yank")
+(define-key "evil-visual-block" "shift-i" "evil-block-insert")  ; I — insert down the left column
+(define-key "evil-visual-block" "shift-a" "evil-block-append")  ; A — append down the right column
+(define-key "evil-visual-block" "v" "evil-visual-state")        ; switch to charwise visual
+(define-key "evil-visual-block" "shift-v" "evil-visual-line-state") ; switch to line-wise
+(define-key "evil-visual-block" "ctrl-v" "evil-normal-state")   ; C-v again exits
+(define-key "evil-visual-block" "escape" "evil-normal-state")
 
 ;; --- binding commands by identity (not by name string) ----------------------
 ;; A keymap stores a NAME string and evals "(name)" on the keypress. To let you

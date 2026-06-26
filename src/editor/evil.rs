@@ -9,7 +9,10 @@ impl Editor {
     pub(super) fn evil_intercepts(&self) -> bool {
         matches!(
             self.evil,
-            EvilState::Normal | EvilState::Visual | EvilState::VisualLine
+            EvilState::Normal
+                | EvilState::Visual
+                | EvilState::VisualLine
+                | EvilState::VisualBlock
         )
     }
 
@@ -18,6 +21,7 @@ impl Editor {
         match self.evil {
             EvilState::Visual => "evil-visual",
             EvilState::VisualLine => "evil-visual-line",
+            EvilState::VisualBlock => "evil-visual-block",
             _ => "evil-normal",
         }
     }
@@ -37,6 +41,7 @@ impl Editor {
             EvilState::Insert => Some("<I>"),
             EvilState::Visual => Some("<V>"),
             EvilState::VisualLine => Some("<VL>"),
+            EvilState::VisualBlock => Some("<VB>"),
         }
     }
 
@@ -119,6 +124,106 @@ impl Editor {
             self.mc_add_cursor_at(pos);
         }
         self.evil_insert_state(cx);
+    }
+
+    /// Enter block-wise Visual (`C-v`). The two corners ride on
+    /// `selected_range.start`/`.end` like the other visual states, so the usual
+    /// motions move the cursor corner; the rectangle is derived on demand by
+    /// [`Self::visual_block_rect`] and the renderer highlights only that column
+    /// strip (not whole lines).
+    pub(super) fn evil_visual_block_state(&mut self, cx: &mut Context<Self>) {
+        self.evil = EvilState::VisualBlock;
+        self.mark_active = true;
+        cx.notify();
+    }
+
+    /// Block `I` (`append` false) / `A` (`append` true): drop a cursor at the
+    /// block's left column (or just past its right column) on every row and
+    /// switch to Insert, so typed text replicates down the column via the
+    /// multiple-cursors machinery — vim's block-wise insert. Escape collapses the
+    /// cursors back to one.
+    pub(super) fn evil_block_insert(&mut self, append: bool, cx: &mut Context<Self>) {
+        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+            return;
+        };
+        let col = if append { right + 1 } else { left };
+        let mut positions = Vec::new();
+        for row in top..=bottom {
+            let lr = self.buffer.line_range(row);
+            let line = self.buffer.slice_to_string(lr.clone());
+            positions.push(lr.start + char_col_byte(&line, col));
+        }
+        if let Some((&first, rest)) = positions.split_first() {
+            self.collapse_to(first);
+            for &p in rest {
+                self.mc_add_cursor_at(p);
+            }
+        }
+        self.evil_insert_state(cx);
+    }
+
+    /// Block `d`/`x`: delete the rectangle (columns `[left, right]` on every row),
+    /// copy it to the kill ring + system clipboard, and return to Normal with the
+    /// cursor at the block's top-left.
+    pub(super) fn evil_block_delete(&mut self, cx: &mut Context<Self>) {
+        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+            return;
+        };
+        let killed = self.block_text(top, bottom, left, right);
+        self.set_clipboard(&killed, cx);
+        self.kill_ring.push(killed);
+        self.kill_index = self.kill_ring.len() - 1;
+        // Delete bottom-up so earlier edits don't shift later rows' offsets.
+        self.begin_undo_group();
+        for row in (top..=bottom).rev() {
+            let lr = self.buffer.line_range(row);
+            let line = self.buffer.slice_to_string(lr.clone());
+            let s = char_col_byte(&line, left);
+            let e = char_col_byte(&line, right + 1);
+            if e > s {
+                self.edit(lr.start + s..lr.start + e, "");
+            }
+        }
+        self.end_undo_group();
+        let top_line = self.buffer.line_range(top);
+        let line = self.buffer.slice_to_string(top_line.clone());
+        let cursor = top_line.start + char_col_byte(&line, left);
+        self.evil_yank_linewise = false;
+        self.collapse_to(cursor);
+        self.evil_normal_state(cx);
+    }
+
+    /// Block `y`: copy the rectangle to the kill ring + system clipboard without
+    /// removing it; the cursor returns to the block's top-left.
+    pub(super) fn evil_block_yank(&mut self, cx: &mut Context<Self>) {
+        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+            return;
+        };
+        let text = self.block_text(top, bottom, left, right);
+        self.set_clipboard(&text, cx);
+        self.kill_ring.push(text);
+        self.kill_index = self.kill_ring.len() - 1;
+        self.evil_yank_linewise = false;
+        let top_line = self.buffer.line_range(top);
+        let line = self.buffer.slice_to_string(top_line.clone());
+        let cursor = top_line.start + char_col_byte(&line, left);
+        self.collapse_to(cursor);
+        self.evil_normal_state(cx);
+    }
+
+    /// The text inside a block rectangle: columns `[left, right]` of rows
+    /// `[top, bottom]`, one buffer line per row joined by newlines (rows shorter
+    /// than `left` contribute an empty string).
+    fn block_text(&self, top: usize, bottom: usize, left: usize, right: usize) -> String {
+        (top..=bottom)
+            .map(|row| {
+                let line = self.buffer.slice_to_string(self.buffer.line_range(row));
+                let s = char_col_byte(&line, left);
+                let e = char_col_byte(&line, right + 1).max(s);
+                line[s..e].to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub(super) fn evil_disable(&mut self, cx: &mut Context<Self>) {

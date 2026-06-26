@@ -58,6 +58,11 @@ impl Editor {
 
     pub fn pane_selection(&self, id: usize) -> Range<usize> {
         if id == self.selected_pane {
+            // Block-wise Visual draws its own rectangular highlight
+            // (`pane_visual_block`), so suppress the contiguous range here.
+            if matches!(self.evil, EvilState::VisualBlock) {
+                return 0..0;
+            }
             // Inclusive of the grapheme under the block cursor in evil Visual.
             self.visual_region()
         } else {

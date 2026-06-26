@@ -1218,6 +1218,9 @@ enum EvilState {
     /// Vim line-wise Visual (`V`): the selection is always rounded out to whole
     /// lines (see [`Editor::visual_region`]).
     VisualLine,
+    /// Vim block-wise Visual (`C-v`): a rectangular selection between the two
+    /// corners `selected_range.start`/`.end` (see [`Editor::visual_block_rect`]).
+    VisualBlock,
 }
 
 /// A single running language server and the per-server state we track for it.
@@ -2264,6 +2267,32 @@ impl Editor {
             }
             _ => r,
         }
+    }
+
+    /// The rectangle of a block-wise Visual selection (`C-v`) as
+    /// `(top_row, bottom_row, left_col, right_col)` in 0-based line indices and
+    /// character columns — the bounding box of the two corners
+    /// `selected_range.start`/`.end`. `None` unless in [`EvilState::VisualBlock`].
+    /// `right_col` is the cursor's own column (inclusive, vim semantics).
+    fn visual_block_rect(&self) -> Option<(usize, usize, usize, usize)> {
+        if !matches!(self.evil, EvilState::VisualBlock) {
+            return None;
+        }
+        let row_col = |off: usize| -> (usize, usize) {
+            let row = self.buffer.line_index_at_byte(off);
+            let line_start = self.buffer.line_range(row).start;
+            let col = self.buffer.byte_to_char(off) - self.buffer.byte_to_char(line_start);
+            (row, col)
+        };
+        let (ra, ca) = row_col(self.selected_range.start);
+        let (rb, cb) = row_col(self.selected_range.end);
+        Some((ra.min(rb), ra.max(rb), ca.min(cb), ca.max(cb)))
+    }
+
+    /// Block-selection rectangle for pane `id`, for the renderer (selected pane
+    /// only; `None` otherwise or when not in block-wise Visual).
+    pub fn pane_visual_block(&self, id: usize) -> Option<(usize, usize, usize, usize)> {
+        (id == self.selected_pane).then(|| self.visual_block_rect()).flatten()
     }
 
     // --- Command implementations ------------------------------------------
@@ -6284,6 +6313,11 @@ impl Editor {
             EvilVisualLineState => self.evil_visual_line_state(cx),
             EvilVisualInsert => self.evil_visual_insert(false, cx),
             EvilVisualAppend => self.evil_visual_insert(true, cx),
+            EvilVisualBlockState => self.evil_visual_block_state(cx),
+            EvilBlockInsert => self.evil_block_insert(false, cx),
+            EvilBlockAppend => self.evil_block_insert(true, cx),
+            EvilBlockDelete => self.evil_block_delete(cx),
+            EvilBlockYank => self.evil_block_yank(cx),
             EvilDisable => self.evil_disable(cx),
             EvilScrollDown => self.scroll_half(1, cx),
             EvilScrollUp => self.scroll_half(-1, cx),
@@ -6968,48 +7002,70 @@ impl Editor {
             }
         }
 
-        // Evil Normal/Visual: every plain key is a command, resolved against the
-        // evil keymap (with prefix support for `g g`, leader `space …`). Ctrl/Alt
-        // chords fall through to the normal Emacs dispatch, so e.g. C-x C-s still
-        // works in normal mode.
+        // Evil Normal/Visual: the evil keymap is consulted FIRST for every chord,
+        // so it can override ANY Emacs default — plain keys, Ctrl/Alt chords, and
+        // multi-key sequences alike. An evil binding wins; an evil prefix pends
+        // (`g g`, leader `space …`, or a user-defined `C-x …`). Otherwise a plain
+        // key is evil-owned, so an unbound one is a no-op (vim doesn't self-insert
+        // in normal/visual) — UNLESS it continues an Emacs prefix already in
+        // progress (so `C-x b`, `C-x k`, … still work); a Ctrl/Alt chord evil
+        // doesn't bind falls through to the Emacs dispatch below, so unshadowed
+        // `C-x C-s`, `C-g`, `M-x`, … keep working. Platform (cmd) chords always
+        // fall through to the OS / Emacs.
         //
         // Special read-only buffers (magit, *Help*, …) are skipped: they are
         // already fully modal via their own keymap, which binds plain keys like
         // `s` (stage) that evil-normal doesn't know about. Without this guard the
         // evil intercept would swallow those keys before the special-buffer
         // dispatch below ever runs. Their keymap takes precedence over evil.
-        if self.evil_intercepts()
-            && self.special.is_none()
-            && !ks.modifiers.control
-            && !ks.modifiers.alt
-            && !ks.modifiers.platform
-        {
-            self.pending_keys.push(chord_string(ks));
-            let sequence = self.pending_keys.join(" ");
-            let state = self.evil_keymap();
+        if self.evil_intercepts() && self.special.is_none() && !ks.modifiers.platform {
+            let chord = chord_string(ks);
+            let candidate = if self.pending_keys.is_empty() {
+                chord.clone()
+            } else {
+                format!("{} {}", self.pending_keys.join(" "), chord)
+            };
             // The active major mode (top of the stack) scopes bindings, so an
             // `evil-normal:rust` keymap can shadow the global `evil-normal`.
+            let state = self.evil_keymap();
             let major: Option<String> = self.modes.names().last().map(|s| s.to_string());
-            let resolved = self
+            if let Some(expr) = self
                 .keymap
-                .resolve_evil(state, major.as_deref(), &sequence)
-                .map(str::to_string);
-            if let Some(expr) = resolved {
+                .resolve_evil(state, major.as_deref(), &candidate)
+                .map(str::to_string)
+            {
                 self.pending_keys.clear();
                 self.status = SharedString::default();
                 self.dispatch_recorded(&expr, cx);
-            } else if self
-                .keymap
-                .is_prefix_evil(state, major.as_deref(), &sequence)
-            {
-                self.status = format!("{sequence}-").into();
-                cx.notify();
-            } else {
-                self.pending_keys.clear();
-                cx.notify();
+                cx.stop_propagation();
+                return;
             }
-            cx.stop_propagation();
-            return;
+            if self
+                .keymap
+                .is_prefix_evil(state, major.as_deref(), &candidate)
+            {
+                self.pending_keys.push(chord);
+                self.status = format!("{candidate}-").into();
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            // No evil binding/prefix for this sequence. A plain (non-Ctrl/Alt) key
+            // is evil-owned: swallow it as a no-op — unless it's completing an
+            // Emacs prefix already pending (then let the Emacs dispatch finish it).
+            // Ctrl/Alt chords always fall through so unshadowed Emacs keys work.
+            if !ks.modifiers.control && !ks.modifiers.alt {
+                let continues_emacs = !self.pending_keys.is_empty()
+                    && (self.keymap.resolve(&self.modes, &candidate).is_some()
+                        || self.keymap.is_prefix(&self.modes, &candidate));
+                if !continues_emacs {
+                    self.pending_keys.clear();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+            // Fall through to the Emacs dispatch below with `pending_keys` intact.
         }
 
         // Evil Insert: a chord bound in `evil-insert` (e.g. Escape → normal) wins;
@@ -8417,6 +8473,16 @@ impl EntityInputHandler for Editor {
     }
 }
 
+/// Byte offset within `line` of character column `col`, clamped to the line's
+/// end (so a column past a short line lands at its end). Used by block-wise
+/// Visual to map a rectangle's columns to per-line byte ranges.
+fn char_col_byte(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map(|(b, _)| b)
+        .unwrap_or(line.len())
+}
+
 /// Clamp a byte range to `[0, len]` and keep it well-ordered.
 fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
     let start = range.start.min(len);
@@ -8427,11 +8493,27 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Buffer, EditorCommand, WindowLayout, file_completions, is_repeatable, language_for_path,
-        last_sexp, layout_leaves, layout_remove, layout_resize, layout_split, line_span, node_at,
-        prefix_arg_value, push_capped, scheme_symbol_token, set_ratio_at, shift_line_map,
-        symbol_at, top_level_form_at, translate_backrefs, union_bounds,
+        Buffer, EditorCommand, WindowLayout, char_col_byte, file_completions, is_repeatable,
+        language_for_path, last_sexp, layout_leaves, layout_remove, layout_resize, layout_split,
+        line_span, node_at, prefix_arg_value, push_capped, scheme_symbol_token, set_ratio_at,
+        shift_line_map, symbol_at, top_level_form_at, translate_backrefs, union_bounds,
     };
+
+    #[test]
+    fn char_col_byte_maps_columns_and_clamps() {
+        // ASCII: column == byte offset.
+        assert_eq!(char_col_byte("hello", 0), 0);
+        assert_eq!(char_col_byte("hello", 3), 3);
+        // Past the end clamps to the line length (a block column off a short row).
+        assert_eq!(char_col_byte("hi", 5), 2);
+        assert_eq!(char_col_byte("", 0), 0);
+        // Multi-byte chars: column 2 is the 'é' (2 bytes) + 1 ascii = byte 3.
+        let s = "aéb"; // a=1, é=2, b=1 bytes
+        assert_eq!(char_col_byte(s, 0), 0);
+        assert_eq!(char_col_byte(s, 1), 1); // start of 'é'
+        assert_eq!(char_col_byte(s, 2), 3); // start of 'b'
+        assert_eq!(char_col_byte(s, 3), 4); // end
+    }
     use std::collections::HashMap;
 
     #[test]
