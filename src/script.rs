@@ -3239,6 +3239,44 @@ mod tests {
     }
 
     #[test]
+    fn evil_leader_key_configurable() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../scheme/evil.scm"))
+            .expect("evil.scm");
+
+        // Default leader is SPC: a global leader binding lands under "space …".
+        let cmds = engine
+            .eval(r#"(evil-leader-set "n n" "next-buffer")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                if m == "evil-normal" && s == "space n n" && cmd == "next-buffer")),
+            "default leader should expand to 'space n n': {cmds:?}"
+        );
+
+        // Changing the leader moves subsequent bindings to the new prefix; a
+        // per-mode leader binding scopes to "evil-normal:<mode>".
+        engine.eval(r#"(evil-set-leader "comma")"#).expect("set leader");
+        let cmds = engine
+            .eval(
+                r#"(evil-leader-set-for-modes '("rust")
+                     (list (cons "g r" "lsp-rename")))"#,
+            )
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                if m == "evil-normal:rust" && s == "comma g r" && cmd == "lsp-rename")),
+            "reconfigured leader should expand to 'comma g r' in rust map: {cmds:?}"
+        );
+    }
+
+    #[test]
     fn isearch_commands_dispatch() {
         let (engine, _rx) = ScriptEngine::new();
         assert!(matches!(

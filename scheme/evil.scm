@@ -152,3 +152,38 @@
       (lambda (b) (evil-define-key state mode (car b) (cdr b)))
       bindings))
    modes))
+
+;; --- leader key -------------------------------------------------------------
+;; Doom/Spacemacs-style leader (Emacs `evil-leader`). Plain evil has no leader;
+;; this opt-in layer lets you bind chords *relative* to a leader key and swap
+;; that key in one place. The leader is a normal config variable — `SPC` by
+;; default; override it in init.scm with `evil-set-leader` BEFORE defining your
+;; leader bindings, since each chord is expanded when it's bound (changing the
+;; leader afterward does not move bindings already made):
+;;
+;;   (evil-set-leader "comma")                    ; or "space" (default), "space space", …
+;;   (evil-leader-set "n n" "next-buffer")        ; <leader> n n   (global, normal state)
+;;   (evil-leader-set-for-modes '("rust" "go")    ; <leader> g g / g r in those modes only
+;;     (list (cons "g g" "lsp-find-definition")
+;;           (cons "g r" "lsp-rename")))
+;;
+;; Commands may be a "name" string or a bare procedure identifier (the latter
+;; lets editor tooling resolve the reference), same as `evil-define-key`.
+(define *evil-leader* "space")
+
+;; Set the leader to a chord string ("space", "comma", "space space", …).
+(define (evil-set-leader key) (set! *evil-leader* key))
+
+;; Prefix a chord with the current leader; "" yields the bare leader key.
+(define (evil-leader-chord chord)
+  (if (equal? chord "") *evil-leader* (string-append *evil-leader* " " chord)))
+
+;; Bind one leader chord in the global normal-state map (`evil-leader/set-key`).
+(define (evil-leader-set chord command)
+  (evil-bind-key "evil-normal" (evil-leader-chord chord) command))
+
+;; Bind many (chord . command) leader pairs across major modes for normal state
+;; (`evil-leader/set-key-for-mode` over a list of modes).
+(define (evil-leader-set-for-modes modes bindings)
+  (evil-define-keys-for-modes "normal" modes
+    (map (lambda (b) (cons (evil-leader-chord (car b)) (cdr b))) bindings)))
