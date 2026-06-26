@@ -497,8 +497,18 @@ impl Workspace {
             .project_indicator()
             .map(|p| format!("  [{p}]"))
             .unwrap_or_default();
+        // Active language servers, e.g. "lsp typescript rust". Empty when none
+        // are ready.
+        let lsp = {
+            let servers = editor.active_lsp_servers();
+            if servers.is_empty() {
+                String::new()
+            } else {
+                format!("  lsp {}", servers.join(" "))
+            }
+        };
         let modes: SharedString = format!(
-            "{evil}{marker}  {}  ({}){project}{diagnostics}",
+            "{evil}{marker}  {}  ({}){project}{lsp}{diagnostics}",
             editor.buffer_name(),
             editor.modes.names().join(" ")
         )

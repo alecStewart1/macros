@@ -4858,6 +4858,20 @@ impl Editor {
             .is_some_and(|s| s.ready && s.open.contains(&uri))
     }
 
+    /// Names of the LSP servers that are running and ready, for the mode-line
+    /// `lsp …` indicator. Keyed by language id; sorted for a stable order since
+    /// `servers` is a `HashMap`.
+    pub fn active_lsp_servers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .servers
+            .iter()
+            .filter(|(_, server)| server.ready)
+            .map(|(key, _)| key.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The mode-line project indicator set from Scheme, if any.
     pub fn project_indicator(&self) -> Option<&str> {
         self.project_indicator.as_ref().map(SharedString::as_ref)
