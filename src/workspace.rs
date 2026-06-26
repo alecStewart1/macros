@@ -488,10 +488,6 @@ impl Workspace {
             .diagnostic_summary()
             .map(|s| format!("  {s}"))
             .unwrap_or_default();
-        let evil = editor
-            .evil_label()
-            .map(|l| format!("{l}  "))
-            .unwrap_or_default();
         // Projectile-style project indicator, e.g. "[macros]".
         let project = editor
             .project_indicator()
@@ -508,7 +504,7 @@ impl Workspace {
             }
         };
         let modes: SharedString = format!(
-            "{evil}{marker}  {}  ({}){project}{lsp}{diagnostics}",
+            "{marker}  {}  ({}){project}{lsp}{diagnostics}",
             editor.buffer_name(),
             editor.modes.names().join(" ")
         )
@@ -529,10 +525,25 @@ impl Workspace {
             .text_color(colors.mode_line_fg)
             .text_size(px(13.))
             .child(modes);
-        let mut col = div().w_full().flex().flex_col().child(mode_line);
-        if !message.is_empty() {
-            col = col.child(echo_row(message, foreground, colors.background));
-        }
+        // The echo row is always present so the layout never shifts when a
+        // pending-chord hint (or any status message) appears and clears. A live
+        // status message wins; otherwise we fall back to the evil mode name
+        // (Normal/Visual/Insert...) so the bar doubles as the modal indicator.
+        // With evil disabled and nothing pending we feed it a single space,
+        // which reserves exactly one line of height instead of collapsing.
+        let echo_text = if !message.is_empty() {
+            message
+        } else if let Some(name) = editor.evil_mode_name() {
+            SharedString::from(name)
+        } else {
+            SharedString::from(" ")
+        };
+        let col = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(mode_line)
+            .child(echo_row(echo_text, foreground, colors.background));
         col.into_any_element()
     }
 

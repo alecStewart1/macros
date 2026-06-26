@@ -7201,7 +7201,7 @@ impl Editor {
                 .is_prefix_evil(state, major.as_deref(), &candidate)
             {
                 self.pending_keys.push(chord);
-                self.status = format!("{candidate}-").into();
+                self.status = format!("{}-", pretty_sequence(&candidate)).into();
                 cx.notify();
                 cx.stop_propagation();
                 return;
@@ -7312,7 +7312,7 @@ impl Editor {
                     .as_deref()
                     .is_some_and(|m| self.keymap.is_prefix_mode(m, &sequence))
             {
-                self.status = format!("{sequence}-").into();
+                self.status = format!("{}-", pretty_sequence(&sequence)).into();
                 cx.notify();
             } else {
                 self.pending_keys.clear();
@@ -7369,10 +7369,10 @@ impl Editor {
             self.status = SharedString::default(); // clear any prefix echo
             self.dispatch_recorded(&expr, cx);
         } else if self.keymap.is_prefix(&self.modes, &sequence) {
-            self.status = format!("{sequence}-").into();
+            self.status = format!("{}-", pretty_sequence(&sequence)).into();
             cx.notify();
         } else {
-            self.status = format!("{sequence} is undefined").into();
+            self.status = format!("{} is undefined", pretty_sequence(&sequence)).into();
             self.pending_keys.clear();
             cx.notify();
         }
@@ -8267,6 +8267,16 @@ fn pretty_key(key: &str) -> String {
         .replace("shift-", "S-")
 }
 
+/// Prettify a whole space-separated chord sequence (e.g. `"ctrl-x ctrl-t"` →
+/// `"C-x C-t"`) for the pending-chord echo. Each chord is run through
+/// [`pretty_key`] so the per-chord shift→uppercase rule still applies.
+fn pretty_sequence(seq: &str) -> String {
+    seq.split(' ')
+        .map(pretty_key)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Render a [`Keystroke`] as a chord string like `"ctrl-g"` or `"alt-shift-,"`.
 /// Order is fixed (control, alt, shift, platform) so keymap entries can match.
 fn chord_string(ks: &Keystroke) -> String {
@@ -8816,6 +8826,15 @@ mod tests {
         assert_eq!(pretty_key("alt-a"), "M-a");
         assert_eq!(pretty_key("c"), "c");
         assert_eq!(pretty_key("tab"), "tab");
+    }
+
+    #[test]
+    fn pretty_sequence_prettifies_each_chord() {
+        use super::pretty_sequence;
+        assert_eq!(pretty_sequence("ctrl-x ctrl-t"), "C-x C-t");
+        assert_eq!(pretty_sequence("alt-g n"), "M-g n");
+        assert_eq!(pretty_sequence("ctrl-c shift-p"), "C-c P");
+        assert_eq!(pretty_sequence("ctrl-x"), "C-x");
     }
 
     #[test]

@@ -30,15 +30,17 @@ impl Editor {
         !matches!(self.evil, EvilState::Insert)
     }
 
-    /// Short mode-line tag for the current state (None when disabled).
-    pub fn evil_label(&self) -> Option<&'static str> {
+    /// Vim-style `-- MODE --` banner shown in the echo bar when no chord hint
+    /// is pending. None in Normal and when disabled — Normal is the resting
+    /// state and (like vim) shows nothing. The bar reverts to this whenever
+    /// `status` clears.
+    pub fn evil_mode_name(&self) -> Option<&'static str> {
         match self.evil {
-            EvilState::Disabled => None,
-            EvilState::Normal => Some("<N>"),
-            EvilState::Insert => Some("<I>"),
-            EvilState::Visual => Some("<V>"),
-            EvilState::VisualLine => Some("<VL>"),
-            EvilState::VisualBlock => Some("<VB>"),
+            EvilState::Disabled | EvilState::Normal => None,
+            EvilState::Insert => Some("-- Insert --"),
+            EvilState::Visual => Some("-- Visual --"),
+            EvilState::VisualLine => Some("-- Visual Line --"),
+            EvilState::VisualBlock => Some("-- Visual Block --"),
         }
     }
 
