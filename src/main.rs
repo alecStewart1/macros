@@ -176,6 +176,11 @@ fn main() {
                             workspace.update(cx, |w, cx| w.eval(&source, cx)).ok();
                         }
 
+                        // Config (incl. any `(evil-mode)`) is fully applied: let
+                        // plain keystrokes through again. Done before the reveal so
+                        // the very first key the user can press is already modal.
+                        workspace.update(cx, |w, cx| w.mark_config_loaded(cx)).ok();
+
                         // Theme is applied — reveal the styled window (unless the
                         // watchdog already did).
                         if !guard.swap(true, Ordering::SeqCst) {

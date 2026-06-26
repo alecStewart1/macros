@@ -7,13 +7,17 @@ use super::*;
 impl Editor {
     /// True in Normal/Visual, where plain keys are commands (not self-insert).
     pub(super) fn evil_intercepts(&self) -> bool {
-        matches!(self.evil, EvilState::Normal | EvilState::Visual)
+        matches!(
+            self.evil,
+            EvilState::Normal | EvilState::Visual | EvilState::VisualLine
+        )
     }
 
     /// The keymap name plain keys resolve against in the current evil state.
     pub(super) fn evil_keymap(&self) -> &'static str {
         match self.evil {
             EvilState::Visual => "evil-visual",
+            EvilState::VisualLine => "evil-visual-line",
             _ => "evil-normal",
         }
     }
@@ -32,6 +36,7 @@ impl Editor {
             EvilState::Normal => Some("<N>"),
             EvilState::Insert => Some("<I>"),
             EvilState::Visual => Some("<V>"),
+            EvilState::VisualLine => Some("<VL>"),
         }
     }
 
@@ -44,6 +49,11 @@ impl Editor {
     pub(super) fn evil_normal_state(&mut self, cx: &mut Context<Self>) {
         let was_insert = matches!(self.evil, EvilState::Insert);
         self.evil = EvilState::Normal;
+        // Collapse any block-insert cursors (vim leaves a single cursor after a
+        // blockwise `I`/`A` once you press Escape). No-op without extras.
+        if self.has_extra_cursors() {
+            self.mc_clear(cx);
+        }
         // Leaving visual/insert clears any selection (vim's Escape behaviour).
         self.mark_active = false;
         // Vim nudges the cursor one column left when leaving Insert (the caret
@@ -70,6 +80,45 @@ impl Editor {
         // Anchor the selection at point; motions extend it (mark is active).
         self.mark_active = true;
         cx.notify();
+    }
+
+    /// Vim line-wise Visual (`V`). Like [`Self::evil_visual_state`] but the
+    /// selection is always rounded out to whole lines by [`Self::visual_region`],
+    /// so `d`/`y` operate line-wise and `j`/`k` extend the selection a line at a
+    /// time.
+    pub(super) fn evil_visual_line_state(&mut self, cx: &mut Context<Self>) {
+        self.evil = EvilState::VisualLine;
+        self.mark_active = true;
+        cx.notify();
+    }
+
+    /// Block insert (`I`, `at_eol` false) / append (`A`, `at_eol` true) over a
+    /// Visual selection: drop a cursor at the start (or end) of every selected
+    /// line and switch to Insert. Typed text, Enter, and Backspace replicate to
+    /// every cursor via the multiple-cursors machinery, so one edit lands on all
+    /// lines — vim's blockwise `I`/`A`. Escape (→ [`Self::evil_normal_state`])
+    /// collapses the cursors back to one.
+    pub(super) fn evil_visual_insert(&mut self, at_eol: bool, cx: &mut Context<Self>) {
+        let region = self.visual_region();
+        let first = self.buffer.line_index_at_byte(region.start);
+        // `region.end` is the start of the line after the last selected line
+        // (line-wise); step back one byte to land on the last selected line.
+        let last_byte = region.end.saturating_sub(1).max(region.start);
+        let last = self.buffer.line_index_at_byte(last_byte);
+
+        let target = |ed: &Self, line: usize| -> usize {
+            let lr = ed.buffer.line_range(line);
+            if at_eol { lr.end } else { lr.start }
+        };
+        // Primary cursor on the first line; a secondary cursor on each of the
+        // rest. `collapse_to` clears the selection so the insert path replicates.
+        let primary = target(self, first);
+        self.collapse_to(primary);
+        for line in (first + 1)..=last {
+            let pos = target(self, line);
+            self.mc_add_cursor_at(pos);
+        }
+        self.evil_insert_state(cx);
     }
 
     pub(super) fn evil_disable(&mut self, cx: &mut Context<Self>) {

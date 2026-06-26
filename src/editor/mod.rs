@@ -401,6 +401,11 @@ pub struct Editor {
     helm_action_context: Option<(String, Vec<(String, String)>)>,
     /// Modal-editing (evil) state.
     evil: EvilState,
+    /// True until startup config (bundled scripts + `init.scm`) has been applied.
+    /// While set, plain keystrokes are swallowed so they can't self-insert before
+    /// `(evil-mode)` runs — the window can be revealed by the load watchdog before
+    /// config finishes, and a stray `j`/`k` in that gap must not land as text.
+    config_pending: bool,
     /// The last `/`/`?` or `C-s` regex, for `n`/`N` repeat and match highlight.
     search_query: Option<String>,
     /// Direction of the last evil `/` (true) or `?` (false) search, so `n`
@@ -1210,6 +1215,9 @@ enum EvilState {
     Normal,
     Insert,
     Visual,
+    /// Vim line-wise Visual (`V`): the selection is always rounded out to whole
+    /// lines (see [`Editor::visual_region`]).
+    VisualLine,
 }
 
 /// A single running language server and the per-server state we track for it.
@@ -1422,6 +1430,7 @@ impl Editor {
             helm_query_counter: 0,
             helm_action_context: None,
             evil: EvilState::Disabled,
+            config_pending: true,
             search_query: None,
             evil_search_forward: true,
             evil_yank_linewise: false,
@@ -1915,10 +1924,16 @@ impl Editor {
         self.h_scroll_offset = px(h.max(0.0));
     }
 
-    fn offset_for_position(&self, position: Point<Pixels>, line_height: Pixels) -> usize {
+    fn offset_for_position(&self, position: Point<Pixels>) -> usize {
         let Some(bounds) = self.last_bounds else {
             return 0;
         };
+        // The *real* line height from the last paint. NOT `window.line_height()`:
+        // inside a mouse-event handler that returns the unstyled default, which
+        // differs from the editor's font-driven height and would mis-compute the
+        // wrapped-row index (`position.y / line_height`) — so a click on a soft-
+        // wrapped line lands on the wrong visual row (cursor "jumps" elsewhere).
+        let line_height = self.line_height;
         // Map a click to a byte offset within a (possibly wrapped) line. `top` is
         // the line's top relative to the element; `wrapped` knows how to resolve a
         // local (x, y) — including which visual row y falls on — to a byte index.
@@ -2221,16 +2236,34 @@ impl Editor {
     /// visual delete at EOL doesn't swallow the newline and join lines.
     fn visual_region(&self) -> Range<usize> {
         let r = self.selected_range.clone();
-        if !matches!(self.evil, EvilState::Visual) {
-            return r;
+        match self.evil {
+            EvilState::Visual => {
+                let at_eol = self.buffer.line_range_at(r.end).end == r.end;
+                let end = if at_eol {
+                    r.end
+                } else {
+                    self.buffer.next_grapheme(r.end)
+                };
+                r.start..end.max(r.start)
+            }
+            // Line-wise Visual (`V`): round the raw selection out to whole lines —
+            // from the start of the first line through the start of the line
+            // *after* the last, so the trailing newline is included and a
+            // line-wise `d`/`y` takes the whole line. At EOF (no trailing
+            // newline) stop at the buffer end.
+            EvilState::VisualLine => {
+                let (lo, hi) = (r.start.min(r.end), r.start.max(r.end));
+                let start = self.buffer.line_range_at(lo).start;
+                let last = self.buffer.line_range_at(hi);
+                let end = if last.end < self.buffer.len() {
+                    self.buffer.next_grapheme(last.end)
+                } else {
+                    last.end
+                };
+                start..end
+            }
+            _ => r,
         }
-        let at_eol = self.buffer.line_range_at(r.end).end == r.end;
-        let end = if at_eol {
-            r.end
-        } else {
-            self.buffer.next_grapheme(r.end)
-        };
-        r.start..end.max(r.start)
     }
 
     // --- Command implementations ------------------------------------------
@@ -6248,6 +6281,9 @@ impl Editor {
             EvilNormalState => self.evil_normal_state(cx),
             EvilInsertState => self.evil_insert_state(cx),
             EvilVisualState => self.evil_visual_state(cx),
+            EvilVisualLineState => self.evil_visual_line_state(cx),
+            EvilVisualInsert => self.evil_visual_insert(false, cx),
+            EvilVisualAppend => self.evil_visual_insert(true, cx),
             EvilDisable => self.evil_disable(cx),
             EvilScrollDown => self.scroll_half(1, cx),
             EvilScrollUp => self.scroll_half(-1, cx),
@@ -6690,17 +6726,30 @@ impl Editor {
         }
     }
 
+    /// Mark startup config as fully applied, so plain keystrokes stop being
+    /// swallowed (see `config_pending`). Called once the bundled scripts and the
+    /// user's `init.scm` have been evaluated — including when that path errors,
+    /// so a broken config can never wedge the keyboard.
+    pub fn mark_config_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.config_pending {
+            self.config_pending = false;
+            cx.notify();
+        }
+    }
+
     /// Evaluate Steel synchronously and apply its commands in order. Used at
     /// startup, where config (keymaps, options, themes) must take effect before
     /// the editor is driven. Blocks the caller — fine before the UI is live.
     pub fn run_script_blocking(&mut self, source: &str, cx: &mut Context<Self>) {
-        match self.script.eval(source) {
-            Ok(result) => {
-                for command in result.commands {
-                    self.apply_command(command, cx);
-                }
-            }
-            Err(err) => self.echo(format!("error: {err}"), cx),
+        // Apply the commands accumulated before any error too (Emacs `init.el`
+        // semantics) — a typo late in `init.scm` must not discard the
+        // `(evil-mode)` / keymaps that ran before it.
+        let (commands, error) = self.script.eval_collecting(source);
+        for command in commands {
+            self.apply_command(command, cx);
+        }
+        if let Some(err) = error {
+            self.echo(format!("error: {err}"), cx);
         }
     }
 
@@ -6798,6 +6847,19 @@ impl Editor {
         // Any keystroke is cursor activity: keep the cursor solid and restart the
         // blink cycle (no-op timer when `cursor-blink` is off).
         self.reset_blink(cx);
+
+        // Startup config hasn't been applied yet (the window may have been
+        // revealed by the load watchdog before `init.scm` finished). Swallow
+        // plain keys so they can't self-insert before `(evil-mode)` and the
+        // keymaps take effect; Ctrl/Alt/Cmd chords still pass (C-g, C-x C-c, …).
+        if self.config_pending
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform
+        {
+            cx.stop_propagation();
+            return;
+        }
 
         // A transient popup is modal: C-g / Escape close it; a row's key runs its
         // command (the popup closes first); everything else is swallowed.
@@ -7079,7 +7141,7 @@ impl Editor {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A click inside the completion popup picks that candidate (rather than
@@ -7142,7 +7204,7 @@ impl Editor {
                 // default and would scale every row off (clicks land one line up).
                 self.line_start_for_click_y(event.position.y, self.line_height)
             } else {
-                Some(self.offset_for_position(event.position, window.line_height()))
+                Some(self.offset_for_position(event.position))
             };
             if let Some(offset) = offset {
                 self.move_to(offset, cx);
@@ -7156,7 +7218,7 @@ impl Editor {
             }
             return;
         }
-        let offset = self.offset_for_position(event.position, window.line_height());
+        let offset = self.offset_for_position(event.position);
         if event.modifiers.shift {
             self.select_to(offset, cx);
         } else {
@@ -7167,7 +7229,7 @@ impl Editor {
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Dragging a split divider: set the split's ratio from the pointer's
@@ -7206,7 +7268,7 @@ impl Editor {
             return;
         }
         if self.is_selecting {
-            let offset = self.offset_for_position(event.position, window.line_height());
+            let offset = self.offset_for_position(event.position);
             self.select_to(offset, cx);
             // If the pointer is near/past the top or bottom edge, keep scrolling
             // (and extending the selection) until it comes back inside or the
@@ -7226,7 +7288,7 @@ impl Editor {
             .pane_at_position(event.position)
             .is_none_or(|p| p == self.selected_pane);
         let message = if over_selected {
-            let offset = self.offset_for_position(event.position, window.line_height());
+            let offset = self.offset_for_position(event.position);
             self.diagnostic_at_offset(offset)
         } else {
             None
@@ -7335,7 +7397,7 @@ impl Editor {
         // The pointer sits past the edge, so this hit-tests to the first/last
         // visible line; after the scroll + repaint that line has moved, so the
         // selection grows by roughly the scrolled distance each tick.
-        let offset = self.offset_for_position(self.autoscroll_pos, px(lh));
+        let offset = self.offset_for_position(self.autoscroll_pos);
         self.select_to(offset, cx);
         cx.notify();
         true
@@ -8325,13 +8387,16 @@ impl EntityInputHandler for Editor {
         &mut self,
         range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
-        window: &mut Window,
+        _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.buffer.range_from_utf16(&range_utf16);
         let row = self.line_index_at(range.start)?;
         let line = self.lines.get(row)?;
-        let lh = window.line_height();
+        // Real painted height (see `offset_for_position`): `window.line_height()`
+        // is the unstyled default here and would put the caret rect on the wrong
+        // wrapped row (`position_for_index` lays rows out at `ix * line_height`).
+        let lh = self.line_height;
         let pos = line
             .wrapped
             .position_for_index(line.to_display(range.start - line.range.start), lh)
@@ -8344,10 +8409,10 @@ impl EntityInputHandler for Editor {
     fn character_index_for_point(
         &mut self,
         point: Point<Pixels>,
-        window: &mut Window,
+        _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let offset = self.offset_for_position(point, window.line_height());
+        let offset = self.offset_for_position(point);
         Some(self.buffer.offset_to_utf16(offset))
     }
 }

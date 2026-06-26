@@ -205,6 +205,14 @@ impl Workspace {
         });
     }
 
+    /// Signal that startup config (bundled scripts + `init.scm`) is fully
+    /// applied, so the editor stops swallowing plain keystrokes (which it does
+    /// until now so a key pressed before `(evil-mode)` runs can't self-insert).
+    pub fn mark_config_loaded(&self, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.mark_config_loaded(cx));
+    }
+
     /// Run the initial buffer's mode hooks, after the startup + user scripts have
     /// registered them (this is what brings up the Steel LSP for `*scratch*`).
     pub fn run_startup_hooks(&self, cx: &mut Context<Self>) {

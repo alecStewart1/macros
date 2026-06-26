@@ -22,6 +22,10 @@
 ;; Visual-mode delete/yank are character-wise (the selection's exact range).
 (define (evil-visual-delete) (kill-region) (evil-set-charwise) (evil-normal-state))
 (define (evil-visual-yank)   (kill-ring-save) (evil-set-charwise) (evil-normal-state))
+;; Visual-LINE delete/yank are line-wise: the visual region already covers whole
+;; lines (incl. the trailing newline), so a following `p`/`P` pastes the vim way.
+(define (evil-visual-line-delete) (kill-region) (evil-set-linewise) (evil-normal-state))
+(define (evil-visual-line-yank)   (kill-ring-save) (evil-set-linewise) (evil-normal-state))
 ;; Normal-mode yanks (copy → kill ring AND the system clipboard). `kill-ring-save`
 ;; syncs the OS clipboard, so these reach cmd-v in other apps. Cursor is restored
 ;; to where the yank started, vim-style. Each marks the yank line- or char-wise
@@ -73,6 +77,7 @@
 (define-key "evil-normal" "shift-p" "evil-paste-before") ; P  (line-wise → above)
 (define-key "evil-normal" "u" "undo")
 (define-key "evil-normal" "v" "evil-visual-state")
+(define-key "evil-normal" "shift-v" "evil-visual-line-state") ; V (line-wise visual)
 (define-key "evil-normal" ":" "evil-ex-command")          ; :  (e.g. :%s/a/b/g)
 (define-key "evil-normal" "escape" "keyboard-quit")
 ;; search
@@ -106,6 +111,30 @@
 (define-key "evil-visual" "x" "evil-visual-delete")
 (define-key "evil-visual" "y" "evil-visual-yank")
 (define-key "evil-visual" "escape" "evil-normal-state")
+
+;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
+;; The selection is rounded out to whole lines in the core, so the motions here
+;; just move point; `d`/`y` act line-wise. `I`/`A` are vim's blockwise insert /
+;; append: they drop a cursor at the start / end of every selected line, so the
+;; text you type (then Escape) lands on all of them at once.
+(define-key "evil-visual-line" "h" "backward-char")
+(define-key "evil-visual-line" "l" "forward-char")
+(define-key "evil-visual-line" "j" "next-line")
+(define-key "evil-visual-line" "k" "previous-line")
+(define-key "evil-visual-line" "w" "forward-word-start")
+(define-key "evil-visual-line" "b" "backward-word")
+(define-key "evil-visual-line" "0" "move-beginning-of-line")
+(define-key "evil-visual-line" "$" "move-end-of-line")
+(define-key "evil-visual-line" "g g" "beginning-of-buffer")
+(define-key "evil-visual-line" "shift-g" "end-of-buffer")
+(define-key "evil-visual-line" "d" "evil-visual-line-delete")
+(define-key "evil-visual-line" "x" "evil-visual-line-delete")
+(define-key "evil-visual-line" "y" "evil-visual-line-yank")
+(define-key "evil-visual-line" "shift-i" "evil-visual-insert")  ; I — insert at each line start
+(define-key "evil-visual-line" "shift-a" "evil-visual-append")  ; A — append at each line end
+(define-key "evil-visual-line" "v" "evil-visual-state")         ; switch to charwise visual
+(define-key "evil-visual-line" "shift-v" "evil-normal-state")   ; V again exits
+(define-key "evil-visual-line" "escape" "evil-normal-state")
 
 ;; --- binding commands by identity (not by name string) ----------------------
 ;; A keymap stores a NAME string and evals "(name)" on the keypress. To let you

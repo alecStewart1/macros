@@ -243,6 +243,13 @@ pub enum EditorCommand {
     EvilNormalState,
     EvilInsertState,
     EvilVisualState,
+    /// Vim line-wise Visual (`V`): the selection always covers whole lines.
+    EvilVisualLineState,
+    /// Block insert/append (`I`/`A` in Visual line): drop a cursor at the start
+    /// (or end) of every selected line and switch to Insert, so one edit
+    /// replicates to all of them.
+    EvilVisualInsert,
+    EvilVisualAppend,
     EvilDisable,
     /// Scroll half a page down / up (evil `C-d` / `C-u`).
     EvilScrollDown,
@@ -760,9 +767,11 @@ fn build_walk(dir: &str, config: &SearchConfig) -> ignore::Walk {
 }
 
 /// The outcome of a blocking eval: enqueued commands + the last value.
+/// Only [`ScriptEngine::eval`] (tests / REPL) builds this; startup uses
+/// [`ScriptEngine::eval_collecting`], which keeps commands even on error.
+#[allow(dead_code)]
 pub struct EvalResult {
     pub commands: Vec<EditorCommand>,
-    #[allow(dead_code)] // read by tests / REPL callers
     pub value: Option<String>,
 }
 
@@ -1141,7 +1150,9 @@ impl ScriptEngine {
         (!out.is_empty()).then_some(out)
     }
 
-    /// Blocking eval — startup/config (ordering matters) and tests.
+    /// Blocking eval — tests and the REPL. Startup config uses
+    /// [`Self::eval_collecting`] (which keeps partial commands on error).
+    #[allow(dead_code)]
     pub fn eval(&self, source: &str) -> Result<EvalResult, String> {
         let (tx, rx) = channel();
         self.jobs
@@ -1158,6 +1169,30 @@ impl ScriptEngine {
                 commands: raw.commands,
                 value: raw.value,
             }),
+        }
+    }
+
+    /// Like [`Self::eval`] but never throws the commands away on error: returns
+    /// everything queued *before* the failure together with the error message.
+    /// Startup config uses this so one bad form in `init.scm` can't silently drop
+    /// the rest of the file — including the `(evil-mode)` that usually precedes
+    /// it (Emacs `init.el` semantics: apply up to the error, then report it).
+    pub fn eval_collecting(&self, source: &str) -> (Vec<EditorCommand>, Option<String>) {
+        let (tx, rx) = channel();
+        if self
+            .jobs
+            .send(Job {
+                task: Task::Eval(source.to_string()),
+                interactive: false,
+                reply: Reply::Sync(tx),
+            })
+            .is_err()
+        {
+            return (Vec::new(), Some("script engine stopped".to_string()));
+        }
+        match rx.recv() {
+            Ok(raw) => (raw.commands, raw.error),
+            Err(_) => (Vec::new(), Some("script engine stopped".to_string())),
         }
     }
 
@@ -1467,6 +1502,9 @@ fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("evil-normal-state", EvilNormalState),
         ("evil-insert-state", EvilInsertState),
         ("evil-visual-state", EvilVisualState),
+        ("evil-visual-line-state", EvilVisualLineState),
+        ("evil-visual-insert", EvilVisualInsert),
+        ("evil-visual-append", EvilVisualAppend),
         ("evil-disable", EvilDisable),
         ("evil-scroll-down", EvilScrollDown),
         ("evil-scroll-up", EvilScrollUp),
@@ -3421,6 +3459,27 @@ mod tests {
     }
 
     #[test]
+    fn eval_collecting_keeps_commands_before_a_runtime_error() {
+        let (engine, _rx) = ScriptEngine::new();
+        // A *runtime* error in a later form must NOT discard the commands that
+        // already ran — otherwise a bad call near the bottom of init.scm would
+        // drop the `(evil-mode)` near the top, leaving the user in plain
+        // (non-modal) editing. (Steel compiles the whole file first, so
+        // compile-time errors — unbound symbols, syntax — still abort everything;
+        // that's inherent and can't be salvaged here.)
+        let (commands, error) = engine.eval_collecting("(evil-mode) (car '())");
+        assert!(
+            matches!(commands.as_slice(), [EditorCommand::EvilMode]),
+            "got {commands:?}"
+        );
+        assert!(error.is_some(), "car of '() should surface a runtime error");
+        // A clean program reports no error and still returns its commands.
+        let (ok_cmds, ok_err) = engine.eval_collecting("(evil-mode)");
+        assert!(matches!(ok_cmds.as_slice(), [EditorCommand::EvilMode]));
+        assert!(ok_err.is_none());
+    }
+
+    #[test]
     fn evil_state_and_composite_operators() {
         let (engine, _rx) = ScriptEngine::new();
         // State commands enqueue.
@@ -3436,6 +3495,49 @@ mod tests {
         assert!(matches!(
             engine.eval("(evil-append)").unwrap().commands.as_slice(),
             [EditorCommand::ForwardChar, EditorCommand::EvilInsertState]
+        ));
+    }
+
+    #[test]
+    fn evil_visual_line_commands_resolve() {
+        let (engine, _rx) = ScriptEngine::new();
+        // `V` enters line-wise Visual.
+        assert!(matches!(
+            engine
+                .eval("(evil-visual-line-state)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::EvilVisualLineState]
+        ));
+        // Blockwise insert (`I`) and append (`A`) over the selection.
+        assert!(matches!(
+            engine.eval("(evil-visual-insert)").unwrap().commands.as_slice(),
+            [EditorCommand::EvilVisualInsert]
+        ));
+        assert!(matches!(
+            engine.eval("(evil-visual-append)").unwrap().commands.as_slice(),
+            [EditorCommand::EvilVisualAppend]
+        ));
+        // The line-wise delete/yank pattern from evil.scm: kill, mark line-wise,
+        // return to Normal (so a following `p` pastes the vim way).
+        engine
+            .eval(
+                "(define (evil-visual-line-delete) \
+                   (kill-region) (evil-set-linewise) (evil-normal-state))",
+            )
+            .unwrap();
+        assert!(matches!(
+            engine
+                .eval("(evil-visual-line-delete)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [
+                EditorCommand::KillRegion,
+                EditorCommand::EvilSetLinewise,
+                EditorCommand::EvilNormalState
+            ]
         ));
     }
 
