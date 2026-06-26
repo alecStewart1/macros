@@ -106,6 +106,16 @@ hex = "0.4"
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
 # for staging update downloads.
 dirs = "5"
+# gitoxide: a pure-Rust git implementation, driven as a library for the
+# `gix-blame` / `gix-log` / `gix-toplevel` Scheme primitives (see src/script.rs).
+# magit historically shells out to `git`; these give magit native blame (which
+# porcelain `git status` can't express) and log with no subprocess. Curated
+# feature set: `blame` (+ `blob-diff`, which blame's rename detection needs),
+# `revision` for the HEAD rev-walk behind `gix-log`, and `sha1` so gix-hash's
+# `Kind` object-id enum is non-empty (without a sha feature the whole crate
+# fails to compile). `max-performance-safe` pulls the pure-Rust `zlib-rs`
+# inflate — fast, and no system zlib/C toolchain required.
+gix = { version = "0.85.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "max-performance-safe"] }
 
 # macOS-only: `libc::statfs` to detect a read-only volume (DMG / App
 # Translocation) and `renamex_np` for the atomic in-place bundle swap. Only the

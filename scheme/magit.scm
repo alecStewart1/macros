@@ -63,10 +63,9 @@
   (call-process "git" (append (list "-C" *magit-dir*) args)))
 
 ;; Walk up from `dir` to the enclosing git work tree, like `magit-toplevel`.
-;; Returns `dir` unchanged if it isn't inside a repo (git prints nothing).
+;; Returns `dir` unchanged if it isn't inside a repo (gix returns "").
 (define (magit-toplevel dir)
-  (let ((root (trim-end
-                (call-process "git" (list "-C" dir "rev-parse" "--show-toplevel")))))
+  (let ((root (gix-toplevel dir)))
     (if (equal? root "") dir root)))
 
 ;; Non-empty lines of a git command's output.
@@ -200,11 +199,9 @@
               ((equal? ahead "0")  (string-append "  (behind " behind ")"))
               (else (string-append "  (ahead " ahead ", behind " behind ")"))))))
 
-;; In-progress merge / rebase (both surfaced via rev-parse, no filesystem peek).
-(define (magit-merging?)
-  (not (equal? "" (trim-end (git (list "rev-parse" "-q" "--verify" "MERGE_HEAD"))))))
-(define (magit-rebasing?)
-  (not (equal? "" (trim-end (git (list "rev-parse" "-q" "--verify" "REBASE_HEAD"))))))
+;; In-progress merge / rebase, read from the repo's git-dir state by gix.
+(define (magit-merging?)  (equal? (gix-state *magit-dir*) "merge"))
+(define (magit-rebasing?) (equal? (gix-state *magit-dir*) "rebase"))
 
 ;; --- confirmation for destructive operations --------------------------------
 ;; A one-shot thunk gated behind `y-or-n-p`; the answer arrives asynchronously
@@ -790,7 +787,7 @@
            (branch    (nth binfo 0))
            (up        (nth binfo 1))
            (ab        (if (equal? up "") #f (cons (nth binfo 2) (nth binfo 3))))
-           (subject   (trim-end (git (list "log" "-1" "--format=%s")))))
+           (subject   (gix-head-subject *magit-dir*)))
       ;; --- header ---
       (magit-emit-header "Head:" (if (equal? branch "") "(no commits)" branch)
                          (if (equal? subject "") "" (string-append " " subject)))
@@ -825,9 +822,9 @@
                                                           (string-append "HEAD.." up))))))
           (magit-emit "Press H to show stashes / unpushed / unpulled."
                       "magit-context" #f #f))
-      ;; --- recent commits (shown by default, one `git log` call) ---
+      ;; --- recent commits (shown by default, one gix rev-walk) ---
       (magit-emit-commit-section "Recent commits"
-                                 (git-lines (list "log" "--oneline" "-n" "10"))))
+                                 (gix-log-oneline *magit-dir* 10)))
     (render-buffer "*magit*" "magit-status"
                    (join-lines (reverse *magit-lines*))
                    (reverse *magit-faces*))
@@ -938,9 +935,9 @@
   (message "git failed — see *magit-process*"))
 
 ;; Lists from git, one item per non-empty line.
-(define (magit-branches) (git-lines (list "branch" "--format=%(refname:short)")))
-(define (magit-remotes)  (git-lines (list "remote")))
-(define (magit-tags)     (git-lines (list "tag")))
+(define (magit-branches) (gix-branches *magit-dir*))
+(define (magit-remotes)  (gix-remotes  *magit-dir*))
+(define (magit-tags)     (gix-tags     *magit-dir*))
 
 ;; --- staging (hunk- and region-level) ---------------------------------------
 ;; Apply a patch to the index (or, for discard, the worktree). `--recount` lets
@@ -1181,9 +1178,9 @@
 (define (magit-do-commit)
   (save-some-buffers)
   (if (magit-switch-on? "commit:amend")
-      (magit-commit-buffer (git (list "log" "-1" "--format=%B")) "yes")
+      (magit-commit-buffer (gix-head-message *magit-dir*) "yes")
       (magit-commit-buffer "" "no")))
-(define (magit-do-reword) (magit-commit-buffer (git (list "log" "-1" "--format=%B")) "yes"))
+(define (magit-do-reword) (magit-commit-buffer (gix-head-message *magit-dir*) "yes"))
 (define (magit-do-amend)
   (save-some-buffers)
   (magit-do (append (list "commit" "--amend" "--no-edit") (magit-commit-flags)) "Amended HEAD")
@@ -1233,7 +1230,7 @@
           (list "u" "Set upstream"      "magit-branch-set-upstream")
           (list "m" "Rename current"    "magit-branch-rename")
           (list "k" "Delete"            "magit-branch-delete"))))
-(define (magit-remote-branches) (git-lines (list "branch" "-r" "--format=%(refname:short)")))
+(define (magit-remote-branches) (gix-remote-branches *magit-dir*))
 ;; Check out a remote branch as a new local tracking branch ("origin/x" → "x").
 (define (magit-checkout-remote)
   (helm (list (list "Checkout remote" (magit-remote-branches) "magit-do-checkout-remote"))))

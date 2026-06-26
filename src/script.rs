@@ -789,6 +789,172 @@ fn build_walk(dir: &str, config: &SearchConfig) -> ignore::Walk {
     wb.build()
 }
 
+/// One commit's metadata row, shared by `gix-log` and `gix-blame`:
+/// `"<shorthash>\t<author>\t<YYYY-MM-DD>\t<summary>"`. Tab-separated because
+/// author names and commit summaries contain spaces and colons, so the
+/// `path:line:text` colon convention `grep-files` uses wouldn't round-trip. The
+/// date comes from `chrono` (already a dep) so we don't depend on gix-date's
+/// formatter module being public.
+fn gix_commit_row(
+    repo: &gix::Repository,
+    id: &gix::ObjectId,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let commit = repo.find_commit(*id)?;
+    let short = id.to_hex_with_len(8).to_string();
+    let author = commit.author()?;
+    let name = author.name.to_string();
+    let date = chrono::DateTime::from_timestamp(author.seconds(), 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    let summary = commit.message()?.summary().to_string();
+    Ok(format!("{short}\t{name}\t{date}\t{summary}"))
+}
+
+/// `(gix-log dir n)` backend: up to `n` commits reachable from HEAD, newest
+/// first, each a commit row. Errors (not a repo, unborn HEAD) surface to Scheme
+/// as an empty list, the same way `walk-files` yields nothing for a missing dir.
+fn gix_log(dir: &str, max: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let repo = gix::discover(dir)?;
+    let head = repo.head_id()?;
+    let mut rows = Vec::new();
+    for info in repo.rev_walk(Some(head.detach())).all()?.take(max) {
+        rows.push(gix_commit_row(&repo, &info?.id)?);
+    }
+    Ok(rows)
+}
+
+/// `(gix-blame dir file)` backend: one row per line of `file` (a path relative
+/// to the repo root) as committed at HEAD, in file order:
+/// `"<1-based-line>\t<shorthash>\t<author>\t<date>\t<summary>"`. The native
+/// equivalent of `git blame HEAD -- file` — something porcelain `git status`
+/// can't express, which is the headline reason to bridge gix at all.
+fn gix_blame(dir: &str, file: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use gix::bstr::BStr;
+    let repo = gix::discover(dir)?;
+    // Resolve `file` (absolute, or relative to `dir`) to a repo-root-relative
+    // path, the way `git blame -C dir -- file` does — callers (e.g. magit) pass
+    // the buffer's path, not a path already relative to the repo root.
+    let abs = {
+        let p = std::path::Path::new(file);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::path::Path::new(dir).join(p)
+        }
+    };
+    let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
+    let rel = match repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()) {
+        Some(wd) => abs.strip_prefix(&wd).map(|p| p.to_path_buf()).unwrap_or(abs),
+        None => abs,
+    };
+    let rel = rel.to_string_lossy();
+    let head = repo.head_id()?.detach();
+    let opts = gix::repository::blame_file::Options::default();
+    let outcome = repo.blame_file(BStr::new(rel.as_bytes()), head, opts)?;
+
+    // Resolve each commit's row once — adjacent blame hunks often share one.
+    let mut cache: HashMap<gix::ObjectId, String> = HashMap::new();
+    let mut entries = outcome.entries;
+    entries.sort_by_key(|e| e.start_in_blamed_file);
+    let mut rows = Vec::new();
+    for entry in entries {
+        let row = match cache.get(&entry.commit_id) {
+            Some(r) => r.clone(),
+            None => {
+                let r = gix_commit_row(&repo, &entry.commit_id)?;
+                cache.insert(entry.commit_id, r.clone());
+                r
+            }
+        };
+        for i in 0..entry.len.get() {
+            // `start_in_blamed_file` is 0-based; editor lines are 1-based.
+            rows.push(format!("{}\t{}", entry.start_in_blamed_file + i + 1, row));
+        }
+    }
+    Ok(rows)
+}
+
+/// Sorted short ref names for one category — backs `gix-branches` (local
+/// branches), `gix-remote-branches` (`origin/main`…), and `gix-tags`. `kind`
+/// picks the iterator the way `git branch` / `git branch -r` / `git tag` do.
+fn gix_ref_names(dir: &str, kind: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let repo = gix::discover(dir)?;
+    let platform = repo.references()?;
+    let iter = match kind {
+        "remote" => platform.remote_branches()?,
+        "tag" => platform.tags()?,
+        _ => platform.local_branches()?,
+    };
+    let mut names: Vec<String> = iter
+        .filter_map(|r| r.ok())
+        .map(|r| r.name().shorten().to_string())
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// `(gix-remotes dir)` backend: configured remote names (`origin`…), sorted.
+fn gix_remotes(dir: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let repo = gix::discover(dir)?;
+    Ok(repo
+        .remote_names()
+        .iter()
+        .map(|n| n.to_string())
+        .collect())
+}
+
+/// `(gix-state dir)` backend: `"merge"` while a merge is in progress (MERGE_HEAD
+/// present), `"rebase"` during a rebase (the rebase-merge/rebase-apply state
+/// dirs), else `""`. Replaces magit's `rev-parse --verify MERGE_HEAD/REBASE_HEAD`
+/// probes — git records this state on disk in the git dir, so we read it there.
+fn gix_state(dir: &str) -> String {
+    let Ok(repo) = gix::discover(dir) else {
+        return String::new();
+    };
+    let git_dir = repo.git_dir();
+    if git_dir.join("MERGE_HEAD").exists() {
+        "merge".into()
+    } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        "rebase".into()
+    } else {
+        String::new()
+    }
+}
+
+/// `(gix-head-message dir full?)` backend: the HEAD commit's summary (`full` =
+/// false → `git log -1 --format=%s`) or full message (`full` = true → `%B`).
+/// Empty string when there are no commits yet.
+fn gix_head_message(dir: &str, full: bool) -> String {
+    let inner = || -> Result<String, Box<dyn std::error::Error>> {
+        let repo = gix::discover(dir)?;
+        let id = repo.head_id()?.detach();
+        let commit = repo.find_commit(id)?;
+        if full {
+            Ok(commit.message_raw()?.to_string())
+        } else {
+            Ok(commit.message()?.summary().to_string())
+        }
+    };
+    inner().unwrap_or_default()
+}
+
+/// `(gix-log-oneline dir n)` backend: up to `n` commits from HEAD, newest first,
+/// each `"<shorthash> <summary>"` — the native form of `git log --oneline -n N`.
+/// 7-char abbreviation matches git's default; magit accents the first token as
+/// the hash and uses it as a `git show` ref.
+fn gix_log_oneline(dir: &str, max: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let repo = gix::discover(dir)?;
+    let head = repo.head_id()?;
+    let mut rows = Vec::new();
+    for info in repo.rev_walk(Some(head.detach())).all()?.take(max) {
+        let id = info?.id;
+        let commit = repo.find_commit(id)?;
+        let summary = commit.message()?.summary().to_string();
+        rows.push(format!("{} {}", id.to_hex_with_len(7), summary));
+    }
+    Ok(rows)
+}
+
 /// The outcome of a blocking eval: enqueued commands + the last value.
 /// Only [`ScriptEngine::eval`] (tests / REPL) builds this; startup uses
 /// [`ScriptEngine::eval_collecting`], which keeps commands even on error.
@@ -975,6 +1141,17 @@ impl ScriptEngine {
                 "current-time",
                 "walk-files",
                 "grep-files",
+                "gix-toplevel",
+                "gix-log",
+                "gix-blame",
+                "gix-branches",
+                "gix-remote-branches",
+                "gix-tags",
+                "gix-remotes",
+                "gix-state",
+                "gix-head-subject",
+                "gix-head-message",
+                "gix-log-oneline",
                 "search-exclude",
                 "search-include",
                 "search-reset",
@@ -2533,6 +2710,60 @@ fn build_engine(
                 },
             );
         }
+    }
+    // gix bridge: pure-Rust git queries (no `git` subprocess), exposed the same
+    // blocking-on-the-engine-thread way as `walk-files`/`grep-files`. Errors
+    // (not a repo, unborn HEAD, untracked file) collapse to an empty list.
+    {
+        // `(gix-toplevel dir)` → absolute work-tree root for the repo enclosing
+        // `dir`, or "" if `dir` isn't in a git work tree. The native form of
+        // `git rev-parse --show-toplevel` behind magit's `magit-toplevel`.
+        engine.register_fn("gix-toplevel", |dir: String| -> String {
+            gix::discover(&dir)
+                .ok()
+                .and_then(|repo| repo.workdir().map(|p| p.to_string_lossy().into_owned()))
+                .unwrap_or_default()
+        });
+        // `(gix-log dir n)` → up to `n` recent HEAD commits, newest first, each
+        // "shorthash\tauthor\tYYYY-MM-DD\tsummary".
+        engine.register_fn("gix-log", |dir: String, max: usize| -> Vec<String> {
+            gix_log(&dir, max).unwrap_or_default()
+        });
+        // `(gix-blame dir file)` → one "line\tshorthash\tauthor\tdate\tsummary"
+        // per line of `file` (absolute or relative to `dir`) as committed at HEAD.
+        engine.register_fn("gix-blame", |dir: String, file: String| -> Vec<String> {
+            gix_blame(&dir, &file).unwrap_or_default()
+        });
+        // `(gix-branches dir)` / `(gix-remote-branches dir)` / `(gix-tags dir)`
+        // → sorted short ref names, the native form of `git branch [-r]` / `git tag`.
+        engine.register_fn("gix-branches", |dir: String| -> Vec<String> {
+            gix_ref_names(&dir, "local").unwrap_or_default()
+        });
+        engine.register_fn("gix-remote-branches", |dir: String| -> Vec<String> {
+            gix_ref_names(&dir, "remote").unwrap_or_default()
+        });
+        engine.register_fn("gix-tags", |dir: String| -> Vec<String> {
+            gix_ref_names(&dir, "tag").unwrap_or_default()
+        });
+        // `(gix-remotes dir)` → configured remote names.
+        engine.register_fn("gix-remotes", |dir: String| -> Vec<String> {
+            gix_remotes(&dir).unwrap_or_default()
+        });
+        // `(gix-state dir)` → "merge" / "rebase" / "" (in-progress operation).
+        engine.register_fn("gix-state", |dir: String| -> String {
+            gix_state(&dir)
+        });
+        // `(gix-head-subject dir)` / `(gix-head-message dir)` → HEAD commit %s / %B.
+        engine.register_fn("gix-head-subject", |dir: String| -> String {
+            gix_head_message(&dir, false)
+        });
+        engine.register_fn("gix-head-message", |dir: String| -> String {
+            gix_head_message(&dir, true)
+        });
+        // `(gix-log-oneline dir n)` → up to n "<shorthash> <summary>" lines.
+        engine.register_fn("gix-log-oneline", |dir: String, max: usize| -> Vec<String> {
+            gix_log_oneline(&dir, max).unwrap_or_default()
+        });
     }
     // `(call-process program args)` — run a subprocess, return stdout. Blocks on
     // the engine thread (never the UI), the same model as `list-directory`.
@@ -6422,6 +6653,149 @@ mod magit_hunk_e2e {
                 .as_deref(),
             Some("#true"),
             "nothing left unstaged"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod gix_e2e {
+    use super::*;
+    #[test]
+    fn blame_log_and_toplevel_against_real_git() {
+        let dir = std::env::temp_dir().join(format!("macros-gix-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        // Commit 1 "init": original two lines.
+        std::fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-qm", "init"]);
+        // Commit 2 "second": rewrite line 2 and append a third line.
+        std::fs::write(dir.join("f.txt"), "one\nTWO\nthree\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-qm", "second"]);
+        // Pin the branch name so the merge step below is git-version-independent.
+        git(&["branch", "-M", "main"]);
+
+        let (engine, _rx) = ScriptEngine::new();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // gix-toplevel resolves the work-tree root; "" for a non-repo path.
+        assert_eq!(
+            v(&format!("(ends-with? (gix-toplevel {d:?}) {name:?})")),
+            "#true",
+            "toplevel points at the repo root"
+        );
+        assert_eq!(
+            v(r#"(equal? (gix-toplevel "/no/such/repo/xyz") "")"#),
+            "#true",
+            "non-repo path yields empty string"
+        );
+
+        // gix-log: two commits, newest first.
+        assert_eq!(v(&format!("(length (gix-log {d:?} 10))")), "2");
+        assert_eq!(
+            v(&format!(r#"(string-contains? (list-ref (gix-log {d:?} 10) 0) "second")"#)),
+            "#true",
+            "newest commit first"
+        );
+        assert_eq!(
+            v(&format!(r#"(string-contains? (list-ref (gix-log {d:?} 10) 1) "init")"#)),
+            "#true",
+            "oldest commit last"
+        );
+        // The count caps at `n`.
+        assert_eq!(v(&format!("(length (gix-log {d:?} 1))")), "1");
+
+        // HEAD subject / full message, and oneline log for the recent-commits view.
+        assert_eq!(v(&format!("(gix-head-subject {d:?})")), "\"second\"");
+        // Full message keeps git's trailing newline, like `log -1 --format=%B`.
+        assert_eq!(v(&format!("(gix-head-message {d:?})")), "\"second\\n\"");
+        assert_eq!(v(&format!("(length (gix-log-oneline {d:?} 10))")), "2");
+        assert_eq!(
+            v(&format!(r#"(string-contains? (list-ref (gix-log-oneline {d:?} 10) 0) "second")"#)),
+            "#true",
+            "oneline newest first"
+        );
+
+        // gix-blame: one row per committed line, attributed to the right commit.
+        let blame = format!(r#"(gix-blame {d:?} "f.txt")"#);
+        assert_eq!(v(&format!("(length {blame})")), "3", "three lines blamed");
+        // Line 1 ("one") is unchanged since "init".
+        assert_eq!(
+            v(&format!(r#"(starts-with? (list-ref {blame} 0) "1\t")"#)),
+            "#true"
+        );
+        assert_eq!(
+            v(&format!(r#"(string-contains? (list-ref {blame} 0) "init")"#)),
+            "#true",
+            "line 1 came from the init commit"
+        );
+        // Lines 2 and 3 were introduced by "second".
+        assert_eq!(
+            v(&format!(r#"(starts-with? (list-ref {blame} 1) "2\t")"#)),
+            "#true"
+        );
+        assert_eq!(
+            v(&format!(r#"(string-contains? (list-ref {blame} 1) "second")"#)),
+            "#true",
+            "line 2 was rewritten by the second commit"
+        );
+        assert_eq!(
+            v(&format!(r#"(string-contains? (list-ref {blame} 2) "second")"#)),
+            "#true",
+            "line 3 was added by the second commit"
+        );
+
+        // Ref listings: add a branch, a tag, and a remote, then check gix sees them.
+        git(&["branch", "feature"]);
+        git(&["tag", "v1"]);
+        git(&["remote", "add", "origin", "https://example.com/r.git"]);
+        assert_ne!(
+            v(&format!(r#"(member "feature" (gix-branches {d:?}))"#)),
+            "#false",
+            "feature branch listed"
+        );
+        assert_ne!(v(&format!(r#"(member "v1" (gix-tags {d:?}))"#)), "#false", "tag listed");
+        assert_ne!(
+            v(&format!(r#"(member "origin" (gix-remotes {d:?}))"#)),
+            "#false",
+            "remote listed"
+        );
+        // Clean repo: no in-progress merge or rebase.
+        assert_eq!(v(&format!(r#"(gix-state {d:?})"#)), "\"\"");
+
+        // gix-state reflects a real in-progress merge. Build a conflict.
+        git(&["checkout", "-q", "-b", "other", "HEAD~1"]);
+        std::fs::write(dir.join("f.txt"), "one\nOTHER\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-qm", "other-change"]);
+        // Merging the divergent branches conflicts on line 2 → merge in progress.
+        let mout = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["merge", "main"])
+            .output()
+            .unwrap();
+        assert!(!mout.status.success(), "merge should conflict");
+        assert_eq!(
+            v(&format!(r#"(gix-state {d:?})"#)),
+            "\"merge\"",
+            "gix-state sees the in-progress merge"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
