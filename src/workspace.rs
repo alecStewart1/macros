@@ -55,6 +55,7 @@ enum UpdatePhase {
 struct UpdateStatus {
     /// The newer release found by the check, carrying this platform's download
     /// URL (used to install on macOS).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     available: crate::update::UpdateAvailable,
     phase: UpdatePhase,
 }
@@ -104,6 +105,7 @@ impl Workspace {
     }
 
     /// Advance the pill to a new phase and repaint.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn set_update_phase(&mut self, phase: UpdatePhase, cx: &mut Context<Self>) {
         if let Some(status) = self.update_status.as_mut() {
             status.phase = phase;
