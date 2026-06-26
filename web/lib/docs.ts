@@ -27,6 +27,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { slug: "getting-started", label: "Getting started", blurb: "Install, first launch, the essential keys" },
       { slug: "configuration", label: "Configuration", blurb: "init.scm, options, and config paths" },
+      { slug: "updates", label: "Updates", blurb: "How Macros updates and how to disable auto-updating" },
       { slug: "keybindings", label: "Keybindings", blurb: "The default keymap and how to rebind" },
       { slug: "getting-help", label: "Getting help", blurb: "Discover commands from inside the editor" },
       { slug: "tutorial", label: "Tutorial", blurb: "The interactive in-editor tutorial (C-h t)" },
