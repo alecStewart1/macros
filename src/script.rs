@@ -4991,6 +4991,111 @@ mod magit_tests {
         );
     }
 
+    /// Inline-blame: `git blame --line-porcelain` parses into per-line records,
+    /// the age helpers humanize/tint by author-time, and uncommitted lines are
+    /// recognized.
+    #[test]
+    fn magit_blame_porcelain() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../scheme/transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
+
+        // Two commits over three lines (lines 1-2 share a commit; line 3 differs),
+        // built as the list of porcelain lines the parser consumes. Each block ends
+        // with the tab-prefixed content line.
+        engine
+            .eval(
+                r#"(define blame-sample (list
+                     "abc1234500000000000000000000000000000000 1 1 2"
+                     "author Alice"
+                     "author-time 100"
+                     "summary First commit subject"
+                     "filename f.txt"
+                     "\tline one"
+                     "abc1234500000000000000000000000000000000 2 2"
+                     "author Alice"
+                     "author-time 100"
+                     "summary First commit subject"
+                     "filename f.txt"
+                     "\tline two"
+                     "def4567800000000000000000000000000000000 3 3 1"
+                     "author Bob"
+                     "author-time 200"
+                     "summary Second commit"
+                     "filename f.txt"
+                     "\tline three"))
+                   (define blame-recs (magit-blame-parse blame-sample))"#,
+            )
+            .unwrap();
+
+        // One record per source line, in file order.
+        assert_eq!(v("(length blame-recs)"), "3");
+        // Record 1: line 1, Alice's commit, summary carried through.
+        assert_eq!(v("(magit-blame-rec-line (list-ref blame-recs 0))"), "1");
+        assert_eq!(v("(list-ref (list-ref blame-recs 0) 2)"), "\"Alice\"");
+        assert_eq!(
+            v("(list-ref (list-ref blame-recs 0) 4)"),
+            "\"First commit subject\""
+        );
+        // Lines 1-2 share a SHA; line 3 is a different commit (so the collapse in
+        // `magit-blame-annotate` will annotate lines 1 and 3, not line 2).
+        assert_eq!(
+            v(
+                "(equal? (magit-blame-rec-sha (list-ref blame-recs 0)) (magit-blame-rec-sha (list-ref blame-recs 1)))"
+            ),
+            "#true"
+        );
+        assert_eq!(
+            v(
+                "(equal? (magit-blame-rec-sha (list-ref blame-recs 1)) (magit-blame-rec-sha (list-ref blame-recs 2)))"
+            ),
+            "#false"
+        );
+
+        // Header detection: a 40-hex SHA header is recognized; a key line is not.
+        assert_eq!(
+            v(r#"(magit-blame-hex40? "abc1234500000000000000000000000000000000 1 1 2")"#),
+            "#true"
+        );
+        assert_eq!(v(r#"(magit-blame-hex40? "author Alice")"#), "#false");
+
+        // Ancient epochs (1970) humanize to "years ago" and tint old.
+        assert_eq!(
+            v(r#"(ends-with? (magit-blame-humanize 100) "years ago")"#),
+            "#true"
+        );
+        assert_eq!(v("(magit-blame-age-face 100)"), "\"magit-blame-old\"");
+
+        // Uncommitted (all-zero SHA) is recognized and rendered plainly.
+        assert_eq!(
+            v(
+                r#"(magit-blame-uncommitted? (list 1 "0000000000000000000000000000000000000000" "Not Committed Yet" 0 ""))"#
+            ),
+            "#true"
+        );
+        assert_eq!(
+            v(
+                r#"(magit-blame-rec-suffix (list 1 "0000000000000000000000000000000000000000" "Not Committed Yet" 0 ""))"#
+            ),
+            "\"  Not committed yet\""
+        );
+        // A committed record's suffix carries short-hash, author, and summary.
+        assert_eq!(
+            v(r#"(string-contains? (magit-blame-rec-suffix (list-ref blame-recs 0)) "abc12345")"#),
+            "#true"
+        );
+        assert_eq!(
+            v(
+                r#"(string-contains? (magit-blame-rec-suffix (list-ref blame-recs 0)) "First commit subject")"#
+            ),
+            "#true"
+        );
+    }
+
     /// Range-editing + undo-boundary + buffer-local commands parse.
     #[test]
     fn editing_primitives_parse() {

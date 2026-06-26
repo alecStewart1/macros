@@ -639,6 +639,16 @@
   (set! *magit-dir* (magit-toplevel dir))
   (magit-render))
 
+;; Point *magit-dir* at the current buffer's repo when invoked from a NON-magit
+;; buffer. magit-status does this on entry; M-x entry points reachable from a
+;; file buffer (log, dispatch) must too, or they'd inherit a stale/default
+;; *magit-dir* and operate on the wrong repo. Inside a *magit…* buffer, the
+;; directory is already resolved — leave it untouched.
+(define (magit-ensure-dir)
+  (when (not (starts-with? (current-buffer) "*magit"))
+    (let ((start (or (project-root (buffer-directory)) (buffer-directory))))
+      (set! *magit-dir* (magit-toplevel start)))))
+
 ;; Refresh re-runs git for the SAME repo (never re-resolves).
 (define (magit-refresh) (magit-render))
 
@@ -1069,6 +1079,7 @@
 ;; --- log (l) → a read-only *magit-log* buffer -------------------------------
 (define (magit-log-toggle-graph) (magit-switch-toggle! "log:graph") (magit-log-popup))
 (define (magit-log-popup)
+  (magit-ensure-dir)            ; reachable via M-x from a file buffer
   (transient "Log"
     (list
       (list "Switches"
@@ -1186,6 +1197,7 @@
 
 ;; --- dispatch (?) : the top-level menu --------------------------------------
 (define (magit-dispatch)
+  (magit-ensure-dir)            ; reachable via M-x from a file buffer
   ;; Grouped (multi-column) transient: each inner list is a titled column.
   (transient "Magit"
     (list
@@ -1325,42 +1337,202 @@
               (when (> target 0) (goto-line (- target 1)))))))))
 
 ;; --- inline blame (git-blame as virtual line suffixes) ----------------------
-;; Toggle author/date annotations on the END of every line of the current FILE
-;; buffer (GitLens-style), built on `set-line-suffix`. `git blame` emits one line
-;; per source line in order, so blame line i annotates buffer line i.
+;; GitLens-style annotations on the END of each line, built on `set-line-suffix`.
+;; Two modes share one parsed cache: full-file (`magit-blame-toggle`, every line)
+;; and current-line (`magit-blame-line-toggle`, only point's line, follows the
+;; cursor via post-command-hook). Each annotation shows short-hash, author, a
+;; humanized date, and the commit summary, tinted by age.
+
+;; Age-tinted faces for full-file mode: recent edits pop, ancient code recedes.
+(set-face "magit-blame-recent" "#a6e22e")  ; < ~1 month
+(set-face "magit-blame-mid"    "#b58900")  ; < ~1 year
+(set-face "magit-blame-old"    "#6a6a6a")  ; older / dim
+;; Current-line mode stays a quiet, uniform grey — it's a single annotation that
+;; should sit behind the code, not a heat-map to scan.
+(set-face "magit-blame-line"   "#5c5c5c")
+
+;; `git blame --line-porcelain` repeats a full header block per line, so each
+;; record is unambiguous: a 40-hex SHA header line, key/value lines, then the
+;; source line (prefixed with a tab). Parse into `(final-line sha author epoch
+;; summary)` records, in file order.
+(define (magit-blame-hex40? line)
+  (and (>= (string-length line) 41)
+       (equal? (substring line 40 41) " ")
+       (let loop ((i 0))
+         (cond ((>= i 40) #t)
+               ((string-contains? "0123456789abcdef" (substring line i (+ i 1)))
+                (loop (+ i 1)))
+               (else #f)))))
+(define (magit-blame-parse lines)
+  (let loop ((ls lines) (sha "") (author "") (epoch 0) (summary "") (fline 0) (acc '()))
+    (cond
+      ((null? ls) (reverse acc))
+      (else
+        (let ((line (car ls)))
+          (cond
+            ;; The tab-prefixed content line ends the current record.
+            ((and (> (string-length line) 0) (equal? (substring line 0 1) "\t"))
+             (loop (cdr ls) "" "" 0 "" 0
+                   (cons (list fline sha author epoch summary) acc)))
+            ((starts-with? line "author ")
+             (loop (cdr ls) sha (substring line 7 (string-length line)) epoch summary fline acc))
+            ((starts-with? line "author-time ")
+             (loop (cdr ls) sha author
+                   (or (string->number (substring line 12 (string-length line))) 0)
+                   summary fline acc))
+            ((starts-with? line "summary ")
+             (loop (cdr ls) sha author epoch (substring line 8 (string-length line)) fline acc))
+            ((magit-blame-hex40? line)             ; "<sha> <orig> <final> [<n>]"
+             (let ((toks (split-many line " ")))
+               (loop (cdr ls) (list-ref toks 0) author epoch summary
+                     (or (string->number (list-ref toks 2)) 0) acc)))
+            (else (loop (cdr ls) sha author epoch summary fline acc))))))))
+
+;; Age from the commit's author-time epoch — `current-time "%s"` is now in epoch
+;; seconds, so no calendar arithmetic is needed.
+(define (magit-blame-age-seconds epoch)
+  (- (or (string->number (current-time "%s")) 0) epoch))
+(define *magit-blame-day* 86400)
+(define (magit-blame-humanize epoch)
+  (let ((age (magit-blame-age-seconds epoch)) (day *magit-blame-day*))
+    (cond ((< age 0) "in the future")
+          ((< age day) "today")
+          ((< age (* 2 day)) "yesterday")
+          ((< age (* 7 day))   (string-append (number->string (quotient age day)) " days ago"))
+          ((< age (* 30 day))  (string-append (number->string (quotient age (* 7 day))) " weeks ago"))
+          ((< age (* 365 day)) (string-append (number->string (quotient age (* 30 day))) " months ago"))
+          (else (string-append (number->string (quotient age (* 365 day))) " years ago")))))
+(define (magit-blame-age-face epoch)
+  (let ((age (magit-blame-age-seconds epoch)) (day *magit-blame-day*))
+    (cond ((< age (* 30 day)) "magit-blame-recent")
+          ((< age (* 365 day)) "magit-blame-mid")
+          (else "magit-blame-old"))))
+
+;; Record accessors + suffix rendering. rec = (final-line sha author epoch summary).
+(define (magit-blame-rec-line rec) (list-ref rec 0))
+(define (magit-blame-rec-sha rec)  (list-ref rec 1))
+(define (magit-blame-uncommitted? rec)
+  (let ((sha (magit-blame-rec-sha rec)))
+    (equal? (substring sha 0 (min 8 (string-length sha))) "00000000")))
+(define (magit-blame-trim s)          ; keep summaries from overflowing the line
+  (if (> (string-length s) 50)
+      (string-append (substring s 0 50) "…")
+      s))
+(define (magit-blame-rec-suffix rec)
+  (if (magit-blame-uncommitted? rec)
+      "  Not committed yet"
+      (string-append "  " (substring (magit-blame-rec-sha rec) 0 8)
+                     "  " (list-ref rec 2)
+                     ", " (magit-blame-humanize (list-ref rec 3))
+                     " · " (magit-blame-trim (list-ref rec 4)))))
+(define (magit-blame-rec-face rec)
+  (if (magit-blame-uncommitted? rec) "magit-context" (magit-blame-age-face (list-ref rec 3))))
+
+;; Parsed records for the current buffer, cached by line so current-line mode and
+;; the at-point actions are O(1) per cursor move (no re-blame). Invalidated when
+;; the active buffer changes.
+(define *magit-blame-cache* (hash))
+(define *magit-blame-buf* "")
+(define (magit-blame-fetch dir file)
+  (magit-blame-parse
+    (split-many (call-process "git" (list "-C" dir "blame" "--line-porcelain" "--" file)) "\n")))
+(define (magit-blame-store file recs)
+  (set! *magit-blame-buf* file)
+  (set! *magit-blame-cache* (hash))
+  (for-each (lambda (rec)
+              (set! *magit-blame-cache*
+                    (hash-insert *magit-blame-cache* (magit-blame-rec-line rec) rec)))
+            recs))
+(define (magit-blame-ensure)
+  (when (not (equal? (current-buffer) *magit-blame-buf*))
+    (magit-blame-store (current-buffer) (magit-blame-fetch (buffer-directory) (current-buffer))))
+  *magit-blame-cache*)
+(define (magit-blame-rec-at line)     ; line is 1-based (git's final line)
+  (hash-try-get (magit-blame-ensure) line))
+
+;; --- full-file mode ---------------------------------------------------------
+;; Annotate only the FIRST line of each run of consecutive lines from the same
+;; commit, so a block authored in one commit reads cleanly instead of repeating
+;; the same hash/date on every line.
 (define *magit-blame-on* #f)
-(define (magit-take n lst)            ; first n elements (no SRFI dependency)
-  (if (or (<= n 0) (null? lst)) '() (cons (car lst) (magit-take (- n 1) (cdr lst)))))
-;; "<hash> (<Author…> <date> <lineno>) code" → "  <short> <Author> <date>".
-(define (magit-blame-suffix l)
-  (let* ((lp (split-many l "("))
-         (hash (trim-end (car lp)))
-         (rest (string-join (cdr lp) "("))
-         (inside (car (split-many rest ")")))
-         (toks (filter (lambda (s) (not (equal? s ""))) (split-many inside " ")))
-         (n (length toks)))
-    (if (< n 3)
-        ""
-        (string-append "  " (substring hash 0 (min 8 (string-length hash)))
-                       " " (string-join (magit-take (- n 2) toks) " ")
-                       " " (list-ref toks (- n 2))))))
 (define (magit-blame-annotate)
-  (let* ((dir (buffer-directory))
-         (file (current-buffer))
-         (lines (split-many (trim-end (call-process "git" (list "-C" dir "blame" "--date=short" "--" file))) "\n")))
-    (if (or (null? lines) (equal? (car lines) ""))
+  (let* ((dir (buffer-directory)) (file (current-buffer))
+         (recs (magit-blame-fetch dir file)))
+    (if (null? recs)
         (message "git blame: nothing to annotate")
         (begin
-          (let loop ((ls lines) (i 0))
-            (when (not (null? ls))
-              (set-line-suffix i (magit-blame-suffix (car ls)) "magit-context")
-              (loop (cdr ls) (+ i 1))))
+          (magit-blame-store file recs)
+          (let loop ((rs recs) (prev ""))
+            (when (not (null? rs))
+              (let* ((rec (car rs)) (sha (magit-blame-rec-sha rec)))
+                (when (not (equal? sha prev))
+                  (set-line-suffix (- (magit-blame-rec-line rec) 1)
+                                   (magit-blame-rec-suffix rec) (magit-blame-rec-face rec)))
+                (loop (cdr rs) sha))))
           (set! *magit-blame-on* #t)
-          (message "Blame on — toggle off with the same key")))))
+          (message "Blame on — C-x v b toggles off")))))
+
+;; --- current-line mode (off by default) -------------------------------------
+;; Show blame only on point's line, re-placing it as the cursor moves. Driven by
+;; `post-command-hook`, which fires (once per cursor-line change) only while the
+;; hook is registered — so there's zero cost unless this mode is on.
+(define *magit-blame-line-on* #f)
+(define *magit-blame-line-last* -1)
+(define (magit-blame-line-refresh)
+  ;; Skip special buffers (`*magit*`, `*Help*`, …): they visit no file, so
+  ;; blaming them just spawns a failing git on every cursor move.
+  (when (and *magit-blame-line-on* (not (starts-with? (current-buffer) "*")))
+    (let ((ln (+ (buffer-line) 1)))          ; buffer-line is 0-based; cache is 1-based
+      (when (not (equal? ln *magit-blame-line-last*))
+        (set! *magit-blame-line-last* ln)
+        (clear-line-suffixes)
+        (let ((rec (magit-blame-rec-at ln)))
+          (when rec
+            (set-line-suffix (- ln 1) (magit-blame-rec-suffix rec) "magit-blame-line")))))))
+
+;; --- shared teardown + toggles ----------------------------------------------
+(define (magit-blame-off)
+  (clear-line-suffixes)
+  (set! *magit-blame-on* #f)
+  (when *magit-blame-line-on*
+    (set! *magit-blame-line-on* #f)
+    (set! *magit-blame-line-last* -1)
+    (remove-hook "post-command-hook" "magit-blame-line-refresh")))
 (define (magit-blame-toggle)
   (if *magit-blame-on*
-      (begin (clear-line-suffixes) (set! *magit-blame-on* #f) (message "Blame off"))
-      (magit-blame-annotate)))
+      (begin (magit-blame-off) (message "Blame off"))
+      (begin (magit-blame-off) (magit-blame-annotate))))
+(define (magit-blame-line-toggle)
+  (if *magit-blame-line-on*
+      (begin (magit-blame-off) (message "Blame (current line) off"))
+      (begin
+        (magit-blame-off)                    ; full-file and line modes are exclusive
+        (set! *magit-blame-line-on* #t)
+        (add-hook "post-command-hook" "magit-blame-line-refresh")
+        (magit-blame-line-refresh)
+        (message "Blame (current line) on — follows point"))))
+
+;; --- at-point actions (work in either mode) ---------------------------------
+(define (magit-blame-show)              ; show the commit that last touched this line
+  (let ((rec (magit-blame-rec-at (+ (buffer-line) 1))))
+    (cond ((not rec) (message "No blame for this line"))
+          ((magit-blame-uncommitted? rec) (message "Line not committed yet"))
+          (else
+           ;; `magit-show-commit` runs `git show` via `*magit-dir*`, which is only
+           ;; set once magit-status has opened. Inline blame can run with no status
+           ;; buffer, so point git at THIS buffer's repo for the call, then restore
+           ;; so a status buffer for another repo keeps its directory.
+           (let ((saved *magit-dir*))
+             (set! *magit-dir* (buffer-directory))
+             (magit-show-commit (magit-blame-rec-sha rec))
+             (set! *magit-dir* saved))))))
+(define (magit-blame-copy)              ; copy the commit hash to the clipboard
+  (let ((rec (magit-blame-rec-at (+ (buffer-line) 1))))
+    (cond ((not rec) (message "No blame for this line"))
+          ((magit-blame-uncommitted? rec) (message "Line not committed yet"))
+          (else (let ((sha (magit-blame-rec-sha rec)))
+                  (clipboard-set sha)
+                  (message (string-append "Copied " (substring sha 0 8))))))))
 
 ;; --- section navigation + visibility cycling --------------------------------
 ;; Navigation targets: every file-section heading + every commit/stash line.
@@ -1512,8 +1684,11 @@
   (helm (list (list "Open git repo in" "find-file-candidates" "magit-status-in"))))
 (define-key "fundamental" "ctrl-x M" "helm-magit")
 
-;; C-x v b: toggle inline git-blame on the current file buffer (Emacs vc-prefix).
-(define-key "fundamental" "ctrl-x v b" "magit-blame-toggle")
+;; C-x v …: inline git-blame controls on the current file buffer (Emacs vc-prefix).
+(define-key "fundamental" "ctrl-x v b" "magit-blame-toggle")        ; full-file blame
+(define-key "fundamental" "ctrl-x v shift-b" "magit-blame-line-toggle") ; current-line blame
+(define-key "fundamental" "ctrl-x v enter" "magit-blame-show")     ; show commit at point
+(define-key "fundamental" "ctrl-x v y" "magit-blame-copy")         ; copy hash at point
 
 ;; `magit` is the familiar alias for `magit-status`.
 (define (magit) (magit-status))
@@ -1526,3 +1701,6 @@
 (register-command "magit-log-popup")
 (register-command "helm-magit")
 (register-command "magit-blame-toggle")
+(register-command "magit-blame-line-toggle")
+(register-command "magit-blame-show")
+(register-command "magit-blame-copy")

@@ -68,6 +68,21 @@ Press <kbd>c</kbd> to open the commit popup, then start a commit. The message bu
 
 The log popup (<kbd>l</kbd>) opens a `magit-log-mode` buffer. From there: <kbd>Enter</kbd> shows a commit, <kbd>A</kbd> cherry-picks, <kbd>v</kbd> reverts, <kbd>q</kbd> closes.
 
+## Inline blame
+
+Annotate the commit that last touched each line as faded virtual text at the end of the line (GitLens-style). This works in any file buffer — you don't need the status buffer open:
+
+| Key | Action |
+| --- | --- |
+| <kbd>C-x v b</kbd> | toggle blame on every line |
+| <kbd>C-x v B</kbd> | toggle blame on the current line only (follows the cursor) |
+| <kbd>C-x v Enter</kbd> | show the commit that last touched this line |
+| <kbd>C-x v y</kbd> | copy that commit's hash |
+
+Each annotation shows the short hash, author, a humanized date ("3 weeks ago"), and the commit summary. Full-file mode (<kbd>C-x v b</kbd>) collapses runs of lines from the same commit to a single annotation and tints by age — recent edits pop, ancient code recedes. Current-line mode (<kbd>C-x v B</kbd>) shows one quiet grey annotation that re-places itself as point moves. All four commands are also available via <kbd>M-x</kbd>.
+
+The status buffer's <kbd>B</kbd> is a separate view: it opens a full `git blame` of the file at point in a read-only buffer.
+
 ## Customizing
 
 `magit-status` is on <kbd>C-x g</kbd> by default. Rebind it, or any key inside the status buffer (the `"magit-status"` map), from your `init.scm`:

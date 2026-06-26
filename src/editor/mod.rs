@@ -277,6 +277,9 @@ pub struct Editor {
     extra_cursors: Vec<u64>,
     /// Mode name -> Steel functions to run when that mode is enabled.
     hooks: HashMap<String, Vec<String>>,
+    /// Point's buffer line at the last `post-command-hook` fire, so the hook runs
+    /// once per cursor-line change rather than on every intra-command move.
+    last_hook_line: Option<usize>,
     /// Scheme completion-at-point functions, tried in order before LSP.
     capf_functions: Vec<String>,
 
@@ -1317,6 +1320,7 @@ impl Editor {
             avy_hints: Vec::new(),
             extra_cursors: Vec::new(),
             hooks: HashMap::new(),
+            last_hook_line: None,
             capf_functions: Vec::new(),
             kill_ring: Vec::new(),
             kill_index: 0,
@@ -1650,6 +1654,7 @@ impl Editor {
         if let Some(message) = self.diagnostic_at_point() {
             self.status = message.into();
         }
+        self.run_post_command_hook();
         cx.notify();
     }
 
@@ -1664,7 +1669,25 @@ impl Editor {
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
         self.ensure_cursor_visible();
+        self.run_post_command_hook();
         cx.notify();
+    }
+
+    /// Fire `post-command-hook` when point's line changed since the last fire —
+    /// the signal current-line decorations (e.g. inline blame) re-place on. The
+    /// hook dispatches asynchronously (no reentrancy into cursor movement), and
+    /// `run_hook` short-circuits when nothing is registered, so this is free
+    /// unless a Scheme feature opts in.
+    fn run_post_command_hook(&mut self) {
+        if !self.has_active_hook("post-command-hook") {
+            return;
+        }
+        let line = self.buffer.line_index_at_byte(self.point());
+        if self.last_hook_line == Some(line) {
+            return;
+        }
+        self.last_hook_line = Some(line);
+        self.run_hook("post-command-hook");
     }
 
     /// Target offset `delta` lines away, preserving the character column.
