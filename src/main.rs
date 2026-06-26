@@ -271,9 +271,7 @@ fn main() {
                             return;
                         }
                         _workspace
-                            .update(cx, |ws, cx| {
-                                ws.log_message("Checking for updates…", cx)
-                            })
+                            .update(cx, |ws, cx| ws.log_message("Checking for updates…", cx))
                             .ok();
                         let found = cx
                             .background_executor()

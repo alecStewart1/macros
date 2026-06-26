@@ -150,10 +150,7 @@ impl Workspace {
         use futures::StreamExt;
 
         self.set_update_phase(UpdatePhase::Downloading { percent: 0 }, cx);
-        self.log_message(
-            format!("Downloading Macros {}…", available.version),
-            cx,
-        );
+        self.log_message(format!("Downloading Macros {}…", available.version), cx);
 
         cx.spawn(async move |this, cx| {
             // The blocking install runs on the background executor and reports
@@ -553,13 +550,15 @@ impl Workspace {
         // ✕ can dismiss independently of it.
         let mut label_el = div().child(label);
         if interactive {
-            label_el = label_el.cursor(gpui::CursorStyle::PointingHand).on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _ev, _window, cx| {
-                    this.on_update_pill_click(cx);
-                    cx.stop_propagation();
-                }),
-            );
+            label_el = label_el
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _ev, _window, cx| {
+                        this.on_update_pill_click(cx);
+                        cx.stop_propagation();
+                    }),
+                );
         }
 
         // The dismiss ✕: hides the pill for this run. The launch check resurfaces
