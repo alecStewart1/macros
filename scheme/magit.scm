@@ -1954,6 +1954,12 @@
 ;; buffer `j`/`k` motion, which takes `k` over from discard — so re-expose
 ;; discard on `x` here, the magit-specific half of the overlay.
 (define-key "evil-normal:magit-status" "x" "magit-discard")
+;; Vim top/bottom motion. `g g` makes `g` a prefix, which shadows the single-`g`
+;; refresh from the keymap above — so re-expose refresh on `g r`, matching
+;; evil-collection's magit bindings.
+(define-key "evil-normal:magit-status" "g g" "evil-goto-first-line")
+(define-key "evil-normal:magit-status" "shift-g" "evil-goto-last-line")
+(define-key "evil-normal:magit-status" "g r" "magit-refresh")
 
 ;; Log / commit / stash-list buffers.
 (define-key "magit-log-mode" "enter" "magit-log-show")

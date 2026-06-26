@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://codeberg.org/likelihood/macros"
