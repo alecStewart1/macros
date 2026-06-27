@@ -6335,15 +6335,33 @@ mod magit_tests {
             .unwrap()
             .commands;
         let bound = |mode: &str, key: &str, cmd: &str| {
-            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
-                if m == mode && s == key && x == cmd))
+            cmds.iter().any(|c| {
+                matches!(c, EditorCommand::DefineKey(m, s, x)
+                if m == mode && s == key && x == cmd)
+            })
         };
         // Overlay (evil-only) motions: top/bottom, relocated refresh, line-start.
-        assert!(bound("evil-normal:magit-status", "g g", "evil-goto-first-line"));
-        assert!(bound("evil-normal:magit-status", "shift-g", "evil-goto-last-line"));
+        assert!(bound(
+            "evil-normal:magit-status",
+            "g g",
+            "evil-goto-first-line"
+        ));
+        assert!(bound(
+            "evil-normal:magit-status",
+            "shift-g",
+            "evil-goto-last-line"
+        ));
         assert!(bound("evil-normal:magit-status", "g r", "magit-refresh"));
-        assert!(bound("evil-normal:magit-status", "0", "move-beginning-of-line"));
-        assert!(bound("evil-normal:magit-status", "^", "evil-first-non-blank"));
+        assert!(bound(
+            "evil-normal:magit-status",
+            "0",
+            "move-beginning-of-line"
+        ));
+        assert!(bound(
+            "evil-normal:magit-status",
+            "^",
+            "evil-first-non-blank"
+        ));
         // Base keymap unchanged: single `g` still refreshes (the evil-off path),
         // and `$` is magit's process buffer, never an end-of-line motion.
         assert!(bound("magit-status", "g", "magit-refresh"));
