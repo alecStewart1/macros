@@ -60,13 +60,14 @@
 (set-option "helm-bevel-bottom" 0)
 (set-option "helm-bevel-left" 0)
 
-;; File extension -> language id and language servers (started lazily when a
-;; matching file is opened; the server binary must be on PATH). The default set
-;; — Rust, Go, C/C++, TypeScript/JavaScript, Python, Scheme, each with
-;; format-on-save and inlay hints — is configured at the END of lsp.scm via the
-;; ergonomic `(lsp-language …)` form. It lives there, not here, because lsp.scm
-;; (which defines `lsp-language`) loads after this file. Override or add
-;; languages in ~/.config/macros/init.scm (loaded last); see the examples below.
+;; Language servers are OPT-IN: none are configured out of the box except the
+;; built-in (in-process) Scheme server. Declare the languages you want in
+;; ~/.config/macros/init.scm with the ergonomic `(lsp-language …)` form; each
+;; server then starts lazily when a matching file is opened, provided its binary
+;; is on PATH. A ready-to-copy template for the common servers (the set Macros
+;; used to configure automatically) is in the DEFAULT LANGUAGE CONFIGURATION
+;; block at the end of lsp.scm; the examples below show the form. (Syntax
+;; highlighting is separate — it comes from the bundled grammars and is always on.)
 
 ;; Language-server stderr is always captured into *lsp-log* — open it with
 ;; C-h l (M-x list-lsp-log); it streams live once open. Set this to "true" if you

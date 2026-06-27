@@ -6396,22 +6396,44 @@ impl Editor {
             SetMajorMode(mode) => {
                 let mut modes = ModeStack::default();
                 modes.push(Mode::new("fundamental"));
-                modes.push(Mode::new(&mode));
+                // A mode whose name matches a bundled tree-sitter language carries
+                // that language, so highlighting AND the language server follow the
+                // mode — `M-x rust-mode` on any buffer colors it and (via the
+                // `fundamental` `enable-lsp` hook below) starts rust-analyzer.
+                // Modes with no grammar (shell-mode, git-commit-mode, …) install
+                // only the keymap and leave any existing highlighter alone.
+                let language_highlighter = Highlighter::for_language(&mode);
+                let mut new_mode = Mode::new(&mode);
+                if language_highlighter.is_some() {
+                    new_mode = new_mode.with_language(&mode);
+                }
+                modes.push(new_mode);
                 self.modes = modes;
-                // The ANVIL REPL displays Scheme, so highlight it in place — no
-                // need to swap to `macros-steel`, which would discard the
-                // anvil-repl keymap (RET → anvil-send-input) and kill the REPL.
-                //
-                // Drive the highlighter DIRECTLY rather than tagging the mode
-                // with a `language`: a mode language also feeds `active_language`,
-                // which the `fundamental` `enable-lsp` hook keys off — so it would
-                // attach the builtin Steel LSP and lint the transcript (the
-                // `;; =>` scrollback isn't a program). The REPL introspects its
-                // live image instead (completion, doc, apropos — see steel-anvil).
-                if mode == "anvil-repl-mode" {
+                if let Some(h) = language_highlighter {
+                    self.highlighter = Some(h);
+                    self.parse_full();
+                } else if mode == "anvil-repl-mode" {
+                    // The ANVIL REPL displays Scheme, so highlight it in place — no
+                    // need to swap to `macros-steel`, which would discard the
+                    // anvil-repl keymap (RET → anvil-send-input) and kill the REPL.
+                    //
+                    // Drive the highlighter DIRECTLY rather than tagging the mode
+                    // with a `language`: a mode language also feeds
+                    // `active_language`, which `enable-lsp` keys off — so it would
+                    // attach the builtin Steel LSP and lint the transcript (the
+                    // `;; =>` scrollback isn't a program). The REPL introspects its
+                    // live image instead (completion, doc, apropos — see
+                    // steel-anvil).
                     self.highlighter = Highlighter::scheme();
                     self.parse_full();
                 }
+                // Entering a mode runs its hooks (Emacs `run-mode-hooks`): a user's
+                // `(add-hook "rust" …)` fires whether the buffer reached rust-mode
+                // by file detection or `M-x rust-mode`, and `enable-lsp` brings up
+                // the server for the now-active language. Idempotent — re-running
+                // `fundamental`'s hooks is a no-op when nothing changed.
+                self.hooks_ran = false;
+                self.run_mode_hooks_once(cx);
                 cx.notify();
             }
             EnterMacrosSteel => {
@@ -8199,6 +8221,8 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "r" | "R" => "r",
         "ml" | "mli" => "ocaml",
         "hs" => "haskell",
+        "scala" | "sc" | "sbt" => "scala",
+        "clj" | "cljs" | "cljc" | "edn" => "clojure",
         "tex" | "sty" | "cls" => "latex",
         "typ" => "typst",
         "mmd" | "mermaid" => "mermaid",

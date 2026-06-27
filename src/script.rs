@@ -2610,6 +2610,18 @@ fn build_engine(
         engine.register_fn("command-list", move || -> Vec<String> { names.clone() });
     }
     {
+        // `(bundled-languages)` → every language id with a bundled tree-sitter
+        // grammar. language-modes.scm reads this to generate an `<id>-mode` M-x
+        // command per language (so `M-x scala-mode` switches the buffer's mode).
+        let langs: Vec<String> = crate::highlight::BUNDLED_LANGUAGES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        engine.register_fn("bundled-languages", move || -> Vec<String> {
+            langs.clone()
+        });
+    }
+    {
         // The doc index: name → (doc, file, line). Steel has no runtime
         // docstrings, so the `;;` block preceding each top-level define IS its
         // documentation; file+line let the picker jump to the implementation.
@@ -4439,6 +4451,89 @@ mod tests {
         ));
     }
 
+    /// With core.scm loaded, `add-hook` accepts a 'symbol and a procedure (not
+    /// just a "name" string), mirroring `bind-key`. A symbol defers to its name;
+    /// a lambda is stashed behind a generated, callable global stub.
+    #[test]
+    fn add_hook_accepts_symbol_and_lambda() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../scheme/hooks.scm"))
+            .expect("hooks.scm");
+
+        // A 'symbol resolves to its bare name — same registration a string makes.
+        let sym = engine.eval(r#"(add-hook "rust" 'my-setup)"#).unwrap();
+        assert!(
+            matches!(
+                sym.commands.as_slice(),
+                [EditorCommand::AddHook(m, f)] if m == "rust" && f == "my-setup"
+            ),
+            "symbol hook should register by name: {:?}",
+            sym.commands
+        );
+
+        // A lambda registers under a generated stub name (it can't be a bare
+        // identifier the editor calls otherwise).
+        let lam = engine
+            .eval(r#"(begin (define *probe* 0) (add-hook "rust" (lambda () (set! *probe* 42))))"#)
+            .unwrap();
+        let stub = match lam.commands.as_slice() {
+            [EditorCommand::AddHook(m, f)] if m == "rust" => {
+                assert!(f.starts_with("hook-fn-"), "lambda stub name was {f:?}");
+                f.clone()
+            }
+            other => panic!("lambda hook should enqueue one AddHook: {other:?}"),
+        };
+        // The stub is a real global: calling it (how the editor invokes a hook by
+        // name) runs the original closure.
+        engine.eval(&format!("({stub})")).unwrap();
+        assert_eq!(
+            engine.eval("*probe*").unwrap().value.as_deref(),
+            Some("42"),
+            "calling the generated stub should run the lambda"
+        );
+    }
+
+    /// Language servers are opt-in: loading the full bundled runtime configures
+    /// only the built-in (in-process) Scheme servers — no external server is
+    /// wired up until the user declares one in their init.scm.
+    #[test]
+    fn language_servers_are_opt_in_by_default() {
+        let (engine, _rx) = ScriptEngine::new();
+        let mut configured: Vec<String> = Vec::new();
+        for src in crate::runtime::startup_scripts() {
+            let out = engine.eval(src).expect("a startup script failed to load");
+            for c in out.commands {
+                if let EditorCommand::SetLsp(lang, _) = c {
+                    configured.push(lang);
+                }
+            }
+        }
+        // The built-in Scheme servers stay on (no binary, power config editing).
+        assert!(
+            configured.iter().any(|l| l == "macros-scheme"),
+            "built-in macros-scheme server should be configured: {configured:?}"
+        );
+        // No external language server is configured out of the box.
+        for ext in [
+            "rust",
+            "go",
+            "c",
+            "cpp",
+            "typescript",
+            "javascript",
+            "python",
+        ] {
+            assert!(
+                !configured.iter().any(|l| l == ext),
+                "{ext} should NOT be configured by default (servers are opt-in): {configured:?}"
+            );
+        }
+    }
+
     #[test]
     fn evil_bind_command_by_identity() {
         let (engine, _rx) = ScriptEngine::new();
@@ -5283,6 +5378,56 @@ mod magit_tests {
                 engine.eval(&q).unwrap().value.as_deref(),
                 Some("\"y\""),
                 "{cmd} is not registered for M-x"
+            );
+        }
+    }
+
+    /// language-modes.scm generates an `<id>-mode` command per bundled grammar:
+    /// each is M-x discoverable AND callable (the `eval-string` define persists),
+    /// and invoking it switches the buffer's major mode. Scheme is excluded (it
+    /// has the richer steel-mode / macros-steel-mode commands).
+    #[test]
+    fn language_modes_are_generated_for_every_grammar() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        for lang in crate::highlight::BUNDLED_LANGUAGES {
+            let cmd = format!("{lang}-mode");
+            if *lang == "scheme" {
+                // Excluded: no generated scheme-mode (steel-mode covers it).
+                assert_eq!(
+                    engine
+                        .eval(&format!(
+                            r#"(if (member "{cmd}" *interactive-commands*) "y" "n")"#
+                        ))
+                        .unwrap()
+                        .value
+                        .as_deref(),
+                    Some("\"n\""),
+                    "scheme-mode should not be generated"
+                );
+                continue;
+            }
+            // Registered for M-x.
+            assert_eq!(
+                engine
+                    .eval(&format!(
+                        r#"(if (member "{cmd}" *interactive-commands*) "y" "n")"#
+                    ))
+                    .unwrap()
+                    .value
+                    .as_deref(),
+                Some("\"y\""),
+                "{cmd} is not registered for M-x"
+            );
+            // Callable, and switches the major mode to the language id.
+            let commands = engine.eval(&format!("({cmd})")).unwrap().commands;
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == lang)),
+                "({cmd}) did not enqueue SetMajorMode({lang}): {commands:?}"
             );
         }
     }

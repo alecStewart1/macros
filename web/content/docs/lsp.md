@@ -9,7 +9,7 @@ Macros speaks the **Language Server Protocol**. The protocol layer — sending r
 
 ## Setting up a language server
 
-Macros ships ready-to-run configs for Rust, Go, C/C++, TypeScript/JavaScript, and Python. Each starts its server lazily the first time you open a matching file — provided the server binary is on your `PATH`. You add or customize languages with the `lsp-language` form in your `init.scm`.
+Language servers are **opt-in**: none are configured out of the box (the one exception is the built-in, in-process Scheme server, which needs no binary). You enable a language by declaring it with the `lsp-language` form in your `init.scm`; the server then starts lazily the first time you open a matching file — provided the server binary is on your `PATH`. (Syntax highlighting is separate — it comes from the bundled tree-sitter grammars and is always on, with or without a server.)
 
 The smallest useful example — Rust, via `rust-analyzer`, formatting on save:
 
@@ -19,6 +19,37 @@ The smallest useful example — Rust, via `rust-analyzer`, formatting on save:
   'command        "rust-analyzer"
   'format-on-save 'lsp)          ; format through the server on save
 ```
+
+### Enabling the common servers
+
+Paste any of these into your `init.scm` and keep the ones whose server binaries are installed and on your `PATH`. This is the set Macros used to configure automatically; `format-on-save 'lsp` uses each server's own formatter (rustfmt, gofmt, clang-format, …) — no extra binary, and a harmless no-op if the server can't format.
+
+```scheme
+(lsp-language "rust"       'extensions '("rs")              'command "rust-analyzer"                 'format-on-save 'lsp)
+(lsp-language "go"         'extensions '("go")              'command "gopls"                         'format-on-save 'lsp)
+(lsp-language "c"          'extensions '("c" "h")           'command "clangd"                        'format-on-save 'lsp)
+(lsp-language "cpp"        'extensions '("cpp" "cc" "hpp")  'command "clangd"                        'format-on-save 'lsp)
+(lsp-language "python"     'extensions '("py")              'command "pylsp"                         'format-on-save 'lsp)
+
+;; .ts and .tsx share one server but must announce different languageIds, or a
+;; .tsx file opens as plain "typescript" and every JSX element is a syntax error.
+(lsp-language "typescript"
+  'extensions   '("ts" "tsx")
+  'language-ids '(("ts" . "typescript") ("tsx" . "typescriptreact"))
+  'command      "typescript-language-server --stdio"
+  'format-on-save 'lsp)
+(lsp-language "javascript"
+  'extensions   '("js" "jsx")
+  'language-ids '(("js" . "javascript") ("jsx" . "javascriptreact"))
+  'command      "typescript-language-server --stdio"
+  'format-on-save 'lsp)
+
+;; JVM languages (highlighting is bundled; install the server to enable LSP):
+(lsp-language "scala"      'extensions '("scala" "sc" "sbt")        'command "metals"      'format-on-save 'lsp)
+(lsp-language "clojure"    'extensions '("clj" "cljs" "cljc" "edn") 'command "clojure-lsp" 'format-on-save 'lsp)
+```
+
+The same block lives (commented) in the `DEFAULT LANGUAGE CONFIGURATION` section at the end of `scheme/lsp.scm`.
 
 `'command` is the server invocation; put any flags right in the string:
 
@@ -58,20 +89,15 @@ The smallest useful example — Rust, via `rust-analyzer`, formatting on save:
   'inlay-hints     #t
   'semantic-tokens #t)
 
-;; A language that doesn't ship by default — Zig via zls:
+;; Zig via zls, with inlay hints off:
 (lsp-language "zig"
   'extensions     '("zig")
   'command        "zls"
-  'format-on-save 'lsp)
-
-;; Re-declare Rust to quietly turn its inlay hints off (keeps everything else):
-(lsp-language "rust"
-  'extensions  '("rs")
-  'command     "rust-analyzer"
-  'inlay-hints #f)
+  'format-on-save 'lsp
+  'inlay-hints    #f)
 ```
 
-Your `init.scm` loads after the built-in config, so re-declaring a language (like the last Rust example) overrides the default.
+Declaring a language is idempotent — re-declaring it (e.g. to flip `'inlay-hints`) just replaces the previous definition, so you can refine a config by stating it again later in your `init.scm`.
 
 ## Navigation & refactoring commands
 

@@ -500,11 +500,17 @@ impl Element for EditorElement {
         let viewport_bottom = px(viewport_h);
         for &i in &rows {
             let (range, text) = buffer.line(i);
-            // Stop once past the bottom — but always lay out the cursor's own line
-            // even if it spills below, so its real (wrapped) position is known and
-            // `reconcile_cursor_scroll` can follow it. The line is clipped anyway.
-            let is_cursor_line = selected && cursor >= range.start && cursor <= range.end;
-            if y >= viewport_bottom && !is_cursor_line {
+            // Stop laying out once below the viewport — but keep going until the
+            // cursor's own line has been laid out, so `reconcile_cursor_scroll`
+            // learns its real (wrapped) pixel position and can follow it. Under
+            // word-wrap the lines above the cursor can fill the viewport before
+            // the loop reaches the cursor's line (e.g. jumping to end-of-buffer),
+            // so breaking at the first off-screen line would leave `cursor_px`
+            // unset and the scroll a few rows short of revealing the cursor. Once
+            // the cursor has been located — or in a non-selected pane, which has
+            // no cursor to follow — the early-out stands. Off-screen lines laid
+            // out in the interim are clipped to `bounds` anyway.
+            if y >= viewport_bottom && (!selected || cursor_px.is_some()) {
                 break;
             }
             let top = y;

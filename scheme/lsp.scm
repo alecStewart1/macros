@@ -407,61 +407,36 @@
 ;;; ===========================================================================
 ;;; DEFAULT LANGUAGE CONFIGURATION
 ;;;
-;;; Reasonable out-of-the-box setup for the common languages, via the ergonomic
-;;; `lsp-language` form (defined above — this is why config lives here in
-;;; lsp.scm rather than init.scm, which loads first). Each language gets:
-;;;   - extension -> language id mapping
-;;;   - the language server command (started lazily on first matching file;
-;;;     the binary must be installed and on PATH)
-;;;   - format-on-save via the server's own formatter ('lsp): rust-analyzer ->
-;;;     rustfmt, gopls -> gofmt, clangd -> clang-format, tsserver, pylsp. No
-;;;     extra binary required, and a harmless no-op if the server can't format.
-;;;   - inlay hints (on by default in `lsp-language`).
+;;; External language servers are OPT-IN — none are configured out of the box.
+;;; Only the built-in, in-process Scheme servers below are on by default (no
+;;; binary to install, and they power editing your own config). Syntax
+;;; highlighting is unaffected by any of this: it comes from the bundled
+;;; tree-sitter grammars and is always on.
 ;;;
-;;; To override any of this, redefine the language in ~/.config/macros/init.scm
-;;; (loaded last, so it wins): swap the formatter (e.g. (list "gofmt") or
-;;; (list "black" "-")), turn on 'code-lens / 'semantic-tokens, or pass
-;;; 'format-on-save #f to disable formatting on save for that language.
-
-(lsp-language "rust"
-  'extensions     '("rs")
-  'command        "rust-analyzer"
-  'format-on-save 'lsp)
-
-(lsp-language "go"
-  'extensions     '("go")
-  'command        "gopls"
-  'format-on-save 'lsp)
-
-(lsp-language "c"
-  'extensions     '("c" "h")
-  'command        "clangd"
-  'format-on-save 'lsp)
-
-(lsp-language "cpp"
-  'extensions     '("cpp" "cc" "hpp")
-  'command        "clangd"
-  'format-on-save 'lsp)
-
-;; .ts and .tsx share one server but must announce different languageIds:
-;; tsserver only enables JSX parsing for the *react variants. Without this, a
-;; .tsx file opens as plain "typescript" and every JSX element is a syntax error.
-(lsp-language "typescript"
-  'extensions     '("ts" "tsx")
-  'language-ids   '(("ts" . "typescript") ("tsx" . "typescriptreact"))
-  'command        "typescript-language-server --stdio"
-  'format-on-save 'lsp)
-
-(lsp-language "javascript"
-  'extensions     '("js" "jsx")
-  'language-ids   '(("js" . "javascript") ("jsx" . "javascriptreact"))
-  'command        "typescript-language-server --stdio"
-  'format-on-save 'lsp)
-
-(lsp-language "python"
-  'extensions     '("py")
-  'command        "pylsp"
-  'format-on-save 'lsp)
+;;; The autostart hook (`(add-hook "fundamental" "enable-lsp")`) stays enabled,
+;;; but `enable-lsp` is a no-op for any language with no server configured — so
+;;; nothing launches until you declare a server with the ergonomic
+;;; `lsp-language` form in ~/.config/macros/init.scm (loaded last, so it wins).
+;;;
+;;; Ready-to-use template — copy the lines you want into your init.scm (keep the
+;;; ones whose server binaries are on your PATH). This is the set Macros used to
+;;; configure automatically; format-on-save uses each server's own formatter:
+;;;
+;;;   (lsp-language "rust"       'extensions '("rs")            'command "rust-analyzer"        'format-on-save 'lsp)
+;;;   (lsp-language "go"         'extensions '("go")            'command "gopls"                'format-on-save 'lsp)
+;;;   (lsp-language "c"          'extensions '("c" "h")         'command "clangd"               'format-on-save 'lsp)
+;;;   (lsp-language "cpp"        'extensions '("cpp" "cc" "hpp") 'command "clangd"              'format-on-save 'lsp)
+;;;   ;; .ts/.tsx share one server but need distinct languageIds for JSX parsing:
+;;;   (lsp-language "typescript" 'extensions '("ts" "tsx")
+;;;                              'language-ids '(("ts" . "typescript") ("tsx" . "typescriptreact"))
+;;;                              'command "typescript-language-server --stdio" 'format-on-save 'lsp)
+;;;   (lsp-language "javascript" 'extensions '("js" "jsx")
+;;;                              'language-ids '(("js" . "javascript") ("jsx" . "javascriptreact"))
+;;;                              'command "typescript-language-server --stdio" 'format-on-save 'lsp)
+;;;   (lsp-language "python"     'extensions '("py")            'command "pylsp"                'format-on-save 'lsp)
+;;;   ;; JVM languages (servers not installed by most users by default):
+;;;   (lsp-language "scala"      'extensions '("scala" "sc" "sbt") 'command "metals"            'format-on-save 'lsp)
+;;;   (lsp-language "clojure"    'extensions '("clj" "cljs" "cljc" "edn") 'command "clojure-lsp" 'format-on-save 'lsp)
 
 ;; Scheme/Steel uses the built-in (in-process) server — no external binary, and
 ;; no reliable on-save formatter, so format-on-save and inlay hints are off.

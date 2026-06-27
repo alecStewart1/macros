@@ -26,7 +26,7 @@ Because the mapping is by capture name, any standard tree-sitter `highlights.scm
 
 These grammars ship in the binary:
 
-`scheme` · `rust` · `python` · `javascript` · `typescript` · `tsx` · `json` · `c` · `cpp` · `go` · `java` · `ruby` · `lua` · `zig` · `r` · `ocaml` · `haskell` · `bash` · `html` · `css` · `yaml` · `toml` · `markdown` · `latex` · `typst` · `mermaid`
+`scheme` · `rust` · `python` · `javascript` · `typescript` · `tsx` · `json` · `c` · `cpp` · `go` · `java` · `scala` · `clojure` · `ruby` · `lua` · `zig` · `r` · `ocaml` · `haskell` · `bash` · `html` · `css` · `yaml` · `toml` · `markdown` · `latex` · `typst` · `mermaid`
 
 Map a file extension to one of them with `set-extension`, and highlighting (and the LSP language id) follows automatically:
 
@@ -68,9 +68,9 @@ Because grammars are compiled in, a brand-new one is a three-step Rust change, t
    "kt" | "kts" => "kotlin",
    ```
 
-Rebuild and Kotlin files highlight. (The `all_bundled_grammars_load` test in `src/highlight.rs` will exercise the new grammar — add it to that list so a query the grammar version rejects fails loudly instead of silently disabling highlighting.)
+Then add `"kotlin"` to the `BUNDLED_LANGUAGES` list in `src/highlight.rs`. That list is the single source of truth: the grammar-load tests iterate it (so a query the grammar version rejects fails loudly instead of silently disabling highlighting), and Scheme reads it via `(bundled-languages)` to generate the mode command below.
 
-This is exactly how Zig, R, OCaml, and Haskell were added — all now bundled, so their files highlight with no config. (OCaml's grammar ships split implementation/interface parsers like TypeScript, so its entry uses `LANGUAGE_OCAML`.)
+Rebuild and Kotlin files highlight. This is exactly how Zig, R, OCaml, Haskell, Scala, and Clojure were added — all now bundled, so their files highlight with no config. (OCaml's grammar ships split implementation/interface parsers like TypeScript, so its entry uses `LANGUAGE_OCAML`.)
 
 The capture names in the grammar's own `highlights.scm` flow straight into the faces above, so you usually need no query of your own.
 
@@ -102,9 +102,25 @@ A major mode is a keymap named after the mode, plus commands, activated on `find
 (add-hook "find-file-hook" "env--maybe-activate")
 ```
 
-`set-major-mode` installs the keymap whose name you pass, so the mode name and the keymap name must match. Bindings can use [`bind-key`](/docs/keybindings#binding-a-function-directly), which takes the command as a `'name` symbol (or a bare function value) rather than a command-name string.
+`set-major-mode` installs the keymap whose name you pass, so the mode name and the keymap name must match. It is also highlighting-aware: if the mode name matches a bundled grammar, switching to it attaches that grammar (and, via the `fundamental` `enable-lsp` hook, its language server *if one is configured* — see [Language servers](/docs/lsp)) and runs the mode's hooks. Bindings can use [`bind-key`](/docs/keybindings#binding-a-function-directly), which takes the command as a `'name` symbol (or a bare function value) rather than a command-name string.
 
 The bundled modes are the best templates: `scheme/markdown.scm` is a compact tree-sitter-backed mode (the grammar highlights; the mode adds heading navigation and folding), and `scheme/org.scm` is a full mode with its own parser and fontification.
+
+## Language modes and entry hooks
+
+Every bundled grammar also gets a major mode named after it, entered automatically when a matching file opens — a `.rs` file lands in `rust` mode, a `.scala` file in `scala` mode. Each is an M-x command too (`rust-mode`, `scala-mode`, `clojure-mode`, …), so you can switch any buffer's mode by hand with no per-language wiring.
+
+To configure what happens **on entering a mode** — the analog of Emacs's `rust-mode-hook` — register a function under the mode name. The hook runs on both entry paths (opening a file of that type, or `M-x rust-mode`):
+
+```scheme
+(define (my-rust-setup)
+  (set-option "word-wrap:rust" #f)                  ; don't wrap long lines in Rust
+  (define-key "rust" "ctrl-c ctrl-t" "lsp-hover"))
+
+(add-hook "rust" 'my-rust-setup)
+```
+
+`add-hook` accepts a command-name string, a `'symbol`, or an anonymous `(lambda () …)`. Two differences from Emacs worth knowing: the hook key is the **mode name** (`"rust"`, not `rust-mode-hook`), with `fundamental` as the catch-all that runs for every buffer; and the registry is **global** (shared by all buffers in that mode) rather than buffer-local, so hooks should be idempotent — *set* buffer-local state, don't *append* to it.
 
 ## Custom fontification from Scheme
 

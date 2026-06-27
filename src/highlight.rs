@@ -42,6 +42,41 @@ pub fn face_name(face: usize) -> &'static str {
     FACE_NAMES.get(face).copied().unwrap_or("variable")
 }
 
+/// Every language id with a bundled grammar in [`grammar`]. The canonical list:
+/// the grammar-load tests iterate it, and Scheme reads it via `(bundled-languages)`
+/// to generate an `<id>-mode` M-x command per language (see language-modes.scm).
+/// Keep in sync with the `grammar` match arms.
+pub const BUNDLED_LANGUAGES: &[&str] = &[
+    "scheme",
+    "rust",
+    "python",
+    "javascript",
+    "json",
+    "c",
+    "cpp",
+    "go",
+    "html",
+    "css",
+    "bash",
+    "typescript",
+    "tsx",
+    "java",
+    "ruby",
+    "lua",
+    "yaml",
+    "toml",
+    "markdown",
+    "zig",
+    "r",
+    "ocaml",
+    "haskell",
+    "scala",
+    "clojure",
+    "latex",
+    "typst",
+    "mermaid",
+];
+
 /// A contiguous run of source bytes and the face (if any) to draw it with.
 pub struct HlSpan {
     pub range: Range<usize>,
@@ -191,6 +226,8 @@ fn injection_lang_id(tag: &str) -> Option<&'static str> {
         "r" => "r",
         "ocaml" | "ml" => "ocaml",
         "haskell" | "hs" => "haskell",
+        "scala" | "sc" => "scala",
+        "clojure" | "clj" | "cljs" | "cljc" | "edn" => "clojure",
         _ => return None,
     })
 }
@@ -272,6 +309,14 @@ fn grammar(language: &str) -> Option<(LanguageFn, &'static str)> {
         "haskell" => (
             tree_sitter_haskell::LANGUAGE,
             tree_sitter_haskell::HIGHLIGHTS_QUERY,
+        ),
+        "scala" => (
+            tree_sitter_scala::LANGUAGE,
+            tree_sitter_scala::HIGHLIGHTS_QUERY,
+        ),
+        "clojure" => (
+            tree_sitter_clojure_orchard::LANGUAGE,
+            tree_sitter_clojure_orchard::HIGHLIGHTS_QUERY,
         ),
         // LaTeX, Typst, and Mermaid bundle no highlights query with the parser,
         // so we vendor nvim-treesitter's under `grammars/queries/`. (LaTeX/Typst
@@ -541,12 +586,15 @@ fn face_for_capture(name: &str) -> Option<usize> {
             }
         }
         "boolean" => "constant",            // true / false / nil
+        "float" => "number",                // float literals (Scala et al.)
         "character" | "escape" => "string", // char literals, \n
         "property" | "field" | "parameter" | "attribute" => "variable", // keys, obj.prop, attrs
-        "tag" | "conditional" | "repeat" | "label" | "preproc" => "keyword", // <tag>, if/for, #define
-        "constructor" | "namespace" | "module" => "type",                    // Foo(), modules
-        "method" => "function",                                              // method calls
-        "delimiter" => "punctuation",                                        // bare `@delimiter`
+        // <tag>, if/for, #define, import, throw/catch, `lazy`/`implicit`
+        "tag" | "conditional" | "repeat" | "label" | "preproc" | "include" | "exception"
+        | "storageclass" => "keyword",
+        "constructor" | "namespace" | "module" => "type", // Foo(), modules
+        "method" => "function",                           // method calls
+        "delimiter" => "punctuation",                     // bare `@delimiter`
         _ => return None,
     };
     FACE_NAMES.iter().position(|face| *face == alias)
@@ -611,34 +659,7 @@ mod tests {
     /// disable highlighting for that language.
     #[test]
     fn all_bundled_grammars_load() {
-        for lang in [
-            "scheme",
-            "rust",
-            "python",
-            "javascript",
-            "json",
-            "c",
-            "cpp",
-            "go",
-            "html",
-            "css",
-            "bash",
-            "typescript",
-            "tsx",
-            "java",
-            "ruby",
-            "lua",
-            "yaml",
-            "toml",
-            "markdown",
-            "zig",
-            "r",
-            "ocaml",
-            "haskell",
-            "latex",
-            "typst",
-            "mermaid",
-        ] {
+        for lang in BUNDLED_LANGUAGES {
             assert!(
                 Highlighter::for_language(lang).is_some(),
                 "grammar or highlights query failed to load for {lang}"
@@ -726,35 +747,8 @@ mod tests {
     fn every_grammar_capture_resolves_to_a_face() {
         // Not visible faces: injected-region and spellcheck markers, error nodes.
         const ALLOWED_UNMAPPED: &[&str] = &["embedded", "spell", "nospell", "conceal", "error"];
-        let langs = [
-            "scheme",
-            "rust",
-            "python",
-            "javascript",
-            "json",
-            "c",
-            "cpp",
-            "go",
-            "html",
-            "css",
-            "bash",
-            "typescript",
-            "tsx",
-            "java",
-            "ruby",
-            "lua",
-            "yaml",
-            "toml",
-            "markdown",
-            "zig",
-            "r",
-            "ocaml",
-            "haskell",
-            "latex",
-            "typst",
-            "mermaid",
-        ];
-        for lang in langs {
+        for lang in BUNDLED_LANGUAGES {
+            let lang = *lang;
             let (langfn, query_src) = grammar(lang).unwrap();
             let language: Language = langfn.into();
             let query = Query::new(&language, query_src).unwrap();

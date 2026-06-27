@@ -186,3 +186,28 @@
     ((symbol? cmd) (define-key map chord (symbol->string cmd)))
     ((string? cmd) (define-key map chord cmd))
     (else (define-key map chord (string-append "run-thunk \"" (register-thunk cmd) "\"")))))
+
+;; --- hook argument plumbing -------------------------------------------------
+;; The editor stores hooks BY NAME and calls them by name on the engine thread —
+;; a live closure can't cross that boundary — so the raw builtins take a string.
+;; Capture them here so the friendlier `add-hook` / `remove-hook` wrappers (in
+;; hooks.scm, which must live in a *separate* file: redefining `add-hook` in this
+;; file would make the line above a forward-reference to the not-yet-initialized
+;; local binding) can accept a 'symbol or a procedure too, like `bind-key`.
+(define raw-add-hook add-hook)
+(define raw-remove-hook remove-hook)
+
+;; Normalize a hook argument to the string name the editor will call. (`proc`,
+;; not `fn` — `fn` is Steel's lambda shorthand and can't be a parameter name.)
+(define (hook->name proc)
+  (cond
+    ((string? proc) proc)
+    ((symbol? proc) (symbol->string proc))
+    ;; Procedure: stash it, then emit a uniquely-named no-arg global stub that
+    ;; runs it. The stub's source only references the thunk by id (a string), so
+    ;; eval-string is enough — no live value need cross into the definition.
+    (else
+     (let* ((id (register-thunk proc))
+            (name (string-append "hook-fn-" id)))
+       (eval-string (string-append "(define (" name ") (run-thunk \"" id "\"))"))
+       name))))
