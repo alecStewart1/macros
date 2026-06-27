@@ -158,10 +158,12 @@
     (when root (projectile-recent-add root))))
 
 ;; --- mode-line indicator ----------------------------------------------------
-;; Recompute the project on every file visit (find-file-hook) and show its name.
+;; Recompute the project on every file visit (find-file-hook) and show its name,
+;; plus the git branch ("git:main") when the file is inside a git work tree.
 (define (projectile-update-modeline)
   (let ((root (project-root (buffer-directory))))
-    (set-modeline-project (if root (basename root) ""))))
+    (set-modeline-project (if root (basename root) ""))
+    (set-modeline-git (gix-branch (buffer-directory)))))
 
 (add-hook "find-file-hook" "projectile-update-modeline")
 (add-hook "find-file-hook" "projectile-track")

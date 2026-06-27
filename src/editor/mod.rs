@@ -457,6 +457,8 @@ pub struct Editor {
     transient: Option<TransientState>,
     /// A mode-line project indicator set from Scheme (projectile-style).
     project_indicator: Option<SharedString>,
+    /// A mode-line git branch indicator set from Scheme, e.g. "main".
+    git_branch: Option<SharedString>,
 
     // --- Windows (split panes) ---
     /// All window panes (the selected one is the live view onto the buffer).
@@ -1465,6 +1467,7 @@ impl Editor {
             locals: HashMap::new(),
             transient: None,
             project_indicator: None,
+            git_branch: None,
             panes: vec![Pane {
                 id: 0,
                 buffer: "*scratch*".to_string(),
@@ -5019,6 +5022,11 @@ impl Editor {
         self.project_indicator.as_ref().map(SharedString::as_ref)
     }
 
+    /// The mode-line git branch indicator set from Scheme, if any.
+    pub fn git_branch(&self) -> Option<&str> {
+        self.git_branch.as_ref().map(SharedString::as_ref)
+    }
+
     // --- Overlays / text properties / folds (active buffer) ---------------
 
     /// Sub-line face ranges, for the element to layer over syntax highlighting.
@@ -6662,6 +6670,14 @@ impl Editor {
                     None
                 } else {
                     Some(name.into())
+                };
+                cx.notify();
+            }
+            SetModelineGit(branch) => {
+                self.git_branch = if branch.is_empty() {
+                    None
+                } else {
+                    Some(branch.into())
                 };
                 cx.notify();
             }

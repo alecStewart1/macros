@@ -493,6 +493,11 @@ impl Workspace {
             .project_indicator()
             .map(|p| format!("  [{p}]"))
             .unwrap_or_default();
+        // Git branch indicator, e.g. "git:main". Empty outside a repo.
+        let git = editor
+            .git_branch()
+            .map(|b| format!("  git:{b}"))
+            .unwrap_or_default();
         // Active language servers, e.g. "lsp typescript rust". Empty when none
         // are ready.
         let lsp = {
@@ -504,7 +509,7 @@ impl Workspace {
             }
         };
         let modes: SharedString = format!(
-            "{marker}  {}  ({}){project}{lsp}{diagnostics}",
+            "{marker}  {}  ({}){project}{git}{lsp}{diagnostics}",
             editor.buffer_name(),
             editor.modes.names().join(" ")
         )
