@@ -311,12 +311,7 @@ fn parse_mode_line_format(tokens: Vec<String>) -> Vec<MlSeg> {
                 "slot" => MlField::Slot(payload.to_string()),
                 _ => MlField::Literal(payload.to_string()),
             };
-            MlSeg::new(
-                field,
-                (!face.is_empty()).then_some(face),
-                prefix,
-                suffix,
-            )
+            MlSeg::new(field, (!face.is_empty()).then_some(face), prefix, suffix)
         })
         .collect()
 }
@@ -5140,9 +5135,7 @@ impl Editor {
             .filter_map(|seg| {
                 let value = match &seg.field {
                     MlField::Literal(s) => s.clone(),
-                    MlField::Modified => {
-                        if self.is_modified() { "**" } else { "--" }.to_string()
-                    }
+                    MlField::Modified => if self.is_modified() { "**" } else { "--" }.to_string(),
                     MlField::BufferName => self.buffer_name().to_string(),
                     MlField::Modes => self.modes.names().join(" "),
                     MlField::EvilMode => self.evil_mode_name().unwrap_or("").to_string(),
@@ -8947,10 +8940,10 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, MlField, WindowLayout, char_col_byte, default_mode_line_format,
-        file_completions, is_repeatable, language_for_path, last_sexp, layout_leaves, layout_remove,
-        layout_resize, layout_split, line_span, node_at, parse_mode_line_format, prefix_arg_value,
-        push_capped, scheme_symbol_token, set_ratio_at, shift_line_map, symbol_at,
-        top_level_form_at, translate_backrefs, union_bounds,
+        file_completions, is_repeatable, language_for_path, last_sexp, layout_leaves,
+        layout_remove, layout_resize, layout_split, line_span, node_at, parse_mode_line_format,
+        prefix_arg_value, push_capped, scheme_symbol_token, set_ratio_at, shift_line_map,
+        symbol_at, top_level_form_at, translate_backrefs, union_bounds,
     };
 
     #[test]
