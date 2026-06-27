@@ -798,9 +798,9 @@
            (up        (nth binfo 1))
            (ab        (if (equal? up "") #f (cons (nth binfo 2) (nth binfo 3))))
            (subject   (gix-head-subject *magit-dir*)))
-      ;; Keep the mode-line branch indicator in step with magit — a checkout or
+      ;; Keep the mode-line branch slot in step with magit — a checkout or
       ;; branch op refreshes here without needing a fresh file visit.
-      (set-modeline-git branch)
+      (set-mode-line-slot "git" branch)
       ;; --- header ---
       (magit-emit-header "Head:" (if (equal? branch "") "(no commits)" branch)
                          (if (equal? subject "") "" (string-append " " subject)))

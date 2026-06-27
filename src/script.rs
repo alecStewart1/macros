@@ -419,10 +419,15 @@ pub enum EditorCommand {
     McAddAbove,
     McMarkNext,
     McClear,
-    /// Set the mode-line project indicator (`None`/empty clears it).
+    /// Set the mode-line project register (back-compat sugar for slot "project").
     SetModelineProject(String),
-    /// Set the mode-line git branch indicator (`None`/empty clears it).
+    /// Set the mode-line git register (back-compat sugar for slot "git").
     SetModelineGit(String),
+    /// Write/clear a named mode-line register: `(key, value)`, empty value clears.
+    SetModeLineSlot(String, String),
+    /// Replace the mode-line format with tab-encoded segment tokens (see
+    /// `parse_mode_line_format`).
+    SetModeLineFormat(Vec<String>),
     // Transient popup (the magit / `transient.el` pattern).
     /// Open a transient popup: a title plus `(key, label, command)` rows.
     Transient {
@@ -1902,6 +1907,8 @@ impl ScriptEngine {
                 "append-to-buffer",
                 "set-modeline-project",
                 "set-modeline-git",
+                "set-mode-line-slot",
+                "set-mode-line-format",
                 "file-exists?",
                 "file-directory?",
                 "packages-directory",
@@ -3308,6 +3315,25 @@ fn build_engine(
         "set-modeline-git",
         EditorCommand::SetModelineGit,
     );
+    // `(set-mode-line-slot key value)` → write/clear a named mode-line register
+    // (empty value clears). The general form behind project/git indicators.
+    register_binary(
+        &mut engine,
+        queue,
+        "set-mode-line-slot",
+        EditorCommand::SetModeLineSlot,
+    );
+    {
+        // `(set-mode-line-format segs)` — replace the mode-line layout. `segs` is
+        // a list of segment tokens (bare strings = literals, or `ml-field`/
+        // `ml-slot`/`ml-text` tab-encoded tokens). Defined from scheme/modeline.scm.
+        let q = queue.clone();
+        engine.register_fn("set-mode-line-format", move |segs: SteelVal| {
+            q.lock()
+                .unwrap()
+                .push(EditorCommand::SetModeLineFormat(steel_string_list(&segs)));
+        });
+    }
     // --- Overlays / text properties / folds -------------------------------
     register_ternary(
         &mut engine,
