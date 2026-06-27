@@ -5,7 +5,7 @@ description: A Magit-style git porcelain — stage, commit, branch, and read dif
 
 # Git (Magit)
 
-Macros includes a **Magit-style** git porcelain: an interactive status buffer where you stage hunks, write commits, branch, push, pull, stash, and read diffs. It's built **entirely in Scheme** on the editor's special-buffer and transient primitives — the Rust side knows nothing about git. It just shells out (`call-process`), renders a read-only faced buffer, and rebuilds that buffer on every refresh.
+Macros includes a **Magit-style** git porcelain: an interactive status buffer where you stage hunks, write commits, branch, push, pull, stash, and read diffs. The porcelain — the sectioned view, the transient popups, the keymaps — is written **entirely in Scheme** on the editor's special-buffer and transient primitives. Underneath, git data comes from two sources: pure-Rust [**gitoxide** (`gix`)](https://github.com/GitoxideLabs/gitoxide) primitives for metadata reads (the HEAD commit, recent log, branches, tags, remotes, repo state, and blame) with no subprocess at all, falling back to shelling out (`call-process` to the `git` binary) for the working-tree scan, diffs, and mutating actions like stage / commit / push. The status buffer is a read-only faced buffer that's rebuilt on every refresh.
 
 ## Opening the status buffer
 
@@ -97,4 +97,4 @@ The status buffer's <kbd>B</kbd> is a separate view: it opens a full `git blame`
 
 ## How it's built
 
-Because Magit here is plain Scheme over a few primitives — `call-process` (run git), `render-buffer` (draw a faced read-only buffer), `buffer-line` / `goto-line` (find and restore the section at point), and `transient` (the popups) — you can read it, extend it, add your own popups, or change any binding. Folding works by regeneration: a refresh simply rebuilds the buffer text. See [Scripting with Steel](/docs/scripting).
+Because Magit here is plain Scheme over a few primitives — `gix-*` (read metadata, log, and blame straight from gitoxide, no subprocess), `call-process` (run the `git` binary for the working-tree scan, diffs, and mutating actions), `render-buffer` (draw a faced read-only buffer), `buffer-line` / `goto-line` (find and restore the section at point), and `transient` (the popups) — you can read it, extend it, add your own popups, or change any binding. Folding works by regeneration: a refresh simply rebuilds the buffer text. See [Scripting with Steel](/docs/scripting).

@@ -146,7 +146,7 @@ const STRIP: { title: string; body: string }[] = [
   },
   {
     title: "Magit",
-    body: "A Magit-style git porcelain for staging, committing, branching, and reading diffs — all in a buffer.",
+    body: "A Magit-style git porcelain for staging, committing, branching, and reading diffs — all in a buffer, powered by gitoxide (gix) behind the scenes.",
   },
   {
     title: "LSP",
