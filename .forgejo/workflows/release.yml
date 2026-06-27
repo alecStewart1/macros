@@ -84,17 +84,13 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-      # The Developer ID identity lives in a DEDICATED keychain that was set up
-      # once on the runner in a GUI session (see MACOS_NOTARIZATION.md):
-      #   ~/Library/Keychains/tukey-signing.keychain-db
-      # This is the SAME keychain the sigma/TukeySheets runner already uses — the
-      # Developer ID identity is per-team, not per-app, so one keychain signs
-      # every app built on this runner. Reusing it means no second one-time
-      # import; just set MACOS_KEYCHAIN_PASSWORD / MACOS_SIGN_IDENTITY in this
-      # repo's secrets to the same values sigma uses.
+      # The Developer ID identity lives in a dedicated signing keychain that was
+      # set up once on the runner in a GUI session. The Developer ID identity is
+      # per-team, so point MACOS_KEYCHAIN_PASSWORD / MACOS_SIGN_IDENTITY in this
+      # repo's secrets at that keychain.
       # The runner executes in a security session separate from the desktop
       # login, so it can't reach the (locked) login keychain — but it CAN unlock
-      # this dedicated keychain with a password we control, then point codesign
+      # the dedicated keychain with a password we control, then point codesign
       # at it. The private key was imported in the GUI session, so it's really
       # there; here we only unlock + search it (never import).
       - name: Prepare signing keychain
@@ -182,10 +178,10 @@ jobs:
           - arch: x86_64
             runs_on: ubuntu-x86
             nfpm_arch: amd64
-            # ubuntu-x86 is the SAME persistent self-hosted runner sigma uses —
-            # build deps, Rust, and nfpm are already installed there (sigma's
-            # x86 job skips these steps too). Re-running `sudo apt-get` here just
-            # blocks on a sudo password prompt and hangs, so skip the setup.
+            # ubuntu-x86 is a persistent self-hosted runner with build deps,
+            # Rust, and nfpm already installed, so skip the setup. Re-running
+            # `sudo apt-get` here would just block on a sudo password prompt and
+            # hang.
             setup_deps: false
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -231,8 +227,8 @@ jobs:
             libfontconfig1-dev libfreetype6-dev \
             libvulkan-dev libssl-dev
       - name: Install Rust
-        # Self-hosted x86 already has Rust on PATH (sigma relies on this too);
-        # only bootstrap it on the container leg.
+        # The self-hosted x86 runner already has Rust on PATH; only bootstrap it
+        # on the container leg.
         if: ${{ matrix.setup_deps }}
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
@@ -241,7 +237,7 @@ jobs:
         run: cargo build --release --bin macros
       - name: Install nfpm
         # Same as the deps step: only the container leg needs it; the self-hosted
-        # x86 runner already has nfpm on PATH (sigma's x86 job assumes it too).
+        # x86 runner already has nfpm on PATH.
         if: ${{ matrix.setup_deps }}
         env:
           # Pinned: bump deliberately so a fresh release version can't change

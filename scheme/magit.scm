@@ -63,10 +63,9 @@
   (call-process "git" (append (list "-C" *magit-dir*) args)))
 
 ;; Walk up from `dir` to the enclosing git work tree, like `magit-toplevel`.
-;; Returns `dir` unchanged if it isn't inside a repo (git prints nothing).
+;; Returns `dir` unchanged if it isn't inside a repo (gix returns "").
 (define (magit-toplevel dir)
-  (let ((root (trim-end
-                (call-process "git" (list "-C" dir "rev-parse" "--show-toplevel")))))
+  (let ((root (gix-toplevel dir)))
     (if (equal? root "") dir root)))
 
 ;; Non-empty lines of a git command's output.
@@ -118,13 +117,15 @@
     (if (>= len width) (string-append s " ")
         (string-append s (magit-spaces (- width len))))))
 
-;; ONE `git status` gives the working tree AND the branch line. `--branch` adds a
-;; leading "## <branch>...<upstream> [ahead N, behind M]" header, so branch name,
-;; upstream, and ahead/behind all come from this single call — no extra
-;; rev-parse / rev-list spawns. `--untracked-files=all` lists files inside new
-;; directories individually (porcelain otherwise collapses a new dir to "dir/").
+;; ONE `gix-status` call (no subprocess) gives the working tree AND the branch
+;; line: porcelain-v1 entries plus a leading "## <branch>...<upstream> [ahead N,
+;; behind M]" header, so branch name, upstream, and ahead/behind all come from
+;; it. Untracked files are listed individually (like `--untracked-files=all`).
+;; Renames read as delete+add (gix doesn't run rename detection) — magit still
+;; stages/unstages each side correctly. Being subprocess-free, this is what makes
+;; the live repo-watch refresh cheap.
 (define (magit-porcelain-full)
-  (let* ((lines  (git-lines (list "status" "--porcelain" "--branch" "--untracked-files=all")))
+  (let* ((lines  (gix-status *magit-dir*))
          (header (if (and (not (null? lines)) (starts-with? (car lines) "##")) (car lines) ""))
          (entries (filter (lambda (l) (not (starts-with? l "##"))) lines)))
     (cons (magit-parse-branch-line header) entries)))
@@ -200,11 +201,9 @@
               ((equal? ahead "0")  (string-append "  (behind " behind ")"))
               (else (string-append "  (ahead " ahead ", behind " behind ")"))))))
 
-;; In-progress merge / rebase (both surfaced via rev-parse, no filesystem peek).
-(define (magit-merging?)
-  (not (equal? "" (trim-end (git (list "rev-parse" "-q" "--verify" "MERGE_HEAD"))))))
-(define (magit-rebasing?)
-  (not (equal? "" (trim-end (git (list "rev-parse" "-q" "--verify" "REBASE_HEAD"))))))
+;; In-progress merge / rebase, read from the repo's git-dir state by gix.
+(define (magit-merging?)  (equal? (gix-state *magit-dir*) "merge"))
+(define (magit-rebasing?) (equal? (gix-state *magit-dir*) "rebase"))
 
 ;; --- confirmation for destructive operations --------------------------------
 ;; A one-shot thunk gated behind `y-or-n-p`; the answer arrives asynchronously
@@ -313,7 +312,11 @@
 ;; reads like the line view). Keyed (type path context), persists across refresh.
 (define *magit-collapsed-groups* '())
 (define *magit-commit-lines* '()) ; (line . ref) — commit/stash lines RET can show
-(define *magit-show-history* #f)  ; stashes/unpushed/unpulled — off = fewer git calls (recent commits always show)
+(define *magit-show-history* #t)  ; stashes/unpushed/unpulled — cheap via gix (no subprocess), so shown by default
+;; When set, `magit-render` updates the buffer in place without stealing focus
+;; (a background refresh, e.g. from `after-save-hook`). It also skips the sub-line
+;; accent overlays, which target the *active* buffer — see magit-maybe-refresh.
+(define *magit-quiet* #f)
 
 (define (magit-emit text face type path)
   (set! *magit-lines* (cons text *magit-lines*))
@@ -769,7 +772,11 @@
 
 ;; Render the status buffer for the current *magit-dir* (no re-resolution).
 (define (magit-render)
-  (let ((cap (magit-capture-point)))
+  (let ((cap (magit-capture-point))
+        ;; The cursor's on-screen row before the redraw, so we can pin it back
+        ;; afterward and the buffer doesn't visually jump (only meaningful when
+        ;; *magit* is the focused buffer — the interactive refresh path).
+        (row (window-cursor-row)))
     (set! *magit-lines* '())
     (set! *magit-faces* '())
     (set! *magit-n* 0)
@@ -790,7 +797,7 @@
            (branch    (nth binfo 0))
            (up        (nth binfo 1))
            (ab        (if (equal? up "") #f (cons (nth binfo 2) (nth binfo 3))))
-           (subject   (trim-end (git (list "log" "-1" "--format=%s")))))
+           (subject   (gix-head-subject *magit-dir*)))
       ;; --- header ---
       (magit-emit-header "Head:" (if (equal? branch "") "(no commits)" branch)
                          (if (equal? subject "") "" (string-append " " subject)))
@@ -805,9 +812,9 @@
       ;; --- working tree ---
       (magit-emit-file-section "Untracked files" untracked "untracked")
       (magit-emit-diff-section "Unstaged changes" unstaged "unstaged"
-                               (if (null? unstaged) '() (build-diff-map (git (list "diff")))))
+                               (if (null? unstaged) '() (build-diff-map (gix-diff *magit-dir*))))
       (magit-emit-diff-section "Staged changes" staged "staged"
-                               (if (null? staged) '() (build-diff-map (git (list "diff" "--cached")))))
+                               (if (null? staged) '() (build-diff-map (gix-diff-cached *magit-dir*))))
       (when (and (null? untracked) (null? unstaged) (null? staged))
         (magit-emit "Nothing to commit, working tree clean." "magit-file" #f #f)
         (magit-emit "" #f #f #f))
@@ -815,24 +822,37 @@
       ;;     with H — recent commits below always render) ---
       (if *magit-show-history*
           (begin
-            (magit-emit-commit-section "Stashes" (git-lines (list "stash" "list")))
+            (magit-emit-commit-section "Stashes" (gix-stash-list *magit-dir*))
             (when (not (equal? up ""))
               (magit-emit-commit-section (string-append "Unpushed to " up)
-                                         (git-lines (list "log" "--oneline"
-                                                          (string-append up "..HEAD"))))
+                                         (gix-log-range *magit-dir* "HEAD" up 256))
               (magit-emit-commit-section (string-append "Unpulled from " up)
-                                         (git-lines (list "log" "--oneline"
-                                                          (string-append "HEAD.." up))))))
+                                         (gix-log-range *magit-dir* up "HEAD" 256))))
           (magit-emit "Press H to show stashes / unpushed / unpulled."
                       "magit-context" #f #f))
-      ;; --- recent commits (shown by default, one `git log` call) ---
+      ;; --- recent commits (shown by default, one gix rev-walk) ---
       (magit-emit-commit-section "Recent commits"
-                                 (git-lines (list "log" "--oneline" "-n" "10"))))
-    (render-buffer "*magit*" "magit-status"
-                   (join-lines (reverse *magit-lines*))
-                   (reverse *magit-faces*))
-    (magit-apply-overlays)
-    (magit-restore-point cap)))
+                                 (gix-log-oneline *magit-dir* 10)))
+    (if *magit-quiet*
+        ;; Background refresh: update in place (works on an inactive pane) and
+        ;; skip overlays — they'd paint onto whatever buffer is in front.
+        (render-buffer-quiet "*magit*" "magit-status"
+                             (join-lines (reverse *magit-lines*))
+                             (reverse *magit-faces*))
+        (begin
+          (render-buffer "*magit*" "magit-status"
+                         (join-lines (reverse *magit-lines*))
+                         (reverse *magit-faces*))
+          (magit-apply-overlays)
+          (magit-restore-point cap)
+          ;; Pin the cursor's line back to the same screen row it was on, so
+          ;; restoring point doesn't scroll the buffer under the user.
+          (scroll-cursor-to-row row)))
+    ;; Watch the whole repo so changes from anywhere — CLI git, other editors,
+    ;; saves in other windows — refresh the status live (see magit-on-fs-change).
+    ;; Replace-per-owner, so switching repos re-points the watch.
+    (when (and (not (equal? *magit-dir* "")) (not (equal? *magit-dir* ".")))
+      (watch-tree "magit" (list *magit-dir*)))))
 
 ;; Launch: resolve the repo from the buffer you're in, then render. A refresh
 ;; from inside *magit* keeps the repo we're already viewing.
@@ -938,9 +958,9 @@
   (message "git failed — see *magit-process*"))
 
 ;; Lists from git, one item per non-empty line.
-(define (magit-branches) (git-lines (list "branch" "--format=%(refname:short)")))
-(define (magit-remotes)  (git-lines (list "remote")))
-(define (magit-tags)     (git-lines (list "tag")))
+(define (magit-branches) (gix-branches *magit-dir*))
+(define (magit-remotes)  (gix-remotes  *magit-dir*))
+(define (magit-tags)     (gix-tags     *magit-dir*))
 
 ;; --- staging (hunk- and region-level) ---------------------------------------
 ;; Apply a patch to the index (or, for discard, the worktree). `--recount` lets
@@ -1171,7 +1191,7 @@
   ;; Show the staged diff (commented out) below the message, like `git commit`.
   (append-to-buffer "*git-commit*"
     (string-append "\n\n" magit-commit-comment-intro
-                   (magit-comment-diff (git (list "diff" "--cached")))))
+                   (magit-comment-diff (gix-diff-cached *magit-dir*))))
   (set-major-mode "git-commit-mode")
   (buffer-local-set "magit-amend" amend)
   (goto-char 0) ; cursor at the top, ready to type the summary
@@ -1181,9 +1201,9 @@
 (define (magit-do-commit)
   (save-some-buffers)
   (if (magit-switch-on? "commit:amend")
-      (magit-commit-buffer (git (list "log" "-1" "--format=%B")) "yes")
+      (magit-commit-buffer (gix-head-message *magit-dir*) "yes")
       (magit-commit-buffer "" "no")))
-(define (magit-do-reword) (magit-commit-buffer (git (list "log" "-1" "--format=%B")) "yes"))
+(define (magit-do-reword) (magit-commit-buffer (gix-head-message *magit-dir*) "yes"))
 (define (magit-do-amend)
   (save-some-buffers)
   (magit-do (append (list "commit" "--amend" "--no-edit") (magit-commit-flags)) "Amended HEAD")
@@ -1233,7 +1253,7 @@
           (list "u" "Set upstream"      "magit-branch-set-upstream")
           (list "m" "Rename current"    "magit-branch-rename")
           (list "k" "Delete"            "magit-branch-delete"))))
-(define (magit-remote-branches) (git-lines (list "branch" "-r" "--format=%(refname:short)")))
+(define (magit-remote-branches) (gix-remote-branches *magit-dir*))
 ;; Check out a remote branch as a new local tracking branch ("origin/x" → "x").
 (define (magit-checkout-remote)
   (helm (list (list "Checkout remote" (magit-remote-branches) "magit-do-checkout-remote"))))
@@ -1334,7 +1354,7 @@
   (magit-confirm "Drop latest stash?"
     (lambda () (magit-do (list "stash" "drop") "Dropped stash"))))
 (define (magit-stash-list)
-  (magit-show-log "*magit-stash*" (git (list "stash" "list"))))
+  (magit-show-log "*magit-stash*" (string-join (gix-stash-list *magit-dir*) "\n")))
 
 ;; --- log (l) → a read-only *magit-log* buffer -------------------------------
 (define (magit-log-toggle-graph) (magit-switch-toggle! "log:graph") (magit-log-popup))
@@ -1349,14 +1369,20 @@
             (list "a" "All branches"   "magit-log-all")
             (list "f" "File at point"  "magit-log-file")))))
 (define (magit-log-flags) (magit-switch-args (list (cons "log:graph" "--graph"))))
+;; gix renders the oneline+decorate log (no subprocess); the `--graph` toggle
+;; falls back to git, whose ASCII commit-graph art gix can't reproduce.
 (define (magit-log-current)
   (magit-show-log "*magit-log*"
-                  (git (append (list "log" "--oneline" "--decorate") (magit-log-flags)
-                               (list "-n" "200")))))
+                  (if (magit-switch-on? "log:graph")
+                      (git (append (list "log" "--oneline" "--decorate" "--graph")
+                                   (list "-n" "200")))
+                      (string-join (gix-log-decorated *magit-dir* #f 200) "\n"))))
 (define (magit-log-all)
   (magit-show-log "*magit-log*"
-                  (git (append (list "log" "--oneline" "--decorate" "--all") (magit-log-flags)
-                               (list "-n" "200")))))
+                  (if (magit-switch-on? "log:graph")
+                      (git (append (list "log" "--oneline" "--decorate" "--all" "--graph")
+                                   (list "-n" "200")))
+                      (string-join (gix-log-decorated *magit-dir* #t 200) "\n"))))
 (define (magit-show-log name text)
   (render-buffer name "magit-log-mode"
                  (if (equal? (trim-end text) "") "No output." (trim-end text)) '()))
@@ -1398,8 +1424,8 @@
   (let ((cur (magit-current)))
     (if cur
         (magit-show-log "*magit-log*"
-                        (git (list "log" "--oneline" "--decorate" "-n" "200" "--"
-                                   (magit-newpath (cadr cur)))))
+                        (string-join
+                          (gix-log-file *magit-dir* (magit-newpath (cadr cur)) 200) "\n"))
         (message "No file at point"))))
 
 ;; --- reset (X) --------------------------------------------------------------
@@ -1485,24 +1511,29 @@
 ;; just re-applies folds/accents to the EXISTING buffer — no git, no re-render
 ;; (the text and section data are unchanged, only which sections are folded).
 (define (magit-toggle-fold)
-  (let ((g (and (magit-structural?) (magit-group-at-line (buffer-line)))))
-    (if g
-        ;; Structural view, point in a function group → fold just that function.
-        (let ((key (grp-key g)))
-          (set! *magit-collapsed-groups*
-                (if (member key *magit-collapsed-groups*)
-                    (filter (lambda (k) (not (equal? k key))) *magit-collapsed-groups*)
-                    (cons key *magit-collapsed-groups*)))
-          (magit-apply-overlays))
-        ;; Otherwise (file heading, or line view) → fold the whole file section.
-        (let ((s (magit-section-at-line (buffer-line))))
-          (when s
-            (let ((key (sec-key s)))
-              (set! *magit-expanded*
-                    (if (member key *magit-expanded*)
-                        (filter (lambda (k) (not (equal? k key))) *magit-expanded*)
-                        (cons key *magit-expanded*)))
-              (magit-apply-overlays)))))))
+  ;; `magit-apply-overlays` unfolds everything then re-folds, which churns the
+  ;; scroll; pin the cursor's screen row so the buffer doesn't jump. Point stays
+  ;; on the heading (byte unchanged), so its final row equals the captured one.
+  (let ((row (window-cursor-row)))
+    (let ((g (and (magit-structural?) (magit-group-at-line (buffer-line)))))
+      (if g
+          ;; Structural view, point in a function group → fold just that function.
+          (let ((key (grp-key g)))
+            (set! *magit-collapsed-groups*
+                  (if (member key *magit-collapsed-groups*)
+                      (filter (lambda (k) (not (equal? k key))) *magit-collapsed-groups*)
+                      (cons key *magit-collapsed-groups*)))
+            (magit-apply-overlays))
+          ;; Otherwise (file heading, or line view) → fold the whole file section.
+          (let ((s (magit-section-at-line (buffer-line))))
+            (when s
+              (let ((key (sec-key s)))
+                (set! *magit-expanded*
+                      (if (member key *magit-expanded*)
+                          (filter (lambda (k) (not (equal? k key))) *magit-expanded*)
+                          (cons key *magit-expanded*)))
+                (magit-apply-overlays))))))
+    (scroll-cursor-to-row row)))
 
 ;; The new-file starting line ("c" in "@@ -a,b +c,d @@") of a hunk header.
 (define (magit-hunk-new-start header)
@@ -1560,7 +1591,7 @@
 ;; accented commit hash. Builds local accumulators (NOT the status buffer's
 ;; render globals) so returning to *magit* leaves its navigation state intact.
 (define (magit-show-commit ref)
-  (let* ((raw   (trim-end (git (list "show" ref))))
+  (let* ((raw   (trim-end (gix-show *magit-dir* ref)))
          (lines (split-many raw "\n")))
     (let loop ((ls lines) (n 0) (byte 0) (in-diff #f) (faces '()) (accents '()))
       (if (null? ls)
@@ -1703,9 +1734,28 @@
 ;; the active buffer changes.
 (define *magit-blame-cache* (hash))
 (define *magit-blame-buf* "")
+;; gix-blame rows ("LINE\tSHA\tAUTHOR\tEPOCH\tSUMMARY") → the same
+;; `(final-line sha author epoch summary)` records magit-blame-parse produces, so
+;; all downstream rendering is shared.
+(define (magit-blame-gix-records dir file)
+  (map (lambda (row)
+         (let ((f (split-many row "\t")))
+           (list (or (string->number (list-ref f 0)) 0)   ; final line
+                 (list-ref f 1)                            ; sha
+                 (list-ref f 2)                            ; author
+                 (or (string->number (list-ref f 3)) 0)   ; author-time epoch
+                 (list-ref f 4))))                         ; summary
+       (gix-blame dir file)))
+;; Prefer gix (no subprocess). It returns rows only when the file matches HEAD
+;; byte-for-byte, so a non-empty result is guaranteed to line up. For a modified
+;; file gix yields nothing and we fall back to `git blame --line-porcelain`,
+;; which blames the working tree and flags uncommitted lines.
 (define (magit-blame-fetch dir file)
-  (magit-blame-parse
-    (split-many (call-process "git" (list "-C" dir "blame" "--line-porcelain" "--" file)) "\n")))
+  (let ((recs (magit-blame-gix-records dir file)))
+    (if (null? recs)
+        (magit-blame-parse
+          (split-many (call-process "git" (list "-C" dir "blame" "--line-porcelain" "--" file)) "\n"))
+        recs)))
 (define (magit-blame-store file recs)
   (set! *magit-blame-buf* file)
   (set! *magit-blame-cache* (hash))
@@ -1826,9 +1876,11 @@
           (else (loop (cdr hs) cur best)))))
 ;; S-TAB: collapse-all when anything is expanded, else expand-all (magit cycle).
 (define (magit-cycle-all)
-  (set! *magit-expanded*
-        (if (null? *magit-expanded*) (map sec-key *magit-sections*) '()))
-  (magit-apply-overlays))
+  (let ((row (window-cursor-row)))
+    (set! *magit-expanded*
+          (if (null? *magit-expanded*) (map sec-key *magit-sections*) '()))
+    (magit-apply-overlays)
+    (scroll-cursor-to-row row)))
 
 ;; v: switch between the line view and the structural (group-by-function) view.
 ;; A full re-render is needed — the two lay the diff out differently.
@@ -1842,11 +1894,36 @@
   (if (member "*magit-process*" (buffer-names))
       (switch-to-buffer "*magit-process*")
       (render-buffer "*magit-process*" "magit-log-mode" "(no git process output yet)" '())))
-;; Refresh the status after a save, but only when *magit* is the buffer in front
-;; (so saving a file elsewhere never yanks focus into magit).
+;; Refresh the status whenever *magit* is open — including while you're editing
+;; and saving a file in another window. The render is quiet (no focus steal, in
+;; place) since the save happens from a different buffer. Cheap now that the
+;; whole render is gix-backed (no subprocess per refresh).
 (define (magit-maybe-refresh)
-  (when (equal? (current-buffer) "*magit*") (magit-refresh)))
+  (when (member "*magit*" (buffer-names))
+    (set! *magit-quiet* #t)
+    (magit-render)
+    (set! *magit-quiet* #f)))
 (add-hook "after-save-hook" "magit-maybe-refresh")
+
+;; Live refresh from the repo watch (watch-tree in magit-render). Fires once per
+;; debounced change batch with the watched repo root. Render fully (overlays) when
+;; *magit* is in front, quietly (in place, no overlays) when it's in a background
+;; window — overlays target the active buffer, so a background refresh must skip
+;; them. Only reacts to our own repo (the hook also fires for dired/treemacs).
+(define (magit-fs-strip-slash p)
+  (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
+(define (magit-on-fs-change dir)
+  (when (and (member "*magit*" (buffer-names))
+             (equal? (magit-fs-strip-slash dir) (magit-fs-strip-slash *magit-dir*)))
+    (if (equal? (current-buffer) "*magit*")
+        (magit-render)
+        (begin (set! *magit-quiet* #t) (magit-render) (set! *magit-quiet* #f)))))
+(add-hook "directory-changed-hook" "magit-on-fs-change")
+
+;; Stop watching the repo when the status buffer is closed.
+(define (magit-quit)
+  (watch-tree "magit" '())
+  (kill-buffer))
 
 ;; --- copy (y) + gitignore (i) -----------------------------------------------
 (define (magit-copy)
@@ -1943,7 +2020,7 @@
 (define-key "magit-status" "p" "previous-line")
 (define-key "magit-status" "alt-n" "magit-next-section")
 (define-key "magit-status" "alt-p" "magit-prev-section")
-(define-key "magit-status" "q" "kill-buffer")
+(define-key "magit-status" "q" "magit-quit")
 (define-key "magit-status" "tab" "magit-toggle-fold")
 (define-key "magit-status" "backtab" "magit-cycle-all")
 (define-key "magit-status" "shift-tab" "magit-cycle-all")
@@ -1960,6 +2037,11 @@
 (define-key "evil-normal:magit-status" "g g" "evil-goto-first-line")
 (define-key "evil-normal:magit-status" "shift-g" "evil-goto-last-line")
 (define-key "evil-normal:magit-status" "g r" "magit-refresh")
+;; Within-line motion. Magit's modal keymap doesn't bind `0` / `^` (only `$`,
+;; which stays `magit-process-buffer`, matching evil-collection), so expose the
+;; vim line-start motions here. evil-collection gives magit these too.
+(define-key "evil-normal:magit-status" "0" "move-beginning-of-line")
+(define-key "evil-normal:magit-status" "^" "evil-first-non-blank")
 
 ;; Log / commit / stash-list buffers.
 (define-key "magit-log-mode" "enter" "magit-log-show")

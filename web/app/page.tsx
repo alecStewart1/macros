@@ -146,7 +146,7 @@ const STRIP: { title: string; body: string }[] = [
   },
   {
     title: "Magit",
-    body: "A Magit-style git porcelain for staging, committing, branching, and reading diffs — all in a buffer.",
+    body: "A Magit-style git porcelain for staging, committing, branching, and reading diffs — all in a buffer, powered by gitoxide (gix) behind the scenes.",
   },
   {
     title: "LSP",
@@ -214,12 +214,12 @@ function WhyIBuiltThis() {
         }}
       >
         <p style={{ margin: 0 }}>
-          I&apos;ve used Emacs for more than twenty years, and it has been the
-          source of so many of my intellectual curiosities, ones that turned out
-          to matter both personally and professionally. I never would have
-          learned Lisp if it weren&apos;t for Emacs, and learning Lisp shaped my
-          career in ways I couldn&apos;t have predicted. It set me down the path
-          of programming languages, which led to a roughly 10+ year
+          I&apos;ve used Emacs for more than twenty years, and I genuinely love
+          it. It&apos;s been a constant companion through my whole career, and so
+          much of what I&apos;ve enjoyed about programming traces back to it. I
+          never would have learned Lisp if it weren&apos;t for Emacs, and learning
+          Lisp shaped my career in ways I couldn&apos;t have predicted. It set me
+          down the path of programming languages, which led to a roughly 10+ year
           stretch where I wrote compilers and related tooling, a completely
           different trajectory than the one I had been on.
         </p>

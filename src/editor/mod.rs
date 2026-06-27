@@ -535,6 +535,13 @@ pub struct Editor {
     /// Flattened union of `fs_watch_owners`' values, for O(1) "is this changed
     /// path inside a watched dir?" membership tests in `on_fs_events`.
     fs_watch_dirs: HashSet<PathBuf>,
+    /// Recursive watches (whole subtree), keyed by Scheme owner — for magit
+    /// watching a repo root. Reconciled with `RecursiveMode::Recursive`.
+    fs_watch_tree_owners: HashMap<String, Vec<PathBuf>>,
+    /// Flattened recursive roots, for descendant matching in `on_fs_events`.
+    fs_watch_trees: HashSet<PathBuf>,
+    /// Paths currently watched recursively (delta tracking, mirrors `fs_watched`).
+    fs_watched_recursive: HashSet<PathBuf>,
     /// While `render-buffer` refreshes a special buffer that's shown in a
     /// *non-selected* pane (the treemacs/dired sidebar during an auto-refresh), the
     /// index of that inactive [`Document`] — so the icon/overlay commands in the
@@ -1489,6 +1496,9 @@ impl Editor {
             fs_task: None,
             fs_watched: HashSet::new(),
             fs_watch_owners: HashMap::new(),
+            fs_watch_tree_owners: HashMap::new(),
+            fs_watch_trees: HashSet::new(),
+            fs_watched_recursive: HashSet::new(),
             fs_watch_dirs: HashSet::new(),
             render_redirect: None,
         };
@@ -3349,6 +3359,13 @@ impl Editor {
                     changed_dirs.push(dir.to_path_buf());
                 }
             }
+            // Recursive roots: a change anywhere in the subtree fires the hook
+            // with the ROOT, deduped so a bulk change refreshes magit once.
+            for root in &self.fs_watch_trees {
+                if path.starts_with(root) && !changed_dirs.iter().any(|d| d == root) {
+                    changed_dirs.push(root.clone());
+                }
+            }
         }
         for dir in changed_dirs {
             self.dispatch_dir_changed(&dir);
@@ -3472,6 +3489,28 @@ impl Editor {
         for path in stale {
             let _ = debouncer.watcher().unwatch(&path);
             self.fs_watched.remove(&path);
+        }
+
+        // Recursive roots (magit repo watch) — same delta dance, recursive mode.
+        let want_rec = self.fs_watch_trees.clone();
+        for path in &want_rec {
+            if !self.fs_watched_recursive.contains(path)
+                && debouncer
+                    .watcher()
+                    .watch(path, RecursiveMode::Recursive)
+                    .is_ok()
+            {
+                self.fs_watched_recursive.insert(path.clone());
+            }
+        }
+        let stale_rec: Vec<PathBuf> = self
+            .fs_watched_recursive
+            .difference(&want_rec)
+            .cloned()
+            .collect();
+        for path in stale_rec {
+            let _ = debouncer.watcher().unwatch(&path);
+            self.fs_watched_recursive.remove(&path);
         }
     }
 
@@ -4908,7 +4947,35 @@ impl Editor {
             selected_window: self.selected_pane,
             lsp_ready: self.active_lsp_ready(),
             visible_lines: self.visible_line_range(),
+            cursor_screen_row: self.cursor_screen_row(),
         });
+    }
+
+    /// The cursor's row within the viewport, in display rows (folds collapsed) —
+    /// the distance from the first visible row to the cursor's row. Paired with
+    /// [`scroll_cursor_to_row`](Self::scroll_cursor_to_row) to keep a buffer
+    /// visually stable across an in-place re-render.
+    fn cursor_screen_row(&self) -> usize {
+        let lh = f32::from(self.line_height).max(1.0);
+        let first = (f32::from(self.scroll_offset) / lh).floor().max(0.0) as usize;
+        let cursor = self.display_row_of_line(self.buffer.line_index_at_byte(self.point()));
+        cursor.saturating_sub(first)
+    }
+
+    /// Scroll so the cursor's row sits `row` rows below the top of the viewport
+    /// (clamped to the scrollable range), undoing the jump a re-render + cursor
+    /// move would otherwise cause.
+    fn scroll_cursor_to_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        let lh = f32::from(self.line_height);
+        let vh = f32::from(self.viewport_height);
+        if lh <= 0.0 {
+            return;
+        }
+        let cursor = self.display_row_of_line(self.buffer.line_index_at_byte(self.point()));
+        let first = cursor.saturating_sub(row);
+        let max = (self.display_line_count() as f32 * lh - vh).max(0.0);
+        self.scroll_offset = px((first as f32 * lh).clamp(0.0, max));
+        cx.notify();
     }
 
     /// Approximate first/last buffer line currently on screen, from the scroll
@@ -6359,6 +6426,21 @@ impl Editor {
                 self.fs_watch_dirs = self.fs_watch_owners.values().flatten().cloned().collect();
                 self.reconcile_watches(cx);
             }
+            WatchTree(owner, dirs) => {
+                let dirs: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+                if dirs.is_empty() {
+                    self.fs_watch_tree_owners.remove(&owner);
+                } else {
+                    self.fs_watch_tree_owners.insert(owner, dirs);
+                }
+                self.fs_watch_trees = self
+                    .fs_watch_tree_owners
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect();
+                self.reconcile_watches(cx);
+            }
             LspDefinition => self.lsp_goto("textDocument/definition", "definition", cx),
             LspDeclaration => self.lsp_goto("textDocument/declaration", "declaration", cx),
             LspTypeDefinition => {
@@ -6532,6 +6614,7 @@ impl Editor {
                 let offset = self.buffer.line_range(n.min(last)).start;
                 self.move_to(offset, cx);
             }
+            ScrollCursorToRow(row) => self.scroll_cursor_to_row(row, cx),
             GotoChar(n) => {
                 let offset = n.min(self.buffer.len());
                 self.move_to(offset, cx);
@@ -7071,12 +7154,15 @@ impl Editor {
             return;
         }
 
-        // While the minibuffer is open, only C-g (abort) is handled here; other
-        // chords are swallowed so they can't reach the main buffer. Plain and
-        // OS-special keys fall through to the IME / GPUI actions, which route to
-        // the minibuffer.
+        // While the minibuffer is open, C-g aborts it (Emacs); other chords are
+        // swallowed so they can't reach the main buffer. Plain and OS-special keys
+        // fall through to the IME / GPUI actions, which route to the minibuffer.
+        // Under evil ONLY, Escape also aborts, so the `:` ex prompt (and any other
+        // read) is dismissed with a single Esc (vim). In pure Emacs mode Escape is
+        // left alone — there it is the Meta prefix, and C-g is the canceller.
         if self.minibuffer.is_some() {
-            if ks.modifiers.control && ks.key == "g" {
+            let evil_escape = ks.key == "escape" && self.evil != EvilState::Disabled;
+            if (ks.modifiers.control && ks.key == "g") || evil_escape {
                 self.mb_abort(cx);
                 cx.stop_propagation();
             } else if self.is_isearch() && ks.modifiers.control && ks.key == "s" {
@@ -7302,6 +7388,18 @@ impl Editor {
                 self.pending_keys.clear();
                 self.status = SharedString::default();
                 self.dispatch_recorded(&expr, cx);
+            } else if scoped
+                .as_deref()
+                .is_some_and(|m| self.keymap.is_prefix_mode(m, &sequence))
+            {
+                // The evil overlay has a LONGER binding for this sequence (e.g.
+                // `g g` / `g r` in magit). Pend for the next key even though the
+                // base keymap may bind this exact key on its own (single `g` =
+                // refresh). This is how evil-collection turns `g` into a prefix
+                // in magit without disturbing the Emacs-default keymap beneath —
+                // checked before the base exact-match below so the prefix wins.
+                self.status = format!("{}-", pretty_sequence(&sequence)).into();
+                cx.notify();
             } else if let Some(expr) = self
                 .keymap
                 .resolve(&self.modes, &sequence)
@@ -7310,11 +7408,7 @@ impl Editor {
                 self.pending_keys.clear();
                 self.status = SharedString::default();
                 self.dispatch_recorded(&expr, cx);
-            } else if self.keymap.is_prefix(&self.modes, &sequence)
-                || scoped
-                    .as_deref()
-                    .is_some_and(|m| self.keymap.is_prefix_mode(m, &sequence))
-            {
+            } else if self.keymap.is_prefix(&self.modes, &sequence) {
                 self.status = format!("{}-", pretty_sequence(&sequence)).into();
                 cx.notify();
             } else {
