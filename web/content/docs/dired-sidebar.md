@@ -66,4 +66,4 @@ Its look is set with [per-mode options](/docs/configuration#per-mode-options) sc
 
 The sidebar is a persistent, expandable tree you keep open beside your code, with file operations built in. The flat [Dired](/docs/dired) buffer (<kbd>C-x d</kbd>) is one directory at a time, focused on bulk file operations — the two complement each other.
 
-Prefer the classic Treemacs sidebar? It now ships as a separate, opt-in package — see [Treemacs](/docs/treemacs).
+Prefer the classic Treemacs sidebar? It now ships as a separate, opt-in package (`macros-treemacs`) you can install with [`package-install`](/docs/packages).

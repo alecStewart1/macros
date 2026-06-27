@@ -5030,7 +5030,10 @@ impl Editor {
     /// as `(start, end)` byte offsets relative to the line start, sorted and
     /// merged. The renderer splices these out so the bytes collapse from display.
     pub fn line_holes(&self, line: usize) -> Vec<(usize, usize)> {
-        if self.overlays.hidden.is_empty() {
+        // Out of range for the active buffer → no holes. Defensive: the caller
+        // only asks for selected-pane rows (which index this buffer), but a stray
+        // line index must never panic the renderer via `line_range`.
+        if self.overlays.hidden.is_empty() || line >= self.buffer.line_count() {
             return Vec::new();
         }
         let lr = self.buffer.line_range(line);

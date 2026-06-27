@@ -515,7 +515,18 @@ impl Element for EditorElement {
             // cursor sits on is revealed in full (Emacs-style) so hidden markup —
             // e.g. Org's leading stars — is visible and editable while point is
             // there; moving off the line re-hides it on the next frame.
-            let mut holes = editor.line_holes(i);
+            //
+            // Selected pane only: `overlay-hide` ranges live on the *active*
+            // buffer (`line_holes` reads `self.buffer`/`self.overlays`), so a
+            // non-selected pane must not consult them — its rows index a different,
+            // possibly longer buffer (e.g. a tall dired-sidebar tree beside a short
+            // file), which would index the active buffer past its end. Matches the
+            // `selected` gating on `overlay_faces` and the cursor-line reveal below.
+            let mut holes = if selected {
+                editor.line_holes(i)
+            } else {
+                Vec::new()
+            };
             holes.retain(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e));
             // The cursor's own line is revealed in full so hidden markup — e.g.
             // Org's leading stars — is visible and editable while point is there.

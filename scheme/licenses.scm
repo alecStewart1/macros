@@ -11,10 +11,10 @@ Macros is free software, licensed under the MIT License. Copyright (c) 2026
 Kyle Gwinnup. See the LICENSE file distributed with Macros for the full text.
 
 
-Magit, Treemacs, Org mode, and Helm
------------------------------------
+Magit, Org mode, and Helm
+-------------------------
 Macros includes features named after, and modeled on, the GNU Emacs packages
-Magit, Treemacs, Org mode, and Helm. These are original reimplementations
+Magit, Org mode, and Helm. These are original reimplementations
 written in Scheme on Macros' own primitives — no source code from those
 packages is copied or included, and Macros is not affiliated with or endorsed
 by them. They are named only to credit the work that inspired them, and are

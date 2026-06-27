@@ -74,7 +74,7 @@ Other building blocks you'll reach for: `range-edit` (replace a byte range), reg
 The faced, read-only buffers used by Magit, LSP results, dired, and the diagnostics list are built from a small set of primitives you can use too:
 
 - `render-buffer` — draw a read-only buffer with per-line faces.
-- `set-line-icon` — put an icon beside a line (Treemacs uses this).
+- `set-line-icon` — put an icon beside a line (the dired sidebar uses this).
 - `buffer-line` / `goto-line` — find and restore the item at point.
 - overlay faces — color sub-line spans (diff accents, semantic tokens, rainbow).
 
