@@ -94,7 +94,7 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 (evil-leader-set "n m" "my/org-files")
 (evil-leader-set "n f" "projectile-find-file")
 (evil-leader-set "n g" "projectile-grep")
-(evil-leader-set "n t" "treemacs")
+(evil-leader-set "n t" "dired-sidebar")
 (evil-leader-set "n l" "helm-buffers-list")
 
 ;; Window splits

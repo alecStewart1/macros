@@ -1921,7 +1921,7 @@
 ;; debounced change batch with the watched repo root. Render fully (overlays) when
 ;; *magit* is in front, quietly (in place, no overlays) when it's in a background
 ;; window — overlays target the active buffer, so a background refresh must skip
-;; them. Only reacts to our own repo (the hook also fires for dired/treemacs).
+;; them. Only reacts to our own repo (the hook also fires for dired/dired-sidebar).
 (define (magit-fs-strip-slash p)
   (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
 (define (magit-on-fs-change dir)

@@ -299,7 +299,7 @@ pub enum EditorCommand {
     /// completion-at-point` before LSP): `(add-completion-at-point-function "f")`.
     AddCapf(String),
     /// Replace the set of directories watched on behalf of `owner` with `dirs`
-    /// (`(watch-directories "treemacs" (list ...))`). Owner-namespaced with
+    /// (`(watch-directories "dired-sidebar" (list ...))`). Owner-namespaced with
     /// replace semantics so a view re-declares its full watch set each render and
     /// never has to unwatch individual paths; pass `'()` to drop them all (e.g. on
     /// quit). A change under any watched dir fires `directory-changed-hook`.
@@ -342,7 +342,7 @@ pub enum EditorCommand {
     },
     /// Like [`RenderBuffer`], but refresh the buffer wherever it already lives
     /// without switching to it or moving focus — the auto-refresh path for the
-    /// treemacs/dired sidebar when a watched directory changes on disk.
+    /// dired-sidebar/dired view when a watched directory changes on disk.
     RenderBufferQuiet {
         name: String,
         mode: String,
@@ -440,7 +440,7 @@ pub enum EditorCommand {
     SplitWindowBelow,
     SplitWindowRight,
     /// Split the selected window side by side, the existing pane keeping this
-    /// fraction of the width — a narrow sidebar (e.g. 0.2 for treemacs).
+    /// fraction of the width — a narrow sidebar (e.g. 0.2 for dired-sidebar).
     SplitWindowRightRatio(f64),
     OtherWindow,
     DeleteWindow,
@@ -3013,7 +3013,7 @@ fn build_engine(
     );
     {
         // `(watch-directories owner dirs)` — replace `owner`'s watched dir set so
-        // a change under any of them fires `directory-changed-hook` (treemacs /
+        // a change under any of them fires `directory-changed-hook` (dired-sidebar /
         // dired live-refresh). Replace semantics: pass `'()` to drop them.
         let q = queue.clone();
         engine.register_fn("watch-directories", move |owner: String, dirs: SteelVal| {
@@ -8989,8 +8989,8 @@ mod fs_watch_lib {
     use super::*;
 
     /// The watch primitives and the sidebar auto-refresh path: `watch-directories`
-    /// and `render-buffer-quiet` map to their commands, and the treemacs/dired FS
-    /// hooks render *quietly* (no focus-stealing switch) while re-declaring the
+    /// and `render-buffer-quiet` map to their commands, and the dired-sidebar/dired
+    /// FS hooks render *quietly* (no focus-stealing switch) while re-declaring the
     /// directory set they want watched.
     #[test]
     fn watch_primitives_and_quiet_refresh() {
@@ -9002,7 +9002,7 @@ mod fs_watch_lib {
 
         // The hook handlers exist and are wired to `directory-changed-hook`.
         assert_eq!(
-            v("(if (procedure? treemacs-on-fs-change) \"y\" \"n\")"),
+            v("(if (procedure? dired-sidebar-on-fs-change) \"y\" \"n\")"),
             "\"y\""
         );
         assert_eq!(
@@ -9012,12 +9012,12 @@ mod fs_watch_lib {
 
         // `(watch-directories owner dirs)` carries the owner + the full dir list.
         let cmds = engine
-            .eval(r#"(watch-directories "treemacs" (list "/a" "/b"))"#)
+            .eval(r#"(watch-directories "dired-sidebar" (list "/a" "/b"))"#)
             .unwrap()
             .commands;
         match cmds.as_slice() {
             [EditorCommand::WatchDirectories(owner, dirs)] => {
-                assert_eq!(owner, "treemacs");
+                assert_eq!(owner, "dired-sidebar");
                 assert_eq!(dirs, &vec!["/a".to_string(), "/b".to_string()]);
             }
             other => panic!("expected one WatchDirectories, got {other:?}"),
@@ -9046,47 +9046,47 @@ mod fs_watch_lib {
             [EditorCommand::RenderBufferQuiet { name, .. }] if name == "*x*"
         ));
 
-        // A treemacs auto-refresh renders quietly and re-declares its watch set
-        // (root + expanded dirs) for the "treemacs" owner.
+        // A dired-sidebar auto-refresh renders quietly and re-declares its watch
+        // set (root + expanded dirs) for the "dired-sidebar" owner.
         let cmds = engine
             .eval(
                 r#"(begin
-                     (set! *treemacs-root* ".")
-                     (set! *treemacs-expanded* '())
-                     (set! *treemacs-quiet* #t)
-                     (treemacs-render))"#,
+                     (set! *dired-sidebar-root* ".")
+                     (set! *dired-sidebar-expanded* '())
+                     (set! *dired-sidebar-quiet* #t)
+                     (dired-sidebar-render))"#,
             )
             .unwrap()
             .commands;
         assert!(
             cmds.iter()
-                .any(|c| matches!(c, EditorCommand::RenderBufferQuiet { name, .. } if name == "*treemacs*")),
-            "quiet treemacs refresh must use render-buffer-quiet"
+                .any(|c| matches!(c, EditorCommand::RenderBufferQuiet { name, .. } if name == "*dired-sidebar*")),
+            "quiet dired-sidebar refresh must use render-buffer-quiet"
         );
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
-                EditorCommand::WatchDirectories(owner, dirs) if owner == "treemacs" && dirs == &vec![".".to_string()]
+                EditorCommand::WatchDirectories(owner, dirs) if owner == "dired-sidebar" && dirs == &vec![".".to_string()]
             )),
-            "treemacs render must re-declare its watched dirs"
+            "dired-sidebar render must re-declare its watched dirs"
         );
 
         // The interactive (non-quiet) path still uses the focus-switching render.
         let cmds = engine
-            .eval(r#"(begin (set! *treemacs-quiet* #f) (treemacs-render))"#)
+            .eval(r#"(begin (set! *dired-sidebar-quiet* #f) (dired-sidebar-render))"#)
             .unwrap()
             .commands;
         assert!(
             cmds.iter().any(
-                |c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*treemacs*")
+                |c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*dired-sidebar*")
             ),
-            "interactive treemacs refresh keeps the switching render-buffer"
+            "interactive dired-sidebar refresh keeps the switching render-buffer"
         );
     }
 }
 
 #[cfg(test)]
-mod treemacs_lib {
+mod dired_subtree_lib {
     use super::*;
     #[test]
     fn loads_and_maps_icons() {
@@ -9095,26 +9095,58 @@ mod treemacs_lib {
             engine.eval(src).unwrap();
         }
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
-        assert_eq!(v(r#"(file-icon "main.rs")"#), "\"file-code\"");
-        assert_eq!(v(r#"(file-icon "Cargo.toml")"#), "\"settings-2\"");
-        assert_eq!(v(r#"(file-icon "data.json")"#), "\"braces\"");
-        assert_eq!(v(r#"(file-icon "logo.png")"#), "\"image\"");
-        assert_eq!(v(r#"(file-icon "README.md")"#), "\"file-text\"");
-        assert_eq!(v(r#"(file-icon "notes")"#), "\"file\"");
-        assert_eq!(v(r#"(strip-slash "/a/b/")"#), "\"/a/b\"");
+        assert_eq!(v(r#"(dired-subtree-icon "main.rs")"#), "\"file-code\"");
+        assert_eq!(v(r#"(dired-subtree-icon "Cargo.toml")"#), "\"settings-2\"");
+        assert_eq!(v(r#"(dired-subtree-icon "data.json")"#), "\"braces\"");
+        assert_eq!(v(r#"(dired-subtree-icon "logo.png")"#), "\"image\"");
+        assert_eq!(v(r#"(dired-subtree-icon "README.md")"#), "\"file-text\"");
+        assert_eq!(v(r#"(dired-subtree-icon "notes")"#), "\"file\"");
+        assert_eq!(v(r#"(dired-subtree-strip-slash "/a/b/")"#), "\"/a/b\"");
+        // dired-sidebar is the bundled file-tree command.
         assert_eq!(
-            v(r#"(if (member "treemacs" *interactive-commands*) "y" "n")"#),
+            v(r#"(if (member "dired-sidebar" *interactive-commands*) "y" "n")"#),
             "\"y\""
         );
         // Indent rails: two columns ("│ ") per ancestor depth.
-        assert_eq!(v(r"(treemacs-rails 0)"), "\"\"");
-        assert_eq!(v(r"(treemacs-rails 2)"), "\"│ │ \"");
+        assert_eq!(v(r"(dired-subtree-rails 0)"), "\"\"");
+        assert_eq!(v(r"(dired-subtree-rails 2)"), "\"│ │ \"");
         // Whole-line faces reuse theme faces so colors track the active theme:
         // dotfiles -> comment (file or dir), other dirs -> keyword accent, plain
         // files take the default foreground (#f).
-        assert_eq!(v(r#"(treemacs-face ".git" #t)"#), "\"comment\"");
-        assert_eq!(v(r#"(treemacs-face "src" #t)"#), "\"keyword\"");
-        assert_eq!(v(r#"(if (treemacs-face "main.rs" #f) "y" "n")"#), "\"n\"");
+        assert_eq!(v(r#"(dired-subtree-face ".git" #t)"#), "\"comment\"");
+        assert_eq!(v(r#"(dired-subtree-face "src" #t)"#), "\"keyword\"");
+        assert_eq!(
+            v(r#"(if (dired-subtree-face "main.rs" #f) "y" "n")"#),
+            "\"n\""
+        );
+
+        // The pure builder lists a real directory (the crate root): more than one
+        // row (root + children), and the entry map resolves the root at line 0.
+        assert_eq!(
+            v(r#"(let ((b (dired-subtree-build "." '() '())))
+                   (if (> (length (nth b 0)) 1) "y" "n"))"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(let ((b (dired-subtree-build "." '() '())))
+                   (if (dired-subtree-entry-at (nth b 1) 0) "y" "n"))"#),
+            "\"y\""
+        );
+        // Unmarked rows open with the "  " mark gutter; marking a row's path
+        // (taken from the entry map) re-renders that row with the "D " gutter.
+        assert_eq!(
+            v(
+                r#"(if (starts-with? (car (nth (dired-subtree-build "." '() '()) 0)) "  ") "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(let* ((b (dired-subtree-build "." '() '()))
+                        (p (car (dired-subtree-entry-at (nth b 1) 1)))
+                        (m (dired-subtree-build "." '() (list p))))
+                   (if (starts-with? (nth (nth m 0) 1) "D ") "y" "n"))"#),
+            "\"y\""
+        );
     }
 }
 

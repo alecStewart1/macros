@@ -56,7 +56,7 @@ impl OptionValue {
 }
 
 /// The declared type of an option (the family it belongs to). Per-mode options
-/// like `line-numbers:treemacs-mode` take their type from the base name.
+/// like `line-numbers:dired-sidebar-mode` take their type from the base name.
 #[derive(Clone, Copy)]
 enum Kind {
     Bool,
@@ -359,7 +359,7 @@ impl Settings {
     /// Whether to show the line-number gutter for a buffer whose major mode is
     /// `mode` (Emacs `display-line-numbers-mode`). It's a *per-major-mode*
     /// option: a `line-numbers:<mode>` value overrides the global `line-numbers`
-    /// default, which is on for every mode unless a mode (e.g. treemacs) turns
+    /// default, which is on for every mode unless a mode (e.g. dired-sidebar) turns
     /// it off.
     pub fn line_numbers_for(&self, mode: Option<&str>) -> bool {
         self.bool_per_mode("line-numbers", mode, true)
@@ -382,7 +382,7 @@ impl Settings {
     /// `word-wrap`). On by default. When off, long lines are not wrapped and the
     /// buffer scrolls horizontally to reveal off-screen text. A *per-major-mode*
     /// option: a `word-wrap:<mode>` value overrides the global `word-wrap`
-    /// default, so a mode (e.g. the treemacs sidebar) can truncate long lines
+    /// default, so a mode (e.g. the dired-sidebar tree) can truncate long lines
     /// while ordinary buffers keep wrapping.
     pub fn word_wrap_for(&self, mode: Option<&str>) -> bool {
         self.bool_per_mode("word-wrap", mode, true)
@@ -429,7 +429,7 @@ impl Settings {
     /// with no unsaved edits changes on disk, re-read it automatically. Off by
     /// default — enabled with `(set-option "auto-revert" #t)`. Buffers with unsaved
     /// changes are never clobbered (a warning is echoed instead). Independent of the
-    /// always-on treemacs/dired directory refresh, which watches dirs, not buffers.
+    /// always-on dired-sidebar/dired directory refresh, which watches dirs, not buffers.
     pub fn auto_revert(&self) -> bool {
         self.bool_or("auto-revert", false)
     }
@@ -505,10 +505,10 @@ mod tests {
         let mut s = Settings::default();
         // A `base:mode` value overrides only that mode; others keep the default.
         s.set(
-            "line-numbers:treemacs-mode".into(),
+            "line-numbers:dired-sidebar-mode".into(),
             OptionValue::Bool(false),
         );
-        assert!(!s.line_numbers_for(Some("treemacs-mode")));
+        assert!(!s.line_numbers_for(Some("dired-sidebar-mode")));
         assert!(s.line_numbers_for(Some("rust")));
         // An un-coercible value leaves the previous value intact.
         s.set("font-size".into(), OptionValue::Int(16));

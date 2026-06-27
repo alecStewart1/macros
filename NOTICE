@@ -7,10 +7,10 @@ This file documents third-party material and acknowledgments. The licenses of
 every Rust crate Macros links against are reproduced in full in
 [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md).
 
-## Magit, Treemacs, Org mode, and Helm
+## Magit, Org mode, and Helm
 
 Macros includes features named after — and modeled on — the well-known GNU Emacs
-packages **Magit**, **Treemacs**, **Org mode**, and **Helm**. These are
+packages **Magit**, **Org mode**, and **Helm**. These are
 **original reimplementations written in Scheme** on Macros' own editor
 primitives; **no source code from those Emacs packages is copied or included**.
 They therefore carry no separate license — like the rest of Macros they are

@@ -59,7 +59,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { slug: "git", label: "Git (Magit)", blurb: "Stage, commit, branch, read diffs" },
       { slug: "ediff", label: "Ediff", blurb: "Diff files and merge hunks between buffers" },
       { slug: "dired", label: "Dired", blurb: "The directory editor / file manager" },
-      { slug: "treemacs", label: "Treemacs", blurb: "The file-tree sidebar" },
+      { slug: "dired-sidebar", label: "Dired sidebar", blurb: "The bundled file-tree sidebar" },
       { slug: "org-mode", label: "Org mode", blurb: "Headings, TODOs, agenda, tables, babel" },
       { slug: "helm", label: "Helm", blurb: "The selection / narrowing framework" },
     ],

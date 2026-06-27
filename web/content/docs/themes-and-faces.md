@@ -43,7 +43,7 @@ The display chrome is controlled with options (see [Configuration](/docs/configu
 Line numbers are a per-mode option — toggle the current mode live with <kbd>M-x</kbd> `line-numbers-mode`, or scope it to one mode:
 
 ```scheme
-(set-option "line-numbers:treemacs-mode" #f)
+(set-option "line-numbers:dired-sidebar-mode" #f)
 ```
 
 `scroll-bar-mode` similarly toggles the scroll bar live.

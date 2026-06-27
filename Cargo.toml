@@ -45,7 +45,7 @@ similar = "2"
 # `walk-files` / `grep-files` primitives (no external `rg` binary needed).
 ignore = "0.4"
 grep = "0.3"
-# Filesystem watching: powers buffer auto-revert and live treemacs/dired refresh.
+# Filesystem watching: powers buffer auto-revert and live dired-sidebar/dired refresh.
 # `-mini` coalesces the OS event storm into a debounced batch on its own thread;
 # we forward each batch onto the GPUI foreground (see `Editor::on_fs_events`).
 # It re-exports `notify` as `notify_debouncer_mini::notify`, so no separate dep.

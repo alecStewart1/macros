@@ -133,8 +133,8 @@ const STRIP: { title: string; body: string }[] = [
     body: "A corfu-style in-buffer popup, with pluggable completion-at-point functions and an LSP fallback.",
   },
   {
-    title: "Dired and Treemacs",
-    body: "A directory editor and a file-tree sidebar with icons. Move around the filesystem without reaching for the mouse.",
+    title: "Dired and the sidebar",
+    body: "A directory editor plus an expandable file-tree sidebar with icons and file operations. Move around the filesystem without reaching for the mouse.",
   },
   {
     title: "Diagnostics",
