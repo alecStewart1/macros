@@ -2037,6 +2037,11 @@
 (define-key "evil-normal:magit-status" "g g" "evil-goto-first-line")
 (define-key "evil-normal:magit-status" "shift-g" "evil-goto-last-line")
 (define-key "evil-normal:magit-status" "g r" "magit-refresh")
+;; Within-line motion. Magit's modal keymap doesn't bind `0` / `^` (only `$`,
+;; which stays `magit-process-buffer`, matching evil-collection), so expose the
+;; vim line-start motions here. evil-collection gives magit these too.
+(define-key "evil-normal:magit-status" "0" "move-beginning-of-line")
+(define-key "evil-normal:magit-status" "^" "evil-first-non-blank")
 
 ;; Log / commit / stash-list buffers.
 (define-key "magit-log-mode" "enter" "magit-log-show")

@@ -7385,6 +7385,18 @@ impl Editor {
                 self.pending_keys.clear();
                 self.status = SharedString::default();
                 self.dispatch_recorded(&expr, cx);
+            } else if scoped
+                .as_deref()
+                .is_some_and(|m| self.keymap.is_prefix_mode(m, &sequence))
+            {
+                // The evil overlay has a LONGER binding for this sequence (e.g.
+                // `g g` / `g r` in magit). Pend for the next key even though the
+                // base keymap may bind this exact key on its own (single `g` =
+                // refresh). This is how evil-collection turns `g` into a prefix
+                // in magit without disturbing the Emacs-default keymap beneath —
+                // checked before the base exact-match below so the prefix wins.
+                self.status = format!("{}-", pretty_sequence(&sequence)).into();
+                cx.notify();
             } else if let Some(expr) = self
                 .keymap
                 .resolve(&self.modes, &sequence)
@@ -7393,11 +7405,7 @@ impl Editor {
                 self.pending_keys.clear();
                 self.status = SharedString::default();
                 self.dispatch_recorded(&expr, cx);
-            } else if self.keymap.is_prefix(&self.modes, &sequence)
-                || scoped
-                    .as_deref()
-                    .is_some_and(|m| self.keymap.is_prefix_mode(m, &sequence))
-            {
+            } else if self.keymap.is_prefix(&self.modes, &sequence) {
                 self.status = format!("{}-", pretty_sequence(&sequence)).into();
                 cx.notify();
             } else {

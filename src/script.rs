@@ -6317,6 +6317,39 @@ mod magit_tests {
         assert_eq!(v(r#"(magit-newpath "a/plain.txt")"#), "\"a/plain.txt\"");
     }
 
+    /// The evil overlay binds vim motions for magit WITHOUT removing magit's
+    /// own single-key commands from the base keymap. `g g` / `g r` coexist with
+    /// the base `g` = refresh: under evil the dispatch prefers the overlay
+    /// prefix (so `g g` reaches the top), and with evil OFF the base `g` still
+    /// refreshes, untouched. `0` / `^` are exposed because magit leaves them free
+    /// (`$` stays `magit-process-buffer`, matching evil-collection).
+    #[test]
+    fn magit_evil_overlay_motions() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../scheme/transient.scm"))
+            .unwrap();
+        let cmds = engine
+            .eval(include_str!("../scheme/magit.scm"))
+            .unwrap()
+            .commands;
+        let bound = |mode: &str, key: &str, cmd: &str| {
+            cmds.iter().any(|c| matches!(c, EditorCommand::DefineKey(m, s, x)
+                if m == mode && s == key && x == cmd))
+        };
+        // Overlay (evil-only) motions: top/bottom, relocated refresh, line-start.
+        assert!(bound("evil-normal:magit-status", "g g", "evil-goto-first-line"));
+        assert!(bound("evil-normal:magit-status", "shift-g", "evil-goto-last-line"));
+        assert!(bound("evil-normal:magit-status", "g r", "magit-refresh"));
+        assert!(bound("evil-normal:magit-status", "0", "move-beginning-of-line"));
+        assert!(bound("evil-normal:magit-status", "^", "evil-first-non-blank"));
+        // Base keymap unchanged: single `g` still refreshes (the evil-off path),
+        // and `$` is magit's process buffer, never an end-of-line motion.
+        assert!(bound("magit-status", "g", "magit-refresh"));
+        assert!(bound("magit-status", "$", "magit-process-buffer"));
+    }
+
     /// The `## …` branch header from `git status --branch` parses into
     /// (branch upstream ahead behind) — replacing 3 separate git spawns.
     #[test]
