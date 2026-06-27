@@ -143,7 +143,7 @@
 ;; Mark fold headers when a file is opened — only for buffers using the default
 ;; indentation style (a mode that owns folding, e.g. org/markdown, sets its own
 ;; "fold-style" and installs its own chevrons) and not too large to scan. Special
-;; generated buffers (magit/dired/treemacs) never hit find-file-hook.
+;; generated buffers (magit/dired/dired-sidebar) never hit find-file-hook.
 (define (fold--setup)
   (when (and (equal? (fold--style) "indent")
              (<= (line-count) *fold-auto-limit*))

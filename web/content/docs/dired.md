@@ -43,6 +43,6 @@ Dired is on <kbd>C-x d</kbd> by default. Rebind it, or any key inside the listin
 (define-key "dired-mode" "r" "dired-rename")
 ```
 
-## Dired vs. Treemacs
+## Dired vs. the sidebar
 
-Dired is a **buffer per directory** focused on *operating* on files (mark, delete, rename, copy). If you want a persistent, expandable **tree sidebar** for navigation, use [Treemacs](/docs/treemacs) instead — they complement each other.
+Dired is a **buffer per directory** focused on *operating* on files (mark, delete, rename, copy). If you want a persistent, expandable **tree sidebar** for navigation, use the bundled [Dired sidebar](/docs/dired-sidebar) (or the opt-in [Treemacs](/docs/treemacs) package) instead — they complement each other.

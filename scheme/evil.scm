@@ -380,7 +380,7 @@
     (map (lambda (b) (cons (evil-leader-chord (car b)) (cdr b))) bindings)))
 
 ;; --- evil-collection: special read-only buffers -----------------------------
-;; Macros' "special" buffers (magit, dired, treemacs, grep, …) drive their own
+;; Macros' "special" buffers (magit, dired, dired-sidebar, grep, …) drive their own
 ;; keymaps, so the global evil keymaps don't apply there. Like Emacs's
 ;; `evil-collection`, this layer overlays vim-style keys onto those buffers.
 ;;
@@ -397,7 +397,7 @@
 ;; (Editable special buffers like `git-commit-mode` are intentionally absent —
 ;; you type into them, so they use the normal insert/normal states.)
 (define *evil-collection-modes*
-  (list "magit-status" "magit-log-mode" "dired-mode" "treemacs-mode"
+  (list "magit-status" "magit-log-mode" "dired-mode" "dired-sidebar-mode"
         "ibuffer-mode" "grep-mode" "occur-mode" "compile-mode"
         "diagnostics-mode" "help-mode" "diff-mode" "welcome-mode"
         "org-roam-backlinks-mode" "org-roam-unlinked-mode"

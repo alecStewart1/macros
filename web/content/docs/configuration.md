@@ -79,10 +79,10 @@ Read an option back from Scheme with `(get-option "name")`. It returns the curre
 
 ### Per-mode options
 
-Append `:mode-name` to scope an option to one major mode. For example, the treemacs sidebar turns its line-number gutter off:
+Append `:mode-name` to scope an option to one major mode. For example, the dired sidebar turns its line-number gutter off:
 
 ```scheme
-(set-option "line-numbers:treemacs-mode" #f)
+(set-option "line-numbers:dired-sidebar-mode" #f)
 ```
 
 ## Watching the filesystem
@@ -97,7 +97,7 @@ Macros watches the filesystem so the editor stays in sync with changes made outs
 
 When a file you're visiting changes on disk and the buffer has **no unsaved edits**, Macros re-reads it automatically, keeping point where it was. A buffer with unsaved changes is **never** clobbered — instead you get a one-line warning, and you can reconcile with `M-x revert-buffer` (`:e!`) when ready. Macros' own saves don't trigger a spurious revert (the on-disk text already matches the buffer).
 
-**Live treemacs/dired refresh** is always on — no option needed. While the file tree or a dired buffer is open, creating, renaming, or deleting files in the directories it shows refreshes the view automatically. The refresh never steals focus: if the sidebar is in another pane while you edit, it updates in place and your cursor stays put.
+**Live sidebar/dired refresh** is always on — no option needed. While the file tree or a dired buffer is open, creating, renaming, or deleting files in the directories it shows refreshes the view automatically. The refresh never steals focus: if the sidebar is in another pane while you edit, it updates in place and your cursor stays put.
 
 ## Session state
 

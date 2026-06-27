@@ -1,7 +1,7 @@
 ;; welcome.scm — the startup splash. A read-only special buffer (welcome-mode)
 ;; shown on launch instead of *scratch*: a Macros ASCII banner over a
 ;; getting-started menu. Each menu line carries an action via per-line metadata;
-;; RET or a left click runs it (the treemacs/tabulated pattern):
+;; RET or a left click runs it (the dired-sidebar/tabulated pattern):
 ;;
 ;;   * "Open the tutorial"  -> help-with-tutorial (the same as C-h t)
 ;;   * "Find a file"        -> helm-find-files
@@ -30,7 +30,7 @@
 
 ;; Colors come from faces the active theme already defines, so the splash tracks
 ;; the current theme (and any `load-theme` switch) instead of hardcoding hex —
-;; the same approach treemacs uses. Hardcoded colors looked wrong on light
+;; the same approach dired-sidebar uses. Hardcoded colors looked wrong on light
 ;; themes (e.g. near-white action rows vanished on a light background):
 ;;   ASCII logo     -> "keyword"    (the theme's primary accent)
 ;;   section titles -> "function"   (a second accent, distinct from the logo)

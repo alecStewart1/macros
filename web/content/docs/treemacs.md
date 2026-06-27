@@ -1,11 +1,24 @@
 ---
 title: Treemacs
-description: An expandable file-tree sidebar with icons.
+description: An expandable file-tree sidebar with icons — now an opt-in package.
 ---
 
 # Treemacs
 
-Treemacs is a **file-tree sidebar**: a recursive, expandable directory view living in its own pane, with per-extension icons. It's built on `render-buffer`, `set-line-icon`, and `open-file-other-window` — selecting a file shows it in the main editor while the tree stays put.
+Treemacs is a **file-tree sidebar**: a recursive, expandable directory view living in its own pane, with per-extension icons. Selecting a file shows it in the main editor while the tree stays put.
+
+> **Treemacs is now an opt-in package.** The bundled file-tree is [Dired sidebar](/docs/dired-sidebar) (also on <kbd>C-c t</kbd>). Treemacs lives on as a standalone package for those who prefer it; installing it rebinds <kbd>C-c t</kbd> to `treemacs`.
+
+## Installing
+
+Add it to your `init.scm` (see [Packages](/docs/packages)):
+
+```scheme
+(package-install "https://github.com/<you>/macros-treemacs"
+  'entry "treemacs.scm")
+```
+
+The entry file is `treemacs.scm` rather than the package-name default, so pass `'entry "treemacs.scm"`. To hack on a local checkout, use `package-install-local` with the same `'entry`.
 
 ## Opening the sidebar
 
@@ -25,13 +38,13 @@ Treemacs is a **file-tree sidebar**: a recursive, expandable directory view livi
 
 ## Icons
 
-Each file is iconed by extension using Lucide SVG icons (`assets/icons/<name>.svg`). The extension → icon mapping is plain Scheme, so you can customize it freely in your config.
+Each file is iconed by extension using Lucide SVG icons (`assets/icons/<name>.svg`). The extension → icon mapping is plain Scheme, so you can customize it freely.
 
 The sidebar opts out of the line-number gutter (it sets `line-numbers:treemacs-mode` to `false`) — a good example of the [per-mode option](/docs/configuration#per-mode-options) pattern.
 
 ## Customizing
 
-The sidebar is on <kbd>C-c t</kbd>. Its look is set with [per-mode options](/docs/configuration#per-mode-options) scoped to `treemacs-mode`, which you can override in your `init.scm`:
+Its look is set with [per-mode options](/docs/configuration#per-mode-options) scoped to `treemacs-mode`, which you can override in your `init.scm`:
 
 ```scheme
 (set-option "line-numbers:treemacs-mode" #f)       ; no line numbers (default)
@@ -43,4 +56,4 @@ The sidebar is on <kbd>C-c t</kbd>. Its look is set with [per-mode options](/doc
 
 ## Treemacs vs. Dired
 
-Treemacs is for **navigation** — a persistent tree you keep open beside your code. For file *operations* (mark, delete, rename, copy) reach for [Dired](/docs/dired).
+Treemacs is for **navigation** — a persistent tree you keep open beside your code. For file *operations* (mark, delete, rename, copy) reach for [Dired](/docs/dired). For a bundled tree that needs no install, see [Dired sidebar](/docs/dired-sidebar).

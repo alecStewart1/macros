@@ -32,9 +32,9 @@
 (set-option "cursor-style" "auto")
 (set-option "cursor-width" 2)                ; bar width in px
 ;; Line-number gutter (Emacs display-line-numbers-mode). Per major mode; on by
-;; default for every mode (the treemacs sidebar opts out — see treemacs.scm).
+;; default for every mode (the dired-sidebar tree opts out — see dired-sidebar.scm).
 ;; Toggle the current mode live with M-x line-numbers-mode, or override one mode:
-;;   (set-option "line-numbers:treemacs-mode" #f)
+;;   (set-option "line-numbers:dired-sidebar-mode" #f)
 (set-option "line-numbers" #t)
 ;; Scroll bar on each pane's right edge (Emacs scroll-bar-mode). On by default.
 ;; Toggle live with M-x scroll-bar-mode.

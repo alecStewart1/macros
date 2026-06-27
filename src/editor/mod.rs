@@ -519,7 +519,7 @@ pub struct Editor {
     /// (kept alive by storing it). Drives `window_active`.
     blink_observer: Option<gpui::Subscription>,
 
-    // --- Filesystem watching (auto-revert + treemacs/dired live refresh) ---
+    // --- Filesystem watching (auto-revert + dired-sidebar/dired live refresh) ---
     /// The debounced OS watcher. Its background thread forwards each coalesced
     /// batch onto `fs_task`; dropping it stops all watches. `None` if the platform
     /// watcher failed to initialise (the feature then silently no-ops).
@@ -529,7 +529,7 @@ pub struct Editor {
     /// Paths currently registered with the watcher (visiting files + watched
     /// dirs), so `reconcile_watches` adds/removes only the delta.
     fs_watched: HashSet<PathBuf>,
-    /// Directories to watch on behalf of each Scheme owner (`treemacs`, `dired`).
+    /// Directories to watch on behalf of each Scheme owner (`dired-sidebar`, `dired`).
     /// Replace-per-owner via `(watch-directories owner dirs)`.
     fs_watch_owners: HashMap<String, Vec<PathBuf>>,
     /// Flattened union of `fs_watch_owners`' values, for O(1) "is this changed
@@ -543,7 +543,7 @@ pub struct Editor {
     /// Paths currently watched recursively (delta tracking, mirrors `fs_watched`).
     fs_watched_recursive: HashSet<PathBuf>,
     /// While `render-buffer` refreshes a special buffer that's shown in a
-    /// *non-selected* pane (the treemacs/dired sidebar during an auto-refresh), the
+    /// *non-selected* pane (the dired-sidebar/dired view during an auto-refresh), the
     /// index of that inactive [`Document`] — so the icon/overlay commands in the
     /// same batch target it instead of the active buffer, and focus never moves.
     /// Reset to `None` after each applied command batch.
@@ -1515,7 +1515,7 @@ impl Editor {
         }));
         // Drain debounced filesystem-change batches onto the foreground: revert
         // unmodified buffers whose file changed, and fire `directory-changed-hook`
-        // for watched dirs (treemacs / dired refresh).
+        // for watched dirs (dired-sidebar / dired refresh).
         editor.fs_task = Some(cx.spawn(async move |this, cx| {
             while let Some(paths) = fs_rx.next().await {
                 if this
@@ -3299,7 +3299,7 @@ impl Editor {
     }
 
     /// Open `path` in a window *other* than the selected one — the sidebar
-    /// pattern (treemacs/dired): `RET` on a file keeps the tree and shows the
+    /// pattern (dired-sidebar/dired): `RET` on a file keeps the tree and shows the
     /// file in the main editor. Uses the first other pane, or splits if the
     /// selected pane is the only one. Focus moves to the file's window.
     fn open_file_other_window(&mut self, path: String, cx: &mut Context<Self>) {
@@ -3343,7 +3343,7 @@ impl Editor {
     /// Foreground handler for a debounced batch of changed paths. For each path:
     /// auto-revert the buffer visiting it (when `auto-revert` is on), and, if it
     /// lives under a watched directory, schedule that dir's `directory-changed-hook`
-    /// (deduped so a 50-file change refreshes treemacs/dired once, not 50 times).
+    /// (deduped so a 50-file change refreshes dired-sidebar/dired once, not 50 times).
     fn on_fs_events(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let auto_revert = cx.global::<crate::settings::Settings>().auto_revert();
         let mut changed_dirs: Vec<PathBuf> = Vec::new();
@@ -3438,7 +3438,7 @@ impl Editor {
     }
 
     /// Fire every `directory-changed-hook` function with `dir` as its argument, so
-    /// a Scheme view (treemacs/dired) can re-render if `dir` is the one it shows.
+    /// a Scheme view (dired-sidebar/dired) can re-render if `dir` is the one it shows.
     /// No-op — and no thread hop — when nothing is registered on the hook.
     fn dispatch_dir_changed(&mut self, dir: &Path) {
         let Some(functions) = self.hooks.get("directory-changed-hook") else {
@@ -4353,7 +4353,7 @@ impl Editor {
 
     /// Like [`render_buffer`](Self::render_buffer), but never switches buffers or
     /// moves focus: it refreshes the named buffer *wherever it already lives* —
-    /// in place if it's active, or in its inactive [`Document`] (the treemacs/dired
+    /// in place if it's active, or in its inactive [`Document`] (the dired-sidebar/dired
     /// sidebar pane) otherwise — and no-ops if the buffer isn't shown at all. This
     /// is the auto-refresh path (a watched directory changed on disk), so a passive
     /// FS event never yanks the user out of the buffer they're editing. Icon/overlay
@@ -7515,7 +7515,7 @@ impl Editor {
         }
         // A click in another pane focuses it (Emacs: mouse selects the window);
         // for a normal buffer the cursor is positioned by a *subsequent* click.
-        // Special buffers (treemacs/dired/…) act on the first click, so fall
+        // Special buffers (dired-sidebar/dired/…) act on the first click, so fall
         // through to position the cursor and run their `mouse-1` binding below.
         if let Some(pane) = self.pane_at_position(event.position)
             && pane != self.selected_pane
@@ -7529,7 +7529,7 @@ impl Editor {
         self.mark_active = false;
         // In a special (read-only) buffer, a plain left click acts like a key:
         // position the cursor on the clicked line, then resolve a `mouse-1`
-        // binding against the mode keymap and run it (treemacs-visit, etc.). The
+        // binding against the mode keymap and run it (dired-sidebar-visit, etc.). The
         // line is mapped from pane geometry rather than `self.lines`, so a click
         // that *also* focuses the pane (cursor was in another buffer) still lands
         // on the right line this frame instead of needing a second click.

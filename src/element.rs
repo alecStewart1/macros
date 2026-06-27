@@ -343,7 +343,7 @@ impl Element for EditorElement {
 
         // Line-number gutter (Emacs display-line-numbers-mode). Per major mode:
         // on by default for every pane's buffer, off for modes that opt out
-        // (e.g. the treemacs sidebar). Resolved against this pane's own major
+        // (e.g. the dired-sidebar tree). Resolved against this pane's own major
         // mode so a code pane shows numbers while the tree next to it doesn't.
         let line_numbers = settings.line_numbers_for(editor.pane_major_mode(pane));
         // hl-line: a background band on the cursor's row, selected pane only.
