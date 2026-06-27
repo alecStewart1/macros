@@ -18,20 +18,20 @@ Any zero-argument function is callable by name from <kbd>M-x</kbd> and bindable 
   (insert-string (call-process "date" '("+%Y-%m-%d"))))
 
 ;; Now: M-x insert-date, or bind it.
-(bind-key "fundamental" "ctrl-c d" insert-date)
+(bind-key "fundamental" "ctrl-c d" 'insert-date)
 ```
 
 ## Keymaps
 
-`bind-key` is the recommended way to bind a key — pass the command itself:
+`bind-key` is the recommended way to bind a key — pass the command name as a `'name` symbol:
 
 ```scheme
 ;; (bind-key "<map>" "<chord>" <command>)
-(bind-key "fundamental" "ctrl-c g" magit-status)   ; global map
-(bind-key "org-mode"    "ctrl-c x" org-todo)       ; mode-local map
+(bind-key "fundamental" "ctrl-c g" 'magit-status)  ; global map
+(bind-key "org-mode"    "ctrl-c x" 'org-todo)      ; mode-local map
 ```
 
-Passing the function directly turns a typo into a load-time error and lets go-to-definition follow the binding. Built-in commands work the same way (they're functions too); a string command name is also accepted. `bind-key` is a thin wrapper over the lower-level `define-key` primitive, which takes a command **name** string only.
+The `'name` symbol names the command without evaluating it, so the binding is independent of file load order. Built-in commands bind the same way. `bind-key` also accepts the bare identity (`magit-status`, no quote) — that turns a typo into a load-time error and lets go-to-definition follow the binding, but the command must already be defined — and a plain string name. `bind-key` is a thin wrapper over the lower-level `define-key` primitive, which takes a command **name** string only.
 
 The global map is `"fundamental"`; major modes have maps named after them. See [Keybindings](/docs/keybindings).
 

@@ -102,7 +102,7 @@ A major mode is a keymap named after the mode, plus commands, activated on `find
 (add-hook "find-file-hook" "env--maybe-activate")
 ```
 
-`set-major-mode` installs the keymap whose name you pass, so the mode name and the keymap name must match. Bindings can use [`bind-key`](/docs/keybindings#binding-a-function-directly) to bind a function value instead of a command-name string.
+`set-major-mode` installs the keymap whose name you pass, so the mode name and the keymap name must match. Bindings can use [`bind-key`](/docs/keybindings#binding-a-function-directly), which takes the command as a `'name` symbol (or a bare function value) rather than a command-name string.
 
 The bundled modes are the best templates: `scheme/markdown.scm` is a compact tree-sitter-backed mode (the grammar highlights; the mode adds heading navigation and folding), and `scheme/org.scm` is a full mode with its own parser and fontification.
 

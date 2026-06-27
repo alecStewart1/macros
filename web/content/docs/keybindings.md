@@ -101,24 +101,25 @@ The argument applies to motions and simple edits (move, kill, yank, delete, newl
 Add `bind-key` calls to your `init.scm` — it's the recommended way to bind a key. The map name for the global map is `"fundamental"`; mode maps are named after the mode (`"org-mode"`, `"magit-status"`, `"dired-mode"`, …).
 
 ```scheme
-;; Rebind in the global map — pass the command itself
-(bind-key "fundamental" "ctrl-x n" next-buffer)
+;; Rebind in the global map — pass the command name as a 'name symbol
+(bind-key "fundamental" "ctrl-x n" 'next-buffer)
 
 ;; Rebind only inside a mode
-(bind-key "org-mode" "ctrl-c x" org-todo)
+(bind-key "org-mode" "ctrl-c x" 'org-todo)
 
 ;; Bind a command of your own, or an inline lambda
 (define (hello) (message "hi"))
-(bind-key "fundamental" "ctrl-c h" hello)
+(bind-key "fundamental" "ctrl-c h" 'hello)
 (bind-key "fundamental" "ctrl-c !" (lambda () (insert-string "!")))
 ```
 
-Prefer passing the command **directly**: a typo becomes an error when your config loads (instead of a silently dead key), and editor tooling like go-to-definition follows the binding. Both your own `define`d commands and the built-in commands (`next-buffer`, `find-file`, `magit-status`, …) are functions you can name this way.
+Prefer the **`'name` symbol** form. It names the command without evaluating it, so the binding works no matter what order your config files load in. Both your own `define`d commands and the built-in commands (`next-buffer`, `find-file`, `magit-status`, …) bind this way.
 
-`bind-key` also accepts a **string** command name, handy when you'd rather not evaluate the symbol (or are pasting straight from a command list):
+`bind-key` also accepts the command **directly** as a bare identifier (`next-buffer`, no quote). That form evaluates the function at bind time — a typo becomes an error when your config loads, and editor tooling like go-to-definition follows the binding — but the command must already be defined at that point. A plain **string** name works too, handy when pasting straight from a command list:
 
 ```scheme
-(bind-key "fundamental" "ctrl-x ctrl-f" "find-file")
+(bind-key "fundamental" "ctrl-x ctrl-d" next-buffer)    ; bare identity (must be defined)
+(bind-key "fundamental" "ctrl-x ctrl-f" "find-file")    ; string name
 ```
 
 ### define-key (the primitive)

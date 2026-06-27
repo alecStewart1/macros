@@ -4466,6 +4466,19 @@ mod tests {
             "identity binding should dispatch LspReferences: {cmds:?}"
         );
 
+        // Canonical config form: a 'name symbol binds directly (no table entry),
+        // the same as the string path — resolution is deferred to keypress.
+        let cmds = engine
+            .eval(r#"(evil-define-key "normal" "zig" "space g l" 'lsp-find-references)"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                    if m == "evil-normal:zig" && s == "space g l" && cmd == "lsp-find-references")),
+            "symbol binding should define-key directly: {cmds:?}"
+        );
+
         // Back-compat: a "name" string still binds directly (no table entry).
         let cmds = engine
             .eval(r#"(evil-define-key "normal" "go" "space g l" "lsp-find-references")"#)
@@ -5122,6 +5135,16 @@ mod tests {
             r.commands.as_slice(),
             [EditorCommand::DefineKey(m, c, cmd)]
                 if m == "fundamental" && c == "ctrl-x g" && cmd == "magit-status"
+        ));
+
+        // The canonical 'name symbol resolves to the same define-key path.
+        let r = engine
+            .eval(r#"(bind-key "fundamental" "ctrl-x s" 'magit-status)"#)
+            .unwrap();
+        assert!(matches!(
+            r.commands.as_slice(),
+            [EditorCommand::DefineKey(m, c, cmd)]
+                if m == "fundamental" && c == "ctrl-x s" && cmd == "magit-status"
         ));
 
         // A procedure is stashed and the chord is bound to a run-thunk stub.
@@ -7584,6 +7607,126 @@ mod magit_hunk_e2e {
                 .as_deref(),
             Some("#true"),
             "nothing left unstaged"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn section_header_staging_against_real_git() {
+        let dir = std::env::temp_dir().join(format!("macros-section-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        // Committed file we then modify (→ unstaged), plus two untracked files.
+        std::fs::write(dir.join("a.txt"), "a\nb\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "init"]);
+        std::fs::write(dir.join("a.txt"), "a\nCHANGED\n").unwrap(); // unstaged mod
+        std::fs::write(dir.join("u1.txt"), "1\n").unwrap(); // untracked
+        std::fs::write(dir.join("u2.txt"), "2\n").unwrap(); // untracked
+
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../scheme/transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
+        engine.eval("(magit-render)").unwrap();
+
+        // Each section header was recorded with its type, and the line→type
+        // lookup resolves on the exact header line.
+        let untracked_head = engine
+            .eval("(car (filter (lambda (h) (equal? (cdr h) \"untracked\")) *magit-headings*))")
+            .unwrap();
+        assert!(
+            untracked_head.value.is_some(),
+            "an untracked header line was recorded"
+        );
+        assert_eq!(
+            engine
+                .eval(
+                    "(magit-heading-type-at-line \
+                       (car (car (filter (lambda (h) (equal? (cdr h) \"untracked\")) \
+                                         *magit-headings*))))"
+                )
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"untracked\""),
+            "the recorded untracked header line resolves back to \"untracked\""
+        );
+
+        // `s` on the "Untracked files" header stages every untracked file.
+        assert_eq!(
+            engine
+                .eval(r#"(length (magit-files-of-type "untracked"))"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("2"),
+            "both untracked files are in the section"
+        );
+        engine.eval(r#"(magit-stage-section "untracked")"#).unwrap();
+        assert_eq!(
+            engine
+                .eval(r#"(equal? (trim-end (git (list "ls-files" "--others" "--exclude-standard"))) "")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("#true"),
+            "no untracked files remain after staging the section"
+        );
+        for f in ["u1.txt", "u2.txt"] {
+            assert_eq!(
+                engine
+                    .eval(&format!(
+                        r#"(string-contains? (git (list "diff" "--cached" "--name-only")) "{f}")"#
+                    ))
+                    .unwrap()
+                    .value
+                    .as_deref(),
+                Some("#true"),
+                "{f} is now staged"
+            );
+        }
+
+        // `s` on the "Unstaged changes" header stages every unstaged change.
+        engine.eval("(magit-render)").unwrap();
+        engine.eval(r#"(magit-stage-section "unstaged")"#).unwrap();
+        assert_eq!(
+            engine
+                .eval(r#"(equal? (trim-end (git (list "diff" "--name-only"))) "")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("#true"),
+            "nothing left unstaged after staging the section"
+        );
+
+        // `u` on the "Staged changes" header unstages the whole section.
+        engine.eval("(magit-render)").unwrap();
+        engine.eval("(magit-unstage-section)").unwrap();
+        assert_eq!(
+            engine
+                .eval(r#"(equal? (trim-end (git (list "diff" "--cached" "--name-only"))) "")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("#true"),
+            "nothing left staged after unstaging the section"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

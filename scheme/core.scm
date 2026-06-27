@@ -171,14 +171,18 @@
     (when p (p))))
 
 ;; Bind `cmd` under `chord` in keymap `map`. Like `define-key`, but `cmd` may be
-;; a procedure (an identity) as well as a "command-name" string. Passing the
-;; function directly means a typo is an unbound-variable error at load time, and
-;; editor tooling (go-to-definition, rename) follows the binding.
+;; a 'name symbol (the canonical config form) or a procedure (an identity), as
+;; well as a "command-name" string. A symbol defers resolution to keypress time,
+;; so it works regardless of file load order. Passing the function directly means
+;; a typo is an unbound-variable error at load time, and editor tooling
+;; (go-to-definition, rename) follows the binding.
 ;;
-;;   (bind-key "fundamental" "ctrl-c g" magit-status)   ; a Scheme command
+;;   (bind-key "fundamental" "ctrl-c g" 'magit-status)  ; canonical: a 'name symbol
+;;   (bind-key "fundamental" "ctrl-c g" magit-status)   ; a Scheme command identity
 ;;   (bind-key "fundamental" "ctrl-c d" (lambda () (insert-string "hi")))
 ;;   (bind-key "fundamental" "ctrl-x g" "magit-status") ; string still works
 (define (bind-key map chord cmd)
-  (if (string? cmd)
-      (define-key map chord cmd)
-      (define-key map chord (string-append "run-thunk \"" (register-thunk cmd) "\""))))
+  (cond
+    ((symbol? cmd) (define-key map chord (symbol->string cmd)))
+    ((string? cmd) (define-key map chord cmd))
+    (else (define-key map chord (string-append "run-thunk \"" (register-thunk cmd) "\"")))))

@@ -312,6 +312,10 @@
 ;; reads like the line view). Keyed (type path context), persists across refresh.
 (define *magit-collapsed-groups* '())
 (define *magit-commit-lines* '()) ; (line . ref) — commit/stash lines RET can show
+;; (line . type) for each top-level section header ("Untracked files",
+;; "Unstaged changes", "Staged changes"), so `s`/`u` on a header act on the
+;; whole section (stage/unstage every file in it), like magit.
+(define *magit-headings* '())
 (define *magit-show-history* #t)  ; stashes/unpushed/unpulled — cheap via gix (no subprocess), so shown by default
 ;; When set, `magit-render` updates the buffer in place without stealing focus
 ;; (a background refresh, e.g. from `after-save-hook`). It also skips the sub-line
@@ -640,6 +644,7 @@
 ;; `dmap` is the section's bulk-diff map; each file pulls its slice by path.
 (define (magit-emit-diff-section title files type dmap)
   (when (not (null? files))
+    (set! *magit-headings* (cons (cons *magit-n* type) *magit-headings*))
     (magit-emit (string-append title " (" (int->string (length files)) ")")
                 "magit-section-heading" #f #f)
     (for-each (lambda (f) (magit-emit-diff f type (diff-map-get dmap (magit-newpath (cadr f))))) files)
@@ -648,6 +653,7 @@
 ;; Untracked files have no diff — list them as (empty-body) sections.
 (define (magit-emit-file-section title files type)
   (when (not (null? files))
+    (set! *magit-headings* (cons (cons *magit-n* type) *magit-headings*))
     (magit-emit (string-append title " (" (int->string (length files)) ")")
                 "magit-section-heading" #f #f)
     (for-each (lambda (f)
@@ -786,6 +792,7 @@
     (set! *magit-hunks* '())
     (set! *magit-groups* '())
     (set! *magit-commit-lines* '())
+    (set! *magit-headings* '())
     ;; ONE status scan (`--branch`) feeds the working-tree sections AND the
     ;; branch/upstream/ahead-behind header — no separate rev-parse/rev-list calls.
     (let* ((porc      (magit-porcelain-full))
@@ -909,6 +916,21 @@
 (define (magit-current)
   (let ((s (magit-section-at-line (buffer-line))))
     (if s (list (sec-type s) (sec-path s)) #f)))
+
+;; The section type whose top-level header is exactly `line` ("untracked",
+;; "unstaged", "staged"), or #f. Lets `s`/`u` act on a whole section from its
+;; header line.
+(define (magit-heading-type-at-line line)
+  (let loop ((hs *magit-headings*))
+    (cond ((null? hs) #f)
+          ((= (car (car hs)) line) (cdr (car hs)))
+          (else (loop (cdr hs))))))
+
+;; Every file path in the sections of `type`, deduped (a partially-staged file
+;; can list twice within a type otherwise).
+(define (magit-files-of-type type)
+  (magit-dedup
+    (map sec-path (filter (lambda (s) (equal? (sec-type s) type)) *magit-sections*))))
 
 ;; The hunk whose line range contains `line`, or #f.
 ;; hunk = (start end header hunk-text type path).
@@ -1058,7 +1080,26 @@
 ;; these handlers mirror that. A contiguous region can't span two files' diffs
 ;; without crossing the second file's heading, so the hunk path is single-file.
 
-;; s: stage the region (multiple files and/or selected lines), else hunk/file at point.
+;; Stage every file in a working-tree section — `s` on the "Untracked files" or
+;; "Unstaged changes" header. Both stage via `git add`.
+(define (magit-stage-section type)
+  (let ((files (magit-files-of-type type)))
+    (if (null? files)
+        (message "Nothing to stage in section")
+        (magit-do (append (list "add" "--") (map magit-newpath files))
+                  (string-append "Staged " (int->string (length files)) " file(s)")))))
+
+;; Unstage every file in the "Staged changes" section — `u` on its header.
+(define (magit-unstage-section)
+  (let ((files (magit-files-of-type "staged")))
+    (if (null? files)
+        (message "Nothing to unstage in section")
+        (magit-do (append (list "reset" "-q" "HEAD" "--")
+                          (apply append (map magit-pathspecs files)))
+                  (string-append "Unstaged " (int->string (length files)) " file(s)")))))
+
+;; s: stage the region (multiple files and/or selected lines), else the section
+;; on its header, else hunk/file at point.
 (define (magit-stage)
   (if (region-active?)
       (let* ((r (magit-region-lines)) (lo (car r)) (hi (cdr r))
@@ -1072,12 +1113,15 @@
                   (when (magit-apply-patch-text patch #t #f) (message "Staged region"))
                   (message "Nothing to stage in region")))))
       (let ((h (magit-hunk-at-line (buffer-line)))
-            (g (and (magit-structural?) (magit-group-on-heading (buffer-line)))))
+            (g (and (magit-structural?) (magit-group-on-heading (buffer-line))))
+            (ht (magit-heading-type-at-line (buffer-line))))
         (cond
           (h (when (magit-apply-hunk h #t #f) (message "Staged hunk")))
           (g (let ((patch (magit-group-patch g)))
                (when (and patch (magit-apply-patch-text patch #t #f))
                  (message (string-append "Staged " (magit-group-display (grp-context g)))))))
+          ((and ht (or (equal? ht "untracked") (equal? ht "unstaged")))
+           (magit-stage-section ht))
           (else
            (let ((cur (magit-current)))
              (if cur
@@ -1098,12 +1142,14 @@
                   (when (magit-apply-patch-text patch #t #t) (message "Unstaged region"))
                   (message "Nothing to unstage in region")))))
       (let ((h (magit-hunk-at-line (buffer-line)))
-            (g (and (magit-structural?) (magit-group-on-heading (buffer-line)))))
+            (g (and (magit-structural?) (magit-group-on-heading (buffer-line))))
+            (ht (magit-heading-type-at-line (buffer-line))))
         (cond
           (h (when (magit-apply-hunk h #t #t) (message "Unstaged hunk")))
           (g (let ((patch (magit-group-patch g)))
                (when (and patch (magit-apply-patch-text patch #t #t))
                  (message (string-append "Unstaged " (magit-group-display (grp-context g)))))))
+          ((and ht (equal? ht "staged")) (magit-unstage-section))
           (else
            (let ((cur (magit-current)))
              (if cur

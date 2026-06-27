@@ -80,11 +80,11 @@ Press <kbd>:</kbd> to enter an Ex command. Substitution works as you'd expect:
 Like vanilla evil-mode in Emacs, Macros' evil has **no <kbd>Space</kbd> leader**. A leader menu is a Doom/Spacemacs convention, not part of evil itself, so it's left to you. Adding one is a few lines in your `init.scm`:
 
 ```scheme
-;; Roll your own Spacemacs-style leader. evil-bind-key takes the command
-;; function directly (a string command name works too).
-(evil-bind-key "evil-normal" "space space" helm-execute-command)
-(evil-bind-key "evil-normal" "space f f"   helm-find-files)
-(evil-bind-key "evil-normal" "space b b"   helm-buffers)
+;; Roll your own Spacemacs-style leader. evil-bind-key takes the command name
+;; as a 'name symbol (a bare command identity or a string name work too).
+(evil-bind-key "evil-normal" "space space" 'helm-execute-command)
+(evil-bind-key "evil-normal" "space f f"   'helm-find-files)
+(evil-bind-key "evil-normal" "space b b"   'helm-buffers)
 ```
 
 ## Customizing

@@ -36,9 +36,9 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 (define (org-toggle-bug)     (org-set-keyword "BUG"))
 (define (org-toggle-feature) (org-set-keyword "FEATURE"))
 (define (org-toggle-idea)    (org-set-keyword "IDEA"))
-(bind-key "org-mode" "ctrl-c ctrl-b" org-toggle-bug)
-(bind-key "org-mode" "ctrl-c ctrl-f" org-toggle-feature)
-(bind-key "org-mode" "ctrl-c ctrl-i" org-toggle-idea)
+(bind-key "org-mode" "ctrl-c ctrl-b" 'org-toggle-bug)
+(bind-key "org-mode" "ctrl-c ctrl-f" 'org-toggle-feature)
+(bind-key "org-mode" "ctrl-c ctrl-i" 'org-toggle-idea)
 
 ;;; ============================================================================
 ;;; EVIL MODE + SPC LEADER
@@ -77,55 +77,55 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 
 ;; --- global leader bindings -------------------------------------------------
 ;; Config
-(evil-leader-set "c o" "my/edit-config")
+(evil-leader-set "c o" 'my/edit-config)
 
 ;; Project
-(evil-leader-set "v u" "compile")
+(evil-leader-set "v u" 'compile)
 
 ;; Buffer / window management
-(evil-leader-set "n k" "my/kill-all-buffers")
-(evil-leader-set "n n" "next-buffer")
-(evil-leader-set "n p" "previous-buffer")
-(evil-leader-set "n o" "delete-other-windows")
-(evil-leader-set "n d" "kill-buffer-and-window")
-(evil-leader-set "n b" "helm-mini")
-(evil-leader-set "n r" "my/scratch")
-(evil-leader-set "n a" "my/notes")
-(evil-leader-set "n m" "my/org-files")
-(evil-leader-set "n f" "projectile-find-file")
-(evil-leader-set "n g" "projectile-grep")
-(evil-leader-set "n t" "dired-sidebar")
-(evil-leader-set "n l" "helm-buffers-list")
+(evil-leader-set "n k" 'my/kill-all-buffers)
+(evil-leader-set "n n" 'next-buffer)
+(evil-leader-set "n p" 'previous-buffer)
+(evil-leader-set "n o" 'delete-other-windows)
+(evil-leader-set "n d" 'kill-buffer-and-window)
+(evil-leader-set "n b" 'helm-mini)
+(evil-leader-set "n r" 'my/scratch)
+(evil-leader-set "n a" 'my/notes)
+(evil-leader-set "n m" 'my/org-files)
+(evil-leader-set "n f" 'projectile-find-file)
+(evil-leader-set "n g" 'projectile-grep)
+(evil-leader-set "n t" 'dired-sidebar)
+(evil-leader-set "n l" 'helm-buffers-list)
 
 ;; Window splits
-(evil-leader-set "_" "split-window-below")
-(evil-leader-set "|" "split-window-right")
+(evil-leader-set "_" 'split-window-below)
+(evil-leader-set "|" 'split-window-right)
 
 ;; Scrolling
-(evil-leader-set "j" "evil-scroll-down")
-(evil-leader-set "k" "evil-scroll-up")
+(evil-leader-set "j" 'evil-scroll-down)
+(evil-leader-set "k" 'evil-scroll-up)
 
 ;; Git / Magit
-(evil-leader-set "m s" "magit")
-(evil-leader-set "m b" "magit-blame-toggle")
-(evil-leader-set "m f" "magit-log-file")
+(evil-leader-set "m s" 'magit)
+(evil-leader-set "m b" 'magit-blame-toggle)
+(evil-leader-set "m f" 'magit-log-file)
 
 ;; --- per-major-mode leader: LSP ---------------------------------------------
 (evil-leader-set-for-modes
   '("rust" "go" "typescript" "steel")
-  (list (cons "g g" "lsp-find-definition")
-        (cons "g l" "lsp-find-references")
-        (cons "g p" "xref-pop-marker")
-        (cons "g r" "lsp-rename")
-        (cons "t"   "lsp-hover")
-        (cons "g u" "enable-lsp")))
+  (list (cons "g g" 'lsp-find-definition)
+        (cons "g l" 'lsp-find-references)
+        (cons "g p" 'xref-pop-marker)
+        (cons "g r" 'lsp-rename)
+        (cons "t"   'lsp-hover)
+        (cons "g u" 'enable-lsp)))
 
 ;; --- per-major-mode leader: Org ---------------------------------------------
 (evil-leader-set-for-modes
   '("org-mode")
-  (list (cons "r r" "org-babel-execute")
-        (cons "u"   "org-todo")
-        (cons "i"   "my/org-insert-src-ruby")))
+  (list (cons "r r" 'org-babel-execute)
+        (cons "u"   'org-todo)
+        (cons "i"   'my/org-insert-src-ruby)))
 ```
 
 That's the entire file. The rest of this page walks through what each part is doing.
@@ -156,10 +156,10 @@ This drops the stock TODO vocabulary and replaces it with `BUG` / `FEATURE` / `I
 
 ```scheme
 (define (org-toggle-bug)     (org-set-keyword "BUG"))
-(bind-key "org-mode" "ctrl-c ctrl-b" org-toggle-bug)
+(bind-key "org-mode" "ctrl-c ctrl-b" 'org-toggle-bug)
 ```
 
-`bind-key`'s first argument is the keymap — `"org-mode"` scopes the binding to Org buffers only. See [Org mode](/docs/org-mode) for the full feature set.
+`bind-key`'s first argument is the keymap — `"org-mode"` scopes the binding to Org buffers only. The command is given as a `'name` symbol (the command's name, quoted). See [Org mode](/docs/org-mode) for the full feature set.
 
 ## Turning on modal editing
 
@@ -204,13 +204,13 @@ These are ordinary Steel — `let`, `cond`, `for-each`, list operations. [Script
 
 `evil-set-leader` picks the leader key — `SPC` here. Every `evil-leader-set` chord below hangs off it. Change this one line (e.g. `(evil-set-leader "comma")`) and the entire leader map moves with it.
 
-Global leader bindings map a chord to a command *by name* (the string is the command's name, so your own `my/…` commands work exactly like built-ins):
+Global leader bindings map a chord to a command *by name* (a `'name` symbol, so your own `my/…` commands work exactly like built-ins):
 
 ```scheme
-(evil-leader-set "c o" "my/edit-config")    ; SPC c o — open this config
-(evil-leader-set "n f" "projectile-find-file")
-(evil-leader-set "n g" "projectile-grep")
-(evil-leader-set "m s" "magit")             ; SPC m s — git status
+(evil-leader-set "c o" 'my/edit-config)     ; SPC c o — open this config
+(evil-leader-set "n f" 'projectile-find-file)
+(evil-leader-set "n g" 'projectile-grep)
+(evil-leader-set "m s" 'magit)              ; SPC m s — git status
 ```
 
 So <kbd>SPC n f</kbd> finds a file in the project and <kbd>SPC m s</kbd> opens [Magit](/docs/git). The grouping is Spacemacs-flavored — `n` for buffers/windows, `m` for git, `g` (per-mode, below) for code navigation.

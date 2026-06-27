@@ -127,7 +127,7 @@ This is vanilla `evil-mode` — plain Vim keys, no leader. See [Modal editing](/
 (set-option "font-size" 14)
 
 ;; A personal binding: jump to definition.
-(bind-key "fundamental" "ctrl-c d" lsp-find-definition)
+(bind-key "fundamental" "ctrl-c d" 'lsp-find-definition)
 
 ;; A command of your own, callable with M-x insert-date.
 (define (insert-date)

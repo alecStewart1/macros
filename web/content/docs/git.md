@@ -33,6 +33,8 @@ Run `magit-status` with <kbd>C-x g</kbd> (or <kbd>M-x</kbd> `magit-status`). You
 | <kbd>u</kbd> / <kbd>U</kbd> | unstage the item / unstage all |
 | <kbd>k</kbd> | discard the change at point |
 
+The "item" follows point: a hunk, a file, a selected region of files/lines — or, on a section header (<kbd>s</kbd> on **Untracked files** / **Unstaged changes**, <kbd>u</kbd> on **Staged changes**), the whole section.
+
 ### Transient popups
 
 Each of these opens a transient menu (a popup of further keys), mirroring Magit:

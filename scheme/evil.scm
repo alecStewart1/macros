@@ -309,14 +309,17 @@
 (define (evil-run-key key)
   (let ((cmd (hash-try-get *evil-cmd-table* key)))
     (when cmd (cmd))))
-;; Bind `cmd` (a procedure OR a "name" string for back-compat) under `chord` in
-;; keymap `km`.
+;; Bind `cmd` under `chord` in keymap `km`. `cmd` is a 'name symbol (the canonical
+;; config form), a procedure (a bare identifier — lets editor tooling resolve the
+;; reference), or a "name" string for back-compat.
 (define (evil-bind-key km chord cmd)
-  (if (string? cmd)
-      (define-key km chord cmd)                      ; "name" → (name)
-      (let ((key (string-append km " " chord)))      ; identity → table dispatch
-        (set! *evil-cmd-table* (hash-insert *evil-cmd-table* key cmd))
-        (define-key km chord (string-append "evil-run-key \"" key "\"")))))
+  (cond
+    ((symbol? cmd) (define-key km chord (symbol->string cmd))) ; 'name → (name)
+    ((string? cmd) (define-key km chord cmd))                  ; "name" → (name), back-compat
+    (else                                                      ; identity → table dispatch
+     (let ((key (string-append km " " chord)))
+       (set! *evil-cmd-table* (hash-insert *evil-cmd-table* key cmd))
+       (define-key km chord (string-append "evil-run-key \"" key "\""))))))
 
 ;; --- per-major-mode evil bindings (Emacs `evil-define-key` / evil-leader) ----
 ;; Bindings in the keymap "evil-<state>:<major-mode>" shadow the global
@@ -324,11 +327,11 @@
 ;; is the language name for code buffers ("rust", "go", "typescript", "steel",
 ;; "python", …) — the same name the highlighter uses.
 ;;
-;;   (evil-define-key "normal" "rust" "space g g" lsp-find-definition)
+;;   (evil-define-key "normal" "rust" "space g g" 'lsp-find-definition)
 ;;
-;; binds SPC g g to go-to-definition in Rust buffers only (pass the bare command
-;; identifier; a "name" string also works). Elsewhere SPC g g keeps whatever the
-;; global evil-normal keymap says.
+;; binds SPC g g to go-to-definition in Rust buffers only (pass a 'name symbol; a
+;; bare command identifier or a "name" string also work). Elsewhere SPC g g keeps
+;; whatever the global evil-normal keymap says.
 
 ;; Bind one key (procedure or name) in a major-mode-scoped evil keymap.
 (define (evil-define-key state mode chord command)
@@ -353,13 +356,14 @@
 ;; leader afterward does not move bindings already made):
 ;;
 ;;   (evil-set-leader "comma")                    ; or "space" (default), "space space", …
-;;   (evil-leader-set "n n" "next-buffer")        ; <leader> n n   (global, normal state)
+;;   (evil-leader-set "n n" 'next-buffer)         ; <leader> n n   (global, normal state)
 ;;   (evil-leader-set-for-modes '("rust" "go")    ; <leader> g g / g r in those modes only
-;;     (list (cons "g g" "lsp-find-definition")
-;;           (cons "g r" "lsp-rename")))
+;;     (list (cons "g g" 'lsp-find-definition)
+;;           (cons "g r" 'lsp-rename)))
 ;;
-;; Commands may be a "name" string or a bare procedure identifier (the latter
-;; lets editor tooling resolve the reference), same as `evil-define-key`.
+;; Commands may be a 'name symbol (canonical), a "name" string, or a bare
+;; procedure identifier (the latter lets editor tooling resolve the reference),
+;; same as `evil-define-key`.
 (define *evil-leader* "space")
 
 ;; Set the leader to a chord string ("space", "comma", "space space", …).
