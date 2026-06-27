@@ -7154,12 +7154,15 @@ impl Editor {
             return;
         }
 
-        // While the minibuffer is open, only C-g (abort) is handled here; other
-        // chords are swallowed so they can't reach the main buffer. Plain and
-        // OS-special keys fall through to the IME / GPUI actions, which route to
-        // the minibuffer.
+        // While the minibuffer is open, C-g aborts it (Emacs); other chords are
+        // swallowed so they can't reach the main buffer. Plain and OS-special keys
+        // fall through to the IME / GPUI actions, which route to the minibuffer.
+        // Under evil ONLY, Escape also aborts, so the `:` ex prompt (and any other
+        // read) is dismissed with a single Esc (vim). In pure Emacs mode Escape is
+        // left alone — there it is the Meta prefix, and C-g is the canceller.
         if self.minibuffer.is_some() {
-            if ks.modifiers.control && ks.key == "g" {
+            let evil_escape = ks.key == "escape" && self.evil != EvilState::Disabled;
+            if (ks.modifiers.control && ks.key == "g") || evil_escape {
                 self.mb_abort(cx);
                 cx.stop_propagation();
             } else if self.is_isearch() && ks.modifiers.control && ks.key == "s" {
