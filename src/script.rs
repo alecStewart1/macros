@@ -1581,11 +1581,19 @@ fn gix_status_branch_line(repo: &gix::Repository) -> String {
     format!("## {branch}...{up} [{}]", ab.join(", "))
 }
 
-/// `XY`-classified change rows for `gix-status`: `(path, X, Y)`, sorted by path.
-/// X = index-vs-HEAD (staged), Y = worktree-vs-index (unstaged), `??` = untracked.
+/// One porcelain status row: a `path` with its staged (`x`) and unstaged (`y`)
+/// codes. `x`/`y` are `' '` (unchanged), `M`/`A`/`D`, or `?` (untracked).
+struct StatusEntry {
+    path: String,
+    x: char,
+    y: char,
+}
+
+/// `XY`-classified change rows for `gix-status`, sorted by path. X = index-vs-HEAD
+/// (staged), Y = worktree-vs-index (unstaged), `??` = untracked.
 fn gix_status_entries(
     repo: &gix::Repository,
-) -> Result<Vec<(String, char, char)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<StatusEntry>, Box<dyn std::error::Error>> {
     use std::collections::{BTreeMap, HashSet};
     let index = repo.open_index()?;
     let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
@@ -1686,7 +1694,11 @@ fn gix_status_entries(
 
     Ok(codes
         .into_iter()
-        .map(|(p, [x, y])| (String::from_utf8_lossy(&p).into_owned(), x, y))
+        .map(|(p, [x, y])| StatusEntry {
+            path: String::from_utf8_lossy(&p).into_owned(),
+            x,
+            y,
+        })
         .collect())
 }
 
@@ -1694,8 +1706,8 @@ fn gix_status_entries(
 fn gix_status(dir: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let repo = gix::discover(dir)?;
     let mut out = vec![gix_status_branch_line(&repo)];
-    for (path, x, y) in gix_status_entries(&repo)? {
-        out.push(format!("{x}{y} {path}"));
+    for e in gix_status_entries(&repo)? {
+        out.push(format!("{}{} {}", e.x, e.y, e.path));
     }
     Ok(out)
 }
