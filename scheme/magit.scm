@@ -798,6 +798,9 @@
            (up        (nth binfo 1))
            (ab        (if (equal? up "") #f (cons (nth binfo 2) (nth binfo 3))))
            (subject   (gix-head-subject *magit-dir*)))
+      ;; Keep the mode-line branch slot in step with magit — a checkout or
+      ;; branch op refreshes here without needing a fresh file visit.
+      (set-mode-line-slot "git" branch)
       ;; --- header ---
       (magit-emit-header "Head:" (if (equal? branch "") "(no commits)" branch)
                          (if (equal? subject "") "" (string-append " " subject)))
@@ -1293,8 +1296,17 @@
       (list "Actions"
             (list "p" "Push"                "magit-push")
             (list "u" "Push & set upstream" "magit-push-upstream")))))
+;; The current branch's upstream from the porcelain header ("" when unset).
+(define (magit-current-upstream)
+  (nth (car (magit-porcelain-full)) 1))
+;; Push the current branch. With no upstream configured a plain `git push`
+;; aborts ("has no upstream branch"), so transparently fall back to `-u origin
+;; HEAD` to create and track it on first push — git's push.autoSetupRemote.
 (define (magit-push)
-  (magit-run-async (append (list "push") (magit-push-flags)) "Pushed")
+  (if (equal? (magit-current-upstream) "")
+      (magit-run-async (append (list "push" "-u" "origin" "HEAD") (magit-push-flags))
+                       "Pushed, upstream set")
+      (magit-run-async (append (list "push") (magit-push-flags)) "Pushed"))
   (magit-switch-clear! "push:"))
 (define (magit-push-upstream)
   (magit-run-async (append (list "push" "-u" "origin" "HEAD") (magit-push-flags)) "Pushed, upstream set")

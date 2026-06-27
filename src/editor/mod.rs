@@ -214,6 +214,108 @@ pub struct MinibufferView {
     pub message: String,
 }
 
+/// One field of a mode-line segment — either inert text or a live value the
+/// renderer pulls from current editor state every frame (the threading forbids
+/// calling Scheme per frame, so volatile values like the modified marker and the
+/// mode stack are resolved here, in Rust, not pushed from Scheme).
+#[derive(Clone)]
+pub enum MlField {
+    /// Inert text (separators, parens, labels Scheme bakes into the format).
+    Literal(String),
+    /// `**` when the buffer is modified, `--` when saved.
+    Modified,
+    /// The active buffer's name.
+    BufferName,
+    /// The active mode names, space-joined.
+    Modes,
+    /// The evil (modal) state name — "Normal"/"Insert"/…, "" when evil is off.
+    EvilMode,
+    /// Ready language-server names, space-joined.
+    Lsp,
+    /// The LSP diagnostic summary ("E:n W:n"), "" when clean.
+    Diagnostics,
+    /// A named register written from Scheme via `set-mode-line-slot`.
+    Slot(String),
+}
+
+/// One mode-line segment: a [`MlField`] plus optional styling. `prefix`/`suffix`
+/// wrap the resolved value and are emitted ONLY when the value is non-empty, so
+/// an absent optional field takes its separators with it. `face` names a theme
+/// face for the whole span, or `None` for the default mode-line color.
+#[derive(Clone)]
+pub struct MlSeg {
+    pub field: MlField,
+    pub face: Option<SharedString>,
+    pub prefix: String,
+    pub suffix: String,
+}
+
+impl MlSeg {
+    fn new(field: MlField, face: Option<&str>, prefix: &str, suffix: &str) -> Self {
+        MlSeg {
+            field,
+            face: face.map(|f| SharedString::from(f.to_string())),
+            prefix: prefix.to_string(),
+            suffix: suffix.to_string(),
+        }
+    }
+}
+
+/// The built-in mode-line layout, used before `scheme/modeline.scm` installs its
+/// own (and whenever no config does). Mirrors that file's default so behavior is
+/// identical with or without Scheme: `-- name (modes) [project] git:branch lsp … E:n W:n`.
+fn default_mode_line_format() -> Vec<MlSeg> {
+    use MlField::*;
+    vec![
+        MlSeg::new(Modified, None, "", ""),
+        MlSeg::new(Literal("  ".into()), None, "", ""),
+        MlSeg::new(BufferName, None, "", ""),
+        MlSeg::new(Literal("  (".into()), None, "", ""),
+        MlSeg::new(Modes, None, "", ""),
+        MlSeg::new(Literal(")".into()), None, "", ""),
+        MlSeg::new(Slot("project".into()), None, "  [", "]"),
+        MlSeg::new(Slot("git".into()), Some("magit-branch"), "  git:", ""),
+        MlSeg::new(Lsp, None, "  lsp ", ""),
+        MlSeg::new(Diagnostics, None, "  ", ""),
+    ]
+}
+
+/// Parse the `set-mode-line-format` payload into renderable segments. Each token
+/// is either a bare string (a literal with the default face) or a tab-joined
+/// `kind\tpayload\tface\tprefix\tsuffix` produced by modeline.scm's `ml-*`
+/// helpers. An unknown `field` name renders as a visible `?name` marker so a
+/// typo in config is obvious rather than silent.
+fn parse_mode_line_format(tokens: Vec<String>) -> Vec<MlSeg> {
+    tokens
+        .into_iter()
+        .map(|token| {
+            if !token.contains('\t') {
+                return MlSeg::new(MlField::Literal(token), None, "", "");
+            }
+            let mut parts = token.splitn(5, '\t');
+            let kind = parts.next().unwrap_or("");
+            let payload = parts.next().unwrap_or("");
+            let face = parts.next().unwrap_or("");
+            let prefix = parts.next().unwrap_or("");
+            let suffix = parts.next().unwrap_or("");
+            let field = match kind {
+                "field" => match payload {
+                    "modified" => MlField::Modified,
+                    "buffer-name" => MlField::BufferName,
+                    "modes" => MlField::Modes,
+                    "evil-mode" => MlField::EvilMode,
+                    "lsp" => MlField::Lsp,
+                    "diagnostics" => MlField::Diagnostics,
+                    other => MlField::Literal(format!("?{other}")),
+                },
+                "slot" => MlField::Slot(payload.to_string()),
+                _ => MlField::Literal(payload.to_string()),
+            };
+            MlSeg::new(field, (!face.is_empty()).then_some(face), prefix, suffix)
+        })
+        .collect()
+}
+
 /// A text editor over a single [`Buffer`], with a stack of active [`Mode`]s and
 /// an embedded [`ScriptEngine`]. This is the GPUI entity that owns all buffer
 /// state; the [`EditorElement`] only draws it.
@@ -455,8 +557,14 @@ pub struct Editor {
     locals: HashMap<String, String>,
     /// The open transient popup, if any (the magit / `transient.el` pattern).
     transient: Option<TransientState>,
-    /// A mode-line project indicator set from Scheme (projectile-style).
-    project_indicator: Option<SharedString>,
+    /// Named mode-line registers written from Scheme (`set-mode-line-slot`),
+    /// e.g. "project" → "macros", "git" → "main". A `Slot` segment in
+    /// `mode_line_format` looks up its value here; absent/empty = renders nothing.
+    mode_line_slots: HashMap<String, SharedString>,
+    /// The ordered mode-line segments, the Emacs `mode-line-format` analogue.
+    /// Defined in Scheme (`scheme/modeline.scm`, via `set-mode-line-format`);
+    /// seeded with [`default_mode_line_format`] so the bar works pre-Scheme.
+    mode_line_format: Vec<MlSeg>,
 
     // --- Windows (split panes) ---
     /// All window panes (the selected one is the live view onto the buffer).
@@ -1464,7 +1572,8 @@ impl Editor {
             overlays: Overlays::default(),
             locals: HashMap::new(),
             transient: None,
-            project_indicator: None,
+            mode_line_slots: HashMap::new(),
+            mode_line_format: default_mode_line_format(),
             panes: vec![Pane {
                 id: 0,
                 buffer: "*scratch*".to_string(),
@@ -5014,9 +5123,46 @@ impl Editor {
         names
     }
 
-    /// The mode-line project indicator set from Scheme, if any.
-    pub fn project_indicator(&self) -> Option<&str> {
-        self.project_indicator.as_ref().map(SharedString::as_ref)
+    /// Resolve the mode-line format into rendered `(text, face)` spans, in
+    /// order, dropping any segment whose value is empty (so optional fields and
+    /// their separators vanish when there's nothing to show). The live fields
+    /// (`modified`, `modes`, …) read current editor state, so the bar never goes
+    /// stale between the sparse Scheme hooks; `face` is `None` for the default
+    /// mode-line color and a face name for the renderer to resolve otherwise.
+    pub fn mode_line_segments(&self) -> Vec<(SharedString, Option<SharedString>)> {
+        self.mode_line_format
+            .iter()
+            .filter_map(|seg| {
+                let value = match &seg.field {
+                    MlField::Literal(s) => s.clone(),
+                    MlField::Modified => if self.is_modified() { "**" } else { "--" }.to_string(),
+                    MlField::BufferName => self.buffer_name().to_string(),
+                    MlField::Modes => self.modes.names().join(" "),
+                    MlField::EvilMode => self.evil_mode_name().unwrap_or("").to_string(),
+                    MlField::Lsp => self.active_lsp_servers().join(" "),
+                    MlField::Diagnostics => self.diagnostic_summary().unwrap_or_default(),
+                    MlField::Slot(key) => self
+                        .mode_line_slots
+                        .get(key)
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                };
+                if value.is_empty() {
+                    return None;
+                }
+                let text = format!("{}{value}{}", seg.prefix, seg.suffix);
+                Some((text.into(), seg.face.clone()))
+            })
+            .collect()
+    }
+
+    /// Write (or, on empty, clear) a named mode-line register.
+    fn set_mode_line_slot(&mut self, key: String, value: String) {
+        if value.is_empty() {
+            self.mode_line_slots.remove(&key);
+        } else {
+            self.mode_line_slots.insert(key, value.into());
+        }
     }
 
     // --- Overlays / text properties / folds (active buffer) ---------------
@@ -6657,12 +6803,21 @@ impl Editor {
             McAddAbove => self.mc_add_line(-1, cx),
             McMarkNext => self.mc_mark_next(cx),
             McClear => self.mc_clear(cx),
+            // Back-compat sugar over the generic slot mechanism.
             SetModelineProject(name) => {
-                self.project_indicator = if name.is_empty() {
-                    None
-                } else {
-                    Some(name.into())
-                };
+                self.set_mode_line_slot("project".into(), name);
+                cx.notify();
+            }
+            SetModelineGit(branch) => {
+                self.set_mode_line_slot("git".into(), branch);
+                cx.notify();
+            }
+            SetModeLineSlot(key, value) => {
+                self.set_mode_line_slot(key, value);
+                cx.notify();
+            }
+            SetModeLineFormat(tokens) => {
+                self.mode_line_format = parse_mode_line_format(tokens);
                 cx.notify();
             }
             Transient { title, columns } => self.open_transient(title, columns, cx),
@@ -8784,11 +8939,53 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Buffer, EditorCommand, WindowLayout, char_col_byte, file_completions, is_repeatable,
-        language_for_path, last_sexp, layout_leaves, layout_remove, layout_resize, layout_split,
-        line_span, node_at, prefix_arg_value, push_capped, scheme_symbol_token, set_ratio_at,
-        shift_line_map, symbol_at, top_level_form_at, translate_backrefs, union_bounds,
+        Buffer, EditorCommand, MlField, WindowLayout, char_col_byte, default_mode_line_format,
+        file_completions, is_repeatable, language_for_path, last_sexp, layout_leaves,
+        layout_remove, layout_resize, layout_split, line_span, node_at, parse_mode_line_format,
+        prefix_arg_value, push_capped, scheme_symbol_token, set_ratio_at, shift_line_map,
+        symbol_at, top_level_form_at, translate_backrefs, union_bounds,
     };
+
+    #[test]
+    fn mode_line_format_parses_literals_fields_slots_and_styling() {
+        // A bare string with no tab is an inert literal, default face.
+        let segs = parse_mode_line_format(vec!["  (".into()]);
+        assert_eq!(segs.len(), 1);
+        assert!(matches!(&segs[0].field, MlField::Literal(s) if s == "  ("));
+        assert!(segs[0].face.is_none());
+
+        // A tab-encoded field with face/prefix/suffix.
+        let segs = parse_mode_line_format(vec!["field\tlsp\tdim\t  lsp \t!".into()]);
+        assert!(matches!(segs[0].field, MlField::Lsp));
+        assert_eq!(segs[0].face.as_ref().map(|f| f.as_ref()), Some("dim"));
+        assert_eq!(segs[0].prefix, "  lsp ");
+        assert_eq!(segs[0].suffix, "!");
+
+        // Empty face stays None; a slot carries its key.
+        let segs = parse_mode_line_format(vec!["slot\tgit\t\t  git:\t".into()]);
+        assert!(matches!(&segs[0].field, MlField::Slot(k) if k == "git"));
+        assert!(segs[0].face.is_none());
+        assert_eq!(segs[0].prefix, "  git:");
+
+        // An unknown field name surfaces as a visible marker, not silence.
+        let segs = parse_mode_line_format(vec!["field\tbogus\t\t\t".into()]);
+        assert!(matches!(&segs[0].field, MlField::Literal(s) if s == "?bogus"));
+    }
+
+    #[test]
+    fn default_mode_line_format_is_the_known_layout() {
+        let segs = default_mode_line_format();
+        // Leads with the modified marker and ends with the diagnostics field.
+        assert!(matches!(segs.first().unwrap().field, MlField::Modified));
+        assert!(matches!(segs.last().unwrap().field, MlField::Diagnostics));
+        // The git slot is colored with the magit branch face.
+        let git = segs
+            .iter()
+            .find(|s| matches!(&s.field, MlField::Slot(k) if k == "git"))
+            .expect("git slot present");
+        assert_eq!(git.face.as_ref().map(|f| f.as_ref()), Some("magit-branch"));
+        assert_eq!(git.prefix, "  git:");
+    }
 
     #[test]
     fn char_col_byte_maps_columns_and_clamps() {

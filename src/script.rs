@@ -419,8 +419,15 @@ pub enum EditorCommand {
     McAddAbove,
     McMarkNext,
     McClear,
-    /// Set the mode-line project indicator (`None`/empty clears it).
+    /// Set the mode-line project register (back-compat sugar for slot "project").
     SetModelineProject(String),
+    /// Set the mode-line git register (back-compat sugar for slot "git").
+    SetModelineGit(String),
+    /// Write/clear a named mode-line register: `(key, value)`, empty value clears.
+    SetModeLineSlot(String, String),
+    /// Replace the mode-line format with tab-encoded segment tokens (see
+    /// `parse_mode_line_format`).
+    SetModeLineFormat(Vec<String>),
     // Transient popup (the magit / `transient.el` pattern).
     /// Open a transient popup: a title plus `(key, label, command)` rows.
     Transient {
@@ -1537,6 +1544,17 @@ fn gix_count_excl(repo: &gix::Repository, tip: gix::ObjectId, base: gix::ObjectI
         .unwrap_or(0)
 }
 
+/// The short name of the checked-out branch for the repo enclosing `dir`, e.g.
+/// "main". Empty when `dir` isn't in a git work tree or HEAD is detached (no
+/// branch). The native form of `git rev-parse --abbrev-ref HEAD`.
+fn gix_branch(dir: &str) -> String {
+    gix::discover(dir)
+        .ok()
+        .and_then(|repo| repo.head_name().ok().flatten())
+        .map(|n| n.shorten().to_string())
+        .unwrap_or_default()
+}
+
 /// The `## …` porcelain branch header: `## branch...upstream [ahead N, behind M]`,
 /// or the `No commits yet` / `HEAD (no branch)` forms magit-parse-branch-line knows.
 fn gix_status_branch_line(repo: &gix::Repository) -> String {
@@ -1888,6 +1906,9 @@ impl ScriptEngine {
                 "read-string-impl",
                 "append-to-buffer",
                 "set-modeline-project",
+                "set-modeline-git",
+                "set-mode-line-slot",
+                "set-mode-line-format",
                 "file-exists?",
                 "file-directory?",
                 "packages-directory",
@@ -1899,6 +1920,7 @@ impl ScriptEngine {
                 "walk-files",
                 "grep-files",
                 "gix-toplevel",
+                "gix-branch",
                 "gix-log",
                 "gix-blame",
                 "gix-branches",
@@ -3287,6 +3309,31 @@ fn build_engine(
         "set-modeline-project",
         EditorCommand::SetModelineProject,
     );
+    register_unary(
+        &mut engine,
+        queue,
+        "set-modeline-git",
+        EditorCommand::SetModelineGit,
+    );
+    // `(set-mode-line-slot key value)` → write/clear a named mode-line register
+    // (empty value clears). The general form behind project/git indicators.
+    register_binary(
+        &mut engine,
+        queue,
+        "set-mode-line-slot",
+        EditorCommand::SetModeLineSlot,
+    );
+    {
+        // `(set-mode-line-format segs)` — replace the mode-line layout. `segs` is
+        // a list of segment tokens (bare strings = literals, or `ml-field`/
+        // `ml-slot`/`ml-text` tab-encoded tokens). Defined from scheme/modeline.scm.
+        let q = queue.clone();
+        engine.register_fn("set-mode-line-format", move |segs: SteelVal| {
+            q.lock()
+                .unwrap()
+                .push(EditorCommand::SetModeLineFormat(steel_string_list(&segs)));
+        });
+    }
     // --- Overlays / text properties / folds -------------------------------
     register_ternary(
         &mut engine,
@@ -3509,6 +3556,9 @@ fn build_engine(
                 .and_then(|repo| repo.workdir().map(|p| p.to_string_lossy().into_owned()))
                 .unwrap_or_default()
         });
+        // `(gix-branch dir)` → short name of the checked-out branch ("main"), or
+        // "" outside a repo / with a detached HEAD. `git rev-parse --abbrev-ref HEAD`.
+        engine.register_fn("gix-branch", |dir: String| -> String { gix_branch(&dir) });
         // `(gix-log dir n)` → up to `n` recent HEAD commits, newest first, each
         // "shorthash\tauthor\tYYYY-MM-DD\tsummary".
         engine.register_fn("gix-log", |dir: String, max: usize| -> Vec<String> {
@@ -7585,6 +7635,18 @@ mod gix_e2e {
             v(r#"(equal? (gix-toplevel "/no/such/repo/xyz") "")"#),
             "#true",
             "non-repo path yields empty string"
+        );
+
+        // gix-branch returns the short checked-out branch; "" outside a repo.
+        assert_eq!(
+            v(&format!(r#"(equal? (gix-branch {d:?}) "main")"#)),
+            "#true",
+            "branch reports the checked-out branch name"
+        );
+        assert_eq!(
+            v(r#"(equal? (gix-branch "/no/such/repo/xyz") "")"#),
+            "#true",
+            "non-repo path yields empty branch"
         );
 
         // gix-log: two commits, newest first.

@@ -482,39 +482,18 @@ impl Workspace {
         let theme = cx.global::<Theme>();
         let foreground = theme.foreground();
         let editor = self.editor.read(cx);
-        // Emacs-style modified marker: `**` modified, `--` saved.
-        let marker = if editor.is_modified() { "**" } else { "--" };
-        let diagnostics = editor
-            .diagnostic_summary()
-            .map(|s| format!("  {s}"))
-            .unwrap_or_default();
-        // Projectile-style project indicator, e.g. "[macros]".
-        let project = editor
-            .project_indicator()
-            .map(|p| format!("  [{p}]"))
-            .unwrap_or_default();
-        // Active language servers, e.g. "lsp typescript rust". Empty when none
-        // are ready.
-        let lsp = {
-            let servers = editor.active_lsp_servers();
-            if servers.is_empty() {
-                String::new()
-            } else {
-                format!("  lsp {}", servers.join(" "))
-            }
-        };
-        let modes: SharedString = format!(
-            "{marker}  {}  ({}){project}{lsp}{diagnostics}",
-            editor.buffer_name(),
-            editor.modes.names().join(" ")
-        )
-        .into();
+        // The mode-line content is defined in Scheme (`scheme/modeline.scm`) as an
+        // ordered list of segments; the editor resolves it to `(text, face)` spans
+        // against live state. We paint each span as its own colored child so a
+        // segment can carry its own face (e.g. the git slot), falling back to the
+        // default mode-line foreground.
+        let segments = editor.mode_line_segments();
         let message = editor.status.clone();
-        // Mode line: fixed-height strip carrying buffer/mode/diagnostic
-        // summary. The echo message (e.g. the LSP diagnostic at point) lives
-        // on its own wrapping row below, Emacs-style, so it no longer fights
-        // the mode line for space or bleeds off the window's right edge.
-        let mode_line = div()
+        // Mode line: fixed-height strip carrying buffer/mode/diagnostic summary.
+        // The echo message (e.g. the LSP diagnostic at point) lives on its own
+        // wrapping row below, Emacs-style, so it no longer fights the mode line
+        // for space or bleeds off the window's right edge.
+        let mut mode_line = div()
             .h(px(24.))
             .w_full()
             .px_2()
@@ -523,8 +502,14 @@ impl Workspace {
             .items_center()
             .bg(colors.mode_line_bg)
             .text_color(colors.mode_line_fg)
-            .text_size(px(13.))
-            .child(modes);
+            .text_size(px(13.));
+        for (text, face) in segments {
+            let color = face
+                .as_ref()
+                .map(|f| theme.color(f, colors.mode_line_fg))
+                .unwrap_or(colors.mode_line_fg);
+            mode_line = mode_line.child(div().text_color(color).child(text));
+        }
         // The echo row is always present so the layout never shifts when a
         // pending-chord hint (or any status message) appears and clears. A live
         // status message wins; otherwise we fall back to the evil mode name

@@ -2,7 +2,7 @@
 ;; resolver (`project-root`, walk-up-to-marker) lives in core.scm (Emacs's
 ;; project.el concept); this file adds the interactive surface — find-file,
 ;; switch-project, grep — plus a mode-line indicator, built on Helm,
-;; call-process, and set-modeline-project.
+;; call-process, and set-mode-line-slot.
 
 (set-face "projectile-modeline" "#66d9ef")
 
@@ -31,7 +31,7 @@
 ;; Open another known project: pick its root, set it current, find a file there.
 (define (projectile-switch-to root)
   (set! *projectile-current* root)
-  (set-modeline-project (basename root))
+  (set-mode-line-slot "project" (basename root))
   (projectile-recent-add root)
   (projectile-find-file-in root))
 
@@ -158,10 +158,12 @@
     (when root (projectile-recent-add root))))
 
 ;; --- mode-line indicator ----------------------------------------------------
-;; Recompute the project on every file visit (find-file-hook) and show its name.
+;; Recompute the project on every file visit (find-file-hook) and show its name,
+;; plus the git branch ("git:main") when the file is inside a git work tree.
 (define (projectile-update-modeline)
   (let ((root (project-root (buffer-directory))))
-    (set-modeline-project (if root (basename root) ""))))
+    (set-mode-line-slot "project" (if root (basename root) ""))
+    (set-mode-line-slot "git" (gix-branch (buffer-directory)))))
 
 (add-hook "find-file-hook" "projectile-update-modeline")
 (add-hook "find-file-hook" "projectile-track")
