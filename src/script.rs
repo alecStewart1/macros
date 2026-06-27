@@ -936,11 +936,7 @@ fn gix_ref_names(dir: &str, kind: &str) -> Result<Vec<String>, Box<dyn std::erro
 /// `(gix-remotes dir)` backend: configured remote names (`origin`…), sorted.
 fn gix_remotes(dir: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let repo = gix::discover(dir)?;
-    Ok(repo
-        .remote_names()
-        .iter()
-        .map(|n| n.to_string())
-        .collect())
+    Ok(repo.remote_names().iter().map(|n| n.to_string()).collect())
 }
 
 /// `(gix-state dir)` backend: `"merge"` while a merge is in progress (MERGE_HEAD
@@ -1008,7 +1004,10 @@ fn diff_lines(data: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut rest = data;
     while !rest.is_empty() {
-        let n = rest.iter().position(|&b| b == b'\n').map_or(rest.len(), |i| i + 1);
+        let n = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(rest.len(), |i| i + 1);
         let (line, r) = rest.split_at(n);
         out.push(line);
         rest = r;
@@ -1061,7 +1060,11 @@ fn diff_hunks(old: &[u8], new: &[u8]) -> Option<String> {
         // Merge hunks whose gap is within 2*context into one displayed hunk.
         let mut j = i;
         while j + 1 < hunks.len()
-            && hunks[j + 1].before.start.saturating_sub(hunks[j].before.end) <= 2 * ctx
+            && hunks[j + 1]
+                .before
+                .start
+                .saturating_sub(hunks[j].before.end)
+                <= 2 * ctx
         {
             j += 1;
         }
@@ -1156,10 +1159,14 @@ fn diff_one_file(path: &str, old: Option<(&[u8], &str)>, new: Option<(&[u8], &st
     let mut out = format!("diff --git a/{path} b/{path}\n");
     match (old, new) {
         (None, Some((_, mode))) => {
-            out.push_str(&format!("new file mode {mode}\n--- /dev/null\n+++ b/{path}\n"));
+            out.push_str(&format!(
+                "new file mode {mode}\n--- /dev/null\n+++ b/{path}\n"
+            ));
         }
         (Some((_, mode)), None) => {
-            out.push_str(&format!("deleted file mode {mode}\n--- a/{path}\n+++ /dev/null\n"));
+            out.push_str(&format!(
+                "deleted file mode {mode}\n--- a/{path}\n+++ /dev/null\n"
+            ));
         }
         _ => out.push_str(&format!("--- a/{path}\n+++ b/{path}\n")),
     }
@@ -1194,8 +1201,9 @@ fn diff_side_maps(
     old: &std::collections::BTreeMap<Vec<u8>, GixSide>,
     new: &std::collections::BTreeMap<Vec<u8>, GixSide>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let blob =
-        |id: gix::ObjectId| -> Result<Vec<u8>, Box<dyn std::error::Error>> { Ok(repo.find_object(id)?.data.clone()) };
+    let blob = |id: gix::ObjectId| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(repo.find_object(id)?.data.clone())
+    };
     let mut keys: Vec<&Vec<u8>> = old.keys().chain(new.keys()).collect();
     keys.sort();
     keys.dedup();
@@ -1288,7 +1296,10 @@ fn gix_show(dir: &str, rev: &str) -> Result<String, Box<dyn std::error::Error>> 
 
     let mut out = format!("commit {}\n", id.to_hex());
     if parents.len() > 1 {
-        let shorts: Vec<String> = parents.iter().map(|p| p.to_hex_with_len(7).to_string()).collect();
+        let shorts: Vec<String> = parents
+            .iter()
+            .map(|p| p.to_hex_with_len(7).to_string())
+            .collect();
         out.push_str(&format!("Merge: {}\n", shorts.join(" ")));
     }
     let author = commit.author()?;
@@ -1296,8 +1307,11 @@ fn gix_show(dir: &str, rev: &str) -> Result<String, Box<dyn std::error::Error>> 
     let t = author.time()?;
     let date = chrono::DateTime::from_timestamp(t.seconds, 0)
         .and_then(|dt| {
-            chrono::FixedOffset::east_opt(t.offset)
-                .map(|off| dt.with_timezone(&off).format("%a %b %e %H:%M:%S %Y %z").to_string())
+            chrono::FixedOffset::east_opt(t.offset).map(|off| {
+                dt.with_timezone(&off)
+                    .format("%a %b %e %H:%M:%S %Y %z")
+                    .to_string()
+            })
         })
         .unwrap_or_default();
     out.push_str(&format!("Date:   {date}\n\n"));
@@ -1321,8 +1335,11 @@ fn gix_show(dir: &str, rev: &str) -> Result<String, Box<dyn std::error::Error>> 
 /// `oid → ["HEAD -> main", "tag: v1", "origin/main"]` for `git log --decorate`.
 /// Tags get a `tag:` prefix; the checked-out branch gets `HEAD ->`. Built from
 /// the ref-name prefix so no Category import is needed.
-fn ref_decorations(repo: &gix::Repository) -> std::collections::HashMap<gix::ObjectId, Vec<String>> {
-    let mut map: std::collections::HashMap<gix::ObjectId, Vec<String>> = std::collections::HashMap::new();
+fn ref_decorations(
+    repo: &gix::Repository,
+) -> std::collections::HashMap<gix::ObjectId, Vec<String>> {
+    let mut map: std::collections::HashMap<gix::ObjectId, Vec<String>> =
+        std::collections::HashMap::new();
     let head_branch = repo
         .head_name()
         .ok()
@@ -1359,7 +1376,11 @@ fn ref_decorations(repo: &gix::Repository) -> std::collections::HashMap<gix::Obj
 /// `(gix-log-decorated dir all? n)`: up to `n` commits newest-first, each
 /// `"<short> [(<decorations>)] <summary>"` — `git log --oneline --decorate
 /// [--all]`. magit keeps git for the `--graph` variant.
-fn gix_log_decorated(dir: &str, all: bool, max: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn gix_log_decorated(
+    dir: &str,
+    all: bool,
+    max: usize,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     use gix::revision::walk::Sorting;
     use gix::traverse::commit::simple::CommitTimeOrder;
     let repo = gix::discover(dir)?;
@@ -1397,7 +1418,12 @@ fn gix_log_decorated(dir: &str, all: bool, max: usize) -> Result<Vec<String>, Bo
 /// `(gix-log-range dir tip hidden n)`: up to `n` commits reachable from `tip`
 /// but not `hidden`, newest-first, as `"<short> <summary>"` — `git log
 /// --oneline hidden..tip`, used for the unpushed/unpulled sections.
-fn gix_log_range(dir: &str, tip: &str, hidden: &str, max: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn gix_log_range(
+    dir: &str,
+    tip: &str,
+    hidden: &str,
+    max: usize,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     use gix::bstr::BStr;
     use gix::revision::walk::Sorting;
     use gix::traverse::commit::simple::CommitTimeOrder;
@@ -1423,7 +1449,11 @@ fn gix_log_range(dir: &str, tip: &str, hidden: &str, max: usize) -> Result<Vec<S
 /// relative to the repo root), newest-first, decorated — `git log --oneline
 /// --decorate -n N -- <file>`. A commit "changed" the file when its blob differs
 /// from the first parent's (including add/remove).
-fn gix_log_file(dir: &str, file: &str, max: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn gix_log_file(
+    dir: &str,
+    file: &str,
+    max: usize,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     use gix::revision::walk::Sorting;
     use gix::traverse::commit::simple::CommitTimeOrder;
     let repo = gix::discover(dir)?;
@@ -1553,7 +1583,9 @@ fn gix_status_branch_line(repo: &gix::Repository) -> String {
 
 /// `XY`-classified change rows for `gix-status`: `(path, X, Y)`, sorted by path.
 /// X = index-vs-HEAD (staged), Y = worktree-vs-index (unstaged), `??` = untracked.
-fn gix_status_entries(repo: &gix::Repository) -> Result<Vec<(String, char, char)>, Box<dyn std::error::Error>> {
+fn gix_status_entries(
+    repo: &gix::Repository,
+) -> Result<Vec<(String, char, char)>, Box<dyn std::error::Error>> {
     use std::collections::{BTreeMap, HashSet};
     let index = repo.open_index()?;
     let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
@@ -3493,9 +3525,7 @@ fn build_engine(
             gix_remotes(&dir).unwrap_or_default()
         });
         // `(gix-state dir)` → "merge" / "rebase" / "" (in-progress operation).
-        engine.register_fn("gix-state", |dir: String| -> String {
-            gix_state(&dir)
-        });
+        engine.register_fn("gix-state", |dir: String| -> String { gix_state(&dir) });
         // `(gix-head-subject dir)` / `(gix-head-message dir)` → HEAD commit %s / %B.
         engine.register_fn("gix-head-subject", |dir: String| -> String {
             gix_head_message(&dir, false)
@@ -3504,9 +3534,12 @@ fn build_engine(
             gix_head_message(&dir, true)
         });
         // `(gix-log-oneline dir n)` → up to n "<shorthash> <summary>" lines.
-        engine.register_fn("gix-log-oneline", |dir: String, max: usize| -> Vec<String> {
-            gix_log_oneline(&dir, max).unwrap_or_default()
-        });
+        engine.register_fn(
+            "gix-log-oneline",
+            |dir: String, max: usize| -> Vec<String> {
+                gix_log_oneline(&dir, max).unwrap_or_default()
+            },
+        );
         // `(gix-diff dir)` / `(gix-diff-cached dir)` → `git diff` / `git diff
         // --cached`-format text (unstaged: index↔worktree; staged: HEAD↔index).
         engine.register_fn("gix-diff", |dir: String| -> String {
@@ -7494,12 +7527,16 @@ mod gix_e2e {
         // gix-log: two commits, newest first.
         assert_eq!(v(&format!("(length (gix-log {d:?} 10))")), "2");
         assert_eq!(
-            v(&format!(r#"(string-contains? (list-ref (gix-log {d:?} 10) 0) "second")"#)),
+            v(&format!(
+                r#"(string-contains? (list-ref (gix-log {d:?} 10) 0) "second")"#
+            )),
             "#true",
             "newest commit first"
         );
         assert_eq!(
-            v(&format!(r#"(string-contains? (list-ref (gix-log {d:?} 10) 1) "init")"#)),
+            v(&format!(
+                r#"(string-contains? (list-ref (gix-log {d:?} 10) 1) "init")"#
+            )),
             "#true",
             "oldest commit last"
         );
@@ -7512,7 +7549,9 @@ mod gix_e2e {
         assert_eq!(v(&format!("(gix-head-message {d:?})")), "\"second\\n\"");
         assert_eq!(v(&format!("(length (gix-log-oneline {d:?} 10))")), "2");
         assert_eq!(
-            v(&format!(r#"(string-contains? (list-ref (gix-log-oneline {d:?} 10) 0) "second")"#)),
+            v(&format!(
+                r#"(string-contains? (list-ref (gix-log-oneline {d:?} 10) 0) "second")"#
+            )),
             "#true",
             "oneline newest first"
         );
@@ -7526,7 +7565,9 @@ mod gix_e2e {
             "#true"
         );
         assert_eq!(
-            v(&format!(r#"(string-contains? (list-ref {blame} 0) "init")"#)),
+            v(&format!(
+                r#"(string-contains? (list-ref {blame} 0) "init")"#
+            )),
             "#true",
             "line 1 came from the init commit"
         );
@@ -7536,19 +7577,25 @@ mod gix_e2e {
             "#true"
         );
         assert_eq!(
-            v(&format!(r#"(string-contains? (list-ref {blame} 1) "second")"#)),
+            v(&format!(
+                r#"(string-contains? (list-ref {blame} 1) "second")"#
+            )),
             "#true",
             "line 2 was rewritten by the second commit"
         );
         assert_eq!(
-            v(&format!(r#"(string-contains? (list-ref {blame} 2) "second")"#)),
+            v(&format!(
+                r#"(string-contains? (list-ref {blame} 2) "second")"#
+            )),
             "#true",
             "line 3 was added by the second commit"
         );
         // Rich row shape: LINE \t SHA \t AUTHOR \t EPOCH \t SUMMARY (5 fields),
         // with a numeric author-time epoch in field 3.
         assert_eq!(
-            v(&format!(r#"(length (split-many (list-ref {blame} 0) "\t"))"#)),
+            v(&format!(
+                r#"(length (split-many (list-ref {blame} 0) "\t"))"#
+            )),
             "5"
         );
         assert_eq!(
@@ -7582,7 +7629,11 @@ mod gix_e2e {
             "#false",
             "feature branch listed"
         );
-        assert_ne!(v(&format!(r#"(member "v1" (gix-tags {d:?}))"#)), "#false", "tag listed");
+        assert_ne!(
+            v(&format!(r#"(member "v1" (gix-tags {d:?}))"#)),
+            "#false",
+            "tag listed"
+        );
         assert_ne!(
             v(&format!(r#"(member "origin" (gix-remotes {d:?}))"#)),
             "#false",
@@ -7656,13 +7707,15 @@ mod magit_quiet_refresh {
             .unwrap()
             .commands;
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*magit*")),
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*magit*")
+            ),
             "interactive refresh uses render-buffer"
         );
         // ...and pins the cursor's screen row so the view doesn't jump.
         assert!(
-            cmds.iter().any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),
             "interactive refresh restores the on-screen row"
         );
 
@@ -7673,17 +7726,22 @@ mod magit_quiet_refresh {
             .unwrap()
             .commands;
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, EditorCommand::RenderBufferQuiet { name, .. } if name == "*magit*")),
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::RenderBufferQuiet { name, .. } if name == "*magit*")
+            ),
             "background refresh uses render-buffer-quiet"
         );
         assert!(
-            !cmds.iter().any(|c| matches!(c, EditorCommand::OverlayFace { .. })),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, EditorCommand::OverlayFace { .. })),
             "quiet refresh must not push overlays onto the active buffer"
         );
         // The background path doesn't touch scroll (the active buffer is the file).
         assert!(
-            !cmds.iter().any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),
             "background refresh must not scroll the active (file) buffer"
         );
 
@@ -7701,7 +7759,8 @@ mod magit_quiet_refresh {
         // cursor's screen row back, so expanding a section doesn't shift the view.
         let cmds = engine.eval("(magit-toggle-fold)").unwrap().commands;
         assert!(
-            cmds.iter().any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),
             "fold toggle restores the on-screen row"
         );
 
@@ -7743,7 +7802,11 @@ mod gix_stash {
 
         let list = gix_stash_list(d).unwrap();
         assert_eq!(list.len(), 2);
-        assert!(list[0].starts_with("stash@{0}:"), "newest first: {}", list[0]);
+        assert!(
+            list[0].starts_with("stash@{0}:"),
+            "newest first: {}",
+            list[0]
+        );
         assert!(list[0].contains("second"), "stash@0 is the latest push");
         assert!(list[1].starts_with("stash@{1}:") && list[1].contains("first"));
 
@@ -7968,7 +8031,10 @@ mod gix_show_view {
         assert!(show.starts_with("commit "), "starts with commit <sha>");
         assert!(show.contains("Author: Tester <t@t>"));
         assert!(show.contains("    second commit"), "indented subject");
-        assert!(show.contains("diff --git a/f.txt b/f.txt"), "modification diff");
+        assert!(
+            show.contains("diff --git a/f.txt b/f.txt"),
+            "modification diff"
+        );
         assert!(show.contains("-b\n+B\n"), "the b→B change");
         assert!(show.contains("new file mode"), "n.txt addition vs parent");
 
@@ -8009,7 +8075,10 @@ mod gix_diff_apply {
         };
         let runq = |args: &[&str]| {
             let o = git(args);
-            (o.status.success(), String::from_utf8_lossy(&o.stdout).into_owned())
+            (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+            )
         };
         git(&["init", "-q"]);
         git(&["config", "user.email", "t@t"]);
@@ -8024,7 +8093,11 @@ mod gix_diff_apply {
 
         // Working-tree edits: two far-apart hunks in f, delete g, change h (still
         // no trailing newline → exercises the `\ No newline` marker on both sides).
-        std::fs::write(dir.join("f.txt"), "l1\nCHANGED2\nl3\nl4\nl5\nl6\nCHANGED7\nl8\n").unwrap();
+        std::fs::write(
+            dir.join("f.txt"),
+            "l1\nCHANGED2\nl3\nl4\nl5\nl6\nCHANGED7\nl8\n",
+        )
+        .unwrap();
         std::fs::remove_file(dir.join("g.txt")).unwrap();
         std::fs::write(dir.join("h.txt"), b"changed-no-newline").unwrap(); // no \n
 
@@ -8044,7 +8117,11 @@ mod gix_diff_apply {
 
         // Everything moved to the index: nothing left unstaged, all three staged.
         let (_, unstaged) = runq(&["diff", "--name-only"]);
-        assert_eq!(unstaged.trim(), "", "no unstaged changes remain after apply");
+        assert_eq!(
+            unstaged.trim(),
+            "",
+            "no unstaged changes remain after apply"
+        );
         let (_, staged) = runq(&["diff", "--cached", "--name-only"]);
         for f in ["f.txt", "g.txt", "h.txt"] {
             assert!(staged.contains(f), "{f} is staged after apply");
@@ -8062,7 +8139,12 @@ mod gix_diff_apply {
         std::fs::create_dir_all(&dir).unwrap();
         let d = dir.to_str().unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git").arg("-C").arg(d).args(args).output().unwrap()
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(args)
+                .output()
+                .unwrap()
         };
         git(&["init", "-q"]);
         git(&["config", "user.email", "t@t"]);
@@ -8096,7 +8178,10 @@ mod gix_diff_apply {
             staged.contains("Binary files /dev/null and b/new.bin differ"),
             "binary addition → marker, got:\n{staged}"
         );
-        assert!(!staged.contains('\u{0}'), "no tree-object bytes leaked into staged diff");
+        assert!(
+            !staged.contains('\u{0}'),
+            "no tree-object bytes leaked into staged diff"
+        );
         // The directory delete shows its two files individually, never a `pkg` tree.
         assert!(staged.contains("a/pkg/a.txt") && staged.contains("a/pkg/b.txt"));
         assert!(
@@ -8104,7 +8189,11 @@ mod gix_diff_apply {
             "no bare-directory diff entry"
         );
         // The diff stays parseable: exactly one `diff --git` per changed file.
-        assert_eq!(unstaged.matches("diff --git").count(), 1, "one file in unstaged");
+        assert_eq!(
+            unstaged.matches("diff --git").count(),
+            1,
+            "one file in unstaged"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

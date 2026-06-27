@@ -3503,8 +3503,11 @@ impl Editor {
                 self.fs_watched_recursive.insert(path.clone());
             }
         }
-        let stale_rec: Vec<PathBuf> =
-            self.fs_watched_recursive.difference(&want_rec).cloned().collect();
+        let stale_rec: Vec<PathBuf> = self
+            .fs_watched_recursive
+            .difference(&want_rec)
+            .cloned()
+            .collect();
         for path in stale_rec {
             let _ = debouncer.watcher().unwatch(&path);
             self.fs_watched_recursive.remove(&path);
@@ -6430,7 +6433,12 @@ impl Editor {
                 } else {
                     self.fs_watch_tree_owners.insert(owner, dirs);
                 }
-                self.fs_watch_trees = self.fs_watch_tree_owners.values().flatten().cloned().collect();
+                self.fs_watch_trees = self
+                    .fs_watch_tree_owners
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect();
                 self.reconcile_watches(cx);
             }
             LspDefinition => self.lsp_goto("textDocument/definition", "definition", cx),
