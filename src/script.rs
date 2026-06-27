@@ -7697,6 +7697,14 @@ mod magit_quiet_refresh {
             "magit-render watches the repo root recursively"
         );
 
+        // Toggling a fold re-applies overlays (which churns scroll) but pins the
+        // cursor's screen row back, so expanding a section doesn't shift the view.
+        let cmds = engine.eval("(magit-toggle-fold)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),
+            "fold toggle restores the on-screen row"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
