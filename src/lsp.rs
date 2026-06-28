@@ -1051,10 +1051,10 @@ pub struct SteelLsp {
     docs: HashMap<String, String>,
     /// A compile-only engine: used to type-check source, never to run it.
     engine: Engine,
-    /// name → (source file, 1-based line) for every bundled define, so
-    /// go-to-definition can resolve editor-API symbols. Empty for the plain
-    /// `scheme` server (which seeds no editor API).
-    defs: HashMap<String, (String, usize)>,
+    /// name → (doc, source file, 1-based line) for every bundled define, so
+    /// go-to-definition and hover can resolve editor-API symbols. Empty for the
+    /// plain `scheme` server (which seeds no editor API).
+    defs: HashMap<String, (String, String, usize)>,
 }
 
 /// Outcome of a sandboxed diagnostic compile.
@@ -1093,10 +1093,11 @@ impl SteelLsp {
             for name in crate::runtime::defined_names() {
                 engine.register_value(&name, SteelVal::Void);
             }
-            // …and their source locations, so go-to-definition can jump to the
-            // bundled implementation of an editor command referenced by name.
+            // …and their docs + source locations, so go-to-definition can jump to
+            // the bundled implementation of an editor command referenced by name,
+            // and hover can show its doc-comment.
             for d in crate::runtime::builtin_docs() {
-                defs.insert(d.name, (d.file, d.line));
+                defs.insert(d.name, (d.doc, d.file, d.line));
             }
         }
         let server = Self {
@@ -1108,10 +1109,15 @@ impl SteelLsp {
         };
         // textDocumentSync = 1 (full): the editor resends the whole document on
         // every change, which is free in-process and keeps this server simple.
+        // `prepareProvider` makes the editor validate a rename target first, so we
+        // can decline (in `prepare_rename`) anything not defined in this document.
         let _ = server.tx.unbounded_send(json!({
             "jsonrpc": "2.0",
             "id": 0,
-            "result": { "capabilities": { "textDocumentSync": 1 } }
+            "result": { "capabilities": {
+                "textDocumentSync": 1,
+                "renameProvider": { "prepareProvider": true }
+            } }
         }));
         (server, rx)
     }
@@ -1267,6 +1273,12 @@ impl SteelLsp {
             | "textDocument/typeDefinition"
             | "textDocument/implementation" => Some(self.definition(&uri, line, character)),
             "textDocument/references" => Some(self.references(&uri, line, character)),
+            "textDocument/hover" => Some(self.hover(&uri, line, character)),
+            "textDocument/prepareRename" => Some(self.prepare_rename(&uri, line, character)),
+            "textDocument/rename" => {
+                let new_name = params["newName"].as_str().unwrap_or_default().to_string();
+                Some(self.rename(&uri, line, character, &new_name))
+            }
             _ => None,
         }
     }
@@ -1298,13 +1310,45 @@ impl SteelLsp {
         }
         // 2) The bundled library — only when its source is present on disk (a
         // checkout); an installed binary has no on-disk sources, so we decline.
-        if let Some((file, ln)) = self.defs.get(sym)
+        if let Some((_, file, ln)) = self.defs.get(sym)
             && Path::new(file).exists()
         {
             let uri = path_to_uri(Path::new(file));
             return Some(location_json(&uri, ln.saturating_sub(1), 0, sym));
         }
         None
+    }
+
+    /// Hover: the doc-comment for the symbol at point — the open document's own
+    /// `;;` comment block if it defines the symbol, else the bundled editor-API
+    /// doc. Replies with `null` when there's nothing documented.
+    fn hover(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let text = self.docs.get(uri).cloned().unwrap_or_default();
+        let result = symbol_at(&text, line, character)
+            .and_then(|sym| self.doc_for(&text, &sym))
+            .map(|doc| json!({ "contents": { "kind": "plaintext", "value": doc } }))
+            .unwrap_or(Value::Null);
+        let _ = self
+            .tx
+            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        id
+    }
+
+    fn doc_for(&self, text: &str, sym: &str) -> Option<String> {
+        // The open document's own definition wins (so a config documents itself),
+        // scraped by the same rules as the bundled library.
+        let in_file = crate::runtime::scrape_docs(text, "")
+            .into_iter()
+            .find(|e| e.name == sym && !e.doc.is_empty())
+            .map(|e| e.doc);
+        in_file.or_else(|| {
+            self.defs
+                .get(sym)
+                .map(|(doc, _, _)| doc.clone())
+                .filter(|d| !d.is_empty())
+        })
     }
 
     /// References to the symbol at point, within the open document: every word-
@@ -1327,12 +1371,80 @@ impl SteelLsp {
             .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": locs }));
         id
     }
+
+    /// prepareRename: allow renaming only a symbol **defined in this document**
+    /// (so a config renames its own commands, never a bundled or external one we
+    /// can't fully update). Replies with the token's range, or `null` to decline.
+    fn prepare_rename(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let text = self.docs.get(uri).cloned().unwrap_or_default();
+        let result = symbol_at_span(&text, line, character)
+            .filter(|(sym, _, _)| defined_in_doc(&text, sym))
+            .map(|(_, s, e)| {
+                json!({
+                    "start": { "line": line, "character": s },
+                    "end": { "line": line, "character": e }
+                })
+            })
+            .unwrap_or(Value::Null);
+        let _ = self
+            .tx
+            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        id
+    }
+
+    /// rename: a `WorkspaceEdit` replacing every word-boundary occurrence (quoted
+    /// references included) of the symbol within this document. Scoped to the open
+    /// document and only for symbols it defines — `prepare_rename` already gated
+    /// that, and this re-checks so a direct rename can't escape the guard.
+    fn rename(&mut self, uri: &str, line: usize, character: usize, new_name: &str) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let text = self.docs.get(uri).cloned().unwrap_or_default();
+        let mut edits: Vec<Value> = Vec::new();
+        if let Some(sym) = symbol_at(&text, line, character)
+            && defined_in_doc(&text, &sym)
+        {
+            let len: usize = sym.chars().map(char::len_utf16).sum();
+            for (li, l) in text.lines().enumerate() {
+                for (_, c) in word_occurrences(l, &sym) {
+                    edits.push(json!({
+                        "range": {
+                            "start": { "line": li, "character": c },
+                            "end": { "line": li, "character": c + len }
+                        },
+                        "newText": new_name
+                    }));
+                }
+            }
+        }
+        let mut changes = serde_json::Map::new();
+        changes.insert(uri.to_string(), Value::Array(edits));
+        let _ = self.tx.unbounded_send(
+            json!({ "jsonrpc": "2.0", "id": id, "result": { "changes": changes } }),
+        );
+        id
+    }
+}
+
+/// Whether any top-level line of `text` defines `sym` (`define` / `define-syntax`
+/// / `define-command`). Gates rename to a document's own symbols.
+fn defined_in_doc(text: &str, sym: &str) -> bool {
+    text.lines()
+        .any(|l| crate::runtime::define_name(l).as_deref() == Some(sym))
 }
 
 /// The identifier covering `(line, character)` (UTF-16 column), or `None`.
 /// Extends over identifier chars in both directions; a leading `'` is a boundary,
 /// so a `'name` reference yields `name`.
 fn symbol_at(text: &str, line: usize, character: usize) -> Option<String> {
+    symbol_at_span(text, line, character).map(|(name, _, _)| name)
+}
+
+/// Like [`symbol_at`] but also returns the token's `(start, end)` UTF-16 columns
+/// on its line — used to report a rename range.
+fn symbol_at_span(text: &str, line: usize, character: usize) -> Option<(String, usize, usize)> {
     let chars: Vec<char> = text.lines().nth(line)?.chars().collect();
     // UTF-16 column → char index.
     let mut utf16 = 0usize;
@@ -1352,7 +1464,13 @@ fn symbol_at(text: &str, line: usize, character: usize) -> Option<String> {
     while end < chars.len() && is_ident_char(chars[end]) {
         end += 1;
     }
-    (start < end).then(|| chars[start..end].iter().collect())
+    if start >= end {
+        return None;
+    }
+    let name: String = chars[start..end].iter().collect();
+    let start16: usize = chars[..start].iter().map(|c| c.len_utf16()).sum();
+    let span16: usize = chars[start..end].iter().map(|c| c.len_utf16()).sum();
+    Some((name, start16, start16 + span16))
 }
 
 /// `(0, utf16-col)` of every word-boundary occurrence of `sym` in a single line.
@@ -1841,6 +1959,76 @@ mod tests {
             "quoted ref counts as a reference: {lines:?}"
         );
         assert!(lines.contains(&2), "call site missing: {lines:?}");
+    }
+
+    #[test]
+    fn builtin_hover_shows_doc_comment() {
+        let (mut server, mut rx) = SteelLsp::start(true, &[]);
+        let _ = futures::executor::block_on(rx.next()).unwrap(); // initialize
+
+        let uri = "file:///cfg.scm";
+        // A documented command, referenced (quoted) from a keybinding.
+        let text = ";; Greet the user.\n(define (greet) 1)\n(bind-key \"m\" \"c\" 'greet)";
+        server.did_open(uri, text);
+        let _ = futures::executor::block_on(rx.next()).unwrap(); // diagnostics
+
+        // Hover on the quoted reference shows the symbol's doc-comment.
+        let col = text.lines().nth(2).unwrap().find("greet").unwrap();
+        let params = json!({"textDocument":{"uri":uri},"position":{"line":2,"character":col}});
+        let id = server.request("textDocument/hover", &params).unwrap();
+        let resp = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(resp["id"], json!(id));
+        assert_eq!(
+            resp["result"]["contents"]["value"],
+            json!("Greet the user.")
+        );
+    }
+
+    #[test]
+    fn builtin_rename_scopes_to_document_defines() {
+        let (mut server, mut rx) = SteelLsp::start(true, &[]);
+        let _ = futures::executor::block_on(rx.next()).unwrap(); // initialize
+
+        let uri = "file:///cfg.scm";
+        let text = "(define (greet) 1)\n(bind-key \"m\" \"c\" 'greet)\n(greet)";
+        server.did_open(uri, text);
+        let _ = futures::executor::block_on(rx.next()).unwrap(); // diagnostics
+
+        let col = text.lines().nth(1).unwrap().find("greet").unwrap();
+        let mut pos = json!({"textDocument":{"uri":uri},"position":{"line":1,"character":col}});
+
+        // prepareRename accepts a symbol defined in this document.
+        let id = server.request("textDocument/prepareRename", &pos).unwrap();
+        let resp = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(resp["id"], json!(id));
+        assert!(
+            !resp["result"].is_null(),
+            "own symbol is renameable: {resp}"
+        );
+
+        // rename rewrites every occurrence — define, quoted reference, and call.
+        pos["newName"] = json!("welcome");
+        let id = server.request("textDocument/rename", &pos).unwrap();
+        let resp = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(resp["id"], json!(id));
+        let edits = resp["result"]["changes"][uri].as_array().unwrap();
+        assert_eq!(edits.len(), 3, "define + quoted + call: {edits:?}");
+        assert!(edits.iter().all(|e| e["newText"] == json!("welcome")));
+
+        // A symbol NOT defined here (a bundled command) is declined — we'd only
+        // half-rename it.
+        let text2 = "(bind-key \"m\" \"c\" 'magit-status)";
+        server.did_change(uri, text2);
+        let _ = futures::executor::block_on(rx.next()).unwrap(); // diagnostics
+        let col = text2.find("magit-status").unwrap();
+        let pos2 = json!({"textDocument":{"uri":uri},"position":{"line":0,"character":col}});
+        let id = server.request("textDocument/prepareRename", &pos2).unwrap();
+        let resp = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(resp["id"], json!(id));
+        assert!(
+            resp["result"].is_null(),
+            "a symbol defined elsewhere isn't renameable here: {resp}"
+        );
     }
 
     #[test]

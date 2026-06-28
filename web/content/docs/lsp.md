@@ -101,9 +101,11 @@ Declaring a language is idempotent — re-declaring it (e.g. to flip `'inlay-hin
 
 ## The built-in Scheme server
 
-The in-process Scheme server needs no binary and runs automatically for `.scm` files. Editor config and extension code (anything under `~/.config/macros`, or a `*.macros.scm` file) get the `macros-scheme` variant, which additionally seeds the whole editor API. It provides **completion**, **"unknown function" diagnostics**, **go-to-definition** (<kbd>M-.</kbd>), and **find-references** (<kbd>M-?</kbd>).
+The in-process Scheme server needs no binary and runs automatically for `.scm` files. Editor config and extension code (anything under `~/.config/macros`, or a `*.macros.scm` file) get the `macros-scheme` variant, which additionally seeds the whole editor API. It provides **completion**, **"unknown function" diagnostics**, **go-to-definition** (<kbd>M-.</kbd>), **find-references** (<kbd>M-?</kbd>), **hover** (<kbd>C-c C-l h</kbd>), and **rename** (<kbd>C-c C-l n</kbd>).
 
-Because command/keybinding references are `'symbols` rather than strings, the server sees them as real identifiers: <kbd>M-.</kbd> on `'magit-status` in a keybinding jumps to its `(define …)` (in your config or the bundled source), and <kbd>M-?</kbd> lists its uses — quoted references included. The leading quote is a word boundary, so the bare name is what completes and navigates. (Hover and rename aren't implemented for the built-in server; config buffers get docs at point via <kbd>C-c C-d</kbd> / <kbd>C-c C-f</kbd> — see [Scripting](/docs/scripting).)
+Because command/keybinding references are `'symbols` rather than strings, the server sees them as real identifiers: <kbd>M-.</kbd> on `'magit-status` in a keybinding jumps to its `(define …)` (in your config or the bundled source), <kbd>M-?</kbd> lists its uses — quoted references included — and hover shows its docs. The leading quote is a word boundary, so the bare name is what resolves.
+
+Rename is **scoped to the current document and to symbols it defines** — renaming a command you wrote in `init.scm` updates its definition, keybindings, and calls there (quoted references included). A symbol defined elsewhere (a bundled command, another file) is declined ("Cannot rename this symbol"), since the built-in server can't safely update across files. (In config buffers, <kbd>C-c C-d</kbd> / <kbd>C-c C-f</kbd> also give doc-at-point via the Scheme-side `macros-eldoc` / `macros-describe-point` — see [Scripting](/docs/scripting).)
 
 ## Navigation & refactoring commands
 
