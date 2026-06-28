@@ -329,7 +329,7 @@
   (if (null? *dired-sidebar-marks*)
       (message "No files marked (mark with d)")
       (y-or-n-p (string-append "Delete " (int->string (length *dired-sidebar-marks*)) " marked file(s)?")
-                "dired-sidebar-delete-confirmed")))
+                'dired-sidebar-delete-confirmed)))
 (define (dired-sidebar-delete-confirmed ans)
   (when (equal? ans "yes")
     (for-each (lambda (p) (call-process "rm" (list "-rf" (dired-subtree-strip-slash p))))
@@ -365,7 +365,7 @@
 
 (define (dired-sidebar-mkdir)
   (set! *dired-sidebar-target-dir* (dired-sidebar-context-dir))
-  (read-string "Create directory: " "dired-sidebar-mkdir-finish"))
+  (read-string "Create directory: " 'dired-sidebar-mkdir-finish))
 (define (dired-sidebar-mkdir-finish name)
   (when (not (equal? (trim-end name) ""))
     (call-process "mkdir" (list "-p" (path-join *dired-sidebar-target-dir* name)))
@@ -375,21 +375,21 @@
 ;; Single keys resolve against this mode keymap under both Emacs and evil: as a
 ;; special buffer, dired-sidebar-mode's only evil overlay is j/k (evil-collection),
 ;; so d/u/x/g/q/R/C/+ fall through here just like dired-mode.
-(define-key "dired-sidebar-mode" "enter" "dired-sidebar-visit")
-(define-key "dired-sidebar-mode" "tab" "dired-sidebar-visit")
+(define-key "dired-sidebar-mode" "enter" 'dired-sidebar-visit)
+(define-key "dired-sidebar-mode" "tab" 'dired-sidebar-visit)
 ;; Left click acts like RET: expand/collapse a dir, or open a file at point.
-(define-key "dired-sidebar-mode" "mouse-1" "dired-sidebar-visit")
-(define-key "dired-sidebar-mode" "n" "next-line")
-(define-key "dired-sidebar-mode" "p" "previous-line")
-(define-key "dired-sidebar-mode" "g" "dired-sidebar-refresh")
-(define-key "dired-sidebar-mode" "d" "dired-sidebar-mark")
-(define-key "dired-sidebar-mode" "u" "dired-sidebar-unmark")
-(define-key "dired-sidebar-mode" "x" "dired-sidebar-do-delete")
-(define-key "dired-sidebar-mode" "shift-r" "dired-sidebar-rename")
-(define-key "dired-sidebar-mode" "shift-c" "dired-sidebar-copy")
-(define-key "dired-sidebar-mode" "+" "dired-sidebar-mkdir")
+(define-key "dired-sidebar-mode" "mouse-1" 'dired-sidebar-visit)
+(define-key "dired-sidebar-mode" "n" 'next-line)
+(define-key "dired-sidebar-mode" "p" 'previous-line)
+(define-key "dired-sidebar-mode" "g" 'dired-sidebar-refresh)
+(define-key "dired-sidebar-mode" "d" 'dired-sidebar-mark)
+(define-key "dired-sidebar-mode" "u" 'dired-sidebar-unmark)
+(define-key "dired-sidebar-mode" "x" 'dired-sidebar-do-delete)
+(define-key "dired-sidebar-mode" "shift-r" 'dired-sidebar-rename)
+(define-key "dired-sidebar-mode" "shift-c" 'dired-sidebar-copy)
+(define-key "dired-sidebar-mode" "+" 'dired-sidebar-mkdir)
 ;; q closes the sidebar outright — kills the tree buffer AND collapses its pane.
-(define-key "dired-sidebar-mode" "q" "dired-sidebar-quit")
+(define-key "dired-sidebar-mode" "q" 'dired-sidebar-quit)
 
 ;; The tree is a listing, not code — no line-number gutter (on by default for
 ;; every other major mode); highlight the current row; truncate long names at the
@@ -398,5 +398,5 @@
 (set-option "hl-line:dired-sidebar-mode" "true")
 (set-option "word-wrap:dired-sidebar-mode" "false")
 
-(define-key "fundamental" "ctrl-c t" "dired-sidebar")
-(register-command "dired-sidebar")
+(define-key "fundamental" "ctrl-c t" 'dired-sidebar)
+(register-command 'dired-sidebar)

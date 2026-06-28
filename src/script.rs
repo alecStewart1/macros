@@ -2588,7 +2588,11 @@ fn build_engine(
         let shadow = bindings.clone();
         engine.register_fn(
             "define-key",
-            move |mode: String, chord: String, command: String| {
+            move |mode: String, chord: String, command: SteelVal| {
+                // The command may be a "name" string OR a 'name symbol (the
+                // canonical config form). Both resolve to the same name; it's
+                // looked up and run by name at keypress time.
+                let command = steel_string(&command).unwrap_or_default();
                 {
                     let mut s = shadow.lock().unwrap();
                     // Last definition for a (mode, chord) wins (matches the keymap).
@@ -2930,7 +2934,9 @@ fn build_engine(
         // (lsp-request method kind params callback) — the generic bridge.
         engine.register_fn(
             "lsp-request",
-            move |method: String, kind: String, params: String, callback: String| {
+            move |method: String, kind: String, params: String, callback: SteelVal| {
+                // `callback` may be a "name" string or a 'name symbol.
+                let callback = steel_string(&callback).unwrap_or_default();
                 q.lock().unwrap().push(EditorCommand::LspRequest {
                     method,
                     kind,
@@ -3203,9 +3209,19 @@ fn build_engine(
         "scroll-cursor-to-row",
         EditorCommand::ScrollCursorToRow,
     );
-    register_ternary(&mut engine, queue, "diff-buffers", |a, b, callback| {
-        EditorCommand::DiffBuffers { a, b, callback }
-    });
+    {
+        // `callback` may be a "name" string or a 'name symbol.
+        let q = queue.clone();
+        engine.register_fn(
+            "diff-buffers",
+            move |a: String, b: String, callback: SteelVal| {
+                let callback = steel_string(&callback).unwrap_or_default();
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::DiffBuffers { a, b, callback });
+            },
+        );
+    }
     register_unary(&mut engine, queue, "buffer-clear-highlights", |name| {
         EditorCommand::BufferClearHighlights { name }
     });
@@ -3318,18 +3334,32 @@ fn build_engine(
         "lsp-semantic-tokens-delta",
         EditorCommand::LspSemanticTokensDelta,
     );
-    register_binary(
-        &mut engine,
-        queue,
-        "tree-sitter-query",
-        |query, callback| EditorCommand::TreeSitterQuery { query, callback },
-    );
-    register_binary(
-        &mut engine,
-        queue,
-        "tree-sitter-node-at",
-        |byte, callback| EditorCommand::TreeSitterNodeAt { byte, callback },
-    );
+    {
+        // `callback` may be a "name" string or a 'name symbol.
+        let q = queue.clone();
+        engine.register_fn(
+            "tree-sitter-query",
+            move |query: String, callback: SteelVal| {
+                let callback = steel_string(&callback).unwrap_or_default();
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::TreeSitterQuery { query, callback });
+            },
+        );
+    }
+    {
+        // `callback` may be a "name" string or a 'name symbol.
+        let q = queue.clone();
+        engine.register_fn(
+            "tree-sitter-node-at",
+            move |byte: usize, callback: SteelVal| {
+                let callback = steel_string(&callback).unwrap_or_default();
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::TreeSitterNodeAt { byte, callback });
+            },
+        );
+    }
     register_nullary(
         &mut engine,
         queue,
@@ -3353,7 +3383,9 @@ fn build_engine(
         let q = queue.clone();
         engine.register_fn(
             "completing-read-impl",
-            move |prompt: String, candidates: SteelVal, callback: String, initial: String| {
+            move |prompt: String, candidates: SteelVal, callback: SteelVal, initial: String| {
+                // `callback` may be a "name" string or a 'name symbol.
+                let callback = steel_string(&callback).unwrap_or_default();
                 let (candidates, dynamic) = match steel_string(&candidates) {
                     Some(func) => (Vec::new(), Some(func)),
                     None => (steel_string_list(&candidates), None),
@@ -3368,12 +3400,29 @@ fn build_engine(
             },
         );
     }
-    register_binary(&mut engine, queue, "read-file-name", |prompt, callback| {
-        EditorCommand::ReadFileName { prompt, callback }
-    });
-    register_binary(&mut engine, queue, "y-or-n-p", |prompt, callback| {
-        EditorCommand::YesOrNo { prompt, callback }
-    });
+    {
+        // `callback` may be a "name" string or a 'name symbol.
+        let q = queue.clone();
+        engine.register_fn(
+            "read-file-name",
+            move |prompt: String, callback: SteelVal| {
+                let callback = steel_string(&callback).unwrap_or_default();
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::ReadFileName { prompt, callback });
+            },
+        );
+    }
+    {
+        // `callback` may be a "name" string or a 'name symbol.
+        let q = queue.clone();
+        engine.register_fn("y-or-n-p", move |prompt: String, callback: SteelVal| {
+            let callback = steel_string(&callback).unwrap_or_default();
+            q.lock()
+                .unwrap()
+                .push(EditorCommand::YesOrNo { prompt, callback });
+        });
+    }
     {
         // Value of buffer-local `key` on the active buffer, or "".
         let shared = point.clone();
@@ -3392,7 +3441,9 @@ fn build_engine(
         let q = queue.clone();
         engine.register_fn(
             "read-string-impl",
-            move |prompt: String, callback: String, initial: String| {
+            move |prompt: String, callback: SteelVal, initial: String| {
+                // `callback` may be a "name" string or a 'name symbol.
+                let callback = steel_string(&callback).unwrap_or_default();
                 q.lock().unwrap().push(EditorCommand::ReadString {
                     prompt,
                     initial,
@@ -3824,9 +3875,16 @@ fn build_engine(
         let ids = async_ids.clone();
         engine.register_fn(
             "make-process",
-            move |program: String, args: SteelVal, on_output: String, on_exit: String| -> usize {
+            move |program: String,
+                  args: SteelVal,
+                  on_output: SteelVal,
+                  on_exit: SteelVal|
+                  -> usize {
                 let id = ids.next();
                 let args = steel_string_list(&args);
+                // Callbacks may be "name" strings or 'name symbols.
+                let on_output = steel_string(&on_output).unwrap_or_default();
+                let on_exit = steel_string(&on_exit).unwrap_or_default();
                 let on_exit = if on_exit.is_empty() {
                     None
                 } else {
@@ -4588,6 +4646,57 @@ mod tests {
             engine.eval("*probe*").unwrap().value.as_deref(),
             Some("42"),
             "calling the generated stub should run the lambda"
+        );
+    }
+
+    /// `register-command` / `define-command` accept the canonical 'symbol form
+    /// (strings still work), and `define-key` binds a 'symbol command by name.
+    #[test]
+    fn command_registration_accepts_symbols() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../scheme/core.scm"))
+            .expect("core.scm");
+
+        // register-command with a 'symbol stores the bare name string.
+        engine.eval("(register-command 'foo-cmd)").unwrap();
+        assert_eq!(
+            engine
+                .eval(r#"(if (member "foo-cmd" *interactive-commands*) 1 0)"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("1"),
+            "register-command should accept a 'symbol"
+        );
+
+        // define-command defines the function AND registers its name.
+        let ran = engine
+            .eval("(begin (define-command (bar-cmd) 99) (bar-cmd))")
+            .unwrap();
+        assert_eq!(ran.value.as_deref(), Some("99"), "define-command body runs");
+        assert_eq!(
+            engine
+                .eval(r#"(if (member "bar-cmd" *interactive-commands*) 1 0)"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("1"),
+            "define-command should register the name"
+        );
+
+        // define-key resolves a 'symbol command to its bare name.
+        let bound = engine
+            .eval(r#"(define-key "fundamental" "ctrl-x z" 'my-cmd)"#)
+            .unwrap();
+        assert!(
+            matches!(
+                bound.commands.as_slice(),
+                [EditorCommand::DefineKey(m, c, cmd)]
+                    if m == "fundamental" && c == "ctrl-x z" && cmd == "my-cmd"
+            ),
+            "define-key should bind a 'symbol by name: {:?}",
+            bound.commands
         );
     }
 

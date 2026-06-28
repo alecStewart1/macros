@@ -1,16 +1,16 @@
 ;; Helm — a generic selection framework (the behaviour is in Rust; sources,
 ;; actions, and applications are written in Scheme). These keys are active only
 ;; during a Helm session; arrows / RET / C-g are handled as well.
-(define-key "helm" "ctrl-n" "helm-next")
-(define-key "helm" "ctrl-p" "helm-previous")
+(define-key "helm" "ctrl-n" 'helm-next)
+(define-key "helm" "ctrl-p" 'helm-previous)
 ;; C-SPC marks the candidate for multi-select; RET then acts on every marked one.
-(define-key "helm" "ctrl-space" "helm-mark")
+(define-key "helm" "ctrl-space" 'helm-mark)
 ;; TAB completes/descends (handled in Rust); M-a opens the action menu for
 ;; sources that offer more than one action.
-(define-key "helm" "alt-a" "helm-actions")
+(define-key "helm" "alt-a" 'helm-actions)
 
 ;; Make M-x go through Helm (built-in source over all commands).
-(define-key "fundamental" "alt-x" "helm-M-x")
+(define-key "fundamental" "alt-x" 'helm-M-x)
 
 ;; Candidate annotations (marginalia): a candidate may be a bare string, or a
 ;; `(candidate annotation)` pair. The annotation renders dimmed and right-aligned
@@ -27,8 +27,8 @@
   (if (starts-with? b "*") (list b "special") b))
 (define (helm-buffers)
   (helm (list (list "Buffers" (map helm-buffer-candidate (buffer-names))
-                    (list (list "Switch to buffer" "switch-to-buffer")
-                          (list "Kill buffer"      "kill-buffer-named"))))))
+                    (list (list "Switch to buffer" 'switch-to-buffer)
+                          (list "Kill buffer"      'kill-buffer-named))))))
 
 ;; Familiar aliases (Emacs names) for the same picker.
 (define (helm-buffers-list) (helm-buffers))
@@ -36,7 +36,7 @@
 (define (list-buffers)      (helm-buffers))
 
 ;; Make C-x b the Helm buffer picker (overrides the minibuffer switch-buffer).
-(define-key "fundamental" "ctrl-x b" "helm-buffers")
+(define-key "fundamental" "ctrl-x b" 'helm-buffers)
 
 ;; Expand a typed path the way Emacs' minibuffer does, so you can jump elsewhere
 ;; without first deleting the pre-filled prefix. A "~" or "//" SHADOWS everything
@@ -73,11 +73,11 @@
 (define (helm-find-files)
   (helm-from (string-append (buffer-directory) "/")
              (list (list "Files" "find-file-candidates" "open-file"))))
-(define-key "fundamental" "ctrl-x ctrl-f" "helm-find-files")
+(define-key "fundamental" "ctrl-x ctrl-f" 'helm-find-files)
 
 ;; C-x f: open/create a file by an arbitrary path (minibuffer, TAB-completed).
 ;; C-c p f: recursive fuzzy finder over ALL project files (projectile).
-(define-key "fundamental" "ctrl-x f" "find-file")
+(define-key "fundamental" "ctrl-x f" 'find-file)
 
 ;; --- A fully Scheme-driven Helm: filtering in Scheme ------------------------
 ;; A normal dynamic source returns a POOL and Rust filters it by the pattern. A
@@ -89,7 +89,7 @@
 ;; like pickers entirely in Scheme. Demo — a recentf picker filtered in Scheme:
 (define (recentf-fuzzy pattern) (fuzzy-match pattern *recentf*))
 (define (helm-recentf-live)
-  (helm (list (list "Recent files" (list 'raw "recentf-fuzzy") "open-file"))))
+  (helm (list (list "Recent files" (list 'raw "recentf-fuzzy") 'open-file))))
 
 ;; A source can also offer MULTIPLE actions — a list of (label fn) pairs. RET
 ;; runs the first; TAB opens an action menu for the rest:
@@ -117,7 +117,7 @@
                        *recentf-max*)))))
 (add-hook "find-file-hook" "recentf-track")
 (define (helm-recentf)
-  (helm (list (list "Recent files" *recentf* "open-file"))))
+  (helm (list (list "Recent files" *recentf* 'open-file))))
 
 ;; --- helm-occur: live line search of the current buffer ---------------------
 ;; All lines become "N: text" candidates; Helm's fuzzy filter narrows them as
@@ -133,7 +133,7 @@
     (when (>= (string-match "^[0-9]" (car parts)) 0)
       (goto-line (string->number (car parts))))))
 (define (helm-occur)
-  (helm (list (list "Occur" (buffer-lines-numbered) "helm-occur-goto"))))
+  (helm (list (list "Occur" (buffer-lines-numbered) 'helm-occur-goto))))
 
 ;; --- helm-imenu: jump to a definition in the current buffer -----------------
 ;; A language-agnostic scan for common definition forms; reuses helm-occur-goto.
@@ -150,20 +150,20 @@
           (loop (cdr lines) (+ n 1)
                 (if nm (cons (string-append (int->string n) ": " nm) acc) acc))))))
 (define (helm-imenu)
-  (helm (list (list "Imenu" (imenu-candidates) "helm-occur-goto"))))
+  (helm (list (list "Imenu" (imenu-candidates) 'helm-occur-goto))))
 
 ;; Bindings: C-x C-r recentf, M-s o occur (Emacs occur prefix). imenu is
 ;; M-x-only so it doesn't clobber alt-i (completion-at-point).
-(define-key "fundamental" "ctrl-x ctrl-r" "helm-recentf")
-(define-key "fundamental" "alt-s o" "helm-occur")
+(define-key "fundamental" "ctrl-x ctrl-r" 'helm-recentf)
+(define-key "fundamental" "alt-s o" 'helm-occur)
 
 ;; M-x discoverability for the helm entry points.
-(register-command "helm-buffers")
-(register-command "helm-buffers-list")
-(register-command "helm-mini")
-(register-command "list-buffers")
-(register-command "helm-find-files")
-(register-command "helm-recentf")
-(register-command "helm-recentf-live")
-(register-command "helm-occur")
-(register-command "helm-imenu")
+(register-command 'helm-buffers)
+(register-command 'helm-buffers-list)
+(register-command 'helm-mini)
+(register-command 'list-buffers)
+(register-command 'helm-find-files)
+(register-command 'helm-recentf)
+(register-command 'helm-recentf-live)
+(register-command 'helm-occur)
+(register-command 'helm-imenu)

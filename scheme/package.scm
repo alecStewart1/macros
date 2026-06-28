@@ -180,7 +180,7 @@
     (message (if (null? names)
                  "package: none installed"
                  (string-append "packages: " (string-join (sort-strings names) ", "))))))
-(register-command "package-list")
+(register-command 'package-list)
 
 ;; M-x package-update — fast-forward every installed package to its upstream and
 ;; report. Packages pinned to a commit/tag ('ref) are re-pinned from init.scm on
@@ -194,4 +194,4 @@
          (message (string-append "package: " name " updated")))))
    (pkg--installed-dirs))
   (message "package-update: done"))
-(register-command "package-update")
+(register-command 'package-update)

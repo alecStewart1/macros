@@ -231,29 +231,29 @@
   (kill-buffer)
   (switch-to-buffer "*scratch*"))
 
-(define-key "welcome-mode" "enter"   "welcome-visit")
-(define-key "welcome-mode" "mouse-1" "welcome-visit")
-(define-key "welcome-mode" "n"       "next-line")
-(define-key "welcome-mode" "p"       "previous-line")
-(define-key "welcome-mode" "g"       "welcome-refresh")
-(define-key "welcome-mode" "q"       "welcome-dismiss")
+(define-key "welcome-mode" "enter"   'welcome-visit)
+(define-key "welcome-mode" "mouse-1" 'welcome-visit)
+(define-key "welcome-mode" "n"       'next-line)
+(define-key "welcome-mode" "p"       'previous-line)
+(define-key "welcome-mode" "g"       'welcome-refresh)
+(define-key "welcome-mode" "q"       'welcome-dismiss)
 
 ;; Under evil-mode, the collection layer (evil.scm) gives this read-only buffer
 ;; only j/k. Add horizontal motion so the cursor can reach a specific target on a
 ;; multi-target row — e.g. the [emacs] vs [evil/vim] labels on the tutorial line,
 ;; which RET then opens. Inert under plain Emacs (this keymap is consulted only
 ;; when evil is active); `g`/`G` are deliberately left to welcome-refresh / vim.
-(define-key "evil-normal:welcome-mode" "h" "backward-char")
-(define-key "evil-normal:welcome-mode" "l" "forward-char")
-(define-key "evil-normal:welcome-mode" "w" "forward-word-start")
-(define-key "evil-normal:welcome-mode" "b" "backward-word")
-(define-key "evil-normal:welcome-mode" "0" "move-beginning-of-line")
-(define-key "evil-normal:welcome-mode" "$" "move-end-of-line")
+(define-key "evil-normal:welcome-mode" "h" 'backward-char)
+(define-key "evil-normal:welcome-mode" "l" 'forward-char)
+(define-key "evil-normal:welcome-mode" "w" 'forward-word-start)
+(define-key "evil-normal:welcome-mode" "b" 'backward-word)
+(define-key "evil-normal:welcome-mode" "0" 'move-beginning-of-line)
+(define-key "evil-normal:welcome-mode" "$" 'move-end-of-line)
 
 ;; A splash, not code — no line-number gutter.
 (set-option "line-numbers:welcome-mode" "false")
 
-(register-command "welcome")
+(register-command 'welcome)
 
 ;; Show it on launch, replacing the initial *scratch* view. To disable, add
 ;; `(switch-to-buffer "*scratch*")` to your ~/.config/macros/init.scm (loaded

@@ -59,7 +59,7 @@ Its look is set with [per-mode options](/docs/configuration#per-mode-options) sc
 (set-option "hl-line:dired-sidebar-mode"      #t)       ; highlight the current row
 (set-option "word-wrap:dired-sidebar-mode"    #f)       ; truncate long names
 
-(define-key "fundamental" "ctrl-c t" "dired-sidebar")   ; rebind the toggle
+(define-key "fundamental" "ctrl-c t" 'dired-sidebar)   ; rebind the toggle
 ```
 
 ## Dired sidebar vs. Dired

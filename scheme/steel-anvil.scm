@@ -61,9 +61,9 @@
   (anvil-reset)
   (append-to-buffer anvil-repl-buffer ";; --- image restarted ---\n"))
 
-(define-key "anvil-repl-mode" "enter" "anvil-send-input")
-(define-key "anvil-repl-mode" "ctrl-c ctrl-c" "anvil-repl-interrupt")
-(define-key "anvil-repl-mode" "ctrl-c ctrl-k" "anvil-repl-reset")
+(define-key "anvil-repl-mode" "enter" 'anvil-send-input)
+(define-key "anvil-repl-mode" "ctrl-c ctrl-c" 'anvil-repl-interrupt)
+(define-key "anvil-repl-mode" "ctrl-c ctrl-k" 'anvil-repl-reset)
 
 ;; --- eldoc: live-image signatures in the echo area --------------------------
 ;; The image's one-line signature for the symbol at point. This is the REPL's
@@ -89,8 +89,8 @@
 
 ;; On-demand variants too: C-c C-s for the one-line signature, C-c C-d for the
 ;; full image docstring (popped to *anvil*).
-(define-key "anvil-repl-mode" "ctrl-c ctrl-s" "anvil-signature")
-(define-key "anvil-repl-mode" "ctrl-c ctrl-d" "anvil-doc")
+(define-key "anvil-repl-mode" "ctrl-c ctrl-s" 'anvil-signature)
+(define-key "anvil-repl-mode" "ctrl-c ctrl-d" 'anvil-doc)
 
 ;; --- evaluate from a Steel source buffer into the image ---------------------
 ;; Echo the result in the minibuffer without stealing focus to the REPL buffer.
@@ -124,35 +124,35 @@
 
 ;; apropos needs a pattern: prompt, then the Rust bridge queries the image.
 (define (anvil-apropos-prompt)
-  (read-string "Anvil apropos: " "anvil-apropos"))
+  (read-string "Anvil apropos: " 'anvil-apropos))
 
 ;; Available from both the plain Steel mode and the editor-aware macros-steel
 ;; mode. C-c C-z pops to the REPL; C-c C-n evals the region into the image.
-(define-key "steel" "ctrl-c ctrl-z" "anvil-repl")
-(define-key "steel" "ctrl-c ctrl-n" "anvil-eval-region")
-(define-key "macros-steel" "ctrl-c ctrl-z" "anvil-repl")
-(define-key "macros-steel" "ctrl-c ctrl-n" "anvil-eval-region")
+(define-key "steel" "ctrl-c ctrl-z" 'anvil-repl)
+(define-key "steel" "ctrl-c ctrl-n" 'anvil-eval-region)
+(define-key "macros-steel" "ctrl-c ctrl-z" 'anvil-repl)
+(define-key "macros-steel" "ctrl-c ctrl-n" 'anvil-eval-region)
 
 ;; SLIME-ish image commands (both Steel modes): C-M-x eval-defun,
 ;; C-c C-l load-file, C-c C-d doc, C-c C-x macroexpand, C-c C-a apropos.
 (define (anvil-bind-image mode)
-  (define-key mode "ctrl-alt-x" "anvil-eval-defun")
-  (define-key mode "ctrl-c ctrl-l" "anvil-load-file")
-  (define-key mode "ctrl-c ctrl-d" "anvil-doc")
-  (define-key mode "ctrl-c ctrl-x" "anvil-macroexpand")
-  (define-key mode "ctrl-c ctrl-a" "anvil-apropos-prompt")
-  (define-key mode "ctrl-c ctrl-s" "anvil-signature"))
+  (define-key mode "ctrl-alt-x" 'anvil-eval-defun)
+  (define-key mode "ctrl-c ctrl-l" 'anvil-load-file)
+  (define-key mode "ctrl-c ctrl-d" 'anvil-doc)
+  (define-key mode "ctrl-c ctrl-x" 'anvil-macroexpand)
+  (define-key mode "ctrl-c ctrl-a" 'anvil-apropos-prompt)
+  (define-key mode "ctrl-c ctrl-s" 'anvil-signature))
 (anvil-bind-image "steel")
 (anvil-bind-image "macros-steel")
 
-(register-command "anvil-repl")
-(register-command "anvil-eval-region")
-(register-command "anvil-eval-buffer")
-(register-command "anvil-repl-interrupt")
-(register-command "anvil-repl-reset")
-(register-command "anvil-eval-defun")
-(register-command "anvil-load-file")
-(register-command "anvil-doc")
-(register-command "anvil-signature")
-(register-command "anvil-macroexpand")
-(register-command "anvil-apropos-prompt")
+(register-command 'anvil-repl)
+(register-command 'anvil-eval-region)
+(register-command 'anvil-eval-buffer)
+(register-command 'anvil-repl-interrupt)
+(register-command 'anvil-repl-reset)
+(register-command 'anvil-eval-defun)
+(register-command 'anvil-load-file)
+(register-command 'anvil-doc)
+(register-command 'anvil-signature)
+(register-command 'anvil-macroexpand)
+(register-command 'anvil-apropos-prompt)

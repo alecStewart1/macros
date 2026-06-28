@@ -38,7 +38,7 @@
 (define (compile-resolve file)
   (if (starts-with? file "/") file (path-join *compile-dir* file)))
 
-(define (compile) (read-string "Compile command: " "compile-run" *compile-last*))
+(define (compile) (read-string "Compile command: " 'compile-run *compile-last*))
 
 ;; Show *compilation* in a half-height window across the bottom of the screen,
 ;; leaving the cursor in the buffer you ran `compile` from. If the window is
@@ -141,18 +141,18 @@
               (message (string-append "No such file: " path))))
         (message "No error on this line"))))
 
-(define-key "compile-mode" "enter" "compile-visit")
-(define-key "compile-mode" "g" "recompile")
-(define-key "compile-mode" "q" "kill-buffer")
-(define-key "compile-mode" "n" "next-line")
-(define-key "compile-mode" "p" "previous-line")
+(define-key "compile-mode" "enter" 'compile-visit)
+(define-key "compile-mode" "g" 'recompile)
+(define-key "compile-mode" "q" 'kill-buffer)
+(define-key "compile-mode" "n" 'next-line)
+(define-key "compile-mode" "p" 'previous-line)
 ;; grep-mode buffers (projectile-grep / occur-style) get the same RET jump.
-(define-key "grep-mode" "enter" "compile-visit")
+(define-key "grep-mode" "enter" 'compile-visit)
 
-(define-key "fundamental" "ctrl-c c" "compile")
-(register-command "compile")
-(register-command "recompile")
-(register-command "compile-first-error")
+(define-key "fundamental" "ctrl-c c" 'compile)
+(register-command 'compile)
+(register-command 'recompile)
+(register-command 'compile-first-error)
 
 ;; --- a basic interactive shell (*shell*) ------------------------------------
 ;; A normal (editable) buffer running /bin/sh on its stdin: type a command, RET
@@ -162,7 +162,7 @@
 (define (shell)
   (append-to-buffer "*shell*" "")          ; create/switch to a normal buffer
   (set-major-mode "shell-mode")            ; so RET is rebound below
-  (set! *shell-proc* (make-process "/bin/sh" (list) "shell-output" "shell-exit")))
+  (set! *shell-proc* (make-process "/bin/sh" (list) 'shell-output 'shell-exit)))
 (define (shell-output line) (append-to-buffer "*shell*" (string-append line "\n")))
 (define (shell-exit code) (append-to-buffer "*shell*" (string-append "[exited " code "]\n")))
 (define (shell-send-input)
@@ -170,6 +170,6 @@
     (insert "\n")
     (process-send-string *shell-proc* (string-append line "\n"))))
 
-(define-key "shell-mode" "enter" "shell-send-input")
-(define-key "fundamental" "ctrl-c s" "shell")
-(register-command "shell")
+(define-key "shell-mode" "enter" 'shell-send-input)
+(define-key "fundamental" "ctrl-c s" 'shell)
+(register-command 'shell)

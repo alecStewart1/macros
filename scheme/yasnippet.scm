@@ -54,9 +54,9 @@
 (yas-define-snippet "while" "while ${1:cond} {\n    $0\n}")
 (yas-define-snippet "let"   "let ${1:name} = ${2:value};$0")
 
-(define-key "fundamental" "ctrl-c y" "yas-expand")
-(define-key "fundamental" "ctrl-c ctrl-f" "snippet-next-field")
-(define-key "fundamental" "ctrl-c ctrl-b" "snippet-prev-field")
+(define-key "fundamental" "ctrl-c y" 'yas-expand)
+(define-key "fundamental" "ctrl-c ctrl-f" 'snippet-next-field)
+(define-key "fundamental" "ctrl-c ctrl-b" 'snippet-prev-field)
 
-(register-command "yas-expand")
-(register-command "yas-define-snippet")
+(register-command 'yas-expand)
+(register-command 'yas-define-snippet)

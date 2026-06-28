@@ -40,7 +40,7 @@
       (message "Capitalized region"))))
 
 ;; --- goto-line (M-g g) ------------------------------------------------------
-(define (goto-line-cmd) (read-string "Goto line: " "goto-line-finish"))
+(define (goto-line-cmd) (read-string "Goto line: " 'goto-line-finish))
 (define (goto-line-finish s)
   (let ((n (string->number (trim-end s))))
     (when n (goto-line (max 0 (- n 1))))))   ; user enters 1-based; goto-line is 0-based
@@ -56,7 +56,7 @@
             (replace-region e i " "))))))
 
 ;; --- zap-to-char (M-z): delete from point up to and including a character ----
-(define (zap-to-char) (read-string "Zap to char: " "zap-to-char-finish"))
+(define (zap-to-char) (read-string "Zap to char: " 'zap-to-char-finish))
 (define (zap-to-char-finish s)
   (when (> (string-length s) 0)
     (let ((idx (search-forward (substring s 0 1))))
@@ -73,16 +73,16 @@
                                        (buffer-substring prev-s prev-e)))))))
 
 ;; --- keymap + M-x registration ----------------------------------------------
-(define-key "fundamental" "alt-g g" "goto-line-cmd")
-(define-key "fundamental" "alt-^" "join-line")
-(define-key "fundamental" "alt-z" "zap-to-char")
-(define-key "fundamental" "ctrl-x ctrl-t" "transpose-lines")
+(define-key "fundamental" "alt-g g" 'goto-line-cmd)
+(define-key "fundamental" "alt-^" 'join-line)
+(define-key "fundamental" "alt-z" 'zap-to-char)
+(define-key "fundamental" "ctrl-x ctrl-t" 'transpose-lines)
 
-(register-command "sort-lines")
-(register-command "upcase-region")
-(register-command "downcase-region")
-(register-command "capitalize-region")
-(register-command "goto-line-cmd")
-(register-command "join-line")
-(register-command "zap-to-char")
-(register-command "transpose-lines")
+(register-command 'sort-lines)
+(register-command 'upcase-region)
+(register-command 'downcase-region)
+(register-command 'capitalize-region)
+(register-command 'goto-line-cmd)
+(register-command 'join-line)
+(register-command 'zap-to-char)
+(register-command 'transpose-lines)

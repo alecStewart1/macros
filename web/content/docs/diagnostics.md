@@ -40,7 +40,7 @@ Toggle the gutter dots, or rebind the navigation keys, from your `init.scm`:
 ```scheme
 (set-option "diagnostics-gutter" #t)               ; #f hides the gutter dots
 
-(define-key "fundamental" "ctrl-c e" "list-diagnostics")
-(define-key "fundamental" "alt-g n" "next-error")
-(define-key "fundamental" "alt-g p" "previous-error")
+(define-key "fundamental" "ctrl-c e" 'list-diagnostics)
+(define-key "fundamental" "alt-g n" 'next-error)
+(define-key "fundamental" "alt-g p" 'previous-error)
 ```

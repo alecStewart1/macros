@@ -152,8 +152,8 @@
 ;; Re-mark after a save: cheap, and picks up structural edits made since open.
 (add-hook "after-save-hook" "fold--setup")
 
-(define-key "fundamental" "ctrl-c ctrl-f" "fold-toggle-at-point")
-(register-command "fold-toggle-at-point")
-(register-command "fold-all")
-(register-command "fold-show-all")
-(register-command "fold-refresh")
+(define-key "fundamental" "ctrl-c ctrl-f" 'fold-toggle-at-point)
+(register-command 'fold-toggle-at-point)
+(register-command 'fold-all)
+(register-command 'fold-show-all)
+(register-command 'fold-refresh)

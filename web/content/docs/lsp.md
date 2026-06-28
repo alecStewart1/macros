@@ -99,6 +99,12 @@ The same block lives (commented) in the `DEFAULT LANGUAGE CONFIGURATION` section
 
 Declaring a language is idempotent — re-declaring it (e.g. to flip `'inlay-hints`) just replaces the previous definition, so you can refine a config by stating it again later in your `init.scm`.
 
+## The built-in Scheme server
+
+The in-process Scheme server needs no binary and runs automatically for `.scm` files. Editor config and extension code (anything under `~/.config/macros`, or a `*.macros.scm` file) get the `macros-scheme` variant, which additionally seeds the whole editor API. It provides **completion**, **"unknown function" diagnostics**, **go-to-definition** (<kbd>M-.</kbd>), and **find-references** (<kbd>M-?</kbd>).
+
+Because command/keybinding references are `'symbols` rather than strings, the server sees them as real identifiers: <kbd>M-.</kbd> on `'magit-status` in a keybinding jumps to its `(define …)` (in your config or the bundled source), and <kbd>M-?</kbd> lists its uses — quoted references included. The leading quote is a word boundary, so the bare name is what completes and navigates. (Hover and rename aren't implemented for the built-in server; config buffers get docs at point via <kbd>C-c C-d</kbd> / <kbd>C-c C-f</kbd> — see [Scripting](/docs/scripting).)
+
 ## Navigation & refactoring commands
 
 All are <kbd>M-x</kbd>-discoverable. The most common two have short bindings; the rest live under the <kbd>C-c C-l</kbd> prefix.

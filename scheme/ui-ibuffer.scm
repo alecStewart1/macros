@@ -27,9 +27,9 @@
     (ibuffer-rows)
     (lambda (id) (switch-to-buffer id)))
   (tabulated-setup-keys "ibuffer-mode")
-  (define-key "ibuffer-mode" "d" "ibuffer-kill")
-  (define-key "ibuffer-mode" "x" "ibuffer-kill")
-  (define-key "ibuffer-mode" "g" "ibuffer-refresh"))
+  (define-key "ibuffer-mode" "d" 'ibuffer-kill)
+  (define-key "ibuffer-mode" "x" 'ibuffer-kill)
+  (define-key "ibuffer-mode" "g" 'ibuffer-refresh))
 
 ;; d / x : kill the buffer on the current line, then refresh in place.
 (define (ibuffer-kill)
@@ -44,5 +44,5 @@
   (set! *ibuffer-killed* '())
   (ibuffer-refresh))
 
-(define-key "fundamental" "ctrl-x ctrl-b" "ibuffer")
-(register-command "ibuffer")
+(define-key "fundamental" "ctrl-x ctrl-b" 'ibuffer)
+(register-command 'ibuffer)

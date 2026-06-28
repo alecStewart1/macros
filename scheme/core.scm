@@ -80,11 +80,31 @@
   (set-line-image-impl line path (if (null? rest) 0 (car rest))))
 
 ;; Interactive-command registry: Scheme commands register here so M-x lists them
-;; alongside the built-in commands (see help.scm).
+;; alongside the built-in commands (see help.scm). `name` is the canonical
+;; 'symbol form, but a "string" still works (M-x runs it by name either way).
 (define *interactive-commands* '())
 (define (register-command name)
-  (when (not (member name *interactive-commands*))
-    (set! *interactive-commands* (cons name *interactive-commands*))))
+  (let ((name (if (symbol? name) (symbol->string name) name)))
+    (when (not (member name *interactive-commands*))
+      (set! *interactive-commands* (cons name *interactive-commands*)))))
+
+;; (define-command (name args …) body …) — define a command AND register it for
+;; M-x in one form, so the name isn't repeated as a separate string. Mirrors a
+;; plain `define`; M-x invokes the command with no arguments. The two-form
+;; variant `(define-command name value)` registers a value binding likewise.
+;;
+;;   (define-command (layout-demo) (render-layout …))   ; was: (define (layout-demo) …)
+;;                                                       ;       (register-command "layout-demo")
+(define-syntax define-command
+  (syntax-rules ()
+    ((_ (name . args) body ...)
+     (begin
+       (define (name . args) body ...)
+       (register-command 'name)))
+    ((_ name value)
+     (begin
+       (define name value)
+       (register-command 'name)))))
 
 ;; `load-theme` — load a built-in theme. With an argument (string or symbol) it
 ;; loads directly: (load-theme 'macros-dark). With no argument — e.g. M-x
@@ -93,9 +113,9 @@
 ;; read-string / completing-read *-impl wrapper pattern above.
 (define (load-theme . rest)
   (if (null? rest)
-      (completing-read "Load theme: " (theme-names) "load-theme")
+      (completing-read "Load theme: " (theme-names) 'load-theme)
       (load-theme-impl (car rest))))
-(register-command "load-theme")
+(register-command 'load-theme)
 ;; In-buffer completion of `(load-theme 'mac…)` is wired in completion.scm, which
 ;; owns the argument-aware CAPF machinery.
 

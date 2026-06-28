@@ -91,10 +91,10 @@ The status buffer's <kbd>B</kbd> is a separate view: it opens a full `git blame`
 
 ```scheme
 ;; Rebind the global entry point:
-(define-key "fundamental" "ctrl-x g" "magit-status")
+(define-key "fundamental" "ctrl-x g" 'magit-status)
 
 ;; Rebind keys inside the status buffer — e.g. make `C` open the commit popup:
-(define-key "magit-status" "shift-c" "magit-commit-popup")
+(define-key "magit-status" "shift-c" 'magit-commit-popup)
 ```
 
 ## How it's built

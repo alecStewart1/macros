@@ -37,11 +37,11 @@
                   (cons "" lines))))
       (list (list 0 "tabulated-header")))
     (set-option "line-numbers:which-key-mode" "false")
-    (define-key "which-key-mode" "q" "kill-buffer")))
+    (define-key "which-key-mode" "q" 'kill-buffer)))
 
 ;; M-x which-key : prompt for a prefix, then list its bindings.
 (define (which-key)
-  (read-string "which-key prefix: " "which-key-from-input" ""))
+  (read-string "which-key prefix: " 'which-key-from-input ""))
 (define (which-key-from-input prefix)
   (which-key-show *which-key-mode* prefix))
 
@@ -50,14 +50,14 @@
 (define (which-key-cc)  (which-key-show "fundamental" "ctrl-c"))
 (define (which-key-top) (which-key-show "fundamental" ""))
 
-(define-key "fundamental" "ctrl-x ?" "which-key-cx")
-(define-key "fundamental" "ctrl-c ?" "which-key-cc")
-(define-key "fundamental" "ctrl-h b" "which-key-top")   ; ~describe-bindings
+(define-key "fundamental" "ctrl-x ?" 'which-key-cx)
+(define-key "fundamental" "ctrl-c ?" 'which-key-cc)
+(define-key "fundamental" "ctrl-h b" 'which-key-top)   ; ~describe-bindings
 
-(register-command "which-key")
-(register-command "which-key-cx")
-(register-command "which-key-cc")
-(register-command "which-key-top")
+(register-command 'which-key)
+(register-command 'which-key-cx)
+(register-command 'which-key-cc)
+(register-command 'which-key-top)
 
 ;; WHICH-KEY-AUTO (future, needs Rust): when a prefix is pending and no full
 ;; binding resolves, start a short idle timer; on expiry call a Scheme hook with

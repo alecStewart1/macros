@@ -211,7 +211,7 @@
 (define *magit-confirm-thunk* #f)
 (define (magit-confirm prompt thunk)
   (set! *magit-confirm-thunk* thunk)
-  (y-or-n-p prompt "magit-confirm-yes"))
+  (y-or-n-p prompt 'magit-confirm-yes))
 (define (magit-confirm-yes ans)
   (let ((a *magit-confirm-thunk*))
     (set! *magit-confirm-thunk* #f)
@@ -231,7 +231,7 @@
   (make-process "/bin/sh"
                 (list "-c" (string-append "cd " *magit-dir* " && git "
                                           (string-join args " ") " 2>&1"))
-                "magit-async-output" "magit-async-exit"))
+                'magit-async-output 'magit-async-exit))
 (define (magit-async-output line)
   (set! *magit-async-out* (string-append *magit-async-out* line "\n")))
 (define (magit-async-exit code)
@@ -1254,13 +1254,13 @@
   (transient "Commit"
     (list
       (list "Switches"
-            (list "a" (magit-sw-label "Amend HEAD"        "commit:amend")    "magit-commit-toggle-amend")
-            (list "s" (magit-sw-label "Sign off (-s)"     "commit:signoff")  "magit-commit-toggle-signoff")
-            (list "n" (magit-sw-label "No verify (-n)"    "commit:noverify") "magit-commit-toggle-noverify"))
+            (list "a" (magit-sw-label "Amend HEAD"        "commit:amend")    'magit-commit-toggle-amend)
+            (list "s" (magit-sw-label "Sign off (-s)"     "commit:signoff")  'magit-commit-toggle-signoff)
+            (list "n" (magit-sw-label "No verify (-n)"    "commit:noverify") 'magit-commit-toggle-noverify))
       (list "Actions"
-            (list "c" "Commit"             "magit-do-commit")
-            (list "e" "Amend (no edit)"    "magit-do-amend")
-            (list "w" "Reword last commit" "magit-do-reword")))))
+            (list "c" "Commit"             'magit-do-commit)
+            (list "e" "Amend (no edit)"    'magit-do-amend)
+            (list "w" "Reword last commit" 'magit-do-reword)))))
 ;; The extra `git commit` flags currently toggled on.
 (define (magit-commit-flags)
   (magit-switch-args (list (cons "commit:signoff" "--signoff")
@@ -1322,42 +1322,42 @@
   (if (equal? (magit-strip-comments (buffer-string)) "")
       (magit-commit-cancel)
       (magit-commit-confirm)))
-(define-key "git-commit-mode" "ctrl-c ctrl-c" "magit-commit-confirm")
-(define-key "git-commit-mode" "ctrl-c ctrl-k" "magit-commit-cancel")
-(define-key "git-commit-mode" "ctrl-x k"      "magit-commit-finish")
+(define-key "git-commit-mode" "ctrl-c ctrl-c" 'magit-commit-confirm)
+(define-key "git-commit-mode" "ctrl-c ctrl-k" 'magit-commit-cancel)
+(define-key "git-commit-mode" "ctrl-x k"      'magit-commit-finish)
 
 ;; --- branch (b) -------------------------------------------------------------
 (define (magit-branch-popup)
   (transient "Branch"
-    (list (list "b" "Checkout"          "magit-checkout")
-          (list "r" "Checkout remote"   "magit-checkout-remote")
-          (list "c" "Create & checkout" "magit-branch-create")
-          (list "u" "Set upstream"      "magit-branch-set-upstream")
-          (list "m" "Rename current"    "magit-branch-rename")
-          (list "k" "Delete"            "magit-branch-delete"))))
+    (list (list "b" "Checkout"          'magit-checkout)
+          (list "r" "Checkout remote"   'magit-checkout-remote)
+          (list "c" "Create & checkout" 'magit-branch-create)
+          (list "u" "Set upstream"      'magit-branch-set-upstream)
+          (list "m" "Rename current"    'magit-branch-rename)
+          (list "k" "Delete"            'magit-branch-delete))))
 (define (magit-remote-branches) (gix-remote-branches *magit-dir*))
 ;; Check out a remote branch as a new local tracking branch ("origin/x" → "x").
 (define (magit-checkout-remote)
-  (helm (list (list "Checkout remote" (magit-remote-branches) "magit-do-checkout-remote"))))
+  (helm (list (list "Checkout remote" (magit-remote-branches) 'magit-do-checkout-remote))))
 (define (magit-do-checkout-remote rb)
   (let ((local (car (reverse (split-many rb "/")))))
     (magit-do (list "checkout" "-b" local "--track" rb) (string-append "Checked out " local))))
 (define (magit-branch-set-upstream)
-  (helm (list (list "Set upstream to" (magit-remote-branches) "magit-do-set-upstream"))))
+  (helm (list (list "Set upstream to" (magit-remote-branches) 'magit-do-set-upstream))))
 (define (magit-do-set-upstream u) (magit-do (list "branch" "--set-upstream-to" u) (string-append "Upstream → " u)))
 (define (magit-checkout)
-  (helm (list (list "Checkout" (magit-branches) "magit-do-checkout"))))
+  (helm (list (list "Checkout" (magit-branches) 'magit-do-checkout))))
 (define (magit-do-checkout b) (magit-do (list "checkout" b) (string-append "Checked out " b)))
-(define (magit-branch-create) (read-string "Create & checkout branch: " "magit-do-branch-create"))
+(define (magit-branch-create) (read-string "Create & checkout branch: " 'magit-do-branch-create))
 (define (magit-do-branch-create name)
   (when (not (equal? (trim-end name) ""))
     (magit-do (list "checkout" "-b" name) (string-append "Created " name))))
-(define (magit-branch-rename) (read-string "Rename current branch to: " "magit-do-branch-rename"))
+(define (magit-branch-rename) (read-string "Rename current branch to: " 'magit-do-branch-rename))
 (define (magit-do-branch-rename name)
   (when (not (equal? (trim-end name) ""))
     (magit-do (list "branch" "-m" name) (string-append "Renamed to " name))))
 (define (magit-branch-delete)
-  (helm (list (list "Delete branch" (magit-branches) "magit-do-branch-delete"))))
+  (helm (list (list "Delete branch" (magit-branches) 'magit-do-branch-delete))))
 (define (magit-do-branch-delete b) (magit-do (list "branch" "-d" b) (string-append "Deleted " b)))
 
 ;; --- push / pull / fetch (P / F / f) ----------------------------------------
@@ -1370,11 +1370,11 @@
   (transient "Push"
     (list
       (list "Switches"
-            (list "f" (magit-sw-label "Force with lease" "push:force")    "magit-push-toggle-force")
-            (list "n" (magit-sw-label "No verify"        "push:noverify") "magit-push-toggle-noverify"))
+            (list "f" (magit-sw-label "Force with lease" "push:force")    'magit-push-toggle-force)
+            (list "n" (magit-sw-label "No verify"        "push:noverify") 'magit-push-toggle-noverify))
       (list "Actions"
-            (list "p" "Push"                "magit-push")
-            (list "u" "Push & set upstream" "magit-push-upstream")))))
+            (list "p" "Push"                'magit-push)
+            (list "u" "Push & set upstream" 'magit-push-upstream)))))
 ;; The current branch's upstream from the porcelain header ("" when unset).
 (define (magit-current-upstream)
   (nth (car (magit-porcelain-full)) 1))
@@ -1396,9 +1396,9 @@
   (transient "Pull"
     (list
       (list "Switches"
-            (list "r" (magit-sw-label "Rebase (--rebase)" "pull:rebase") "magit-pull-toggle-rebase"))
+            (list "r" (magit-sw-label "Rebase (--rebase)" "pull:rebase") 'magit-pull-toggle-rebase))
       (list "Actions"
-            (list "p" "Pull" "magit-pull")))))
+            (list "p" "Pull" 'magit-pull)))))
 (define (magit-pull)
   (magit-run-async (append (list "pull")
                            (magit-switch-args (list (cons "pull:rebase" "--rebase")))) "Pulled")
@@ -1410,10 +1410,10 @@
   (transient "Fetch"
     (list
       (list "Switches"
-            (list "p" (magit-sw-label "Prune (--prune)" "fetch:prune") "magit-fetch-toggle-prune"))
+            (list "p" (magit-sw-label "Prune (--prune)" "fetch:prune") 'magit-fetch-toggle-prune))
       (list "Actions"
-            (list "a" "Fetch all"    "magit-fetch-all")
-            (list "o" "Fetch origin" "magit-fetch-origin")))))
+            (list "a" "Fetch all"    'magit-fetch-all)
+            (list "o" "Fetch origin" 'magit-fetch-origin)))))
 (define (magit-fetch-all)
   (magit-run-async (append (list "fetch" "--all") (magit-fetch-flags)) "Fetched all remotes")
   (magit-switch-clear! "fetch:"))
@@ -1424,19 +1424,19 @@
 ;; --- stash (z) --------------------------------------------------------------
 (define (magit-stash-popup)
   (transient "Stash"
-    (list (list "z" "Stash"            "magit-stash")
-          (list "m" "Stash w/ message" "magit-stash-push-msg")
-          (list "p" "Pop latest"       "magit-stash-pop")
-          (list "shift-p" "Pop a stash…" "magit-stash-pick")
-          (list "a" "Apply latest"     "magit-stash-apply")
-          (list "k" "Drop latest"      "magit-stash-drop")
-          (list "l" "List"             "magit-stash-list"))))
-(define (magit-stash-push-msg) (read-string "Stash message: " "magit-do-stash-msg"))
+    (list (list "z" "Stash"            'magit-stash)
+          (list "m" "Stash w/ message" 'magit-stash-push-msg)
+          (list "p" "Pop latest"       'magit-stash-pop)
+          (list "shift-p" "Pop a stash…" 'magit-stash-pick)
+          (list "a" "Apply latest"     'magit-stash-apply)
+          (list "k" "Drop latest"      'magit-stash-drop)
+          (list "l" "List"             'magit-stash-list))))
+(define (magit-stash-push-msg) (read-string "Stash message: " 'magit-do-stash-msg))
 (define (magit-do-stash-msg m)
   (when (not (equal? (trim-end m) "")) (magit-do (list "stash" "push" "-m" m) "Stashed")))
 (define (magit-stash-refs) (git-lines (list "stash" "list" "--format=%gd")))
 (define (magit-stash-pick)
-  (helm (list (list "Pop stash" (magit-stash-refs) "magit-do-stash-pop-ref"))))
+  (helm (list (list "Pop stash" (magit-stash-refs) 'magit-do-stash-pop-ref))))
 (define (magit-do-stash-pop-ref r) (magit-do (list "stash" "pop" r) (string-append "Popped " r)))
 (define (magit-stash)       (magit-do (list "stash" "push") "Stashed"))
 (define (magit-stash-pop)   (magit-do (list "stash" "pop") "Popped stash"))
@@ -1455,11 +1455,11 @@
       (transient "Log"
         (list
           (list "Switches"
-                (list "g" (magit-sw-label "Graph (--graph)" "log:graph") "magit-log-toggle-graph"))
+                (list "g" (magit-sw-label "Graph (--graph)" "log:graph") 'magit-log-toggle-graph))
           (list "Actions"
-                (list "l" "Current branch" "magit-log-current")
-                (list "a" "All branches"   "magit-log-all")
-                (list "f" "File at point"  "magit-log-file"))))))
+                (list "l" "Current branch" 'magit-log-current)
+                (list "a" "All branches"   'magit-log-all)
+                (list "f" "File at point"  'magit-log-file))))))
 (define (magit-log-flags) (magit-switch-args (list (cons "log:graph" "--graph"))))
 ;; gix renders the oneline+decorate log (no subprocess); the `--graph` toggle
 ;; falls back to git, whose ASCII commit-graph art gix can't reproduce.
@@ -1523,9 +1523,9 @@
 ;; --- reset (X) --------------------------------------------------------------
 (define (magit-reset-popup)
   (transient "Reset"
-    (list (list "m" "Mixed — unstage, keep changes"   "magit-reset-mixed")
-          (list "s" "Soft — undo last commit, keep"   "magit-reset-soft")
-          (list "h" "Hard — DISCARD working changes"  "magit-reset-hard"))))
+    (list (list "m" "Mixed — unstage, keep changes"   'magit-reset-mixed)
+          (list "s" "Soft — undo last commit, keep"   'magit-reset-soft)
+          (list "h" "Hard — DISCARD working changes"  'magit-reset-hard))))
 (define (magit-reset-mixed) (magit-do (list "reset" "--mixed" "HEAD") "Reset (mixed)"))
 (define (magit-reset-soft)  (magit-do (list "reset" "--soft" "HEAD~1") "Undid last commit (soft)"))
 (define (magit-reset-hard)
@@ -1536,40 +1536,40 @@
 (define *magit-remote-name* "")
 (define (magit-remote-popup)
   (transient "Remote"
-    (list (list "a" "Add"    "magit-remote-add")
-          (list "k" "Remove" "magit-remote-remove"))))
-(define (magit-remote-add) (read-string "Remote name: " "magit-remote-add-name"))
+    (list (list "a" "Add"    'magit-remote-add)
+          (list "k" "Remove" 'magit-remote-remove))))
+(define (magit-remote-add) (read-string "Remote name: " 'magit-remote-add-name))
 (define (magit-remote-add-name name)
   (set! *magit-remote-name* name)
-  (read-string "Remote URL: " "magit-remote-add-url"))
+  (read-string "Remote URL: " 'magit-remote-add-url))
 (define (magit-remote-add-url url)
   (magit-do (list "remote" "add" *magit-remote-name* url) "Remote added"))
 (define (magit-remote-remove)
-  (helm (list (list "Remove remote" (magit-remotes) "magit-do-remote-remove"))))
+  (helm (list (list "Remove remote" (magit-remotes) 'magit-do-remote-remove))))
 (define (magit-do-remote-remove r) (magit-do (list "remote" "remove" r) "Remote removed"))
 
 ;; --- tag (t) ----------------------------------------------------------------
 (define (magit-tag-popup)
   (transient "Tag"
-    (list (list "t" "Create" "magit-tag-create")
-          (list "k" "Delete" "magit-tag-delete"))))
-(define (magit-tag-create) (read-string "Tag name: " "magit-do-tag-create"))
+    (list (list "t" "Create" 'magit-tag-create)
+          (list "k" "Delete" 'magit-tag-delete))))
+(define (magit-tag-create) (read-string "Tag name: " 'magit-do-tag-create))
 (define (magit-do-tag-create name)
   (when (not (equal? (trim-end name) ""))
     (magit-do (list "tag" name) (string-append "Tagged " name))))
 (define (magit-tag-delete)
-  (helm (list (list "Delete tag" (magit-tags) "magit-do-tag-delete"))))
+  (helm (list (list "Delete tag" (magit-tags) 'magit-do-tag-delete))))
 (define (magit-do-tag-delete t) (magit-do (list "tag" "-d" t) (string-append "Deleted tag " t)))
 
 ;; --- merge (m) --------------------------------------------------------------
 (define (magit-merge-popup)
   (transient "Merge"
-    (list (list "m" "Merge branch"               "magit-merge")
-          (list "o" "Take ours (file at point)"  "magit-take-ours")
-          (list "t" "Take theirs (file at point)" "magit-take-theirs")
-          (list "a" "Abort"                      "magit-merge-abort"))))
+    (list (list "m" "Merge branch"               'magit-merge)
+          (list "o" "Take ours (file at point)"  'magit-take-ours)
+          (list "t" "Take theirs (file at point)" 'magit-take-theirs)
+          (list "a" "Abort"                      'magit-merge-abort))))
 (define (magit-merge)
-  (helm (list (list "Merge branch" (magit-branches) "magit-do-merge"))))
+  (helm (list (list "Merge branch" (magit-branches) 'magit-do-merge))))
 (define (magit-do-merge b) (magit-do (list "merge" b) (string-append "Merged " b)))
 (define (magit-merge-abort) (magit-do (list "merge" "--abort") "Merge aborted"))
 
@@ -1581,22 +1581,22 @@
       (transient "Magit"
         (list
           (list "Changes"
-                (list "c"       "Commit" "magit-commit-popup")
-                (list "z"       "Stash"  "magit-stash-popup")
-                (list "shift-x" "Reset"  "magit-reset-popup")
-                (list "shift-h" "History" "magit-toggle-history")
-                (list "g"       "Refresh" "magit-refresh"))
+                (list "c"       "Commit" 'magit-commit-popup)
+                (list "z"       "Stash"  'magit-stash-popup)
+                (list "shift-x" "Reset"  'magit-reset-popup)
+                (list "shift-h" "History" 'magit-toggle-history)
+                (list "g"       "Refresh" 'magit-refresh))
           (list "Branch"
-                (list "b"       "Branch" "magit-branch-popup")
-                (list "m"       "Merge"  "magit-merge-popup")
-                (list "r"       "Rebase" "magit-rebase-popup")
-                (list "t"       "Tag"    "magit-tag-popup")
-                (list "l"       "Log"    "magit-log-popup"))
+                (list "b"       "Branch" 'magit-branch-popup)
+                (list "m"       "Merge"  'magit-merge-popup)
+                (list "r"       "Rebase" 'magit-rebase-popup)
+                (list "t"       "Tag"    'magit-tag-popup)
+                (list "l"       "Log"    'magit-log-popup))
           (list "Remote"
-                (list "shift-p" "Push"   "magit-push-popup")
-                (list "shift-f" "Pull"   "magit-pull-popup")
-                (list "f"       "Fetch"  "magit-fetch-popup")
-                (list "shift-m" "Remote" "magit-remote-popup"))))))
+                (list "shift-p" "Push"   'magit-push-popup)
+                (list "shift-f" "Pull"   'magit-pull-popup)
+                (list "f"       "Fetch"  'magit-fetch-popup)
+                (list "shift-m" "Remote" 'magit-remote-popup))))))
 
 ;; --- TAB / RET (sections) ---------------------------------------------------
 ;; TAB: expand/collapse the section at point. Sections are collapsed by default,
@@ -2046,12 +2046,12 @@
 ;; doesn't expose yet, so it's intentionally omitted.)
 (define (magit-rebase-popup)
   (transient "Rebase"
-    (list (list "e" "Rebase onto…" "magit-rebase-onto")
-          (list "c" "Continue"     "magit-rebase-continue")
-          (list "s" "Skip"         "magit-rebase-skip")
-          (list "a" "Abort"        "magit-rebase-abort"))))
+    (list (list "e" "Rebase onto…" 'magit-rebase-onto)
+          (list "c" "Continue"     'magit-rebase-continue)
+          (list "s" "Skip"         'magit-rebase-skip)
+          (list "a" "Abort"        'magit-rebase-abort))))
 (define (magit-rebase-onto)
-  (helm (list (list "Rebase onto" (magit-branches) "magit-do-rebase-onto"))))
+  (helm (list (list "Rebase onto" (magit-branches) 'magit-do-rebase-onto))))
 (define (magit-do-rebase-onto b) (magit-do (list "rebase" b) (string-append "Rebased onto " b)))
 (define (magit-rebase-continue) (magit-do (list "rebase" "--continue") "Rebase continued"))
 (define (magit-rebase-skip)     (magit-do (list "rebase" "--skip") "Skipped commit"))
@@ -2084,96 +2084,96 @@
 ;; --- keymaps ----------------------------------------------------------------
 ;; magit-status (matches magit's keys; uppercase = shift-, shown prettified in
 ;; transient menus via Rust pretty_key).
-(define-key "magit-status" "s" "magit-stage")
-(define-key "magit-status" "shift-s" "magit-stage-all")
-(define-key "magit-status" "u" "magit-unstage")
-(define-key "magit-status" "shift-u" "magit-unstage-all")
-(define-key "magit-status" "k" "magit-discard")
-(define-key "magit-status" "c" "magit-commit-popup")
-(define-key "magit-status" "b" "magit-branch-popup")
-(define-key "magit-status" "shift-p" "magit-push-popup")
-(define-key "magit-status" "shift-f" "magit-pull-popup")
-(define-key "magit-status" "f" "magit-fetch-popup")
-(define-key "magit-status" "z" "magit-stash-popup")
-(define-key "magit-status" "l" "magit-log-popup")
-(define-key "magit-status" "shift-x" "magit-reset-popup")
-(define-key "magit-status" "shift-m" "magit-remote-popup")
-(define-key "magit-status" "t" "magit-tag-popup")
-(define-key "magit-status" "m" "magit-merge-popup")
-(define-key "magit-status" "shift-b" "magit-blame")
-(define-key "magit-status" "r" "magit-rebase-popup")
-(define-key "magit-status" "y" "magit-copy")
-(define-key "magit-status" "i" "magit-gitignore")
-(define-key "magit-status" "$" "magit-process-buffer")
-(define-key "magit-status" "shift-h" "magit-toggle-history")
-(define-key "magit-status" "?" "magit-dispatch")
-(define-key "magit-status" "g" "magit-refresh")
-(define-key "magit-status" "v" "magit-toggle-view")
-(define-key "magit-status" "n" "next-line")
-(define-key "magit-status" "p" "previous-line")
-(define-key "magit-status" "alt-n" "magit-next-section")
-(define-key "magit-status" "alt-p" "magit-prev-section")
-(define-key "magit-status" "q" "magit-quit")
-(define-key "magit-status" "tab" "magit-toggle-fold")
-(define-key "magit-status" "backtab" "magit-cycle-all")
-(define-key "magit-status" "shift-tab" "magit-cycle-all")
-(define-key "magit-status" "enter" "magit-visit-file")
+(define-key "magit-status" "s" 'magit-stage)
+(define-key "magit-status" "shift-s" 'magit-stage-all)
+(define-key "magit-status" "u" 'magit-unstage)
+(define-key "magit-status" "shift-u" 'magit-unstage-all)
+(define-key "magit-status" "k" 'magit-discard)
+(define-key "magit-status" "c" 'magit-commit-popup)
+(define-key "magit-status" "b" 'magit-branch-popup)
+(define-key "magit-status" "shift-p" 'magit-push-popup)
+(define-key "magit-status" "shift-f" 'magit-pull-popup)
+(define-key "magit-status" "f" 'magit-fetch-popup)
+(define-key "magit-status" "z" 'magit-stash-popup)
+(define-key "magit-status" "l" 'magit-log-popup)
+(define-key "magit-status" "shift-x" 'magit-reset-popup)
+(define-key "magit-status" "shift-m" 'magit-remote-popup)
+(define-key "magit-status" "t" 'magit-tag-popup)
+(define-key "magit-status" "m" 'magit-merge-popup)
+(define-key "magit-status" "shift-b" 'magit-blame)
+(define-key "magit-status" "r" 'magit-rebase-popup)
+(define-key "magit-status" "y" 'magit-copy)
+(define-key "magit-status" "i" 'magit-gitignore)
+(define-key "magit-status" "$" 'magit-process-buffer)
+(define-key "magit-status" "shift-h" 'magit-toggle-history)
+(define-key "magit-status" "?" 'magit-dispatch)
+(define-key "magit-status" "g" 'magit-refresh)
+(define-key "magit-status" "v" 'magit-toggle-view)
+(define-key "magit-status" "n" 'next-line)
+(define-key "magit-status" "p" 'previous-line)
+(define-key "magit-status" "alt-n" 'magit-next-section)
+(define-key "magit-status" "alt-p" 'magit-prev-section)
+(define-key "magit-status" "q" 'magit-quit)
+(define-key "magit-status" "tab" 'magit-toggle-fold)
+(define-key "magit-status" "backtab" 'magit-cycle-all)
+(define-key "magit-status" "shift-tab" 'magit-cycle-all)
+(define-key "magit-status" "enter" 'magit-visit-file)
 
 ;; Evil-mode overlay (consulted only under evil, before the keymap above, so the
 ;; Emacs defaults are untouched). `evil-collection-init` gives every special
 ;; buffer `j`/`k` motion, which takes `k` over from discard — so re-expose
 ;; discard on `x` here, the magit-specific half of the overlay.
-(define-key "evil-normal:magit-status" "x" "magit-discard")
+(define-key "evil-normal:magit-status" "x" 'magit-discard)
 ;; Vim top/bottom motion. `g g` makes `g` a prefix, which shadows the single-`g`
 ;; refresh from the keymap above — so re-expose refresh on `g r`, matching
 ;; evil-collection's magit bindings.
-(define-key "evil-normal:magit-status" "g g" "evil-goto-first-line")
-(define-key "evil-normal:magit-status" "shift-g" "evil-goto-last-line")
-(define-key "evil-normal:magit-status" "g r" "magit-refresh")
+(define-key "evil-normal:magit-status" "g g" 'evil-goto-first-line)
+(define-key "evil-normal:magit-status" "shift-g" 'evil-goto-last-line)
+(define-key "evil-normal:magit-status" "g r" 'magit-refresh)
 ;; Within-line motion. Magit's modal keymap doesn't bind `0` / `^` (only `$`,
 ;; which stays `magit-process-buffer`, matching evil-collection), so expose the
 ;; vim line-start motions here. evil-collection gives magit these too.
-(define-key "evil-normal:magit-status" "0" "move-beginning-of-line")
-(define-key "evil-normal:magit-status" "^" "evil-first-non-blank")
+(define-key "evil-normal:magit-status" "0" 'move-beginning-of-line)
+(define-key "evil-normal:magit-status" "^" 'evil-first-non-blank)
 
 ;; Log / commit / stash-list buffers.
-(define-key "magit-log-mode" "enter" "magit-log-show")
-(define-key "magit-log-mode" "shift-a" "magit-log-cherry-pick")
-(define-key "magit-log-mode" "v" "magit-log-revert")
-(define-key "magit-log-mode" "q" "kill-buffer")
-(define-key "magit-log-mode" "n" "next-line")
-(define-key "magit-log-mode" "p" "previous-line")
+(define-key "magit-log-mode" "enter" 'magit-log-show)
+(define-key "magit-log-mode" "shift-a" 'magit-log-cherry-pick)
+(define-key "magit-log-mode" "v" 'magit-log-revert)
+(define-key "magit-log-mode" "q" 'kill-buffer)
+(define-key "magit-log-mode" "n" 'next-line)
+(define-key "magit-log-mode" "p" 'previous-line)
 
 ;; Launch with C-x g (resolves the repo from the current buffer's directory).
-(define-key "fundamental" "ctrl-x g" "magit-status")
+(define-key "fundamental" "ctrl-x g" 'magit-status)
 
 ;; C-x M: pick a different repo via Helm, then open magit there (e.g. from
 ;; *scratch*, or to jump to another project).
 (define (helm-magit)
-  (helm (list (list "Open git repo in" "find-file-candidates" "magit-status-in"))))
-(define-key "fundamental" "ctrl-x M" "helm-magit")
+  (helm (list (list "Open git repo in" "find-file-candidates" 'magit-status-in))))
+(define-key "fundamental" "ctrl-x M" 'helm-magit)
 
 ;; C-x v …: inline git-blame controls on the current file buffer (Emacs vc-prefix).
-(define-key "fundamental" "ctrl-x v b" "magit-blame-toggle")        ; full-file blame
-(define-key "fundamental" "ctrl-x v shift-b" "magit-blame-line-toggle") ; current-line blame
-(define-key "fundamental" "ctrl-x v enter" "magit-blame-show")     ; show commit at point
-(define-key "fundamental" "ctrl-x v y" "magit-blame-copy")         ; copy hash at point
+(define-key "fundamental" "ctrl-x v b" 'magit-blame-toggle)        ; full-file blame
+(define-key "fundamental" "ctrl-x v shift-b" 'magit-blame-line-toggle) ; current-line blame
+(define-key "fundamental" "ctrl-x v enter" 'magit-blame-show)     ; show commit at point
+(define-key "fundamental" "ctrl-x v y" 'magit-blame-copy)         ; copy hash at point
 
 ;; `magit` is the familiar alias for `magit-status`.
 (define (magit) (magit-status))
 
 ;; Expose magit's entry points to M-x. helm-execute-command only lists
 ;; registered commands; the single-key actions stay in-buffer.
-(register-command "magit-status")
-(register-command "magit")
-(register-command "magit-dispatch")
-(register-command "magit-log-popup")
-(register-command "helm-magit")
-(register-command "magit-blame-toggle")
-(register-command "magit-blame-line-toggle")
-(register-command "magit-blame-show")
-(register-command "magit-blame-copy")
-(register-command "magit-toggle-view")
+(register-command 'magit-status)
+(register-command 'magit)
+(register-command 'magit-dispatch)
+(register-command 'magit-log-popup)
+(register-command 'helm-magit)
+(register-command 'magit-blame-toggle)
+(register-command 'magit-blame-line-toggle)
+(register-command 'magit-blame-show)
+(register-command 'magit-blame-copy)
+(register-command 'magit-toggle-view)
 
 ;; Standalone git operations: these act on the repo (prompting via helm /
 ;; read-string where they need a target), so they're meaningful from M-x in any
@@ -2181,38 +2181,38 @@
 ;; file-at-point operations (stage, unstage, discard, blame-file, log-file,
 ;; take-ours/theirs) which only make sense on point inside a magit buffer, and
 ;; the *-popup / accessor helpers.
-(register-command "magit-do-commit")
-(register-command "magit-do-amend")
-(register-command "magit-do-reword")
-(register-command "magit-pull")
-(register-command "magit-push")
-(register-command "magit-push-upstream")
-(register-command "magit-fetch-all")
-(register-command "magit-fetch-origin")
-(register-command "magit-stash")
-(register-command "magit-stash-pop")
-(register-command "magit-stash-apply")
-(register-command "magit-stash-drop")
-(register-command "magit-stash-list")
-(register-command "magit-stash-pick")
-(register-command "magit-stash-push-msg")
-(register-command "magit-checkout")
-(register-command "magit-checkout-remote")
-(register-command "magit-branch-create")
-(register-command "magit-branch-delete")
-(register-command "magit-branch-rename")
-(register-command "magit-branch-set-upstream")
-(register-command "magit-merge")
-(register-command "magit-rebase-onto")
-(register-command "magit-rebase-continue")
-(register-command "magit-rebase-skip")
-(register-command "magit-rebase-abort")
-(register-command "magit-reset-soft")
-(register-command "magit-reset-mixed")
-(register-command "magit-reset-hard")
-(register-command "magit-remote-add")
-(register-command "magit-remote-remove")
-(register-command "magit-tag-create")
-(register-command "magit-tag-delete")
-(register-command "magit-log-all")
-(register-command "magit-log-current")
+(register-command 'magit-do-commit)
+(register-command 'magit-do-amend)
+(register-command 'magit-do-reword)
+(register-command 'magit-pull)
+(register-command 'magit-push)
+(register-command 'magit-push-upstream)
+(register-command 'magit-fetch-all)
+(register-command 'magit-fetch-origin)
+(register-command 'magit-stash)
+(register-command 'magit-stash-pop)
+(register-command 'magit-stash-apply)
+(register-command 'magit-stash-drop)
+(register-command 'magit-stash-list)
+(register-command 'magit-stash-pick)
+(register-command 'magit-stash-push-msg)
+(register-command 'magit-checkout)
+(register-command 'magit-checkout-remote)
+(register-command 'magit-branch-create)
+(register-command 'magit-branch-delete)
+(register-command 'magit-branch-rename)
+(register-command 'magit-branch-set-upstream)
+(register-command 'magit-merge)
+(register-command 'magit-rebase-onto)
+(register-command 'magit-rebase-continue)
+(register-command 'magit-rebase-skip)
+(register-command 'magit-rebase-abort)
+(register-command 'magit-reset-soft)
+(register-command 'magit-reset-mixed)
+(register-command 'magit-reset-hard)
+(register-command 'magit-remote-add)
+(register-command 'magit-remote-remove)
+(register-command 'magit-tag-create)
+(register-command 'magit-tag-delete)
+(register-command 'magit-log-all)
+(register-command 'magit-log-current)

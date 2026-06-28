@@ -55,7 +55,7 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 ;; Helm picker over my org directory.
 (define (my/org-files)
   (helm-from "/Users/me/workspace/org/"
-             (list (list "Files" "find-file-candidates" "open-file"))))
+             (list (list "Files" 'find-file-candidates 'open-file))))
 
 ;; Kill every buffer, then land on *scratch*.
 (define (my/kill-all-buffers)
@@ -183,7 +183,7 @@ Some are richer. `my/org-files` opens a [Helm](/docs/helm) picker scoped to one 
 ```scheme
 (define (my/org-files)
   (helm-from "/Users/me/workspace/org/"
-             (list (list "Files" "find-file-candidates" "open-file"))))
+             (list (list "Files" 'find-file-candidates 'open-file))))
 ```
 
 `my/kill-all-buffers` iterates every buffer, kills it, then lands on `*scratch*`:

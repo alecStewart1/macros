@@ -108,8 +108,8 @@
 ;; the result arrives.
 (define (rainbow-refresh)
   (when (and *rainbow-enabled* (not (rainbow--skip?)))
-    (tree-sitter-query *rainbow-query* "rainbow--apply")))
-(register-command "rainbow-refresh")
+    (tree-sitter-query *rainbow-query* 'rainbow--apply)))
+(register-command 'rainbow-refresh)
 
 ;; --- public configuration API -----------------------------------------------
 (define (rainbow-set-colors colors)
@@ -139,7 +139,7 @@
 (define (rainbow-delimiters)
   (if *rainbow-enabled* (rainbow-disable) (rainbow-enable))
   (message (if *rainbow-enabled* "rainbow-delimiters on" "rainbow-delimiters off")))
-(register-command "rainbow-delimiters")
+(register-command 'rainbow-delimiters)
 
 ;; --- triggers ---------------------------------------------------------------
 ;; Paint on open so an opened file is colored immediately (guarded by the flag).

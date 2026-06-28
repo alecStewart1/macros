@@ -160,9 +160,9 @@
 ;; Bind the conventional tabulated-list keys into `mode`'s keymap and turn off
 ;; line numbers (these are list views, not code).
 (define (tabulated-setup-keys mode)
-  (define-key mode "enter" "tabulated-visit")
-  (define-key mode "s" "tabulated-sort")
-  (define-key mode "n" "next-line")
-  (define-key mode "p" "previous-line")
-  (define-key mode "q" "kill-buffer")
+  (define-key mode "enter" 'tabulated-visit)
+  (define-key mode "s" 'tabulated-sort)
+  (define-key mode "n" 'next-line)
+  (define-key mode "p" 'previous-line)
+  (define-key mode "q" 'kill-buffer)
   (set-option (string-append "line-numbers:" mode) "false"))

@@ -12,8 +12,8 @@
 ;; `undo-tree-dump` bridge expose it. vundo is an informational view of the
 ;; active buffer's tree — actual movement is via undo / redo in the buffer.
 
-(define-key "fundamental" "ctrl-?" "redo")
-(define-key "evil-normal" "ctrl-r" "redo")
+(define-key "fundamental" "ctrl-?" 'redo)
+(define-key "evil-normal" "ctrl-r" 'redo)
 
 ;; --- vundo: draw the branch structure --------------------------------------
 (define (vundo) (undo-tree-dump "vundo--render"))
@@ -44,8 +44,8 @@
                                          (cons "" lines))))
                    '())
     (set-option "line-numbers:vundo-mode" "false")
-    (define-key "vundo-mode" "q" "kill-buffer")
-    (define-key "vundo-mode" "g" "vundo")))
+    (define-key "vundo-mode" "q" 'kill-buffer)
+    (define-key "vundo-mode" "g" 'vundo)))
 
-(register-command "redo")
-(register-command "vundo")
+(register-command 'redo)
+(register-command 'vundo)

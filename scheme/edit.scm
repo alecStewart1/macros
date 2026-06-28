@@ -35,7 +35,7 @@
 (define *replace-from* "")
 
 (define (replace-string)
-  (read-string "Replace string: " "replace-string-from"))
+  (read-string "Replace string: " 'replace-string-from))
 (define (replace-string-from from)
   (set! *replace-from* from)
   (read-string (string-append "Replace \"" from "\" with: ") "replace-string-to"))
@@ -48,7 +48,7 @@
 ;; --- occur ------------------------------------------------------------------
 ;; List lines matching a regexp in a read-only *occur* buffer.
 (define (occur)
-  (read-string "Occur regexp: " "occur-run"))
+  (read-string "Occur regexp: " 'occur-run))
 (define (occur-run re)
   (let ((matched (filter (lambda (l) (>= (string-match re l) 0))
                          (split-many (buffer-string) "\n"))))
@@ -59,16 +59,16 @@
                    '())))
 
 ;; --- keymap -----------------------------------------------------------------
-(define-key "fundamental" "alt-;" "comment-dwim")
-(define-key "fundamental" "alt-%" "replace-string")  ; (Emacs M-% is query-replace)
-(define-key "fundamental" "ctrl-c o" "occur")
-(define-key "occur-mode" "q" "kill-buffer")
+(define-key "fundamental" "alt-;" 'comment-dwim)
+(define-key "fundamental" "alt-%" 'replace-string)  ; (Emacs M-% is query-replace)
+(define-key "fundamental" "ctrl-c o" 'occur)
+(define-key "occur-mode" "q" 'kill-buffer)
 
 ;; steel-mode uses ";; " line comments.
 (add-hook "steel" "edit-steel-comment-string")
 (define (edit-steel-comment-string) (buffer-local-set "comment-string" ";; "))
 
 ;; Make the editing entry points M-x discoverable.
-(register-command "comment-dwim")
-(register-command "occur")
-(register-command "replace-string")
+(register-command 'comment-dwim)
+(register-command 'occur)
+(register-command 'replace-string)

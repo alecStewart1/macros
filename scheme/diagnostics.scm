@@ -68,10 +68,10 @@
       (switch-to-buffer *diag-buffer*)
       (goto-line target))))
 
-(define-key "diagnostics-mode" "enter" "diag-visit")
-(define-key "diagnostics-mode" "q" "kill-buffer")
-(define-key "diagnostics-mode" "n" "next-line")
-(define-key "diagnostics-mode" "p" "previous-line")
+(define-key "diagnostics-mode" "enter" 'diag-visit)
+(define-key "diagnostics-mode" "q" 'kill-buffer)
+(define-key "diagnostics-mode" "n" 'next-line)
+(define-key "diagnostics-mode" "p" 'previous-line)
 
 ;; --- diagnostic navigation (one `next-error` source) ------------------------
 ;; Move point to the nearest diagnostic after/before the current line. The list
@@ -97,9 +97,9 @@
 ;; `next-error` / `previous-error` are the unified dispatchers (shell.scm); they
 ;; route to diag-next-error/diag-previous-error or compile's nav per
 ;; *next-error-source*. Bound + registered here since diagnostics owns C-c e.
-(define-key "fundamental" "ctrl-c e" "list-diagnostics")
-(define-key "fundamental" "alt-g n" "next-error")
-(define-key "fundamental" "alt-g p" "previous-error")
-(register-command "list-diagnostics")
-(register-command "next-error")
-(register-command "previous-error")
+(define-key "fundamental" "ctrl-c e" 'list-diagnostics)
+(define-key "fundamental" "alt-g n" 'next-error)
+(define-key "fundamental" "alt-g p" 'previous-error)
+(register-command 'list-diagnostics)
+(register-command 'next-error)
+(register-command 'previous-error)

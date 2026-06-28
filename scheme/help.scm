@@ -13,11 +13,11 @@
 
 ;; M-x: fuzzy-pick any command and run it.
 (define (helm-execute-command)
-  (helm (list (list "M-x" (all-commands) "execute-command"))))
-(define-key "fundamental" "alt-x" "helm-execute-command")
+  (helm (list (list "M-x" (all-commands) 'execute-command))))
+(define-key "fundamental" "alt-x" 'helm-execute-command)
 
 ;; describe-key (C-h k): what is a chord bound to (in fundamental)?
-(define (describe-key) (read-string "Describe key (e.g. ctrl-x ctrl-f): " "describe-key-finish"))
+(define (describe-key) (read-string "Describe key (e.g. ctrl-x ctrl-f): " 'describe-key-finish))
 (define (describe-key-finish chord)
   (let ((cmd (key-binding "fundamental" chord)))
     (message (if (equal? cmd "")
@@ -74,7 +74,7 @@
           (all-names)))
 
 ;; apropos (C-h a): names OR docs containing a pattern → a help buffer.
-(define (apropos) (read-string "Apropos: " "apropos-finish"))
+(define (apropos) (read-string "Apropos: " 'apropos-finish))
 (define (apropos-finish pat)
   (let ((matches (apropos-matches pat)))
     (render-buffer "*apropos*" "help-mode"
@@ -87,7 +87,7 @@
 ;; describe-function (C-h f): show a function's documentation — its bundled source
 ;; comment. Completion ranges over every Scheme-defined function.
 (define (describe-function)
-  (completing-read "Describe function: " (function-list) "describe-function-show"))
+  (completing-read "Describe function: " (function-list) 'describe-function-show))
 (define (describe-function-show name)
   (when (not (equal? name ""))
     (if (member name (option-list))
@@ -165,9 +165,9 @@
 (define (helm-apropos)
   (helm (list (list "Apropos"
                     (list 'raw "helm-apropos-candidates")
-                    (list (list "Jump to definition" "jump-to-definition")
-                          (list "Describe"           "describe-function-show"))))))
-(define-key "fundamental" "ctrl-h ctrl-a" "helm-apropos")
+                    (list (list "Jump to definition" 'jump-to-definition)
+                          (list "Describe"           'describe-function-show))))))
+(define-key "fundamental" "ctrl-h ctrl-a" 'helm-apropos)
 
 ;; version (M-x version): show the running Macros version in the echo area.
 ;; `macros-version` is a Rust builtin returning the compiled-in package version.
@@ -181,25 +181,25 @@
     (render-buffer "*bindings*" "help-mode"
                    (string-append "Key bindings (fundamental):\n\n" (join-lines rows)) '())))
 
-(define-key "help-mode" "q" "kill-buffer")
-(define-key "help-mode" "n" "next-line")
-(define-key "help-mode" "p" "previous-line")
+(define-key "help-mode" "q" 'kill-buffer)
+(define-key "help-mode" "n" 'next-line)
+(define-key "help-mode" "p" 'previous-line)
 
 ;; C-h help prefix.
-(define-key "fundamental" "ctrl-h k" "describe-key")
-(define-key "fundamental" "ctrl-h f" "describe-function")
-(define-key "fundamental" "ctrl-h a" "apropos")
-(define-key "fundamental" "ctrl-h b" "describe-bindings")
-(define-key "fundamental" "ctrl-h e" "list-messages")   ; echo-area scrollback
-(define-key "fundamental" "ctrl-h l" "list-lsp-log")    ; language-server stderr
+(define-key "fundamental" "ctrl-h k" 'describe-key)
+(define-key "fundamental" "ctrl-h f" 'describe-function)
+(define-key "fundamental" "ctrl-h a" 'apropos)
+(define-key "fundamental" "ctrl-h b" 'describe-bindings)
+(define-key "fundamental" "ctrl-h e" 'list-messages)   ; echo-area scrollback
+(define-key "fundamental" "ctrl-h l" 'list-lsp-log)    ; language-server stderr
 ;; C-h t (help-with-tutorial) is defined in tutorial.scm, loaded after this.
 
-(register-command "describe-key")
-(register-command "describe-function")
-(register-command "apropos")
-(register-command "helm-apropos")
-(register-command "describe-bindings")
-(register-command "version")
+(register-command 'describe-key)
+(register-command 'describe-function)
+(register-command 'apropos)
+(register-command 'helm-apropos)
+(register-command 'describe-bindings)
+(register-command 'version)
 
 ;; *Messages* / *lsp-log* are normal, editable buffers (copy/paste, edit; new
 ;; entries append). No line-number gutter, and no syntax highlighting/LSP runs

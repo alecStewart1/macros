@@ -61,7 +61,7 @@ options the package defines are available:
 (package-install "https://github.com/user/macros-snippets"
   'ref    "v1.0"
   'config (lambda ()
-            (define-key "prog" "ctrl-c ctrl-s" "snippet-expand")
+            (define-key "prog" "ctrl-c ctrl-s" 'snippet-expand)
             (set-option "snippet-dir" "~/.snippets")))
 ```
 
@@ -115,11 +115,11 @@ macros-foo/
 Name the entry file anything you like and have users point at it with `'entry "init.scm"`, but matching the repo name is the zero-config convention. A minimal entry:
 
 ```scheme
-;; macros-foo.scm — define a command and bind it.
-(define (foo-hello)
+;; macros-foo.scm — define a command and bind it. define-command defines the
+;; command AND makes it M-x-discoverable in one form.
+(define-command (foo-hello)
   (message "Hello from macros-foo!"))
-(register-command "foo-hello")               ; makes it M-x-discoverable
-(define-key "global" "ctrl-c f" "foo-hello") ; optional default binding
+(define-key "global" "ctrl-c f" 'foo-hello) ; optional default binding
 ```
 
 ### What you can do in the entry

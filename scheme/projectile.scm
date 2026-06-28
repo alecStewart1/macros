@@ -22,7 +22,7 @@
 (define (projectile-find-file-in root)
   (helm (list (list (string-append "Find file in " (basename root))
                     (project-files root)
-                    "open-file"))))
+                    'open-file))))
 
 (define (projectile-find-file)
   (let ((root (project-root (buffer-directory))))
@@ -38,7 +38,7 @@
 (define (projectile-switch-project)
   (if (null? *project-known*)
       (message "No known projects yet — open a file in one first")
-      (helm (list (list "Switch project" *project-known* "projectile-switch-to")))))
+      (helm (list (list "Switch project" *project-known* 'projectile-switch-to)))))
 
 ;; Grep across the project with ripgrep's content searcher (`grep-files`,
 ;; gitignore-aware and honouring the search-* options). Two surfaces:
@@ -77,12 +77,12 @@
   (if (project-root (buffer-directory))
       (helm (list (list "Grep project"
                         (list 'raw "projectile-grep-candidates")
-                        "projectile-grep-goto")))
+                        'projectile-grep-goto)))
       (message "Not in a project")))
 
 ;; One-shot buffer grep — the previous behaviour, kept for next-error walking.
 (define (projectile-grep-buffer)
-  (read-string "Grep project (regexp): " "projectile-grep-buffer-run"))
+  (read-string "Grep project (regexp): " 'projectile-grep-buffer-run))
 
 (define (projectile-grep-buffer-run pattern)
   (let ((root (project-root (buffer-directory))))
@@ -172,17 +172,17 @@
 (projectile-recent-load)
 
 ;; --- keymap (projectile's C-c p prefix) -------------------------------------
-(define-key "fundamental" "ctrl-c p f" "projectile-find-file")
-(define-key "fundamental" "ctrl-c p p" "projectile-switch-project")
-(define-key "fundamental" "ctrl-c p g" "projectile-grep")
-(define-key "fundamental" "ctrl-c p G" "projectile-grep-buffer")
+(define-key "fundamental" "ctrl-c p f" 'projectile-find-file)
+(define-key "fundamental" "ctrl-c p p" 'projectile-switch-project)
+(define-key "fundamental" "ctrl-c p g" 'projectile-grep)
+(define-key "fundamental" "ctrl-c p G" 'projectile-grep-buffer)
 
 ;; grep results buffer: q to close, g to grep again.
-(define-key "grep-mode" "q" "kill-buffer")
-(define-key "grep-mode" "g" "projectile-grep-buffer")
+(define-key "grep-mode" "q" 'kill-buffer)
+(define-key "grep-mode" "g" 'projectile-grep-buffer)
 
 ;; M-x discoverability for the projectile entry points.
-(register-command "projectile-find-file")
-(register-command "projectile-grep")
-(register-command "projectile-grep-buffer")
-(register-command "projectile-switch-project")
+(register-command 'projectile-find-file)
+(register-command 'projectile-grep)
+(register-command 'projectile-grep-buffer)
+(register-command 'projectile-switch-project)

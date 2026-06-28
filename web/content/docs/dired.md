@@ -37,10 +37,10 @@ Dired is on <kbd>C-x d</kbd> by default. Rebind it, or any key inside the listin
 
 ```scheme
 ;; Rebind the global entry point:
-(define-key "fundamental" "ctrl-x d" "dired")
+(define-key "fundamental" "ctrl-x d" 'dired)
 
 ;; Rebind keys inside the listing — e.g. lowercase `r` to rename:
-(define-key "dired-mode" "r" "dired-rename")
+(define-key "dired-mode" "r" 'dired-rename)
 ```
 
 ## Dired vs. the sidebar

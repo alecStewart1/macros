@@ -14,11 +14,11 @@
 ;; Note: plain motions move only the primary cursor for now — add cursors, then
 ;; type/delete.
 
-(define-key "fundamental" "ctrl-c ctrl-n" "mc-add-cursor-below")
-(define-key "fundamental" "ctrl-c ctrl-p" "mc-add-cursor-above")
-(define-key "fundamental" "ctrl-c ctrl-d" "mc-mark-next-like-this")
+(define-key "fundamental" "ctrl-c ctrl-n" 'mc-add-cursor-below)
+(define-key "fundamental" "ctrl-c ctrl-p" 'mc-add-cursor-above)
+(define-key "fundamental" "ctrl-c ctrl-d" 'mc-mark-next-like-this)
 
-(register-command "mc-add-cursor-below")
-(register-command "mc-add-cursor-above")
-(register-command "mc-mark-next-like-this")
-(register-command "mc-clear")
+(register-command 'mc-add-cursor-below)
+(register-command 'mc-add-cursor-above)
+(register-command 'mc-mark-next-like-this)
+(register-command 'mc-clear)

@@ -24,12 +24,12 @@
 (define (ansi-term) (term-open ""))
 
 ;; Open a terminal running a specific program (M-x term-run).
-(define (term-run) (read-string "Run program: " "term-open"))
+(define (term-run) (read-string "Run program: " 'term-open))
 
-(register-command "term")
-(register-command "ansi-term")
-(register-command "term-run")
+(register-command 'term)
+(register-command 'ansi-term)
+(register-command 'term-run)
 
 ;; A convenient default binding (Emacs uses no global key for term; pick the
 ;; project leader prefix). Users can rebind in init.scm.
-(define-key "fundamental" "ctrl-c ctrl-t" "term")
+(define-key "fundamental" "ctrl-c ctrl-t" 'term)

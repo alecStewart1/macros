@@ -190,16 +190,16 @@ A major mode is a keymap named after the mode, plus commands, activated on `find
   (message "uncommented"))
 
 ;; 3. A keymap named after the mode; bind the commands.
-(define-key "env-mode" "ctrl-c ctrl-c" "env-uncomment-line")
+(define-key "env-mode" "ctrl-c ctrl-c" 'env-uncomment-line)
 
 ;; 4. Make commands discoverable from M-x.
-(register-command "env-uncomment-line")
+(register-command 'env-uncomment-line)
 
 ;; 5. Activate the mode when a matching file opens.
 (define (env--maybe-activate)
   (when (ends-with? (current-buffer) ".env")
     (set-major-mode "env-mode")))
-(add-hook "find-file-hook" "env--maybe-activate")
+(add-hook "find-file-hook" 'env--maybe-activate)
 ```
 
 `set-major-mode` installs the keymap whose name you pass, so the mode name and the keymap name must match. It is also highlighting-aware: if the mode name matches a bundled grammar, switching to it attaches that grammar (and, via the `fundamental` `enable-lsp` hook, its language server *if one is configured* — see [Language servers](/docs/lsp)) and runs the mode's hooks. Bindings can use [`bind-key`](/docs/keybindings#binding-a-function-directly), which takes the command as a `'name` symbol (or a bare function value) rather than a command-name string.
@@ -215,7 +215,7 @@ To configure what happens **on entering a mode** — the analog of Emacs's `rust
 ```scheme
 (define (my-rust-setup)
   (set-option "word-wrap:rust" #f)                  ; don't wrap long lines in Rust
-  (define-key "rust" "ctrl-c ctrl-t" "lsp-hover"))
+  (define-key "rust" "ctrl-c ctrl-t" 'lsp-hover))
 
 (add-hook "rust" 'my-rust-setup)
 ```
@@ -238,7 +238,7 @@ When the standard tree-sitter highlighting isn't enough — you want depth-based
                           "type")))
     (non-empty-lines records)))
 
-(tree-sitter-query "(type_identifier) @t" "color-types")
+(tree-sitter-query "(type_identifier) @t" 'color-types)
 ```
 
 `scheme/rainbow.scm` is the full worked example (depth-colored brackets via a query plus `overlay-set-face`), and re-runs on `find-file-hook` and `after-change-functions` so it stays live as you type.

@@ -11,15 +11,18 @@ Your code lives in `~/.config/macros/init.scm` (see [Configuration](/docs/config
 
 ## Defining a command
 
-Any zero-argument function is callable by name from <kbd>M-x</kbd> and bindable to a key:
+Any zero-argument function is bindable to a key and runnable by name. To also list it in the <kbd>M-x</kbd> palette, register it — `define-command` defines and registers in one form, so the name lives in exactly one place:
 
 ```scheme
-(define (insert-date)
+;; define-command = define + register for M-x, in one form.
+(define-command (insert-date)
   (insert-string (call-process "date" '("+%Y-%m-%d"))))
 
 ;; Now: M-x insert-date, or bind it.
 (bind-key "fundamental" "ctrl-c d" 'insert-date)
 ```
+
+The longhand is a plain `define` plus `(register-command 'insert-date)`; either way, pass the command name as a `'symbol` (a string also works).
 
 ## Keymaps
 
@@ -31,7 +34,7 @@ Any zero-argument function is callable by name from <kbd>M-x</kbd> and bindable 
 (bind-key "org-mode"    "ctrl-c x" 'org-todo)      ; mode-local map
 ```
 
-The `'name` symbol names the command without evaluating it, so the binding is independent of file load order. Built-in commands bind the same way. `bind-key` also accepts the bare identity (`magit-status`, no quote) — that turns a typo into a load-time error and lets go-to-definition follow the binding, but the command must already be defined — and a plain string name. `bind-key` is a thin wrapper over the lower-level `define-key` primitive, which takes a command **name** string only.
+The `'name` symbol names the command without evaluating it, so the binding is independent of file load order. Built-in commands bind the same way. `bind-key` also accepts the bare identity (`magit-status`, no quote) — that turns a typo into a load-time error and lets go-to-definition follow the binding, but the command must already be defined — and a plain string name. `bind-key` is a thin wrapper over the lower-level `define-key` primitive, which takes a command **name** as a `'symbol` (preferred) or string — the canonical form across the API. Name-reference arguments throughout Macros work this way: prefer a `'symbol`, with strings still accepted.
 
 The global map is `"fundamental"`; major modes have maps named after them. See [Keybindings](/docs/keybindings).
 
@@ -94,7 +97,7 @@ Display-only overlays change how text *renders* without touching the buffer. The
 | `(clear-overlay-faces)` / `(clear-overlay-hides)` | reset faces / hides (each owner clears only its own) |
 | `(clear-line-scales)` / `(clear-line-indents)` | reset scaling / indentation |
 
-To target *syntax* rather than regex matches, query the buffer's tree-sitter grammar. `(tree-sitter-query "<query>" "callback")` runs the query against whatever grammar the current buffer uses and calls `callback` with the captures — one `name⇥start⇥end⇥kind` record per line (tab-separated, byte offsets). `(tree-sitter-node-at byte "callback")` reports the node chain at a position ("what am I inside?").
+To target *syntax* rather than regex matches, query the buffer's tree-sitter grammar. `(tree-sitter-query "<query>" 'callback)` runs the query against whatever grammar the current buffer uses and calls `callback` with the captures — one `name⇥start⇥end⇥kind` record per line (tab-separated, byte offsets). `(tree-sitter-node-at byte 'callback)` reports the node chain at a position ("what am I inside?"). The callback name is a `'symbol` (a string also works).
 
 Combined, they let you conceal — or recolor, or enlarge — a node type in *any* language. This is the markdown `## `-hiding machinery, generalized:
 
@@ -102,7 +105,7 @@ Combined, they let you conceal — or recolor, or enlarge — a node type in *an
 ;; Hide every node captured by `query` in the current buffer (any grammar).
 (define (hide-nodes query)
   (clear-overlay-hides)
-  (tree-sitter-query query "hide-nodes--apply"))
+  (tree-sitter-query query 'hide-nodes--apply))
 
 (define (hide-nodes--apply records)        ; "name\tstart\tend\tkind" per line
   (for-each
@@ -139,6 +142,8 @@ In `macros-steel-mode` you also get one-key documentation for the API symbol at 
 | --- | --- | --- |
 | <kbd>C-c C-d</kbd> | `macros-eldoc` | Echo a one-line summary of the symbol at point |
 | <kbd>C-c C-f</kbd> | `macros-describe-point` | Open the symbol's full docs in `*help*` |
+
+The built-in `macros-scheme` language server also powers completion, "unknown function" diagnostics, and navigation over the editor API. Because command references are `'symbols` (not strings), the server treats them as real identifiers — so <kbd>M-.</kbd> (`lsp-find-definition`) jumps from a `'magit-status` in a keybinding straight to its `(define …)`, and <kbd>M-?</kbd> (`lsp-find-references`) lists its uses (quoted references included). The leading quote is a word boundary, so completion and navigation read the bare name. A string `"magit-status"` is opaque by comparison — this is the practical reason to prefer the `'symbol` form.
 
 So the workflow is: edit a function in your `init.scm`, press <kbd>C-c C-e</kbd> on it, and keep going — the redefinition is live. <kbd>M-:</kbd> (`eval-expression`) evaluates a one-off expression in the minibuffer.
 

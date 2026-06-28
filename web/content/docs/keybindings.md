@@ -124,10 +124,11 @@ Prefer the **`'name` symbol** form. It names the command without evaluating it, 
 
 ### define-key (the primitive)
 
-`bind-key` is a thin wrapper over `define-key`, the lower-level primitive the keymap is built on. `define-key` takes a command **name** (a string) only — it can't take a function or a `lambda`:
+`bind-key` is a thin wrapper over `define-key`, the lower-level primitive the keymap is built on. `define-key` takes a command **name** — a `'symbol` (preferred) or a string. It resolves the name at keypress time, so it can't take a function or a `lambda` (use `bind-key` for those):
 
 ```scheme
-(define-key "fundamental" "ctrl-c d" "lsp-find-definition")
+(define-key "fundamental" "ctrl-c d" 'lsp-find-definition)  ; 'symbol (preferred)
+(define-key "fundamental" "ctrl-c d" "lsp-find-definition")  ; string still works
 ```
 
 You'll see `define-key` throughout the bundled config and it's fully supported — reach for it when you specifically want the primitive or the exact Emacs spelling. For everyday rebinding, `bind-key` does everything it does and takes functions too.

@@ -1,13 +1,13 @@
 ;; Completion-popup keymap (corfu-style). These bindings are consulted only
 ;; while the in-buffer completion popup is open; otherwise the keys behave
 ;; normally. Rebind freely — the popup is driven entirely from here.
-(define-key "completion" "ctrl-n" "completion-next")
-(define-key "completion" "ctrl-p" "completion-previous")
-(define-key "completion" "down" "completion-next")
-(define-key "completion" "up" "completion-previous")
-(define-key "completion" "tab" "completion-accept")
-(define-key "completion" "enter" "completion-accept")
-(define-key "completion" "ctrl-g" "completion-abort")
+(define-key "completion" "ctrl-n" 'completion-next)
+(define-key "completion" "ctrl-p" 'completion-previous)
+(define-key "completion" "down" 'completion-next)
+(define-key "completion" "up" 'completion-previous)
+(define-key "completion" "tab" 'completion-accept)
+(define-key "completion" "enter" 'completion-accept)
+(define-key "completion" "ctrl-g" 'completion-abort)
 
 ;; --- completion-at-point-functions (CAPF) -----------------------------------
 ;; `completion-at-point` (M-i) tries each registered Scheme CAPF in order before

@@ -41,7 +41,7 @@
 
 ;; Entry: prompt for the target character.
 (define (avy-goto-char)
-  (read-string "avy char: " "avy--got-char" ""))
+  (read-string "avy char: " 'avy--got-char ""))
 
 (define (avy--got-char ch)
   (if (equal? ch "")
@@ -66,7 +66,7 @@
 ;; The editor dispatches the captured key to `avy-pick`.
 (define (avy-pick key) (avy--pick key))
 
-(define-key "fundamental" "ctrl-c j" "avy-goto-char")
-(define-key "evil-normal" "g s" "avy-goto-char")
+(define-key "fundamental" "ctrl-c j" 'avy-goto-char)
+(define-key "evil-normal" "g s" 'avy-goto-char)
 
-(register-command "avy-goto-char")
+(register-command 'avy-goto-char)

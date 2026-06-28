@@ -40,4 +40,4 @@ Press q to close this buffer.")
 ;; M-x licenses — show the notice in a read-only buffer (help-mode gives q / n / p).
 (define (licenses)
   (render-buffer "*licenses*" "help-mode" *licenses-text* '()))
-(register-command "licenses")
+(register-command 'licenses)

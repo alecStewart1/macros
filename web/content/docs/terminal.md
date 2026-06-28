@@ -38,5 +38,5 @@ Each terminal gets a distinct buffer name, so you can run several at once. `make
 `term` has no global key in Emacs, so Macros picks <kbd>C-c C-t</kbd> as a sensible default — rebind it in your `init.scm` like any other key:
 
 ```scheme
-(define-key "fundamental" "ctrl-c enter" "term")
+(define-key "fundamental" "ctrl-c enter" 'term)
 ```

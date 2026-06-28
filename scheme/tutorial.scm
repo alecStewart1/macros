@@ -442,7 +442,7 @@ quit Macros, type C-x C-c.
       (tutorial-open "*TUTORIAL*" *emacs-tutorial-text*
                      "Welcome to the Macros tutorial. Try the commands marked with >>.")))
 
-(define-key "fundamental" "ctrl-h t" "help-with-tutorial")
-(register-command "help-with-tutorial")
-(register-command "help-with-emacs-tutorial")
-(register-command "help-with-vim-tutorial")
+(define-key "fundamental" "ctrl-h t" 'help-with-tutorial)
+(register-command 'help-with-tutorial)
+(register-command 'help-with-emacs-tutorial)
+(register-command 'help-with-vim-tutorial)

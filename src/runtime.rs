@@ -33,12 +33,13 @@ pub fn defined_names() -> Vec<String> {
         .collect()
 }
 
-/// The name bound by a top-level `(define name …)`, `(define (name …) …)`, or
-/// `(define-syntax name …)` line, if the line is such a define. Shared by
-/// [`defined_names`] and [`function_docs`].
-fn define_name(line: &str) -> Option<String> {
+/// The name bound by a top-level `(define name …)`, `(define (name …) …)`,
+/// `(define-syntax name …)`, or `(define-command (name …) …)` line, if the line
+/// is such a define. Shared by [`defined_names`] and [`function_docs`].
+pub(crate) fn define_name(line: &str) -> Option<String> {
     let rest = line
         .strip_prefix("(define-syntax ")
+        .or_else(|| line.strip_prefix("(define-command "))
         .or_else(|| line.strip_prefix("(define "))?;
     // `(define (name …)` — skip the opening paren of the arg list.
     let token = rest

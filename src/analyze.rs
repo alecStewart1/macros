@@ -137,11 +137,24 @@ fn collect_bound(expr: &ExprKind, set: &mut HashSet<String>) {
             collect_bound(&let_expr.body_expr, set);
         }
         ExprKind::List(list) => {
-            // let* / letrec / named let are parsed as plain lists pre-expansion.
-            if let Some(head) = list.args.first().and_then(ident)
-                && matches!(head, "let" | "let*" | "letrec" | "letrec*")
-            {
-                collect_let_like_bindings(&list.args[1..], set);
+            // let* / letrec / named let, and the `define-command` macro, are parsed
+            // as plain lists pre-expansion (macros aren't expanded at parse time).
+            if let Some(head) = list.args.first().and_then(ident) {
+                if matches!(head, "let" | "let*" | "letrec" | "letrec*") {
+                    collect_let_like_bindings(&list.args[1..], set);
+                } else if head == "define-command" {
+                    // (define-command (name a b) …) binds name + params;
+                    // (define-command name value) binds name.
+                    match list.args.get(1) {
+                        Some(ExprKind::List(sig)) => {
+                            for arg in &sig.args {
+                                insert_ident(arg, set);
+                            }
+                        }
+                        Some(other) => insert_ident(other, set),
+                        None => {}
+                    }
+                }
             }
             for arg in &list.args {
                 collect_bound(arg, set);
@@ -231,6 +244,16 @@ fn top_define_name(expr: &ExprKind) -> Option<String> {
         return match &define.name {
             ExprKind::List(sig) => sig.args.first().and_then(ident).map(str::to_string),
             other => ident(other).map(str::to_string),
+        };
+    }
+    // `(define-command (name …) …)` / `(define-command name value)` — a macro, so
+    // it parses as a plain list; surface its name for scope-aware completion.
+    if let ExprKind::List(list) = expr
+        && list.args.first().and_then(ident) == Some("define-command")
+    {
+        return match list.args.get(1) {
+            Some(ExprKind::List(sig)) => sig.args.first().and_then(ident).map(str::to_string),
+            other => other.and_then(ident).map(str::to_string),
         };
     }
     None
@@ -358,6 +381,29 @@ mod tests {
         assert!(unbound_operators("(let ((g (lambda () 1))) (g))", &HashSet::new()).is_empty());
         // cond's `else` is not treated as a call.
         assert!(unbound_operators("(define (f x) (cond (else x)))", &known(&["cond"])).is_empty());
+    }
+
+    #[test]
+    fn define_command_binds_its_name_and_params() {
+        // define-command is a macro (parses as a plain list); the analyzer must
+        // still treat its name as bound so calls aren't flagged "unknown" and the
+        // name is offered for completion.
+        // `define-command` itself is a seeded global (a define-syntax in core.scm).
+        let known = known(&["define-command"]);
+        let src =
+            "(define-command (my-cmd x) (helper x))\n(define-command (helper y) y)\n(my-cmd 1)";
+        assert!(
+            unbound_operators(src, &known).is_empty(),
+            "got {:?}",
+            unbound_operators(src, &known)
+        );
+        // The command name is in scope for completion.
+        let scope = bindings_in_scope_at(src, src.len());
+        assert!(
+            scope.contains("my-cmd"),
+            "define-command name in scope: {scope:?}"
+        );
+        assert!(scope.contains("helper"), "second name in scope: {scope:?}");
     }
 
     #[test]

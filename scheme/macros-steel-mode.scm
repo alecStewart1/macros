@@ -27,12 +27,12 @@
 ;; Evaluation targets the LIVE editor runtime (it can define commands, rebind
 ;; keys, mutate buffers) — that is the whole point of an extension file, and the
 ;; reason this is its own mode rather than a flag on `steel`.
-(define-key "macros-steel" "ctrl-c ctrl-e" "eval-last-sexp")
-(define-key "macros-steel" "ctrl-c ctrl-b" "eval-buffer")
+(define-key "macros-steel" "ctrl-c ctrl-e" 'eval-last-sexp)
+(define-key "macros-steel" "ctrl-c ctrl-b" 'eval-buffer)
 ;; Editor-API documentation for the symbol at point: a one-line echo (eldoc), or
 ;; the full doc buffer.
-(define-key "macros-steel" "ctrl-c ctrl-d" "macros-eldoc")
-(define-key "macros-steel" "ctrl-c ctrl-f" "macros-describe-point")
+(define-key "macros-steel" "ctrl-c ctrl-d" 'macros-eldoc)
+(define-key "macros-steel" "ctrl-c ctrl-f" 'macros-describe-point)
 
 ;; --- symbol at point --------------------------------------------------------
 ;; The codepoint of a one-character string (its first char).
@@ -70,5 +70,5 @@
   (let ((sym (macros-symbol-at-point)))
     (when (not (equal? sym "")) (describe-function-show sym))))
 
-(register-command "macros-eldoc")
-(register-command "macros-describe-point")
+(register-command 'macros-eldoc)
+(register-command 'macros-describe-point)

@@ -92,7 +92,7 @@ Like vanilla evil-mode in Emacs, Macros' evil has **no <kbd>Space</kbd> leader**
 evil bindings live in the `"evil-normal"`, `"evil-insert"`, and `"evil-visual"` maps. Rebind exactly like any other key:
 
 ```scheme
-(define-key "evil-normal" "shift-q" "kill-buffer")
+(define-key "evil-normal" "shift-q" 'kill-buffer)
 ```
 
 Because it's all Scheme, you can add operators, text objects, and leader sub-maps of your own. See [Scripting with Steel](/docs/scripting).

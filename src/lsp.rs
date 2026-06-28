@@ -1016,12 +1016,13 @@ impl LspBackend {
         }
     }
 
-    /// Send a generic request. Returns its id, or `None` for the builtin Steel
-    /// server (which only implements diagnostics + completion).
+    /// Send a generic request. Returns its id, or `None` when unsupported. The
+    /// builtin Steel server answers definition/references (plus diagnostics and
+    /// completion, handled elsewhere) and declines everything else.
     pub fn request(&mut self, method: &str, params: Value) -> Option<i64> {
         match self {
             LspBackend::External(c) => Some(c.send_request(method, params)),
-            LspBackend::Builtin(_) => None,
+            LspBackend::Builtin(b) => b.request(method, &params),
         }
     }
 
@@ -1050,6 +1051,10 @@ pub struct SteelLsp {
     docs: HashMap<String, String>,
     /// A compile-only engine: used to type-check source, never to run it.
     engine: Engine,
+    /// name → (source file, 1-based line) for every bundled define, so
+    /// go-to-definition can resolve editor-API symbols. Empty for the plain
+    /// `scheme` server (which seeds no editor API).
+    defs: HashMap<String, (String, usize)>,
 }
 
 /// Outcome of a sandboxed diagnostic compile.
@@ -1077,6 +1082,7 @@ impl SteelLsp {
     ) -> (Self, UnboundedReceiver<Value>) {
         let (tx, rx) = unbounded();
         let mut engine = Engine::new();
+        let mut defs = HashMap::new();
         if seed_editor_api {
             for name in known_globals {
                 engine.register_value(name, SteelVal::Void);
@@ -1087,12 +1093,18 @@ impl SteelLsp {
             for name in crate::runtime::defined_names() {
                 engine.register_value(&name, SteelVal::Void);
             }
+            // …and their source locations, so go-to-definition can jump to the
+            // bundled implementation of an editor command referenced by name.
+            for d in crate::runtime::builtin_docs() {
+                defs.insert(d.name, (d.file, d.line));
+            }
         }
         let server = Self {
             tx,
             next_id: 1,
             docs: HashMap::new(),
             engine,
+            defs,
         };
         // textDocumentSync = 1 (full): the editor resends the whole document on
         // every change, which is free in-process and keeps this server simple.
@@ -1240,6 +1252,147 @@ impl SteelLsp {
             })
             .collect()
     }
+
+    /// Builtin navigation requests. Returns the request id (a response is queued
+    /// on the channel), or `None` for methods the builtin doesn't implement — the
+    /// caller treats `None` as "no server support" for this request.
+    pub fn request(&mut self, method: &str, params: &Value) -> Option<i64> {
+        let uri = params["textDocument"]["uri"].as_str()?.to_string();
+        let line = params["position"]["line"].as_u64()? as usize;
+        let character = params["position"]["character"].as_u64()? as usize;
+        match method {
+            // declaration/type/impl all collapse to "the definition" here.
+            "textDocument/definition"
+            | "textDocument/declaration"
+            | "textDocument/typeDefinition"
+            | "textDocument/implementation" => Some(self.definition(&uri, line, character)),
+            "textDocument/references" => Some(self.references(&uri, line, character)),
+            _ => None,
+        }
+    }
+
+    /// Go-to-definition: prefer a definition in the open document (so a config's
+    /// own `define`/`define-command` and any overrides win), then the bundled doc
+    /// index. A `'name` reference resolves like a bare one — the quote is a word
+    /// boundary. Replies with a single `Location`, or `null` when unresolved.
+    fn definition(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let text = self.docs.get(uri).cloned().unwrap_or_default();
+        let result = symbol_at(&text, line, character)
+            .and_then(|sym| self.locate_definition(&text, uri, &sym))
+            .unwrap_or(Value::Null);
+        let _ = self
+            .tx
+            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        id
+    }
+
+    fn locate_definition(&self, text: &str, uri: &str, sym: &str) -> Option<Value> {
+        // 1) A definition in the open document (the user's own, or an override).
+        for (i, line) in text.lines().enumerate() {
+            if crate::runtime::define_name(line).as_deref() == Some(sym) {
+                let col = word_occurrences(line, sym).first().map_or(0, |&(_, c)| c);
+                return Some(location_json(uri, i, col, sym));
+            }
+        }
+        // 2) The bundled library — only when its source is present on disk (a
+        // checkout); an installed binary has no on-disk sources, so we decline.
+        if let Some((file, ln)) = self.defs.get(sym)
+            && Path::new(file).exists()
+        {
+            let uri = path_to_uri(Path::new(file));
+            return Some(location_json(&uri, ln.saturating_sub(1), 0, sym));
+        }
+        None
+    }
+
+    /// References to the symbol at point, within the open document: every word-
+    /// boundary occurrence — which includes quoted `'name` references, since the
+    /// quote is a boundary. (Cross-file references aren't tracked here.)
+    fn references(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let text = self.docs.get(uri).cloned().unwrap_or_default();
+        let mut locs: Vec<Value> = Vec::new();
+        if let Some(sym) = symbol_at(&text, line, character) {
+            for (li, l) in text.lines().enumerate() {
+                for (_, c) in word_occurrences(l, &sym) {
+                    locs.push(location_json(uri, li, c, &sym));
+                }
+            }
+        }
+        let _ = self
+            .tx
+            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": locs }));
+        id
+    }
+}
+
+/// The identifier covering `(line, character)` (UTF-16 column), or `None`.
+/// Extends over identifier chars in both directions; a leading `'` is a boundary,
+/// so a `'name` reference yields `name`.
+fn symbol_at(text: &str, line: usize, character: usize) -> Option<String> {
+    let chars: Vec<char> = text.lines().nth(line)?.chars().collect();
+    // UTF-16 column → char index.
+    let mut utf16 = 0usize;
+    let mut idx = chars.len();
+    for (i, c) in chars.iter().enumerate() {
+        if utf16 >= character {
+            idx = i;
+            break;
+        }
+        utf16 += c.len_utf16();
+    }
+    let mut start = idx.min(chars.len());
+    while start > 0 && is_ident_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = idx.min(chars.len());
+    while end < chars.len() && is_ident_char(chars[end]) {
+        end += 1;
+    }
+    (start < end).then(|| chars[start..end].iter().collect())
+}
+
+/// `(0, utf16-col)` of every word-boundary occurrence of `sym` in a single line.
+/// (The line index is the caller's; this returns 0 in that slot.)
+fn word_occurrences(line: &str, sym: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let (mut i, mut col16) = (0usize, 0usize);
+    while i < chars.len() {
+        if is_ident_char(chars[i]) {
+            let start16 = col16;
+            let mut j = i;
+            let mut word = String::new();
+            while j < chars.len() && is_ident_char(chars[j]) {
+                word.push(chars[j]);
+                col16 += chars[j].len_utf16();
+                j += 1;
+            }
+            if word == sym {
+                out.push((0, start16));
+            }
+            i = j;
+        } else {
+            col16 += chars[i].len_utf16();
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A one-line LSP `Location` JSON at `(line, character)` spanning `sym`.
+fn location_json(uri: &str, line: usize, character: usize, sym: &str) -> Value {
+    let len: usize = sym.chars().map(char::len_utf16).sum();
+    json!({
+        "uri": uri,
+        "range": {
+            "start": { "line": line, "character": character },
+            "end": { "line": line, "character": character + len }
+        }
+    })
 }
 
 /// Map an LSP position `(line, utf16-col)` to a byte offset in `text`.
@@ -1638,6 +1791,56 @@ mod tests {
             labels.contains(&"map"),
             "expected stdlib `map`, got {labels:?}"
         );
+
+        // A 'symbol command reference completes: the leading quote is a boundary,
+        // so the prefix is the name and the candidate inserts after the quote.
+        // This is the canonical form for keybindings/commands across the API.
+        let src = "(define-key \"m\" \"c\" 'set-l";
+        let items = server.complete(src, 0, src.chars().count());
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert!(
+            labels.contains(&"set-lsp"),
+            "quoted 'set-l should complete set-lsp, got {labels:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_definition_and_references_resolve_symbols() {
+        let (mut server, mut rx) = SteelLsp::start(true, &[]);
+        let _ = futures::executor::block_on(rx.next()).unwrap(); // initialize
+
+        let uri = "file:///cfg.scm";
+        // A command, a quoted reference (keybinding), and a call.
+        let text = "(define (my-cmd) 1)\n(bind-key \"m\" \"c\" 'my-cmd)\n(my-cmd)";
+        server.did_open(uri, text);
+        let _ = futures::executor::block_on(rx.next()).unwrap(); // diagnostics
+
+        // Go-to-definition from the *quoted* reference on line 1 jumps to the
+        // define on line 0 — the quote is a word boundary, so symbols resolve.
+        let col = text.lines().nth(1).unwrap().find("my-cmd").unwrap();
+        let params = json!({"textDocument":{"uri":uri},"position":{"line":1,"character":col}});
+        let id = server.request("textDocument/definition", &params).unwrap();
+        let resp = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(resp["id"], json!(id));
+        assert_eq!(resp["result"]["uri"], json!(uri));
+        assert_eq!(resp["result"]["range"]["start"]["line"], json!(0));
+
+        // References include the define, the quoted use, and the call.
+        let id = server.request("textDocument/references", &params).unwrap();
+        let resp = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(resp["id"], json!(id));
+        let lines: Vec<i64> = resp["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["range"]["start"]["line"].as_i64().unwrap())
+            .collect();
+        assert!(lines.contains(&0), "define site missing: {lines:?}");
+        assert!(
+            lines.contains(&1),
+            "quoted ref counts as a reference: {lines:?}"
+        );
+        assert!(lines.contains(&2), "call site missing: {lines:?}");
     }
 
     #[test]
