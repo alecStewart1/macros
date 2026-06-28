@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin};
@@ -144,6 +144,10 @@ enum MinibufferPurpose {
     SchemeReadFile(String),
     /// `y-or-n-p`: call fn with "yes" or "no".
     SchemeYesNo(String),
+    /// First-trust confirmation for the grammar install at the front of
+    /// `pending_grammar_installs`. `yes` records trust + installs; either way the
+    /// next queued install (if any) is then prompted.
+    ConfirmGrammarInstall,
 }
 
 /// A buffer's state, snapshotted when it isn't the active buffer. The active
@@ -453,6 +457,12 @@ pub struct Editor {
     /// Tree-sitter highlighter; keeps the persistent parse tree. Spans are
     /// queried on demand per-frame, not cached.
     highlighter: Option<Highlighter>,
+
+    /// Grammar installs from untrusted repos awaiting first-trust confirmation
+    /// (see `install_grammar`). A queue, not a single slot, so several
+    /// `install-language` calls in one `init.scm` each get prompted in turn
+    /// rather than clobbering one another. The front is the one being prompted.
+    pending_grammar_installs: VecDeque<crate::grammar::InstallSpec>,
 
     /// Identity of the active buffer.
     active_name: String,
@@ -1535,6 +1545,7 @@ impl Editor {
             line_height: px(0.),
             viewport_height: px(0.),
             highlighter,
+            pending_grammar_installs: VecDeque::new(),
             active_name: "*scratch*".to_string(),
             active_path: None,
             process_cwd: std::env::current_dir()
@@ -2737,6 +2748,100 @@ impl Editor {
         .detach();
     }
 
+    /// Download, compile, and load a user tree-sitter grammar (M-x
+    /// install-language → `(grammar-install …)`). The git clone + C compile run
+    /// on the background executor so the UI stays live; only the result echo and
+    /// the re-highlight touch the editor. On success the grammar is in the
+    /// process-global registry, so any later file open of a matching extension
+    /// highlights automatically (see `language_for_path`); here we additionally
+    /// re-highlight the *current* buffer if it already visits such a file.
+    /// Entry point for a grammar install. Installing runs arbitrary native code
+    /// (the compiled parser + scanner are `dlopen`ed), so the first install from
+    /// a given repo asks for confirmation in the minibuffer; approved sources are
+    /// remembered (see [`crate::grammar::is_trusted`]) so a config-driven install
+    /// on every launch doesn't re-prompt. Trusted → straight to the work.
+    fn install_grammar(&mut self, spec: crate::grammar::InstallSpec, cx: &mut Context<Self>) {
+        if crate::grammar::is_trusted(&spec.repo) {
+            self.run_grammar_install(spec, cx);
+            return;
+        }
+        // Untrusted source: queue it and, if nothing is currently being prompted,
+        // start the prompt. Queuing (rather than a single slot) means several
+        // untrusted `install-language` calls in one `init.scm` are each prompted
+        // in turn instead of all but the last being silently dropped.
+        let was_idle = self.pending_grammar_installs.is_empty();
+        self.pending_grammar_installs.push_back(spec);
+        if was_idle {
+            self.prompt_next_grammar_install(cx);
+        }
+    }
+
+    /// Open the first-trust confirmation for the install at the front of the
+    /// queue. The answer is handled by `MinibufferPurpose::ConfirmGrammarInstall`,
+    /// which pops the front and chains to the next queued install.
+    fn prompt_next_grammar_install(&mut self, cx: &mut Context<Self>) {
+        let Some(spec) = self.pending_grammar_installs.front() else {
+            return;
+        };
+        let prompt = format!(
+            "Install grammar {} from {} (downloads and runs native code)? (yes or no) ",
+            spec.id, spec.repo
+        );
+        self.open_minibuffer(&prompt, MinibufferPurpose::ConfirmGrammarInstall, "", cx);
+    }
+
+    /// Resolve the front grammar-install confirmation with the user's answer,
+    /// then prompt the next queued one. Called from the minibuffer submit path.
+    pub(super) fn resolve_grammar_install_confirm(
+        &mut self,
+        approved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(spec) = self.pending_grammar_installs.pop_front() {
+            if approved {
+                crate::grammar::trust(&spec.repo);
+                self.run_grammar_install(spec, cx);
+            } else {
+                self.echo(format!("Skipped grammar {}", spec.id), cx);
+            }
+        }
+        if !self.pending_grammar_installs.is_empty() {
+            self.prompt_next_grammar_install(cx);
+        }
+    }
+
+    /// Do the actual download + compile + load on the background executor, then
+    /// re-highlight the current buffer and echo the result. Reached only after
+    /// the source is trusted (directly, or via the confirm prompt).
+    fn run_grammar_install(&mut self, spec: crate::grammar::InstallSpec, cx: &mut Context<Self>) {
+        self.echo(
+            format!("Installing grammar {} (clone + compile)…", spec.id),
+            cx,
+        );
+        let task = cx
+            .background_executor()
+            .spawn(async move { crate::grammar::install(spec) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |editor, cx| match result {
+                Ok(lang) => {
+                    // Colorize the current buffer now if it visits a file the new
+                    // grammar claims — otherwise it highlights on next open.
+                    let matches = editor.active_path.as_deref().and_then(language_for_path)
+                        == Some(lang.as_str());
+                    if let Some(h) = matches.then(|| Highlighter::for_language(&lang)).flatten() {
+                        editor.highlighter = Some(h);
+                        editor.parse_full();
+                    }
+                    editor.echo(format!("Installed grammar {lang}."), cx);
+                }
+                Err(err) => editor.echo(format!("Grammar install failed: {err}"), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Download + install an already-resolved [`crate::update::UpdateAvailable`],
     /// echoing progress. Driven by [`check_for_updates`].
     fn start_update_install(
@@ -3651,7 +3756,10 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "tex" | "sty" | "cls" => "latex",
         "typ" => "typst",
         "mmd" | "mermaid" => "mermaid",
-        _ => return None,
+        // Not bundled: a user may have installed a grammar claiming this
+        // extension at runtime (M-x install-language). Check that registry so
+        // opening the file highlights without a restart.
+        _ => return crate::grammar::language_for_extension(ext),
     };
     Some(language)
 }

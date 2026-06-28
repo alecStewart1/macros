@@ -899,6 +899,26 @@ impl Editor {
             ListMessages => self.list_messages(cx),
             ListLspLog => self.list_lsp_log(cx),
             CheckForUpdates => self.check_for_updates(cx),
+            InstallGrammar(args) => {
+                // Empty strings are the Scheme wrapper's "use the default" sentinel.
+                let non_empty = |s: String| (!s.is_empty()).then_some(s);
+                self.install_grammar(
+                    crate::grammar::InstallSpec {
+                        id: args.id,
+                        repo: args.repo,
+                        rev: args.rev,
+                        extensions: args
+                            .extensions
+                            .split_whitespace()
+                            .map(str::to_string)
+                            .collect(),
+                        symbol: non_empty(args.symbol),
+                        subdir: non_empty(args.subdir),
+                        highlights_path: None,
+                    },
+                    cx,
+                );
+            }
             EnterMacrosSteel => {
                 let mut modes = ModeStack::default();
                 modes.push(Mode::new("fundamental"));

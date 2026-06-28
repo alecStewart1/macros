@@ -12,7 +12,7 @@ Support for a language in Macros has two independent layers:
 
 You can do either without the other: a file type can get highlighting with no custom mode, and a mode can add behavior on top of the built-in highlighting.
 
-One thing to know up front: **tree-sitter grammars are compiled into the binary.** Adding highlighting for a file type whose grammar is *already bundled* is pure `init.scm` config. Adding a *brand-new* grammar is a small Rust change and a rebuild (covered below).
+One thing to know up front: a file type whose grammar is *already bundled* needs only `init.scm` config. For a *brand-new* grammar, `install-language` downloads, compiles, and loads it at runtime — no rebuild, all from your config. Both are covered below.
 
 ## How highlighting works
 
@@ -46,33 +46,133 @@ When the file type also has a language server, configure both at once with the `
 
 > `lsp-language` wires the *server* and the language id, but highlighting still needs a bundled grammar for that id. If none is bundled (Kotlin isn't), add it as below.
 
-## Adding a new tree-sitter grammar
+## Installing a grammar at runtime
 
-Because grammars are compiled in, a brand-new one is a three-step Rust change, then a rebuild. Say you want Kotlin:
+For a language Macros doesn't bundle, `install-language` downloads a tree-sitter grammar from git, compiles it, and loads it — no rebuild. Put a call in your `init.scm`, pinning a revision so the build is reproducible:
 
-1. **Add the grammar crate** to `Cargo.toml`:
+```scheme
+(install-language "nim"
+                  "https://github.com/alaviss/tree-sitter-nim"
+                  "a4b3e3a"          ; commit, tag, or branch
+                  '("nim" "nims"))   ; file extensions (no dot)
+```
 
-   ```toml
-   tree-sitter-kotlin = "0.3"
+Once installed, opening any `.nim` file highlights automatically — the extension lookup falls back to runtime grammars, so you don't need a separate `set-extension`. A runtime grammar also gets an `<id>-mode` command (`M-x nim-mode`), exactly like a bundled language.
+
+**You need a C/C++ toolchain.** Published grammars ship generated C; Macros compiles it with the host compiler (`cc`/`clang` on macOS and Linux, MSVC or MinGW on Windows) — the same toolchain a source build needs. The grammar repo must commit its generated `parser.c` (almost all do) and a `queries/highlights.scm`; the query is what produces color, so a parser with no query gives a tree but no highlighting.
+
+**The first install from a repo asks for confirmation** in the minibuffer — loading a grammar runs native code in-process, so a new source is trusted once (recorded in `trusted-grammars` in your config dir) and isn't re-prompted on later launches, even though the `install-language` call re-runs every startup. The compiled library is cached under the OS cache dir, keyed by language id and revision, so relaunching reuses it instead of recompiling.
+
+**Grammars in a subdirectory or with a different parser name** take two optional trailing arguments — `symbol` then `subdir`. Some repos nest the grammar (tree-sitter-typescript keeps it in `typescript/`) or export a parser symbol (`tree_sitter_<symbol>`) that differs from the id you chose:
+
+```scheme
+(install-language "typescript"
+                  "https://github.com/tree-sitter/tree-sitter-typescript"
+                  "v0.23.2" '("ts")
+                  "typescript"        ; symbol → tree_sitter_typescript
+                  "typescript")       ; subdir within the repo
+```
+
+The capture names in the grammar's own `highlights.scm` flow straight into the faces above, so no query of your own is needed. To build a grammar yourself — for a new or in-house language — see [Authoring a grammar repo](#authoring-a-grammar-repo) below.
+
+## Authoring a grammar repo
+
+Most languages already have a community grammar — search GitHub for `tree-sitter-<language>` and point `install-language` straight at it. Write your own only for a brand-new or in-house language. Either way it helps to know the repo layout Macros consumes.
+
+### Repo layout
+
+`install-language` expects a standard tree-sitter grammar repo:
+
+```
+tree-sitter-foo/
+├── grammar.js              # the grammar, in tree-sitter's JS DSL (source of truth)
+├── src/
+│   ├── parser.c            # GENERATED from grammar.js — MUST be committed
+│   ├── tree_sitter/        # generated headers, committed alongside parser.c
+│   │   └── parser.h
+│   └── scanner.c           # optional hand-written scanner (or scanner.cc for C++)
+└── queries/
+    └── highlights.scm      # node patterns → capture names → faces
+```
+
+Macros only ever touches three things in it: it **compiles `src/parser.c`** (plus `src/scanner.c` / `scanner.cc` if present), **reads `queries/highlights.scm`**, and resolves the parser entry point `tree_sitter_<name>`, where `<name>` is the `name:` field in `grammar.js`. It does **not** run `grammar.js` — that's why `src/parser.c` must be committed (it's the generated output; nearly every published grammar commits it). If `<name>` differs from the id you pass to `install-language`, pass it as the `symbol` argument; if the grammar lives in a subdirectory, pass `subdir`.
+
+### Creating one from scratch
+
+1. **Install the tree-sitter CLI** — the tool that turns `grammar.js` into `parser.c`:
+
+   ```sh
+   npm install -g tree-sitter-cli      # or: cargo install tree-sitter-cli
    ```
 
-2. **Register it** in `grammar()` in `src/highlight.rs` — one arm mapping the language id to its `LANGUAGE` and highlights query:
+2. **Write `grammar.js`.** The `name` becomes the parser symbol; the rules describe the syntax. A minimal grammar for a `key = value` config language:
 
-   ```rust
-   "kotlin" => (tree_sitter_kotlin::LANGUAGE, tree_sitter_kotlin::HIGHLIGHTS_QUERY),
+   ```js
+   module.exports = grammar({
+     name: 'kv',                 // → tree_sitter_kv; this is your install-language id
+     extras: $ => [/\s/, $.comment],   // whitespace + comments may appear between tokens
+     rules: {
+       document: $ => repeat($.pair),
+       pair:    $ => seq(field('key', $.key), '=', field('value', $.value)),
+       key:     $ => /[A-Za-z_][A-Za-z0-9_]*/,
+       value:   $ => choice($.number, $.string),
+       number:  $ => /\d+/,
+       string:  $ => /"[^"]*"/,
+       comment: $ => /#.*/,
+     },
+   });
    ```
 
-3. **Map the extension** in `language_for_path` in `src/editor/mod.rs`:
+   The grammar DSL — `seq`, `choice`, `repeat`, `field`, precedence, conflicts, and hand-written external scanners for context-sensitive tokens (indentation, heredocs) — is a subject of its own; see tree-sitter's [Creating parsers](https://tree-sitter.github.io/tree-sitter/creating-parsers) guide.
 
-   ```rust
-   "kt" | "kts" => "kotlin",
+3. **Generate and check:**
+
+   ```sh
+   tree-sitter generate            # writes src/parser.c and src/tree_sitter/*.h
+   tree-sitter parse example.kv    # print the parse tree to sanity-check it
    ```
 
-Then add `"kotlin"` to the `BUNDLED_LANGUAGES` list in `src/highlight.rs`. That list is the single source of truth: the grammar-load tests iterate it (so a query the grammar version rejects fails loudly instead of silently disabling highlighting), and Scheme reads it via `(bundled-languages)` to generate the mode command below.
+4. **Write `queries/highlights.scm`** (next section).
 
-Rebuild and Kotlin files highlight. This is exactly how Zig, R, OCaml, Haskell, Scala, and Clojure were added — all now bundled, so their files highlight with no config. (OCaml's grammar ships split implementation/interface parsers like TypeScript, so its entry uses `LANGUAGE_OCAML`.)
+5. **Commit** `src/parser.c`, `src/tree_sitter/`, any `src/scanner.*`, and `queries/highlights.scm`. Tag a release or note the commit SHA — that's the `rev` you pin in `install-language`.
 
-The capture names in the grammar's own `highlights.scm` flow straight into the faces above, so you usually need no query of your own.
+6. **Point `install-language` at it:**
+
+   ```scheme
+   (install-language "kv" "https://github.com/you/tree-sitter-kv" "v0.1.0" '("kv" "conf"))
+   ```
+
+### Writing the highlights query
+
+`queries/highlights.scm` is a list of tree-sitter [query patterns](https://tree-sitter.github.io/tree-sitter/using-parsers#query-syntax), each tagging a node with an `@capture`. The capture name — by its dotted prefix — selects the face. For the `kv` grammar above:
+
+```scheme
+(comment) @comment
+(key)     @property        ; @property aliases to the `variable` face
+(number)  @number
+(string)  @string
+"=" @operator              ; anonymous tokens are matched as string literals
+```
+
+- `(rule_name) @cap` tags a *named* node; `"literal" @cap` tags an *anonymous* token — a keyword or punctuation written literally in the grammar.
+- Only the dotted **prefix** matters: `@string.special` → `string`, `@keyword.control` → `keyword`. Stick to the conventional [nvim-treesitter capture names](https://github.com/nvim-treesitter/nvim-treesitter/blob/master/CONTRIBUTING.md#highlights) and existing themes color your language with no extra work. A capture Macros doesn't recognize simply renders uncolored — never an error — so an over-specific query degrades gracefully.
+
+Macros resolves captures to these faces (direct prefix matches plus the common aliases):
+
+| Face | Captures that resolve to it |
+|------|------------------------------|
+| `comment` | `comment` |
+| `string` | `string`, `character`, `escape` |
+| `keyword` | `keyword`, `conditional`, `repeat`, `include`, `exception`, `label`, `preproc`, `storageclass`, `tag` |
+| `function` | `function`, `method` |
+| `number` | `number`, `float` |
+| `constant` | `constant`, `boolean` |
+| `type` | `type`, `constructor`, `namespace`, `module` |
+| `operator` | `operator` |
+| `punctuation` | `punctuation`, `delimiter` |
+| `variable` | `variable`, `property`, `field`, `parameter`, `attribute` |
+
+Markup languages can also use the `@markup.*` / `@text.*` families (headings, bold, links) — those map onto the faces above too; the bundled `latex` and `markdown` queries are worked examples. To restyle any of these, set the face in your theme (see [Themes & faces](/docs/themes-and-faces)).
 
 ## Building a major mode
 

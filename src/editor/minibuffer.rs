@@ -224,7 +224,17 @@ impl Editor {
         // Aborting an incremental search returns point to where it began and
         // drops the match highlight (Emacs C-g out of isearch).
         let isearch = self.is_isearch();
+        let grammar_confirm = matches!(
+            self.minibuffer.as_ref().map(|m| &m.purpose),
+            Some(MinibufferPurpose::ConfirmGrammarInstall)
+        );
         self.minibuffer = None;
+        if grammar_confirm {
+            // C-g out of the trust prompt declines this grammar and moves on to
+            // the next queued one — otherwise the queue would stall here.
+            self.resolve_grammar_install_confirm(false, cx);
+            return;
+        }
         if isearch {
             self.search_query = None;
             self.isearch_match = None;
@@ -249,13 +259,13 @@ impl Editor {
                 .filter(|n| n.starts_with(input))
                 .collect(),
             Some(MinibufferPurpose::FindFile) => file_completions(input),
-            Some(MinibufferPurpose::Confirm(_)) | Some(MinibufferPurpose::QuitSave) => {
-                ["yes", "no"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .filter(|c| c.starts_with(input))
-                    .collect()
-            }
+            Some(MinibufferPurpose::Confirm(_))
+            | Some(MinibufferPurpose::QuitSave)
+            | Some(MinibufferPurpose::ConfirmGrammarInstall) => ["yes", "no"]
+                .iter()
+                .map(|s| s.to_string())
+                .filter(|c| c.starts_with(input))
+                .collect(),
             Some(MinibufferPurpose::CompleteAtPoint) => self
                 .completion_items
                 .iter()
@@ -387,6 +397,7 @@ impl Editor {
             MinibufferPurpose::Confirm(_)
                 | MinibufferPurpose::QuitSave
                 | MinibufferPurpose::SchemeYesNo(_)
+                | MinibufferPurpose::ConfirmGrammarInstall
         ) {
             self.push_minibuffer_history(&input);
         }
@@ -486,6 +497,10 @@ impl Editor {
                 };
                 self.publish_point();
                 self.script.dispatch_action(&callback, Some(answer));
+            }
+            MinibufferPurpose::ConfirmGrammarInstall => {
+                let approved = matches!(input.as_str(), "yes" | "y");
+                self.resolve_grammar_install_confirm(approved, cx);
             }
         }
     }

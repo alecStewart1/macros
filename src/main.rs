@@ -4,6 +4,7 @@ mod assets;
 mod buffer;
 mod editor;
 mod element;
+mod grammar;
 mod highlight;
 mod lsp;
 mod mode;

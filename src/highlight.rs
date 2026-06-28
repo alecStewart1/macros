@@ -157,16 +157,23 @@ impl Highlighter {
         )
     }
 
-    /// A highlighter for a language id (the registry of bundled grammars), or
-    /// `None` when no grammar is bundled for it. Wired from file extensions by
+    /// A highlighter for a language id, or `None` when nothing provides it.
+    /// Bundled grammars ([`grammar`]) win; otherwise we fall back to a
+    /// runtime-installed grammar from the [`crate::grammar`] registry (a user
+    /// language macros downloaded and compiled). Wired from file extensions by
     /// `language_for_path` and the active mode's language.
     pub fn for_language(language: &str) -> Option<Self> {
-        let (lang, query) = grammar(language)?;
-        let mut hl = Self::new(lang, query)?;
-        if let Some(src) = injection_query(language) {
-            hl.injection = build_injection(&hl.language, src);
+        if let Some((lang, query)) = grammar(language) {
+            let mut hl = Self::new(lang, query)?;
+            if let Some(src) = injection_query(language) {
+                hl.injection = build_injection(&hl.language, src);
+            }
+            return Some(hl);
         }
-        Some(hl)
+        // Runtime-installed grammar: owns its highlights query as a `String`.
+        // No injection wiring — only the bundled markdown grammar injects.
+        let (lang, query) = crate::grammar::installed(language)?;
+        Self::new(lang, &query)
     }
 }
 

@@ -109,8 +109,13 @@ semver = "1"
 sha2 = "0.10"
 hex = "0.4"
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
-# for staging update downloads.
+# for staging update downloads and compiled user grammars (src/grammar.rs).
 dirs = "5"
+# Runtime tree-sitter grammars (src/grammar.rs): `dlopen` a user grammar's
+# freshly compiled shared library and resolve its `tree_sitter_<lang>` entry
+# point. Loading native code is inherent to the feature — see the module's
+# safety note. The library is leaked so the resolved `LanguageFn` never dangles.
+libloading = "0.8"
 # gitoxide: a pure-Rust git implementation, driven as a library for the
 # `gix-blame` / `gix-log` / `gix-toplevel` Scheme primitives (see src/script.rs).
 # magit historically shells out to `git`; these give magit native blame (which
@@ -148,3 +153,11 @@ opt-level = 1
 # builds never pull or invoke it.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# Windows-only runtime dependency: the `cc` crate to locate the host toolchain
+# (MSVC cl.exe / MinGW) and its environment, then compile a user grammar to a
+# .dll (src/grammar.rs). Unix compiles by spawning cc/c++ directly, but Windows
+# toolchain discovery (cl.exe's INCLUDE/LIB env, the registry probe) is fiddly
+# enough that we reuse cc's logic — mirroring how Helix builds grammars.
+[target.'cfg(windows)'.dependencies]
+cc = "1"

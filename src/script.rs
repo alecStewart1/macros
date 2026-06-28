@@ -19,6 +19,20 @@ use steel::steel_vm::register_fn::RegisterFn;
 /// that the editor drains and applies after evaluation — the same decoupling
 /// Emacs gets from its command loop. Most commands are nullary; a few carry a
 /// string payload.
+/// Payload for [`EditorCommand::InstallGrammar`], boxed in the variant to keep
+/// `EditorCommand` small. Fields carry the raw Steel-side strings; `symbol` and
+/// `subdir` are `""` for "use the default" (symbol = id, grammar at repo root),
+/// and `extensions` is whitespace-separated.
+#[derive(Debug, Clone)]
+pub struct GrammarInstall {
+    pub id: String,
+    pub repo: String,
+    pub rev: String,
+    pub extensions: String,
+    pub symbol: String,
+    pub subdir: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
     // Motion
@@ -223,6 +237,12 @@ pub enum EditorCommand {
         byte: usize,
         callback: String,
     },
+    /// Download, compile, and load a user tree-sitter grammar (see
+    /// [`crate::grammar`]). Runs on the background executor; on success the active
+    /// buffer re-highlights if it visits a matching file. Boxed so its six fields
+    /// don't make this the largest `EditorCommand` variant (which would bloat the
+    /// `Result<(), EditorCommand>` every dispatcher threads — `result_large_err`).
+    InstallGrammar(Box<GrammarInstall>),
     // LSP / completion popup
     CompletionAtPoint,
     CompletionNext,
@@ -2630,6 +2650,44 @@ fn build_engine(
         engine.register_fn("bundled-languages", move || -> Vec<String> {
             langs.clone()
         });
+    }
+    {
+        // `(installed-languages)` → ids of grammars downloaded + compiled at
+        // runtime (M-x install-language). grammar.scm reads this alongside
+        // `(bundled-languages)` so installed languages also get `<id>-mode`.
+        engine.register_fn("installed-languages", || -> Vec<String> {
+            crate::grammar::installed_ids()
+        });
+    }
+    {
+        // `(grammar-install id repo rev extensions symbol subdir)` → queue an
+        // async download + compile + load of a tree-sitter grammar. `extensions`
+        // is a whitespace-separated string of bare extensions; `symbol` and
+        // `subdir` are "" for the defaults (parser symbol = id, grammar at repo
+        // root). The Scheme `install-language` wrapper builds these from nicer
+        // args. Returns immediately; progress/result echoes to the minibuffer
+        // (see Editor::install_grammar).
+        let q = queue.clone();
+        engine.register_fn(
+            "grammar-install",
+            move |id: String,
+                  repo: String,
+                  rev: String,
+                  extensions: String,
+                  symbol: String,
+                  subdir: String| {
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::InstallGrammar(Box::new(GrammarInstall {
+                        id,
+                        repo,
+                        rev,
+                        extensions,
+                        symbol,
+                        subdir,
+                    })));
+            },
+        );
     }
     {
         // The doc index: name → (doc, file, line). Steel has no runtime

@@ -16,6 +16,14 @@
 //!    targeting macOS/Linux.
 
 fn main() {
+    // Expose the target triple to the running binary as `BUILD_TARGET`. The `cc`
+    // crate needs a target to locate a toolchain, but it reads `$TARGET` from the
+    // build environment, which isn't present at runtime — so we bake it in for
+    // the Windows grammar compiler (src/grammar.rs). Mirrors Helix's BUILD_TARGET.
+    if let Ok(target) = std::env::var("TARGET") {
+        println!("cargo:rustc-env=BUILD_TARGET={target}");
+    }
+
     compile_mermaid_grammar();
 
     #[cfg(windows)]

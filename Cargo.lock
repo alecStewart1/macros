@@ -4371,6 +4371,7 @@ dependencies = [
  "image",
  "include_dir",
  "libc",
+ "libloading",
  "notify-debouncer-mini",
  "nucleo-matcher",
  "regex",
