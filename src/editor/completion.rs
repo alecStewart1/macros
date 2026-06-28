@@ -161,6 +161,7 @@ impl Editor {
             return;
         }
         let min_prefix = settings.completion_auto_prefix();
+        let capf_enabled = settings.completion_capf();
         // Only trigger right after typing a word character.
         if !typed
             .chars()
@@ -174,12 +175,17 @@ impl Editor {
         if point.saturating_sub(word_start) < min_prefix.max(1) {
             return;
         }
-        if !self.has_ready_lsp() {
+        // Fire when a language server can complete OR a Scheme CAPF can (argument
+        // completion like `(load-theme 'mac…)`, dabbrev in plain-text/scratch
+        // buffers). CAPFs run on the engine thread, so even a buffer-scanning CAPF
+        // never blocks the UI. Without either source there's nothing to complete.
+        let can_capf = capf_enabled && !self.capf_functions.is_empty();
+        if !self.has_ready_lsp() && !can_capf {
             return;
         }
         self.completion_auto_pending = true;
-        // Auto-trigger is LSP-driven (it only fires when a server is ready);
-        // Scheme CAPFs participate in the explicit `completion-at-point` command.
-        self.completion_at_point_lsp(cx);
+        // Route through the full completion-at-point path so CAPFs get a chance
+        // before the language server; a CAPF that declines falls back to LSP.
+        self.completion_at_point(cx);
     }
 }

@@ -116,6 +116,26 @@ pub fn builtin_docs() -> Vec<DocEntry> {
     docs
 }
 
+/// The names of the bundled themes — the stems of `scheme/themes/*.scm`, sorted.
+/// Scheme reads this via `(theme-names)` to offer completion for `load-theme`
+/// (both the minibuffer prompt and the in-buffer argument CAPF).
+pub fn theme_names() -> Vec<String> {
+    let mut names: Vec<String> = SCHEME
+        .get_dir("themes")
+        .into_iter()
+        .flat_map(|d| d.files())
+        .filter(|f| f.path().extension().is_some_and(|e| e == "scm"))
+        .filter_map(|f| {
+            f.path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// A theme definition by name — the contents of `scheme/themes/<name>.scm`.
 pub fn theme_script(name: &str) -> Option<&'static str> {
     SCHEME
@@ -269,6 +289,13 @@ mod tests {
         assert!(theme_script("macros-dark").is_some_and(|s| s.contains("set-face")));
         assert!(theme_script("macros-light").is_some());
         assert!(theme_script("nope").is_none());
+
+        // `theme-names` enumerates the bundled themes (stems, sorted, no .scm).
+        let names = theme_names();
+        assert_eq!(
+            names,
+            vec!["macros-dark".to_string(), "macros-light".to_string()]
+        );
     }
 
     /// Every color literal in the bundled themes must parse (catches a bad hex

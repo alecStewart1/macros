@@ -66,3 +66,32 @@
 (set-face "lsp-sem-number" "#b8448b")
 (set-face "lsp-sem-comment" "#6f6f6f")
 (set-face "lsp-sem-operator" "#141414")
+
+;; Magit (status buffer) — Cursor Light palette. magit.scm's built-in defaults are
+;; dark-theme colors (bright greens/yellows that vanish on a light background); a
+;; runtime `load-theme` resets the palette, so these light-tuned overrides are what
+;; keep the magit buffer readable in light mode. Tier logic is inverted vs. dark:
+;; to RECEDE on white a color goes lighter/lower-contrast, to POP it goes darker.
+(set-face "magit-section-heading" "#2e7d32") ; dark green heading
+(set-face "magit-file" "#9a6700")            ; amber file names
+(set-face "magit-key" "#206595")             ; blue keys (Cursor Light type blue)
+(set-face "magit-added" "#4a7d3a")           ; +line body (medium green)
+(set-face "magit-removed" "#b3324a")         ; -line body (medium red)
+(set-face "magit-hunk" "#206595")            ; @@ hunk headers
+(set-face "magit-context" "#777777")         ; unchanged context
+(set-face "magit-group" "#2f8a7d")           ; funcname sub-heading (teal)
+(set-face "magit-add-marker" "#1f8a2f")      ; leading + marker (pops darker)
+(set-face "magit-remove-marker" "#c41030")   ; leading - marker (pops darker)
+(set-face "magit-added-dim" "#8fb87f")       ; unchanged text on a +line (recedes lighter)
+(set-face "magit-removed-dim" "#d99ba8")     ; unchanged text on a -line (recedes lighter)
+(set-face "magit-word-added" "#1f7a1f")      ; changed span on a +line (pops darkest)
+(set-face "magit-word-removed" "#c41030")    ; changed span on a -line (pops darkest)
+(set-face "magit-label-modified" "#9a6700")
+(set-face "magit-label-new"      "#2e7d32")
+(set-face "magit-label-deleted"  "#c41030")
+(set-face "magit-label-renamed"  "#206595")
+(set-face "magit-label-other"    "#9a6700")
+(set-face "magit-hash" "#8a6d00")            ; commit short hashes (dark goldenrod)
+(set-face "magit-header" "#888888")          ; "Head:" label column
+(set-face "magit-branch" "#206595")          ; branch / upstream names
+(set-face "hl-line" "#00000010")             ; current-line band (translucent black)

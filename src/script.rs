@@ -348,7 +348,9 @@ pub enum EditorCommand {
     // Theming
     /// Set a face's color: `(set-face "comment" "#6a9955")`.
     SetFace(String, String),
-    /// Load a built-in theme by name: `(load-theme "macros-light")`.
+    /// Load a built-in theme by name. Queued by the `load-theme-impl` primitive,
+    /// which the core.scm `load-theme` wrapper calls for `(load-theme 'macros-light)`
+    /// or `(load-theme "macros-light")` (a symbol or string).
     LoadTheme(String),
     // Special (read-only, program-generated) buffers — the magit pattern.
     /// Render `text` into a read-only buffer `name` with major mode `mode` and
@@ -1862,7 +1864,8 @@ impl ScriptEngine {
                 "message",
                 "define-key",
                 "set-face",
-                "load-theme",
+                "load-theme-impl",
+                "theme-names",
                 "set-lsp",
                 "set-extension",
                 "set-language-id",
@@ -2652,6 +2655,14 @@ fn build_engine(
         });
     }
     {
+        // `(theme-names)` → every bundled theme name (the stem of each
+        // scheme/themes/*.scm). The `load-theme` wrapper in core.scm reads this to
+        // complete theme names — in the M-x prompt and the in-buffer argument CAPF.
+        engine.register_fn("theme-names", || -> Vec<String> {
+            crate::runtime::theme_names()
+        });
+    }
+    {
         // `(installed-languages)` → ids of grammars downloaded + compiled at
         // runtime (M-x install-language). grammar.scm reads this alongside
         // `(bundled-languages)` so installed languages also get `<id>-mode`.
@@ -2823,7 +2834,17 @@ fn build_engine(
         "clipboard-set",
         EditorCommand::ClipboardSet,
     );
-    register_unary(&mut engine, queue, "load-theme", EditorCommand::LoadTheme);
+    {
+        // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
+        // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
+        // value is stringified, so a bad arg echoes "No theme named …" rather than
+        // failing to type-check. The wrapper adds the no-arg interactive prompt.
+        let q = queue.clone();
+        engine.register_fn("load-theme-impl", move |value: SteelVal| {
+            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
+            q.lock().unwrap().push(EditorCommand::LoadTheme(name));
+        });
+    }
     register_binary(&mut engine, queue, "set-lsp", EditorCommand::SetLsp);
     register_binary(
         &mut engine,
@@ -5453,6 +5474,143 @@ mod magit_tests {
                 "{cmd} is not registered for M-x"
             );
         }
+    }
+
+    /// `load-theme-impl` accepts both a symbol and a string, queueing the same
+    /// `LoadTheme` command with the bare theme name either way. (The user-facing
+    /// `load-theme` wrapper that adds the interactive prompt lives in core.scm.)
+    #[test]
+    fn load_theme_accepts_symbol_and_string() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in [
+            r#"(load-theme-impl 'macros-dark)"#,
+            r#"(load-theme-impl "macros-dark")"#,
+        ] {
+            let cmds = engine.eval(src).expect("load-theme should eval").commands;
+            match cmds.as_slice() {
+                [EditorCommand::LoadTheme(name)] => assert_eq!(name, "macros-dark"),
+                other => panic!("{src} should queue LoadTheme(\"macros-dark\"), got {other:?}"),
+            }
+        }
+    }
+
+    /// The argument-aware completion machinery (completion.scm): the form scanner
+    /// finds the enclosing head + arg index, the registry resolves a producer, and
+    /// `theme-names` feeds the `(load-theme …)` argument completion. Exercises the
+    /// pure logic; the live CAPF additionally reads buffer state at completion time.
+    #[test]
+    fn arg_completion_capf_logic() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        let yn = |src: &str| engine.eval(src).unwrap().value;
+        // In `(load-theme 'mac…` the context is (head="load-theme", arg-index=0).
+        assert_eq!(
+            yn(r#"(let ((c (capf-arg-context "(load-theme 'mac")))
+                    (if (and c (equal? (car c) "load-theme") (= (cdr c) 0)) "y" "n"))"#)
+            .as_deref(),
+            Some("\"y\"")
+        );
+        // Typing the head itself, or being at top level, yields no arg context.
+        assert_eq!(
+            yn(r#"(if (capf-arg-context "(load-the") "y" "n")"#).as_deref(),
+            Some("\"n\"")
+        );
+        assert_eq!(
+            yn(r#"(if (capf-arg-context "mac") "y" "n")"#).as_deref(),
+            Some("\"n\"")
+        );
+        // String args don't desync the counter: arg 2 of (define-key a b c…).
+        assert_eq!(
+            yn(
+                r#"(let ((c (capf-arg-context "(define-key \"mode\" \"chord\" \"comm")))
+                    (if (and c (equal? (car c) "define-key") (= (cdr c) 2)) "y" "n"))"#
+            )
+            .as_deref(),
+            Some("\"y\"")
+        );
+        // Symbol prefix keeps hyphens but drops the leading quote.
+        assert_eq!(
+            yn(r#"(if (equal? (capf-symbol-prefix "(load-theme 'macros-d") "macros-d") "y" "n")"#)
+                .as_deref(),
+            Some("\"y\"")
+        );
+        // Comments with stray parens/quotes/apostrophes don't desync the counter:
+        // the `(set-face)` and unbalanced `(` and the apostrophe live in comments.
+        assert_eq!(
+            yn("(let ((c (capf-arg-context \"\
+                 ;; it's a (set-face thing with an unmatched (\n\
+                 (load-theme 'mac\")))\
+                 (if (and c (equal? (car c) \"load-theme\") (= (cdr c) 0)) \"y\" \"n\"))")
+            .as_deref(),
+            Some("\"y\"")
+        );
+        // The registry wires load-theme arg 0 to a theme-name producer.
+        assert_eq!(
+            yn(r#"(if (procedure? (arg-completion-lookup "load-theme" 0)) "y" "n")"#).as_deref(),
+            Some("\"y\"")
+        );
+        assert_eq!(
+            yn(
+                r#"(if (member "macros-dark" ((arg-completion-lookup "load-theme" 0) "")) "y" "n")"#
+            )
+            .as_deref(),
+            Some("\"y\"")
+        );
+    }
+
+    /// `M-x load-theme` (no args) opens a "Load theme:" completing-read whose
+    /// candidates are the bundled theme names, with itself as the callback.
+    #[test]
+    fn load_theme_no_args_prompts_with_theme_candidates() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        match engine.eval("(load-theme)").unwrap().commands.as_slice() {
+            [
+                EditorCommand::CompletingRead {
+                    prompt,
+                    candidates,
+                    callback,
+                    ..
+                },
+            ] => {
+                assert!(prompt.contains("theme"), "prompt was {prompt:?}");
+                assert_eq!(callback, "load-theme");
+                assert!(candidates.iter().any(|c| c == "macros-dark"));
+                assert!(candidates.iter().any(|c| c == "macros-light"));
+            }
+            other => panic!("expected a CompletingRead over themes, got {other:?}"),
+        }
+    }
+
+    /// End-to-end CAPF: with a snapshot whose buffer is `(load-theme 'ma` and
+    /// point at end, `arg-completion-capf` reads `(point)`/`(buffer-substring)`
+    /// and returns the theme names — the path the editor's auto-complete drives.
+    #[test]
+    fn arg_completion_capf_returns_themes_from_snapshot() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        let text = "(load-theme 'ma";
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str(text),
+            point: text.len(),
+            ..Default::default()
+        });
+        // The CAPF ignores its prefix arg and computes from buffer state.
+        let v = engine
+            .eval(r#"(arg-completion-capf "ma")"#)
+            .unwrap()
+            .value
+            .unwrap_or_default();
+        assert!(
+            v.contains("macros-dark") && v.contains("macros-light"),
+            "CAPF should return theme names, got: {v}"
+        );
     }
 
     /// language-modes.scm generates an `<id>-mode` command per bundled grammar:

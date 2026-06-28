@@ -3753,6 +3753,7 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "hs" => "haskell",
         "scala" | "sc" | "sbt" => "scala",
         "clj" | "cljs" | "cljc" | "edn" => "clojure",
+        "sql" => "sql",
         "tex" | "sty" | "cls" => "latex",
         "typ" => "typst",
         "mmd" | "mermaid" => "mermaid",
@@ -4943,6 +4944,7 @@ mod tests {
         assert_eq!(language_for_path(Path::new("paper.tex")), Some("latex"));
         assert_eq!(language_for_path(Path::new("doc.typ")), Some("typst"));
         assert_eq!(language_for_path(Path::new("flow.mmd")), Some("mermaid"));
+        assert_eq!(language_for_path(Path::new("query.sql")), Some("sql"));
         assert_eq!(language_for_path(Path::new("notes.txt")), None);
         assert_eq!(language_for_path(Path::new("Makefile")), None);
     }

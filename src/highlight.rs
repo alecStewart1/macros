@@ -72,6 +72,7 @@ pub const BUNDLED_LANGUAGES: &[&str] = &[
     "haskell",
     "scala",
     "clojure",
+    "sql",
     "latex",
     "typst",
     "mermaid",
@@ -235,6 +236,7 @@ fn injection_lang_id(tag: &str) -> Option<&'static str> {
         "haskell" | "hs" => "haskell",
         "scala" | "sc" => "scala",
         "clojure" | "clj" | "cljs" | "cljc" | "edn" => "clojure",
+        "sql" => "sql",
         _ => return None,
     })
 }
@@ -324,6 +326,10 @@ fn grammar(language: &str) -> Option<(LanguageFn, &'static str)> {
         "clojure" => (
             tree_sitter_clojure_orchard::LANGUAGE,
             tree_sitter_clojure_orchard::HIGHLIGHTS_QUERY,
+        ),
+        "sql" => (
+            tree_sitter_sequel::LANGUAGE,
+            tree_sitter_sequel::HIGHLIGHTS_QUERY,
         ),
         // LaTeX, Typst, and Mermaid bundle no highlights query with the parser,
         // so we vendor nvim-treesitter's under `grammars/queries/`. (LaTeX/Typst

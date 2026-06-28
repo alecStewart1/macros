@@ -66,3 +66,30 @@
 (set-face "lsp-sem-number" "#ebc88d")
 (set-face "lsp-sem-comment" "#6d6d6d")
 (set-face "lsp-sem-operator" "#d6d6dd")
+
+;; Magit (status buffer). magit.scm sets these same defaults at load time, so a
+;; theme that omits them still works; defining them here keeps the magit buffer
+;; colorized after a runtime `load-theme` (which resets the palette first).
+(set-face "magit-section-heading" "#a6e22e")
+(set-face "magit-file" "#e6db74")
+(set-face "magit-key" "#66d9ef")
+(set-face "magit-added" "#7a9a3a")        ; +line body
+(set-face "magit-removed" "#b34a5f")      ; -line body
+(set-face "magit-hunk" "#66d9ef")         ; @@ hunk headers
+(set-face "magit-context" "#888888")      ; unchanged context
+(set-face "magit-group" "#7fb0a8")        ; funcname sub-heading
+(set-face "magit-add-marker" "#a6e22e")   ; leading + marker
+(set-face "magit-remove-marker" "#f92672"); leading - marker
+(set-face "magit-added-dim" "#4e5e34")    ; unchanged text on a modified +line
+(set-face "magit-removed-dim" "#6e4651")  ; unchanged text on a modified -line
+(set-face "magit-word-added" "#cdee69")   ; changed span on a +line
+(set-face "magit-word-removed" "#fc6a8a") ; changed span on a -line
+(set-face "magit-label-modified" "#e2c08d")
+(set-face "magit-label-new"      "#a6e22e")
+(set-face "magit-label-deleted"  "#f92672")
+(set-face "magit-label-renamed"  "#66d9ef")
+(set-face "magit-label-other"    "#e6db74")
+(set-face "magit-hash" "#b58900")         ; commit short hashes
+(set-face "magit-header" "#9a9a9a")       ; "Head:" label column
+(set-face "magit-branch" "#66d9ef")       ; branch / upstream names
+(set-face "hl-line" "#ffffff14")          ; current-line band (translucent white)

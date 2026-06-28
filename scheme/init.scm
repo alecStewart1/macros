@@ -10,8 +10,8 @@
 ;; itself across files with `(include "other.scm")`, resolved relative to the
 ;; config directory; `(load "/abs/path.scm")` works for absolute paths.
 
-;; Select the default theme (see scheme/themes/*.scm).
-(load-theme "macros-dark")
+;; Select the default theme (see scheme/themes/*.scm). A string also works.
+(load-theme 'macros-dark)
 
 ;; Editor options (defaults live in Rust; override them here). Values are typed:
 ;; pass a number, a boolean (#t / #f), or a string — a "string" works too and is

@@ -78,6 +78,9 @@ tree-sitter-scala = "0.26.0"
 # `LANGUAGE: LanguageFn` and a `HIGHLIGHTS_QUERY`; the bare `tree-sitter-clojure`
 # crate ships only the parser.
 tree-sitter-clojure-orchard = "0.2.5"
+# SQL: the `-sequel` crate is DerekStride's grammar (the maintained one),
+# publishing `LANGUAGE: LanguageFn` and `HIGHLIGHTS_QUERY` on tree-sitter 0.26.
+tree-sitter-sequel = "0.3.11"
 # LaTeX and Typst grammars. No upstream crate exposes the modern `LanguageFn`
 # API against tree-sitter 0.26, so we use the `codebook-*` forks (from the
 # Codebook spellchecker), which publish a `LANGUAGE: LanguageFn` const built on

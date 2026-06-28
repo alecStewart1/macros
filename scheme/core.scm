@@ -86,6 +86,19 @@
   (when (not (member name *interactive-commands*))
     (set! *interactive-commands* (cons name *interactive-commands*))))
 
+;; `load-theme` — load a built-in theme. With an argument (string or symbol) it
+;; loads directly: (load-theme 'macros-dark). With no argument — e.g. M-x
+;; load-theme — it prompts with completion over (theme-names), reusing itself as
+;; the callback (the chosen name comes back as a string). Mirrors the
+;; read-string / completing-read *-impl wrapper pattern above.
+(define (load-theme . rest)
+  (if (null? rest)
+      (completing-read "Load theme: " (theme-names) "load-theme")
+      (load-theme-impl (car rest))))
+(register-command "load-theme")
+;; In-buffer completion of `(load-theme 'mac…)` is wired in completion.scm, which
+;; owns the argument-aware CAPF machinery.
+
 (define (path-join a b)
   (if (ends-with? a "/") (string-append a b) (string-append a "/" b)))
 
