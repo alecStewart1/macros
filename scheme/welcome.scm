@@ -54,13 +54,33 @@
 (define *welcome-actions* '())   ; (line . thunk), reversed
 (define *welcome-n* 0)
 
-;; Emit one line, optionally tagging it with a face and/or a click action.
+;; Record an action thunk for `line`, active over byte-columns [lo,hi); lo/hi #f
+;; means the whole line. (Columns are byte offsets from the line start, matching
+;; `point` / `line-bounds`, so a click or RET on a multi-byte line still lands on
+;; the right segment.) Newest-first, like the other welcome state.
+(define (welcome-add-action line lo hi action)
+  (set! *welcome-actions* (cons (list line lo hi action) *welcome-actions*)))
+
+;; Emit one line, optionally tagging it with a face and/or a whole-line action.
 (define (welcome-emit text face action)
   (set! *welcome-lines* (cons text *welcome-lines*))
   (when face
     (set! *welcome-faces* (cons (list *welcome-n* face) *welcome-faces*)))
   (when action
-    (set! *welcome-actions* (cons (cons *welcome-n* action) *welcome-actions*)))
+    (welcome-add-action *welcome-n* #f #f action))
+  (set! *welcome-n* (+ *welcome-n* 1)))
+
+;; Emit a line with several independently clickable targets. `segments` is a list
+;; of (lo hi thunk): byte-column ranges relative to the line start (or #f #f for a
+;; whole-line fallback) and the action to run when RET/click lands in that range.
+;; A matching segment wins over the whole-line fallback in `welcome-action-at`.
+(define (welcome-emit-segmented text face segments)
+  (set! *welcome-lines* (cons text *welcome-lines*))
+  (when face
+    (set! *welcome-faces* (cons (list *welcome-n* face) *welcome-faces*)))
+  (for-each
+    (lambda (seg) (welcome-add-action *welcome-n* (car seg) (cadr seg) (caddr seg)))
+    segments)
   (set! *welcome-n* (+ *welcome-n* 1)))
 
 ;; --- recent projects --------------------------------------------------------
@@ -129,8 +149,23 @@
 
   (welcome-emit "   Getting started" "function" #f)
   (welcome-emit "" #f #f)
-  (welcome-emit "     ‣  Open the tutorial            C-h t"
-                "foreground" (lambda () (help-with-tutorial)))
+  ;; Two clickable targets on one line. RET (or a click anywhere else on the row)
+  ;; opens the tutorial for your *current* keybindings via the whole-line
+  ;; fallback; clicking a specific label opens that one and switches to its mode.
+  (let* ((prefix "     ‣  Open the tutorial            ")
+         (emacs-label "[emacs]")
+         (gap "  ")
+         (vim-label "[evil/vim]")
+         (emacs-lo (utf8-length prefix))
+         (emacs-hi (+ emacs-lo (utf8-length emacs-label)))
+         (vim-lo   (+ emacs-hi (utf8-length gap)))
+         (vim-hi   (+ vim-lo (utf8-length vim-label))))
+    (welcome-emit-segmented
+      (string-append prefix emacs-label gap vim-label "   C-h t")
+      "foreground"
+      (list (list emacs-lo emacs-hi (lambda () (help-with-emacs-tutorial)))
+            (list vim-lo   vim-hi   (lambda () (help-with-vim-tutorial)))
+            (list #f #f (lambda () (help-with-tutorial))))))
   (welcome-emit "     ‣  Find a file                  C-x C-f"
                 "foreground" (lambda () (helm-find-files)))
   (welcome-emit "     ‣  Switch project               C-c p p"
@@ -162,17 +197,29 @@
                  (reverse *welcome-faces*)))
 
 ;; --- interaction ------------------------------------------------------------
-;; The action thunk stored for `line`, or #f.
-(define (welcome-action-at line)
-  (let loop ((as *welcome-actions*))
-    (cond ((null? as) #f)
-          ((= (car (car as)) line) (cdr (car as)))
-          (else (loop (cdr as))))))
+;; The action thunk for (line, col): the first segment whose [lo,hi) byte range
+;; contains col wins; otherwise a whole-line action (lo/hi #f) for that line, if
+;; any; otherwise #f. A precise label hit (mouse, or RET with point on it) thus
+;; beats the row's fallback regardless of record order.
+(define (welcome-action-at line col)
+  (let loop ((as *welcome-actions*) (whole #f))
+    (if (null? as)
+        whole
+        (let* ((rec (car as)) (rl (car rec)) (lo (cadr rec)) (hi (caddr rec))
+               (thunk (cadddr rec)))
+          (cond ((not (= rl line)) (loop (cdr as) whole))
+                ((and lo hi)
+                 (if (and (>= col lo) (< col hi)) thunk (loop (cdr as) whole)))
+                (else (loop (cdr as) thunk)))))))
 
-;; RET / left click: run the action on the current line, if any. Clicks on the
-;; banner or blank lines do nothing.
+;; RET / left click: run the action under point on the current line, if any.
+;; `col` is the byte offset of point within the line (point minus line start),
+;; matching the byte-column ranges stored by `welcome-emit-segmented`. Clicks on
+;; the banner or blank lines do nothing.
 (define (welcome-visit)
-  (let ((act (welcome-action-at (buffer-line))))
+  (let* ((line (buffer-line))
+         (col  (- (point) (car (line-bounds))))
+         (act  (welcome-action-at line col)))
     (when act (act))))
 
 ;; Show (or refresh) the welcome buffer and switch to it.
@@ -190,6 +237,18 @@
 (define-key "welcome-mode" "p"       "previous-line")
 (define-key "welcome-mode" "g"       "welcome-refresh")
 (define-key "welcome-mode" "q"       "welcome-dismiss")
+
+;; Under evil-mode, the collection layer (evil.scm) gives this read-only buffer
+;; only j/k. Add horizontal motion so the cursor can reach a specific target on a
+;; multi-target row — e.g. the [emacs] vs [evil/vim] labels on the tutorial line,
+;; which RET then opens. Inert under plain Emacs (this keymap is consulted only
+;; when evil is active); `g`/`G` are deliberately left to welcome-refresh / vim.
+(define-key "evil-normal:welcome-mode" "h" "backward-char")
+(define-key "evil-normal:welcome-mode" "l" "forward-char")
+(define-key "evil-normal:welcome-mode" "w" "forward-word-start")
+(define-key "evil-normal:welcome-mode" "b" "backward-word")
+(define-key "evil-normal:welcome-mode" "0" "move-beginning-of-line")
+(define-key "evil-normal:welcome-mode" "$" "move-end-of-line")
 
 ;; A splash, not code — no line-number gutter.
 (set-option "line-numbers:welcome-mode" "false")

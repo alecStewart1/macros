@@ -5057,6 +5057,7 @@ impl Editor {
             lsp_ready: self.active_lsp_ready(),
             visible_lines: self.visible_line_range(),
             cursor_screen_row: self.cursor_screen_row(),
+            evil_enabled: self.evil != EvilState::Disabled,
         });
     }
 

@@ -719,6 +719,11 @@ pub struct EditorSnapshot {
     /// `(window-cursor-row)` — magit captures it before a refresh and restores it
     /// after so the buffer doesn't visually jump.
     pub cursor_screen_row: usize,
+    /// Whether evil (modal) editing is currently active — true in any evil state
+    /// (Normal/Insert/Visual/…), false when disabled. For `(evil-enabled?)`, so
+    /// Scheme can branch on the active keybinding style (e.g. open the vim or the
+    /// emacs tutorial to match what the user is using).
+    pub evil_enabled: bool,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the
@@ -1892,6 +1897,7 @@ impl ScriptEngine {
                 "point-max",
                 "position->byte",
                 "lsp-server-ready?",
+                "evil-enabled?",
                 "line-bounds",
                 "diagnostics",
                 "regexp-quote",
@@ -3898,6 +3904,8 @@ fn build_engine(
     }
     // `(lsp-server-ready?)` → #t if the active buffer has a ready LSP server.
     register_snapshot_read(&mut engine, point, "lsp-server-ready?", |s| s.lsp_ready);
+    // `(evil-enabled?)` → #t when modal (evil) editing is active.
+    register_snapshot_read(&mut engine, point, "evil-enabled?", |s| s.evil_enabled);
     // `(diagnostics)` → the active buffer's LSP diagnostics, each a record
     // "line\tcol\tseverity\tmessage" (line/col 0-based). The library splits it.
     register_snapshot_read(&mut engine, point, "diagnostics", |s| s.diagnostics.clone());

@@ -1,19 +1,26 @@
-;; tutorial.scm — an interactive, hands-on tutorial (help-with-tutorial, C-h t).
+;; tutorial.scm — interactive, hands-on tutorials (help-with-tutorial, C-h t).
 ;;
-;; This opens a normal *editable* buffer: you read the text and practice the
-;; commands right here, on this copy. Lines that begin with ">>" tell you a
+;; Two tutorials, one per editing style: an Emacs-keys tutorial and a Vim/evil
+;; tutorial. Each opens a normal *editable* buffer: you read the text and practice
+;; the commands right here, on this copy. Lines that begin with ">>" tell you a
 ;; command to try at that spot. Loaded after help.scm so the C-h prefix exists.
 ;;
-;; The text is original to Macros. Every key it teaches is a binding that
-;; actually exists (see fundamental.scm / undo-tree.scm). The lessons follow a
-;; vimtutor-style progression: move, then how to leave, then delete (small to
-;; large), undo, paste, navigate and search, files, and finally selecting and
-;; copying text.
+;; C-h t opens the one matching your *current* keybindings (vim under evil-mode,
+;; emacs otherwise) without changing the mode. The welcome screen's [emacs] and
+;; [evil/vim] labels call help-with-emacs-tutorial / help-with-vim-tutorial, which
+;; switch the editor into that mode first (evil-disable / evil-mode) so the keys
+;; you practice are the ones actually in effect.
+;;
+;; The text is original to Macros. Every key each one teaches is a binding that
+;; actually exists (see fundamental.scm / undo-tree.scm / evil.scm). The lessons
+;; follow a vimtutor-style progression: move, then how to leave/enter insert, then
+;; delete, undo, paste, navigate and search, files, and selecting text. The vim
+;; tutorial also covers the Emacs chords that survive into evil mode (C-x, M-x …).
 ;;
 ;; Conventions used in the text: C-<chr> = hold Control + <chr>; M-<chr> = hold
 ;; Meta (Alt, or Option on a Mac) + <chr>, or press Esc, release, then <chr>.
-(define *tutorial-text* "\
-MACROS TUTORIAL
+(define *emacs-tutorial-text* "\
+MACROS TUTORIAL (EMACS KEYS)
 
 Welcome.  This is a hands-on tour of Macros.  You are reading it inside an
 ordinary, editable buffer, so you can practice every command right here, on this
@@ -244,14 +251,198 @@ This is the end of the tutorial.  To close this buffer, type C-x k Return.  To
 quit Macros, type C-x C-c.
 ")
 
-;; help-with-tutorial (C-h t): open a fresh, editable copy of the tutorial and
-;; put point at the top so the reader starts from the beginning. Rebuilding from
-;; scratch each time gives a clean slate.
-(define (help-with-tutorial)
-  (kill-buffer-named "*TUTORIAL*")
-  (append-to-buffer "*TUTORIAL*" *tutorial-text*)
+;; The vim/evil tutorial. Teaches modal editing (the keys defined in evil.scm)
+;; plus the handful of Emacs chords that survive *into* evil mode: evil only
+;; intercepts plain keys in Normal/Visual, so C-x, C-c, M-x, C-h and C-g still
+;; reach their Emacs commands and you need them for files, buffers and quitting.
+(define *vim-tutorial-text* "\
+MACROS TUTORIAL (VIM / EVIL KEYS)
+
+Welcome.  Evil mode is now ON, so Macros edits the Vim way: a modal editor.  You
+are reading this inside an ordinary, editable buffer, so practice every command
+right here, on this text.  Nothing is permanent: this copy is rebuilt fresh each
+time you open it, so experiment freely.
+
+Two keys are written in shorthand:
+
+ C-x   hold Control and press x.
+ M-x   hold Meta and press x.  Meta is Alt on most keyboards, or Option on a
+       Mac.  No Meta key?  Press Esc, let go, then the next key.
+
+Lines that begin with >> are things to try.  Do what they say before reading on.
+
+
+* LESSON 0: MODES (THE BIG IDEA)
+--------------------------------
+Vim has separate modes.  In NORMAL mode the letter keys are commands (they move
+and edit); in INSERT mode they type text.  You start in Normal mode.
+
+   i        enter Insert mode (type text), then Esc to return to Normal
+   Esc      leave Insert mode; also cancels a half-typed command
+
+>> Press i, type a few words, then press Esc.  You are back in Normal mode, where
+   h j k l move instead of typing.  When in doubt, press Esc.
+
+The mode banner at the bottom shows '-- Insert --' while inserting; Normal mode
+shows nothing (the resting state).
+
+
+* LESSON 1: MOVING AROUND
+-------------------------
+In Normal mode the home-row keys move point (the cursor):
+
+   k   up            j   down
+   h   left          l   right
+
+>> With Esc to be sure you are in Normal mode, steer around this paragraph with
+   h j k l.  (The arrow keys work too, but h j k l keep your hands home.)
+
+Jump by words and along the line:
+
+   w   forward to next word     b   back a word     e   end of word
+   0   start of line            ^   first non-blank text     $   end of line
+   gg  top of the buffer        G   bottom of the buffer
+
+>> Try w and b across a sentence, then 0 and $ to snap to the ends of a line.
+   Finish with gg and G to leap to the top and bottom (then come back here).
+
+
+* LESSON 2: ENTERING INSERT MODE
+--------------------------------
+Several keys enter Insert mode, each at a different spot:
+
+   i   insert before the cursor      a   append after the cursor
+   I   insert at first non-blank     A   append at end of line
+   o   open a new line below         O   open a new line above
+
+>> Put point in the middle of this line and press A; the cursor jumps to the end,
+   ready to type.  Press Esc.  Now press o to open a fresh line below and type on
+   it, then Esc.
+
+
+* LESSON 3: DELETING AND CHANGING
+---------------------------------
+Operators act in Normal mode.  The common ones:
+
+   x    delete the character under the cursor
+   dd   delete (cut) the whole line          dw   delete to next word
+   d$ / D   delete to end of line
+   cc   change the whole line (delete + Insert)   cw   change a word
+   r    replace one character (r then the new char)
+   ~    toggle the case of the character        J    join the next line up
+
+>> Put point on the next line and press dd to delete it:
+This is a throwaway practice line.  Delete it with dd and watch the text close up.
+
+>> Put point on a word and press cw, type a replacement, and Esc.
+
+What you delete is not lost — it is saved, ready to put back (next lesson).
+
+
+* LESSON 4: YANK, PUT, AND UNDO
+-------------------------------
+'Yank' means copy; 'put' means paste.
+
+   yy   yank (copy) the current line     yw   yank a word
+   p    put after the cursor / below      P    put before / above
+   u    undo the last change              C-?  redo (re-apply an undo)
+
+>> Yank this line with yy, then press p to drop a copy on the line below.
+>> Make a mess with dd or x, then press u a few times to undo it.
+
+(Undo is u, as in Vim.  Redo is C-? — a Control chord, which works in every mode;
+more on those Emacs chords in Lesson 7.)
+
+
+* LESSON 5: VISUAL MODE (SELECTING)
+-----------------------------------
+Visual mode selects a range, then an operator acts on it.
+
+   v    start a character-wise selection   V    select whole lines
+   (move with h j k l, w, $, …)            the span highlights as you go
+   d    delete the selection   y  yank it   c  change it
+
+>> Press v, stretch the selection with l or w, then press d to cut it (u to undo).
+>> Press V to select this whole line, press j to add the next, then y to copy.
+
+
+* LESSON 6: SEARCH AND EX COMMANDS
+----------------------------------
+   /text   search forward for 'text' (Return to jump)    ?text  search backward
+   n       next match            N       previous match
+   :       start an Ex command, e.g.  :%s/old/new/g  to replace across the buffer
+
+>> Press / then type the word region and Return; press n to find the next one.
+
+
+* LESSON 7: THE EMACS KEYS YOU STILL NEED
+-----------------------------------------
+Evil only takes over the plain letter keys.  Control- and Meta-chords still run
+their Emacs commands in every mode, and you genuinely need a few for files,
+buffers, help, and quitting.  These are not optional extras — there is no Vim
+':w' wired up; saving is C-x C-s.
+
+   C-g        cancel a half-typed command (Vim's Esc cancels modes; C-g cancels
+              a pending Emacs chord) — your get-out-of-trouble key
+   C-x C-s    save the current buffer to its file        (Vim :w)
+   C-x C-f    open (visit) a file by name                (Vim :e)
+   C-x b      switch to another buffer       C-x C-b   list all buffers
+   C-x k      kill (close) a buffer          C-x C-c   quit Macros   (Vim :q)
+   M-x        run any command by name (a fuzzy list helps you find it)
+   C-h k <key>   describe what a key does    C-h t   reopen this tutorial
+
+>> Press C-x C-f to begin opening a file, then C-g to cancel.  Press M-x, type
+   apropos, Return, then a word like line to list matching commands.
+
+(Prefer Vim-style file commands?  Evil's Ex line has them too: try :w, :e, :q
+after pressing : — but the Emacs chords above always work.)
+
+
+* WHERE TO GO NEXT
+------------------
+You now know enough to edit the Vim way.  From here, Macros has much more: LSP
+code navigation, a magit-style git interface, project-wide search, dired, org-
+mode, keyboard macros, themes, and a full Steel (Scheme) extension language.
+Evil keymaps are all Scheme too — rebind anything in ~/.config/macros/init.scm.
+Add a leader key (Doom/Spacemacs style) with evil-set-leader and evil-leader-set.
+
+This is the end of the tutorial.  To close this buffer, type C-x k Return.  To
+quit Macros, type C-x C-c.
+")
+
+;; Open a fresh, editable copy of `text` in buffer `name`, point at the top, with
+;; an echo-area hint. Rebuilding from scratch each time gives a clean slate.
+(define (tutorial-open name text hint)
+  (kill-buffer-named name)
+  (append-to-buffer name text)
   (goto-char 0)
-  (message "Welcome to the Macros tutorial. Try the commands marked with >>."))
+  (message hint))
+
+;; The Emacs tutorial. Entering it switches OFF evil-mode so the keys it teaches
+;; (C-n, C-k, C-Space …) are the ones actually in effect while you practice.
+(define (help-with-emacs-tutorial)
+  (evil-disable)
+  (tutorial-open "*TUTORIAL*" *emacs-tutorial-text*
+                 "Welcome to the Macros tutorial. Try the commands marked with >>."))
+
+;; The vim/evil tutorial. Entering it switches ON evil-mode so the modal keys it
+;; teaches are live while you practice.
+(define (help-with-vim-tutorial)
+  (evil-mode)
+  (tutorial-open "*VIM-TUTORIAL*" *vim-tutorial-text*
+                 "Welcome to the Vim tutorial. Evil mode is on. Try the >> commands."))
+
+;; help-with-tutorial (C-h t): open the tutorial that matches your *current*
+;; keybindings — the vim one under evil-mode, the emacs one otherwise. It does
+;; NOT change the mode (the welcome-screen [emacs]/[evil/vim] labels do that).
+(define (help-with-tutorial)
+  (if (evil-enabled?)
+      (tutorial-open "*VIM-TUTORIAL*" *vim-tutorial-text*
+                     "Welcome to the Vim tutorial. Try the >> commands.")
+      (tutorial-open "*TUTORIAL*" *emacs-tutorial-text*
+                     "Welcome to the Macros tutorial. Try the commands marked with >>.")))
 
 (define-key "fundamental" "ctrl-h t" "help-with-tutorial")
 (register-command "help-with-tutorial")
+(register-command "help-with-emacs-tutorial")
+(register-command "help-with-vim-tutorial")
