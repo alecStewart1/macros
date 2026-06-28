@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://codeberg.org/likelihood/macros"
@@ -81,6 +81,9 @@ tree-sitter-clojure-orchard = "0.2.5"
 # SQL: the `-sequel` crate is DerekStride's grammar (the maintained one),
 # publishing `LANGUAGE: LanguageFn` and `HIGHLIGHTS_QUERY` on tree-sitter 0.26.
 tree-sitter-sequel = "0.3.11"
+# Elixir: the official grammar crate, publishing `LANGUAGE: LanguageFn` and
+# `HIGHLIGHTS_QUERY` on tree-sitter 0.26.
+tree-sitter-elixir = "0.3.5"
 # LaTeX and Typst grammars. No upstream crate exposes the modern `LanguageFn`
 # API against tree-sitter 0.26, so we use the `codebook-*` forks (from the
 # Codebook spellchecker), which publish a `LANGUAGE: LanguageFn` const built on

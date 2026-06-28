@@ -26,7 +26,7 @@ Because the mapping is by capture name, any standard tree-sitter `highlights.scm
 
 These grammars ship in the binary:
 
-`scheme` · `rust` · `python` · `javascript` · `typescript` · `tsx` · `json` · `c` · `cpp` · `go` · `java` · `scala` · `clojure` · `ruby` · `lua` · `zig` · `r` · `ocaml` · `haskell` · `bash` · `html` · `css` · `yaml` · `toml` · `markdown` · `latex` · `typst` · `mermaid`
+`scheme` · `rust` · `python` · `javascript` · `typescript` · `tsx` · `json` · `c` · `cpp` · `go` · `java` · `scala` · `clojure` · `elixir` · `ruby` · `lua` · `zig` · `r` · `ocaml` · `haskell` · `sql` · `bash` · `html` · `css` · `yaml` · `toml` · `markdown` · `latex` · `typst` · `mermaid`
 
 Map a file extension to one of them with `set-extension`, and highlighting (and the LSP language id) follows automatically:
 

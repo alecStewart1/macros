@@ -6864,6 +6864,13 @@ mod magit_tests {
             .eval(include_str!("../scheme/transient.scm"))
             .unwrap();
         engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        // Build transients as if invoked from inside a magit buffer, so the
+        // repo-association guard (which refuses fileless buffers like *scratch*)
+        // short-circuits and we exercise the transient structure itself.
+        engine.set_snapshot(EditorSnapshot {
+            name: "*magit*".into(),
+            ..Default::default()
+        });
 
         match engine
             .eval("(magit-branch-popup)")

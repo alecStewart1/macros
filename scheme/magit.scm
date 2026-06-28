@@ -881,15 +881,30 @@
     (when (and (not (equal? *magit-dir* "")) (not (equal? *magit-dir* ".")))
       (watch-tree "magit" (list *magit-dir*)))))
 
+;; The git work-tree the CURRENT buffer belongs to, or #f when it has none.
+;; A buffer that visits no file (e.g. *scratch*, *Messages*) is deliberately
+;; treated as "not in a repo": its `buffer-directory` falls back to the process
+;; cwd, so without this guard launching magit from *scratch* would silently open
+;; whatever repo the app happened to be started in. Requiring a real file (then
+;; walking up to its git work-tree) is the reliable "is this a project buffer?"
+;; signal — the same intent as projectile's `(project-root (buffer-directory))`
+;; guard, but git-exact (a file in a non-git project still returns #f).
+(define (magit-current-repo)
+  (and (not (equal? (buffer-file-name) ""))
+       (let ((top (gix-toplevel (buffer-directory))))
+         (and (not (equal? top "")) top))))
+
 ;; Launch: resolve the repo from the buffer you're in, then render. A refresh
-;; from inside *magit* keeps the repo we're already viewing.
-;; Resolve via projectile's shared project-root (walks up for `.git` & friends),
-;; then git-confirm the exact work-tree. Falls back to the buffer directory.
+;; from inside a *magit…* buffer keeps the repo we're already viewing; from any
+;; other buffer we require a git work-tree and refuse (like projectile) when the
+;; buffer isn't part of one.
 (define (magit-status)
-  (when (not (equal? (current-buffer) "*magit*"))
-    (let ((start (or (project-root (buffer-directory)) (buffer-directory))))
-      (set! *magit-dir* (magit-toplevel start))))
-  (magit-render))
+  (if (starts-with? (current-buffer) "*magit")
+      (magit-render)                       ; refresh the repo we're already viewing
+      (let ((repo (magit-current-repo)))
+        (if repo
+            (begin (set! *magit-dir* repo) (magit-render))
+            (message "Not inside a git repository")))))
 
 ;; Open magit on an explicitly chosen directory (the override path — used by the
 ;; Helm picker below, or callable directly for any repo).
@@ -898,14 +913,15 @@
   (magit-render))
 
 ;; Point *magit-dir* at the current buffer's repo when invoked from a NON-magit
-;; buffer. magit-status does this on entry; M-x entry points reachable from a
-;; file buffer (log, dispatch) must too, or they'd inherit a stale/default
-;; *magit-dir* and operate on the wrong repo. Inside a *magit…* buffer, the
-;; directory is already resolved — leave it untouched.
+;; buffer; returns #t on success, #f when the buffer isn't in a repo (so callers
+;; can refuse). M-x entry points reachable from a file buffer (log, dispatch)
+;; need this, or they'd inherit a stale/default *magit-dir* and operate on the
+;; wrong repo. Inside a *magit…* buffer the directory is already resolved.
 (define (magit-ensure-dir)
-  (when (not (starts-with? (current-buffer) "*magit"))
-    (let ((start (or (project-root (buffer-directory)) (buffer-directory))))
-      (set! *magit-dir* (magit-toplevel start)))))
+  (if (starts-with? (current-buffer) "*magit")
+      #t
+      (let ((repo (magit-current-repo)))
+        (and repo (begin (set! *magit-dir* repo) #t)))))
 
 ;; Refresh re-runs git for the SAME repo (never re-resolves).
 (define (magit-refresh) (magit-render))
@@ -1434,15 +1450,16 @@
 ;; --- log (l) → a read-only *magit-log* buffer -------------------------------
 (define (magit-log-toggle-graph) (magit-switch-toggle! "log:graph") (magit-log-popup))
 (define (magit-log-popup)
-  (magit-ensure-dir)            ; reachable via M-x from a file buffer
-  (transient "Log"
-    (list
-      (list "Switches"
-            (list "g" (magit-sw-label "Graph (--graph)" "log:graph") "magit-log-toggle-graph"))
-      (list "Actions"
-            (list "l" "Current branch" "magit-log-current")
-            (list "a" "All branches"   "magit-log-all")
-            (list "f" "File at point"  "magit-log-file")))))
+  (if (not (magit-ensure-dir))  ; reachable via M-x from a file buffer
+      (message "Not inside a git repository")
+      (transient "Log"
+        (list
+          (list "Switches"
+                (list "g" (magit-sw-label "Graph (--graph)" "log:graph") "magit-log-toggle-graph"))
+          (list "Actions"
+                (list "l" "Current branch" "magit-log-current")
+                (list "a" "All branches"   "magit-log-all")
+                (list "f" "File at point"  "magit-log-file"))))))
 (define (magit-log-flags) (magit-switch-args (list (cons "log:graph" "--graph"))))
 ;; gix renders the oneline+decorate log (no subprocess); the `--graph` toggle
 ;; falls back to git, whose ASCII commit-graph art gix can't reproduce.
@@ -1558,27 +1575,28 @@
 
 ;; --- dispatch (?) : the top-level menu --------------------------------------
 (define (magit-dispatch)
-  (magit-ensure-dir)            ; reachable via M-x from a file buffer
-  ;; Grouped (multi-column) transient: each inner list is a titled column.
-  (transient "Magit"
-    (list
-      (list "Changes"
-            (list "c"       "Commit" "magit-commit-popup")
-            (list "z"       "Stash"  "magit-stash-popup")
-            (list "shift-x" "Reset"  "magit-reset-popup")
-            (list "shift-h" "History" "magit-toggle-history")
-            (list "g"       "Refresh" "magit-refresh"))
-      (list "Branch"
-            (list "b"       "Branch" "magit-branch-popup")
-            (list "m"       "Merge"  "magit-merge-popup")
-            (list "r"       "Rebase" "magit-rebase-popup")
-            (list "t"       "Tag"    "magit-tag-popup")
-            (list "l"       "Log"    "magit-log-popup"))
-      (list "Remote"
-            (list "shift-p" "Push"   "magit-push-popup")
-            (list "shift-f" "Pull"   "magit-pull-popup")
-            (list "f"       "Fetch"  "magit-fetch-popup")
-            (list "shift-m" "Remote" "magit-remote-popup")))))
+  (if (not (magit-ensure-dir))  ; reachable via M-x from a file buffer
+      (message "Not inside a git repository")
+      ;; Grouped (multi-column) transient: each inner list is a titled column.
+      (transient "Magit"
+        (list
+          (list "Changes"
+                (list "c"       "Commit" "magit-commit-popup")
+                (list "z"       "Stash"  "magit-stash-popup")
+                (list "shift-x" "Reset"  "magit-reset-popup")
+                (list "shift-h" "History" "magit-toggle-history")
+                (list "g"       "Refresh" "magit-refresh"))
+          (list "Branch"
+                (list "b"       "Branch" "magit-branch-popup")
+                (list "m"       "Merge"  "magit-merge-popup")
+                (list "r"       "Rebase" "magit-rebase-popup")
+                (list "t"       "Tag"    "magit-tag-popup")
+                (list "l"       "Log"    "magit-log-popup"))
+          (list "Remote"
+                (list "shift-p" "Push"   "magit-push-popup")
+                (list "shift-f" "Pull"   "magit-pull-popup")
+                (list "f"       "Fetch"  "magit-fetch-popup")
+                (list "shift-m" "Remote" "magit-remote-popup"))))))
 
 ;; --- TAB / RET (sections) ---------------------------------------------------
 ;; TAB: expand/collapse the section at point. Sections are collapsed by default,

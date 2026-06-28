@@ -2979,3 +2979,14 @@
 ;; *Org Columns* buffer.
 (define-key "org-columns-mode" "q" "kill-buffer")
 (set-option "line-numbers:org-columns-mode" "false")
+
+;; *scratch* defaults to Org mode (Emacs `initial-major-mode`). At startup the
+;; active buffer is *scratch* (this file evals before welcome.scm), so switch it
+;; to org-mode here — the same steps org--maybe-activate runs for .org files,
+;; minus the find-file message. The mode sticks to the buffer, so dismissing the
+;; splash with `q` lands you in an Org *scratch* buffer.
+(when (equal? (current-buffer) "*scratch*")
+  (set-major-mode "org-mode")
+  (buffer-local-set "org-active" "t")
+  (buffer-local-set "fold-style" "org")
+  (org--fontify))

@@ -1455,10 +1455,12 @@ impl Editor {
         // The active highlighter follows the active mode's language.
         let highlighter = modes.active_language().and_then(Highlighter::for_language);
 
-        let welcome = ";; Macros — the Emacs you know, with a modern engine\n\
-                       ;; Movement: C-f/C-b/C-n/C-p, C-a/C-e, M-f/M-b\n\
-                       ;; Kill/yank: C-k, C-w, M-w, C-y; mark: C-Space; undo: C-/\n\
-                       ;; steel-mode: C-c C-e eval-last-sexp, C-c C-b eval-buffer\n\n";
+        // *scratch* defaults to Org mode (see org.scm), so the greeting uses Org
+        // comment syntax (`#`) rather than Steel's `;;`.
+        let welcome = "# Macros — the Emacs you know, with a modern engine\n\
+                       # This buffer is for notes you don't want to save, in Org mode.\n\
+                       # Movement: C-f/C-b/C-n/C-p, C-a/C-e, M-f/M-b\n\
+                       # Kill/yank: C-k, C-w, M-w, C-y; mark: C-Space; undo: C-/\n\n";
 
         let (script, mut script_outcomes) = ScriptEngine::new();
         let (anvil, mut anvil_outcomes) = AnvilEngine::new();
@@ -3754,6 +3756,7 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         "scala" | "sc" | "sbt" => "scala",
         "clj" | "cljs" | "cljc" | "edn" => "clojure",
         "sql" => "sql",
+        "ex" | "exs" => "elixir",
         "tex" | "sty" | "cls" => "latex",
         "typ" => "typst",
         "mmd" | "mermaid" => "mermaid",
@@ -4945,6 +4948,8 @@ mod tests {
         assert_eq!(language_for_path(Path::new("doc.typ")), Some("typst"));
         assert_eq!(language_for_path(Path::new("flow.mmd")), Some("mermaid"));
         assert_eq!(language_for_path(Path::new("query.sql")), Some("sql"));
+        assert_eq!(language_for_path(Path::new("app.ex")), Some("elixir"));
+        assert_eq!(language_for_path(Path::new("mix.exs")), Some("elixir"));
         assert_eq!(language_for_path(Path::new("notes.txt")), None);
         assert_eq!(language_for_path(Path::new("Makefile")), None);
     }

@@ -236,6 +236,12 @@ impl Editor {
     /// line-wise or character-wise placement from the flag set by the last
     /// yank/delete (`evil_yank_linewise`).
     pub(super) fn evil_paste(&mut self, after: bool, cx: &mut Context<Self>) {
+        // Reconcile with the system clipboard before pasting, so `p` pastes what
+        // was last copied anywhere. External text carries no line-wise marker, so
+        // paste it char-wise.
+        if self.sync_clipboard_into_kill_ring(cx) {
+            self.evil_yank_linewise = false;
+        }
         let Some(text) = self.kill_ring.last().cloned() else {
             self.echo("Kill ring is empty", cx);
             return;

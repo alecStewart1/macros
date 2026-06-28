@@ -4353,7 +4353,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "macros"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "alacritty_terminal",
  "arc-swap",
@@ -4389,6 +4389,7 @@ dependencies = [
  "tree-sitter-clojure-orchard",
  "tree-sitter-cpp",
  "tree-sitter-css",
+ "tree-sitter-elixir",
  "tree-sitter-go",
  "tree-sitter-haskell",
  "tree-sitter-html",
@@ -7328,6 +7329,16 @@ name = "tree-sitter-css"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5cbc5e18f29a2c6d6435891f42569525cf95435a3e01c2f1947abcde178686f"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-elixir"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66dd064a762ed95bfc29857fa3cb7403bb1e5cb88112de0f6341b7e47284ba40"
 dependencies = [
  "cc",
  "tree-sitter-language",

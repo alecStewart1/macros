@@ -121,7 +121,28 @@ impl Editor {
         cx.notify();
     }
 
+    /// Pull the system clipboard into the kill ring when it holds text that isn't
+    /// already the ring's top — i.e. it was copied in another app, or via a path
+    /// that bypassed the ring. This is Emacs's `interprogram-paste-function`: any
+    /// yank/paste then reflects what was last copied *anywhere*, not just inside
+    /// the editor. Returns true when an external value was adopted, so callers
+    /// tracking register metadata (evil's line-wise flag) can reset it.
+    pub(super) fn sync_clipboard_into_kill_ring(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(clip) = cx.read_from_clipboard().and_then(|item| item.text())
+            && !clip.is_empty()
+            && self.kill_ring.last() != Some(&clip)
+        {
+            self.kill_ring.push(clip);
+            self.kill_index = self.kill_ring.len() - 1;
+            return true;
+        }
+        false
+    }
+
     pub(super) fn yank(&mut self, cx: &mut Context<Self>) {
+        // C-y reflects the system clipboard too (Emacs `select-enable-clipboard`),
+        // so a copy from another app yanks here without needing cmd-v.
+        self.sync_clipboard_into_kill_ring(cx);
         let Some(text) = self.kill_ring.last().cloned() else {
             self.echo("Kill ring is empty", cx);
             return;
