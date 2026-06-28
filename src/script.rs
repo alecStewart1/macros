@@ -686,6 +686,9 @@ pub struct EditorSnapshot {
     /// Buffer's directory — visited file's parent, else the process cwd
     /// (Emacs's buffer-local `default-directory`).
     pub directory: String,
+    /// The visited file's full path, or "" for a buffer with no file (Emacs's
+    /// `buffer-file-name`). Lets Scheme reveal the current file in dired etc.
+    pub path: String,
     /// Point as a byte offset.
     pub point: usize,
     /// The full buffer text. A [`Rope`] handle, not an owned `String`: the editor
@@ -1893,6 +1896,7 @@ impl ScriptEngine {
                 "buffer-line",
                 "current-buffer",
                 "buffer-directory",
+                "buffer-file-name",
                 "point",
                 "point-max",
                 "position->byte",
@@ -3856,6 +3860,9 @@ fn build_engine(
     register_snapshot_read(&mut engine, point, "buffer-directory", |s| {
         s.directory.clone()
     });
+    // The visited file's full path, or "" for a buffer with no file (Emacs's
+    // `buffer-file-name`).
+    register_snapshot_read(&mut engine, point, "buffer-file-name", |s| s.path.clone());
     // Point as a byte offset (Emacs `(point)`).
     register_snapshot_read(&mut engine, point, "point", |s| s.point);
     {
@@ -9398,6 +9405,18 @@ mod dired_subtree_lib {
         assert_eq!(v(r#"(dired-subtree-icon "README.md")"#), "\"file-text\"");
         assert_eq!(v(r#"(dired-subtree-icon "notes")"#), "\"file\"");
         assert_eq!(v(r#"(dired-subtree-strip-slash "/a/b/")"#), "\"/a/b\"");
+        // Reveal: ancestors of a file from just inside the root down to its parent,
+        // ordered root-first so they expand top-down.
+        assert_eq!(
+            v(r#"(dired-subtree-ancestors "/a" "/a/b/c/f.rs")"#),
+            "(\"/a/b\" \"/a/b/c\")"
+        );
+        // A file directly in the root has no intermediate dirs to open.
+        assert_eq!(v(r#"(dired-subtree-ancestors "/a" "/a/f.rs")"#), "()");
+        // A file outside the root reveals nothing.
+        assert_eq!(v(r#"(dired-subtree-ancestors "/a" "/x/y/f.rs")"#), "()");
+        // A sibling whose name merely prefixes the root must not count as inside it.
+        assert_eq!(v(r#"(dired-subtree-ancestors "/a" "/ab/f.rs")"#), "()");
         // dired-sidebar is the bundled file-tree command.
         assert_eq!(
             v(r#"(if (member "dired-sidebar" *interactive-commands*) "y" "n")"#),

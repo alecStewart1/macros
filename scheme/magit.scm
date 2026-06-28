@@ -650,7 +650,21 @@
     (for-each (lambda (f) (magit-emit-diff f type (diff-map-get dmap (magit-newpath (cadr f))))) files)
     (magit-emit "" #f #f #f)))
 
-;; Untracked files have no diff — list them as (empty-body) sections.
+;; Untracked files have no index entry, so `git diff` skips them. Diff each one
+;; against /dev/null (`--no-index`) to render its whole content as added lines —
+;; this exits non-zero whenever the files differ, so we keep stdout regardless of
+;; the code. Strip the file-header noise (magit-diff-keep?) so only the @@ hunk +
+;; body lines remain. Empty/binary files yield no body (nothing to expand).
+(define (magit-untracked-diff path)
+  (let ((r (call-process-full "git"
+             (list "-C" *magit-dir* "diff" "--no-index" "--"
+                   "/dev/null" (magit-newpath path)) "")))
+    (filter magit-diff-keep? (split-many (trim-end (nth r 1)) "\n"))))
+
+;; Render each untracked file as a foldable section: its content shown as added
+;; lines, with a body range so TAB folds/expands it like a tracked file. We do
+;; NOT register hunks — staging/discarding an untracked file acts on the whole
+;; file (`git add` / `git clean`), so `s`/`k` keep using the file-level path.
 (define (magit-emit-file-section title files type)
   (when (not (null? files))
     (set! *magit-headings* (cons (cons *magit-n* type) *magit-headings*))
@@ -659,8 +673,11 @@
     (for-each (lambda (f)
                 (let ((heading *magit-n*))
                   (magit-emit-file-heading "" f type)
-                  (set! *magit-sections*
-                        (cons (list heading f type heading heading) *magit-sections*))))
+                  (let ((body-start *magit-n*))
+                    (for-each magit-emit-diff-line (magit-untracked-diff f))
+                    (set! *magit-sections*
+                          (cons (list heading f type body-start *magit-n*)
+                                *magit-sections*)))))
               files)
     (magit-emit "" #f #f #f)))
 

@@ -174,6 +174,19 @@
   (dired-subtree-strip-slash
     (or (project-root (buffer-directory)) (buffer-directory))))
 
+;; Directories to open so PATH (a file) becomes visible under ROOT: every ancestor
+;; of PATH from just inside ROOT down to PATH's own parent. Returns '() when PATH
+;; isn't under ROOT (nothing to reveal). Walks up parent-by-parent, so it stops at
+;; the filesystem root even when the prefix never matches.
+(define (dired-subtree-ancestors root path)
+  (let ((root (dired-subtree-strip-slash root)))
+    (let loop ((dir (parent-directory (dired-subtree-strip-slash path))) (acc '()))
+      (cond ((equal? dir root) acc)
+            ((or (equal? dir "")
+                 (not (starts-with? (string-append dir "/")
+                                    (string-append root "/")))) '())
+            (else (loop (parent-directory dir) (cons dir acc)))))))
+
 ;; Toggle PATH in EXPANDED (a list of dir paths), returning the new list.
 (define (dired-subtree-toggled expanded path)
   (if (member path expanded)
@@ -213,18 +226,39 @@
 ;; Open the tree in a 20%-wide sidebar on the left, pushing the current buffer into
 ;; an 80% pane on the right. Re-invoking just refocuses the sidebar, preserving the
 ;; expanded directories and any pending marks; only a fresh open resets them.
+;; Move point onto the row showing full path PATH, if it's currently visible in
+;; the tree. Entries are (line path is-dir); dirs carry a trailing slash, so both
+;; sides are stripped before comparing.
+(define (dired-sidebar-goto-path path)
+  (let ((target (dired-subtree-strip-slash path)))
+    (let loop ((es *dired-sidebar-entries*))
+      (cond ((null? es) #f)
+            ((equal? (dired-subtree-strip-slash (nth (car es) 1)) target)
+             (goto-line (nth (car es) 0)))
+            (else (loop (cdr es)))))))
+
 (define (dired-sidebar)
   (if (dired-sidebar-live?)
       (begin (select-window *dired-sidebar-window*) (dired-sidebar-render))
-      (begin
+      ;; Read the visited file BEFORE the split — afterward the tree buffer is
+      ;; active and buffer-file-name no longer points at the file we came from.
+      (let ((file (buffer-file-name)))
         (set! *dired-sidebar-root* (dired-subtree-default-root))
-        (set! *dired-sidebar-expanded* '())
+        ;; Reveal the current file: open its ancestor dirs so it shows in the tree
+        ;; ('() when there's no file, or it's outside the root).
+        (set! *dired-sidebar-expanded*
+              (if (equal? file "")
+                  '()
+                  (dired-subtree-ancestors *dired-sidebar-root* file)))
         (set! *dired-sidebar-marks* '())
         ;; The split keeps the selected pane selected, so it (now the left 20%) is
         ;; where the tree renders; the right 80% keeps the original buffer.
         (set! *dired-sidebar-window* (selected-window))
         (split-window-right-ratio 0.2)
-        (dired-sidebar-render))))
+        (dired-sidebar-render)
+        ;; Land point on the revealed file (no-op if it isn't under the root).
+        (when (not (equal? file ""))
+          (dired-sidebar-goto-path file)))))
 (define (dired-sidebar-refresh) (dired-sidebar-render))
 
 ;; directory-changed-hook handler: re-render only when the sidebar buffer is alive
