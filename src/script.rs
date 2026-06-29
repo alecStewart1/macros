@@ -7469,33 +7469,6 @@ mod magit_tests {
         );
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     /// Async primitives parse to their commands.
     #[test]
     fn async_primitives_parse() {
@@ -7573,7 +7546,11 @@ mod magit_tests {
             other => panic!("expected HttpStream, got {other:?}"),
         }
         assert!(matches!(
-            engine.eval(r"(http-stream-cancel 7)").unwrap().commands.as_slice(),
+            engine
+                .eval(r"(http-stream-cancel 7)")
+                .unwrap()
+                .commands
+                .as_slice(),
             [EditorCommand::HttpStreamCancel { id: 7 }]
         ));
     }

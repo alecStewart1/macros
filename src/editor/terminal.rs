@@ -125,8 +125,8 @@ impl Editor {
         on_done: String,
         cx: &mut Context<Self>,
     ) {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.http_streams.insert(id, cancel.clone());
@@ -158,7 +158,8 @@ impl Editor {
                 // error JSON (e.g. a 401 from a bad key) into the transcript.
                 Err(ureq::Error::Status(code, resp)) => {
                     let detail = resp.into_string().unwrap_or_default();
-                    let _ = tx.unbounded_send(ProcMsg::Line(format!("error: HTTP {code}: {detail}")));
+                    let _ =
+                        tx.unbounded_send(ProcMsg::Line(format!("error: HTTP {code}: {detail}")));
                 }
                 Err(e) => {
                     let _ = tx.unbounded_send(ProcMsg::Line(format!("error: {e}")));
@@ -171,9 +172,7 @@ impl Editor {
             while let Some(msg) = rx.next().await {
                 let alive = this
                     .update(cx, |editor, _| match &msg {
-                        ProcMsg::Line(line) => {
-                            editor.script.dispatch_action(&on_line, Some(line))
-                        }
+                        ProcMsg::Line(line) => editor.script.dispatch_action(&on_line, Some(line)),
                         ProcMsg::Exit => {
                             editor.http_streams.remove(&id);
                             if !on_done.is_empty() {
