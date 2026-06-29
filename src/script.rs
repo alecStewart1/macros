@@ -33,6 +33,24 @@ pub struct GrammarInstall {
     pub subdir: String,
 }
 
+/// Payload for [`EditorCommand::HttpStream`]. Boxed in the enum because it's the
+/// largest variant by far (a `Vec` plus several `String`s); see the variant doc.
+#[derive(Debug, Clone)]
+pub struct HttpStreamArgs {
+    /// Stream id (for `http-stream-cancel`).
+    pub id: u64,
+    /// Request URL.
+    pub url: String,
+    /// Request headers as `(key, value)` pairs.
+    pub headers: Vec<(String, String)>,
+    /// JSON request body.
+    pub body: String,
+    /// Steel fn called with each response line as it arrives.
+    pub on_line: String,
+    /// Steel fn called with the stream id once the body closes.
+    pub on_done: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
     // Motion
@@ -546,19 +564,12 @@ pub enum EditorCommand {
     KillProcess {
         id: u64,
     },
-    /// Open a streaming HTTP POST to `url` under `id` with `headers` (key/value
-    /// pairs) and JSON `body`; call Steel `on_line` with each response line as it
-    /// arrives, and `on_done` with the stream id once it closes. The transport for
+    /// Open a streaming HTTP POST (see [`HttpStreamArgs`]); the transport for
     /// talking directly to a model provider's SSE endpoint (e.g. Anthropic) from
-    /// Steel — the HTTP analogue of `make-process`.
-    HttpStream {
-        id: u64,
-        url: String,
-        headers: Vec<(String, String)>,
-        body: String,
-        on_line: String,
-        on_done: String,
-    },
+    /// Steel — the HTTP analogue of `make-process`. Boxed: its payload is far
+    /// larger than any other variant, and unboxed it would bloat every
+    /// `Result<(), EditorCommand>` (clippy `result_large_err`).
+    HttpStream(Box<HttpStreamArgs>),
     /// Cancel in-flight HTTP stream `id`: the reader stops forwarding lines and
     /// drops the connection (the chat client's "cancel turn").
     HttpStreamCancel {
@@ -3973,14 +3984,16 @@ fn build_engine(
                     .collect();
                 let on_line = steel_string(&on_line).unwrap_or_default();
                 let on_done = steel_string(&on_done).unwrap_or_default();
-                q.lock().unwrap().push(EditorCommand::HttpStream {
-                    id,
-                    url,
-                    headers,
-                    body,
-                    on_line,
-                    on_done,
-                });
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::HttpStream(Box::new(HttpStreamArgs {
+                        id,
+                        url,
+                        headers,
+                        body,
+                        on_line,
+                        on_done,
+                    })));
                 id as usize
             },
         );
@@ -7521,16 +7534,15 @@ mod magit_tests {
             .commands
             .as_slice()
         {
-            [
-                EditorCommand::HttpStream {
+            [EditorCommand::HttpStream(args)] => {
+                let HttpStreamArgs {
                     url,
                     headers,
                     body,
                     on_line,
                     on_done,
                     ..
-                },
-            ] => {
+                } = args.as_ref();
                 assert_eq!(url, "https://api.anthropic.com/v1/messages");
                 assert_eq!(
                     headers.as_slice(),

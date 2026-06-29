@@ -117,16 +117,20 @@ impl Editor {
     /// checks it between lines and drops the connection.
     pub(super) fn http_stream(
         &mut self,
-        id: u64,
-        url: String,
-        headers: Vec<(String, String)>,
-        body: String,
-        on_line: String,
-        on_done: String,
+        args: crate::script::HttpStreamArgs,
         cx: &mut Context<Self>,
     ) {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+
+        let crate::script::HttpStreamArgs {
+            id,
+            url,
+            headers,
+            body,
+            on_line,
+            on_done,
+        } = args;
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.http_streams.insert(id, cancel.clone());

@@ -771,14 +771,7 @@ impl Editor {
             }
             SendProcess { id, text } => self.send_to_process(id, &text, cx),
             KillProcess { id } => self.kill_process(id),
-            HttpStream {
-                id,
-                url,
-                headers,
-                body,
-                on_line,
-                on_done,
-            } => self.http_stream(id, url, headers, body, on_line, on_done, cx),
+            HttpStream(args) => self.http_stream(*args, cx),
             HttpStreamCancel { id } => self.http_stream_cancel(id),
             AnvilEval { source, on_result } => self.anvil.eval(&source, &on_result),
             AnvilInterrupt => self.anvil.interrupt(),
