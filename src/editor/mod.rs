@@ -604,6 +604,9 @@ pub struct Editor {
     resizing: Option<ResizeDrag>,
     /// Live async child processes, by id (for stdin/kill).
     processes: HashMap<u64, ProcessHandle>,
+    /// Cancel flags for in-flight HTTP streams, by id. `http-stream-cancel` flips
+    /// the flag; the stream's reader thread checks it between lines and stops.
+    http_streams: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Live embedded terminals, by id. A `term-mode` buffer's name maps to one
     /// of these via [`Terminal::buffer_name`].
     terminals: HashMap<u64, Terminal>,
@@ -1608,6 +1611,7 @@ impl Editor {
             fold_hitboxes: Vec::new(),
             resizing: None,
             processes: HashMap::new(),
+            http_streams: HashMap::new(),
             terminals: HashMap::new(),
             term_events_tx,
             lsp_fullsync_dirty: None,
