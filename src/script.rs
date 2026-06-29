@@ -7485,6 +7485,7 @@ mod magit_tests {
 
 
 
+
     /// Async primitives parse to their commands.
     #[test]
     fn async_primitives_parse() {
