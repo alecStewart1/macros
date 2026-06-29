@@ -41,6 +41,9 @@ use tree_sitter_language::LanguageFn;
 struct Installed {
     language_fn: LanguageFn,
     highlights: String,
+    /// The grammar's `queries/indents.scm`, if it ships one — enables structural
+    /// auto-indent. Optional: absent for grammars that provide only highlights.
+    indents: Option<String>,
     extensions: Vec<String>,
 }
 
@@ -106,6 +109,13 @@ pub fn installed(id: &str) -> Option<(LanguageFn, String)> {
     Some((entry.language_fn, entry.highlights.clone()))
 }
 
+/// The structural-indent query (`queries/indents.scm`) for a runtime-installed
+/// language, or `None` when the grammar shipped none.
+/// [`crate::highlight::Highlighter::for_language`] uses it to enable auto-indent.
+pub fn installed_indent(id: &str) -> Option<String> {
+    registry().read().unwrap().get(id)?.indents.clone()
+}
+
 /// The installed language id claiming file extension `ext` (no dot), or `None`.
 /// `language_for_path` consults this after its bundled match misses, so opening a
 /// `.foo` file highlights once a `.foo` grammar is installed — no restart.
@@ -129,13 +139,20 @@ pub fn installed_ids() -> Vec<String> {
 
 /// Insert a loaded grammar into the registry. Shared by [`install`] and the
 /// tests (which register a bundled `LanguageFn` directly, skipping dlopen).
-fn register(id: &str, language_fn: LanguageFn, highlights: String, extensions: Vec<String>) {
+fn register(
+    id: &str,
+    language_fn: LanguageFn,
+    highlights: String,
+    indents: Option<String>,
+    extensions: Vec<String>,
+) {
     intern(id); // so a later language_for_extension hand-back is cheap
     registry().write().unwrap().insert(
         id.to_string(),
         Installed {
             language_fn,
             highlights,
+            indents,
             extensions,
         },
     );
@@ -203,6 +220,11 @@ fn install_in(spec: InstallSpec, root: &Path) -> Result<String, String> {
     let highlights = std::fs::read_to_string(&hl_path)
         .map_err(|e| format!("highlights query {}: {e}", hl_path.display()))?;
 
+    // 3b. The structural-indent query is optional — read it if present (a
+    //     missing one just leaves the language on copy-previous indentation),
+    //     but if it exists it must compile, else it would silently no-op.
+    let indents = std::fs::read_to_string(grammar_dir.join("queries/indents.scm")).ok();
+
     // 4. dlopen + ABI check, then register.
     let language_fn = load(&lib, &symbol)?;
     // Validate the query compiles against this grammar now, so a broken query
@@ -210,8 +232,12 @@ fn install_in(spec: InstallSpec, root: &Path) -> Result<String, String> {
     let language: Language = language_fn.into();
     tree_sitter::Query::new(&language, &highlights)
         .map_err(|e| format!("highlights query does not compile against {}: {e}", spec.id))?;
+    if let Some(src) = &indents {
+        tree_sitter::Query::new(&language, src)
+            .map_err(|e| format!("indents query does not compile against {}: {e}", spec.id))?;
+    }
 
-    register(&spec.id, language_fn, highlights, spec.extensions);
+    register(&spec.id, language_fn, highlights, indents, spec.extensions);
     Ok(spec.id)
 }
 
@@ -632,6 +658,7 @@ mod tests {
             "rustish",
             tree_sitter_rust::LANGUAGE,
             tree_sitter_rust::HIGHLIGHTS_QUERY.to_string(),
+            None,
             vec!["rsh".to_string()],
         );
 

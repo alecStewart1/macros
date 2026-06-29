@@ -2480,10 +2480,260 @@ impl Editor {
 
     fn newline(&mut self, cx: &mut Context<Self>) {
         if self.has_extra_cursors() {
+            // Multi-cursor RET stays a plain split; per-cursor reindent would
+            // need each cursor's own structural context.
             self.multi_insert("\n", cx);
             return;
         }
-        self.insert_text("\n", cx);
+        if !cx.global::<crate::settings::Settings>().electric_indent() {
+            self.insert_text("\n", cx);
+            return;
+        }
+        let p = self.selected_range.start;
+
+        // Lisp: dedicated paren-aligning indenter (column alignment, which the
+        // step-based tree-sitter model can't express).
+        if self
+            .active_language()
+            .as_deref()
+            .is_some_and(is_lisp_language)
+        {
+            let text = self.buffer.slice_to_string(self.lisp_defun_start(p)..p);
+            let indent = " ".repeat(lisp_indent_for(&text));
+            self.insert_text(&format!("\n{indent}"), cx);
+            return;
+        }
+
+        // Tree-sitter structural indent, when the grammar carries an indent query.
+        let tab = cx.global::<crate::settings::Settings>().tab_width();
+        let target_row = self.buffer.byte_to_position(p).0 + 1;
+        let anchor = self.prev_nonspace(p);
+        if let Some(level) = self.tree_indent(anchor, p, target_row, Some(p)) {
+            // Cursor sitting just before a closing bracket: open a body line and
+            // push the closer down to its own (dedented) line.
+            let next = self.buffer.slice_to_string(p..self.buffer.next_grapheme(p));
+            if matches!(next.as_str(), "}" | ")" | "]")
+                && let Some(body) = self.tree_indent(anchor, p, target_row, None)
+                && body > level
+            {
+                let first = " ".repeat(body * tab);
+                let second = " ".repeat(level * tab);
+                self.edit(self.selected_range.clone(), &format!("\n{first}\n{second}"));
+                self.collapse_to(p + 1 + first.len());
+                self.ensure_cursor_visible();
+                cx.notify();
+                return;
+            }
+            self.insert_text(&format!("\n{}", " ".repeat(level * tab)), cx);
+            return;
+        }
+
+        // Fallback (no indent query): copy the current line's leading whitespace
+        // up to point, so splitting inside the indentation never adds extra.
+        let line = self.buffer.line_range_at(p);
+        let indent: String = self
+            .buffer
+            .slice_to_string(line.start..p)
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        self.insert_text(&format!("\n{indent}"), cx);
+    }
+
+    /// The structural indent depth (in `tab_width` steps) for a line, via the
+    /// active buffer's tree-sitter indent query. `anchor` is the byte whose
+    /// syntax the line follows (previous non-blank for a newline, the line's own
+    /// first non-blank for reindent); `ref_byte` is the line's logical start.
+    /// `None` when there is no highlighter or no indent query for the language.
+    /// See [`crate::highlight::Highlighter::indent_level`].
+    fn tree_indent(
+        &self,
+        anchor: usize,
+        ref_byte: usize,
+        target_row: usize,
+        outdent_byte: Option<usize>,
+    ) -> Option<usize> {
+        self.highlighter.as_ref()?.indent_level(
+            self.buffer.rope(),
+            anchor,
+            ref_byte,
+            target_row,
+            outdent_byte,
+        )
+    }
+
+    /// Byte ranges to highlight for matching-delimiter display (Emacs
+    /// `show-paren-mode`): the bracket at point (block-cursor style) or just
+    /// before it, together with its match — each one grapheme wide. Empty when
+    /// point isn't on a bracket, or the bracket has no match. Computed fresh per
+    /// frame by the painter, so it always tracks the cursor.
+    pub(super) fn show_paren_ranges(&self) -> Vec<Range<usize>> {
+        let p = self.point();
+        let at = |b: usize, e: usize| self.buffer.slice_to_string(b..e);
+        // Prefer the bracket the cursor sits on (the char "after" point); else
+        // the closer the cursor just moved past.
+        let delim = if p < self.buffer.len()
+            && matches!(
+                at(p, self.buffer.next_grapheme(p)).as_str(),
+                "(" | "[" | "{"
+            ) {
+            Some(p)
+        } else {
+            let prev = self.buffer.prev_grapheme(p);
+            (prev < p && matches!(at(prev, p).as_str(), ")" | "]" | "}")).then_some(prev)
+        };
+        let Some(d) = delim else {
+            return Vec::new();
+        };
+        match self.bracket_match(d) {
+            Some(m) => vec![
+                d..self.buffer.next_grapheme(d),
+                m..self.buffer.next_grapheme(m),
+            ],
+            None => Vec::new(),
+        }
+    }
+
+    /// The matching delimiter for the bracket at `byte` — structurally via the
+    /// parse tree when the buffer has one, else a balanced text scan (plain-text
+    /// buffers, or a grammar where the tree lookup misses).
+    fn bracket_match(&self, byte: usize) -> Option<usize> {
+        if let Some(m) = self
+            .highlighter
+            .as_ref()
+            .and_then(|h| h.bracket_match(byte))
+        {
+            return Some(m);
+        }
+        self.scan_bracket_match(byte)
+    }
+
+    /// Balanced bracket scan over buffer text (counting only the delimiter's own
+    /// kind), bounded so a keypress can't scan an enormous buffer. Not string- or
+    /// comment-aware — that's what the tree-sitter path in [`Self::bracket_match`]
+    /// is for; this is the no-grammar fallback.
+    fn scan_bracket_match(&self, byte: usize) -> Option<usize> {
+        let rope = self.buffer.rope();
+        if byte >= rope.len_bytes() {
+            return None;
+        }
+        let total = rope.len_chars();
+        let mut ci = rope.byte_to_char(byte);
+        let (open, close, forward) = match rope.char(ci) {
+            '(' => ('(', ')', true),
+            '[' => ('[', ']', true),
+            '{' => ('{', '}', true),
+            ')' => ('(', ')', false),
+            ']' => ('[', ']', false),
+            '}' => ('{', '}', false),
+            _ => return None,
+        };
+        const LIMIT: usize = 200_000;
+        let mut depth = 0i32;
+        for _ in 0..LIMIT {
+            let c = rope.char(ci);
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+            }
+            if depth == 0 {
+                return Some(rope.char_to_byte(ci));
+            }
+            if forward {
+                ci += 1;
+                if ci >= total {
+                    return None;
+                }
+            } else if ci == 0 {
+                return None;
+            } else {
+                ci -= 1;
+            }
+        }
+        None
+    }
+
+    /// Byte where the nearest non-whitespace grapheme before `from` begins, or 0
+    /// if only whitespace precedes it. Anchors a fresh line's indentation to the
+    /// previous line's syntax (e.g. a compound-statement header) rather than the
+    /// blank position just past the newline.
+    fn prev_nonspace(&self, from: usize) -> usize {
+        let mut a = from;
+        while a > 0 {
+            let prev = self.buffer.prev_grapheme(a);
+            if self
+                .buffer
+                .slice_to_string(prev..a)
+                .chars()
+                .all(char::is_whitespace)
+            {
+                a = prev;
+            } else {
+                return prev;
+            }
+        }
+        0
+    }
+
+    /// Byte offset of the nearest enclosing top-level form at or before `pos` —
+    /// the start of the last line whose first character is `(`. Falls back to
+    /// the buffer start. This bounds the Lisp indent scan to one defun, the
+    /// same heuristic Emacs `beginning-of-defun` uses for Lisp.
+    fn lisp_defun_start(&self, pos: usize) -> usize {
+        let mut i = self.buffer.line_index_at_byte(pos);
+        loop {
+            let range = self.buffer.line_range(i);
+            if self.buffer.slice_to_string(range.clone()).starts_with('(') {
+                return range.start;
+            }
+            if i == 0 {
+                return 0;
+            }
+            i -= 1;
+        }
+    }
+
+    /// Replace the current line's leading whitespace with `target` spaces,
+    /// keeping point in the same place relative to the line's text (Emacs TAB
+    /// reindent). A no-op move when the line is already correctly space-indented.
+    fn reindent_current_line(&mut self, target: usize, cx: &mut Context<Self>) {
+        let p = self.point();
+        let line = self.buffer.line_range_at(p);
+        let line_text = self.buffer.slice_to_string(line.clone());
+        let cur: String = line_text
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let cur_bytes = cur.len();
+        let indent_end = line.start + cur_bytes;
+        if target == cur.chars().count() && cur.bytes().all(|b| b == b' ') {
+            if p < indent_end {
+                self.move_to(indent_end, cx);
+            }
+            return;
+        }
+        self.edit(line.start..indent_end, &" ".repeat(target));
+        let new_indent_end = line.start + target;
+        let cursor = if p <= indent_end {
+            new_indent_end
+        } else {
+            (p + target).saturating_sub(cur_bytes)
+        };
+        self.collapse_to(cursor);
+        cx.notify();
+    }
+
+    /// Reindent the current line to its Lisp indentation (Emacs TAB in a Lisp
+    /// buffer).
+    fn lisp_reindent_line(&mut self, cx: &mut Context<Self>) {
+        let line = self.buffer.line_range_at(self.point());
+        let target = lisp_indent_for(
+            &self
+                .buffer
+                .slice_to_string(self.lisp_defun_start(line.start)..line.start),
+        );
+        self.reindent_current_line(target, cx);
     }
 
     fn open_line(&mut self, cx: &mut Context<Self>) {
@@ -2493,8 +2743,42 @@ impl Editor {
     }
 
     fn indent_for_tab(&mut self, cx: &mut Context<Self>) {
-        let width = cx.global::<crate::settings::Settings>().tab_width();
-        self.insert_text(&" ".repeat(width), cx);
+        let (electric, tab) = {
+            let s = cx.global::<crate::settings::Settings>();
+            (s.electric_indent(), s.tab_width())
+        };
+        if electric && !self.has_extra_cursors() && self.region().is_none() {
+            // Lisp: paren-aligning reindent.
+            if self
+                .active_language()
+                .as_deref()
+                .is_some_and(is_lisp_language)
+            {
+                self.lisp_reindent_line(cx);
+                return;
+            }
+            // Tree-sitter structural reindent of the current line.
+            let line = self.buffer.line_range_at(self.point());
+            let line_text = self.buffer.slice_to_string(line.clone());
+            let lead_bytes: usize = line_text
+                .chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .map(char::len_utf8)
+                .sum();
+            let ref_byte = if lead_bytes < line_text.len() {
+                line.start + lead_bytes
+            } else {
+                line.start
+            };
+            let target_row = self.buffer.byte_to_position(line.start).0;
+            // Reindent anchors on the line's own content (no scan back), so a
+            // line that belongs outside an enclosing block isn't pulled into it.
+            if let Some(level) = self.tree_indent(ref_byte, ref_byte, target_row, Some(ref_byte)) {
+                self.reindent_current_line(level * tab, cx);
+                return;
+            }
+        }
+        self.insert_text(&" ".repeat(tab), cx);
     }
 
     fn set_mark(&mut self, cx: &mut Context<Self>) {
@@ -3768,6 +4052,239 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
     Some(language)
 }
 
+/// Languages that get Lisp-style (paren-aware) auto-indentation rather than the
+/// generic copy-previous-line-indent behaviour.
+fn is_lisp_language(lang: &str) -> bool {
+    matches!(
+        lang,
+        "scheme"
+            | "macros-scheme"
+            | "racket"
+            | "lisp"
+            | "commonlisp"
+            | "common-lisp"
+            | "clojure"
+            | "clojurescript"
+            | "elisp"
+            | "emacs-lisp"
+            | "fennel"
+            | "janet"
+    )
+}
+
+/// Whether a form headed by `head` indents its body by two columns (special
+/// forms / macros: `define`, `let`, `when`, …) rather than aligning
+/// continuation lines under the first argument (ordinary function calls).
+fn lisp_form_indents_body(head: &str) -> bool {
+    if head.starts_with("define") || head.starts_with("with-") {
+        return true;
+    }
+    matches!(
+        head,
+        "lambda"
+            | "λ"
+            | "named-lambda"
+            | "case-lambda"
+            | "let"
+            | "let*"
+            | "letrec"
+            | "letrec*"
+            | "let-values"
+            | "let*-values"
+            | "let-syntax"
+            | "letrec-syntax"
+            | "parameterize"
+            | "fluid-let"
+            | "when"
+            | "unless"
+            | "while"
+            | "until"
+            | "cond"
+            | "case"
+            | "match"
+            | "match-let"
+            | "match-let*"
+            | "begin"
+            | "do"
+            | "dynamic-wind"
+            | "guard"
+            | "syntax-rules"
+            | "syntax-case"
+            | "for"
+            | "delay"
+            | "unwind-protect"
+            | "module"
+            | "library"
+    )
+}
+
+/// Target indentation column for a line whose preceding text — from the start
+/// of the enclosing top-level form (a line beginning at column 0) up to the
+/// insertion point — is `text`. A pragmatic Lisp indenter: continuation lines
+/// align under the enclosing form's first argument, while the body of a known
+/// special form indents two columns past its opening paren. Strings, line and
+/// block comments, and char literals are skipped so their parens don't count.
+fn lisp_indent_for(text: &str) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    // Open delimiters still unclosed at the end: (column, char-index just past
+    // it, delimiter char).
+    let mut stack: Vec<(usize, usize, char)> = Vec::new();
+    let mut i = 0usize;
+    let mut col = 0usize;
+    while i < n {
+        match chars[i] {
+            '\n' => {
+                col = 0;
+                i += 1;
+            }
+            ';' => {
+                while i < n && chars[i] != '\n' {
+                    i += 1; // leave the '\n' to reset col on the next pass
+                }
+            }
+            '"' => {
+                i += 1;
+                col += 1;
+                while i < n {
+                    match chars[i] {
+                        '\\' => {
+                            i += 1;
+                            col += 1;
+                            if i < n {
+                                if chars[i] == '\n' {
+                                    col = 0;
+                                } else {
+                                    col += 1;
+                                }
+                                i += 1;
+                            }
+                        }
+                        '"' => {
+                            i += 1;
+                            col += 1;
+                            break;
+                        }
+                        '\n' => {
+                            col = 0;
+                            i += 1;
+                        }
+                        _ => {
+                            col += 1;
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            '#' if i + 1 < n && chars[i + 1] == '\\' => {
+                // Char literal `#\x` — the `#`, the `\`, and the literal char
+                // are skipped (trailing letters of a named char like `#\space`
+                // are harmless symbol chars that hold no parens).
+                i += 2;
+                col += 2;
+                if i < n {
+                    if chars[i] == '\n' {
+                        col = 0;
+                    } else {
+                        col += 1;
+                    }
+                    i += 1;
+                }
+            }
+            '#' if i + 1 < n && chars[i + 1] == '|' => {
+                // Nestable block comment `#| ... |#`.
+                i += 2;
+                col += 2;
+                let mut depth = 1usize;
+                while i < n && depth > 0 {
+                    if chars[i] == '#' && i + 1 < n && chars[i + 1] == '|' {
+                        depth += 1;
+                        i += 2;
+                        col += 2;
+                    } else if chars[i] == '|' && i + 1 < n && chars[i + 1] == '#' {
+                        depth -= 1;
+                        i += 2;
+                        col += 2;
+                    } else if chars[i] == '\n' {
+                        col = 0;
+                        i += 1;
+                    } else {
+                        col += 1;
+                        i += 1;
+                    }
+                }
+            }
+            '(' | '[' | '{' => {
+                stack.push((col, i + 1, chars[i]));
+                i += 1;
+                col += 1;
+            }
+            ')' | ']' | '}' => {
+                stack.pop();
+                i += 1;
+                col += 1;
+            }
+            _ => {
+                i += 1;
+                col += 1;
+            }
+        }
+    }
+
+    let Some(&(open_col, after, open)) = stack.last() else {
+        return 0; // top level
+    };
+
+    // Walk from just past the opener to the head token / first argument,
+    // tracking columns. The char at `after` sits at column open_col + 1.
+    let mut j = after;
+    let mut c = open_col + 1;
+    while j < n && (chars[j] == ' ' || chars[j] == '\t') {
+        j += 1;
+        c += 1;
+    }
+    // Nothing but a comment after the opener on its line → indent one past it.
+    if lisp_line_end(&chars, j) {
+        return open_col + 1;
+    }
+    // Data lists / vectors, or a list used as the head, align under the first
+    // element rather than applying special-form rules.
+    if open != '(' || matches!(chars[j], '(' | '[' | '{') {
+        return c;
+    }
+    let head_start = j;
+    while j < n
+        && !chars[j].is_whitespace()
+        && !matches!(chars[j], '(' | ')' | '[' | ']' | '{' | '}')
+    {
+        j += 1;
+        c += 1;
+    }
+    if lisp_form_indents_body(&chars[head_start..j].iter().collect::<String>()) {
+        return open_col + 2;
+    }
+    // Function call: align under the first argument when it shares the head's
+    // line; otherwise one past the opener.
+    while j < n && (chars[j] == ' ' || chars[j] == '\t') {
+        j += 1;
+        c += 1;
+    }
+    if lisp_line_end(&chars, j) {
+        return open_col + 1;
+    }
+    c
+}
+
+/// Whether position `j` in `chars` is the end of meaningful content on its line:
+/// end of input, a newline, or the start of a line (`;`) or block (`#|`)
+/// comment. Used to decide there's no argument left to align under.
+fn lisp_line_end(chars: &[char], j: usize) -> bool {
+    j >= chars.len()
+        || chars[j] == '\n'
+        || chars[j] == ';'
+        || (chars[j] == '#' && j + 1 < chars.len() && chars[j + 1] == '|')
+}
+
 /// Build a fresh document for `contents`, choosing modes/highlighter by file type.
 /// Append `item` to a capped ring buffer, dropping the oldest entries on
 /// overflow (used by the `*Messages*` and `*lsp-log*` rings).
@@ -4504,10 +5021,11 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, MlField, WindowLayout, char_col_byte, default_mode_line_format,
-        file_completions, is_repeatable, language_for_path, last_sexp, layout_leaves,
-        layout_remove, layout_resize, layout_split, line_span, node_at, parse_mode_line_format,
-        prefix_arg_value, push_capped, scheme_symbol_token, set_ratio_at, shift_line_map,
-        symbol_at, top_level_form_at, translate_backrefs, union_bounds,
+        file_completions, is_lisp_language, is_repeatable, language_for_path, last_sexp,
+        layout_leaves, layout_remove, layout_resize, layout_split, line_span, lisp_indent_for,
+        node_at, parse_mode_line_format, prefix_arg_value, push_capped, scheme_symbol_token,
+        set_ratio_at, shift_line_map, symbol_at, top_level_form_at, translate_backrefs,
+        union_bounds,
     };
 
     #[test]
@@ -4952,6 +5470,46 @@ mod tests {
         assert_eq!(language_for_path(Path::new("mix.exs")), Some("elixir"));
         assert_eq!(language_for_path(Path::new("notes.txt")), None);
         assert_eq!(language_for_path(Path::new("Makefile")), None);
+    }
+
+    #[test]
+    fn lisp_indent_aligns_and_bodies() {
+        // Top level: no enclosing form.
+        assert_eq!(lisp_indent_for(""), 0);
+        assert_eq!(lisp_indent_for("(define x 1)\n"), 0);
+        // Function call: continuation aligns under the first argument.
+        assert_eq!(lisp_indent_for("(foo bar\n"), 5);
+        // Operator alone on its line → one past the opener.
+        assert_eq!(lisp_indent_for("(foo\n"), 1);
+        // Special form indents its body two columns past the opener.
+        assert_eq!(lisp_indent_for("(define (f x)\n"), 2);
+        assert_eq!(lisp_indent_for("(let ((x 1))\n"), 2);
+        assert_eq!(lisp_indent_for("(when ready\n"), 2);
+        // Nesting: indent follows the innermost open form, offset by its column.
+        assert_eq!(lisp_indent_for("(define (f x)\n  (when y\n"), 4);
+        // A list used as the head aligns under it (let-binding lists).
+        assert_eq!(lisp_indent_for("(let ((a 1)\n"), 6);
+    }
+
+    #[test]
+    fn lisp_indent_skips_strings_and_comments() {
+        // A paren inside a string is not an open form.
+        assert_eq!(lisp_indent_for("(foo \"(\"\n"), 5);
+        // A paren inside a line comment is ignored.
+        assert_eq!(lisp_indent_for("(foo ; (\n"), 1);
+        // Char literal `#\(` is not an opener; aligns under the first arg `c`.
+        assert_eq!(lisp_indent_for("(char=? c #\\(\n"), 8);
+        // Block comment hides its parens.
+        assert_eq!(lisp_indent_for("(foo #| ( |#\n"), 1);
+    }
+
+    #[test]
+    fn lisp_language_detection() {
+        assert!(is_lisp_language("scheme"));
+        assert!(is_lisp_language("macros-scheme"));
+        assert!(is_lisp_language("clojure"));
+        assert!(!is_lisp_language("rust"));
+        assert!(!is_lisp_language("python"));
     }
 
     #[test]

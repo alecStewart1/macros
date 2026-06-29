@@ -102,6 +102,8 @@ pub const KNOWN_OPTIONS: &[&str] = &[
     "hl-line",
     "word-wrap",
     "auto-revert",
+    "electric-indent",
+    "show-paren",
 ];
 
 /// Type + numeric bounds for a known option, looked up by its base name (the
@@ -135,7 +137,9 @@ fn option_kind(key: &str) -> Option<(Kind, Option<f64>, Option<f64>)> {
         | "line-numbers"
         | "hl-line"
         | "word-wrap"
-        | "auto-revert" => (Bool, None, None),
+        | "auto-revert"
+        | "electric-indent"
+        | "show-paren" => (Bool, None, None),
         _ => return None,
     };
     Some(spec)
@@ -283,6 +287,27 @@ impl Settings {
     /// Spaces inserted by `indent-for-tab-command`.
     pub fn tab_width(&self) -> usize {
         self.usize_or("tab-width", 4)
+    }
+
+    /// Whether RET keeps the current indentation (and, in Lisp buffers, indents
+    /// to the enclosing form) and TAB reindents the current Lisp line. Emacs
+    /// `electric-indent-mode`. Set `electric-indent` to `#f` to disable.
+    pub fn electric_indent(&self) -> bool {
+        self.bool_or("electric-indent", true)
+    }
+
+    /// Whether the bracket at (or just before) point and its match are
+    /// highlighted (Emacs `show-paren-mode`). A *per-major-mode* option: on
+    /// everywhere by default except prose/data buffers (`markdown`, `toml`, and
+    /// plain text in `fundamental`), where bracket matching is just noise. A
+    /// `show-paren` / `show-paren:<mode>` option overrides — e.g.
+    /// `(set-option "show-paren:markdown" #t)` to re-enable it there.
+    pub fn show_paren_for(&self, mode: Option<&str>) -> bool {
+        let default = !matches!(
+            mode,
+            None | Some("markdown" | "toml" | "fundamental" | "text")
+        );
+        self.bool_per_mode("show-paren", mode, default)
     }
 
     /// How completion candidates are presented: `"popup"` (corfu-style overlay)
@@ -471,6 +496,25 @@ mod tests {
         for key in KNOWN_OPTIONS {
             assert!(seen.insert(*key), "{key} listed twice in KNOWN_OPTIONS");
         }
+    }
+
+    #[test]
+    fn show_paren_defaults_per_language_and_overrides() {
+        let mut s = Settings::default();
+        // On for code, off for prose/data buffers and plain text.
+        assert!(s.show_paren_for(Some("rust")));
+        assert!(s.show_paren_for(Some("python")));
+        assert!(!s.show_paren_for(Some("markdown")));
+        assert!(!s.show_paren_for(Some("toml")));
+        assert!(!s.show_paren_for(Some("fundamental")));
+        assert!(!s.show_paren_for(None));
+        // A per-mode override wins over the per-language default…
+        s.set("show-paren:markdown".into(), OptionValue::Bool(true));
+        assert!(s.show_paren_for(Some("markdown")));
+        // …and a global override applies where no per-mode value is set.
+        s.set("show-paren".into(), OptionValue::Bool(false));
+        assert!(!s.show_paren_for(Some("rust")));
+        assert!(s.show_paren_for(Some("markdown"))); // per-mode still wins
     }
 
     #[test]

@@ -29,7 +29,7 @@ use steel::rvals::SteelVal;
 use steel::steel_vm::ThreadStateController;
 use steel::steel_vm::engine::Engine;
 
-use crate::script::format_value;
+use crate::script::{format_value, steel_error_string};
 
 /// Something the ANVIL engine thread sends back to the editor's foreground drain.
 pub enum AnvilOutcome {
@@ -193,7 +193,7 @@ fn anvil_thread(
                 let _ = engine.run("(current-output-port (open-output-string))");
                 let (value, error) = match engine.run(source) {
                     Ok(values) => (values.last().and_then(format_value), None),
-                    Err(e) => (None, Some(e.to_string())),
+                    Err(e) => (None, Some(steel_error_string(&e))),
                 };
                 // The run may have ended via interrupt, which leaves the VM in
                 // the Interrupted state — reset it so the next eval isn't
@@ -289,7 +289,7 @@ fn run_query(engine: &mut Engine, kind: AnvilQuery) -> String {
                     .map(|expr| expr.to_pretty(60))
                     .collect::<Vec<_>>()
                     .join("\n\n"),
-                Err(e) => format!(";; macroexpand error: {e}"),
+                Err(e) => format!(";; macroexpand error: {}", steel_error_string(&e)),
             }
         }
         AnvilQuery::Signature(name) => {

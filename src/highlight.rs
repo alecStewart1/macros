@@ -116,6 +116,33 @@ pub struct Highlighter {
     /// cache of sub-highlighters that color those regions. `None` for grammars
     /// that don't inject. Interior-mutable so it can warm during `spans_in`.
     injection: Option<Injection>,
+    /// Structural auto-indent query (the `@indent`/`@outdent`/`@extend` captures
+    /// of a tree-sitter `indents.scm`). `None` for grammars with no indent query;
+    /// the editor then falls back to copying the previous line's indentation.
+    indent: Option<IndentQuery>,
+}
+
+/// What an indent-query capture says about a node.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndentKind {
+    /// Indent the lines inside this node (a brace block, a bracketed list). Only
+    /// counts while the node is genuinely open past the reference point.
+    Indent,
+    /// Like [`Indent`] but exempt from the same-row dedup — two `@indent.always`
+    /// nodes opening on one line each add a level.
+    IndentAlways,
+    /// A closing token (`}`, `)`, `end`) whose own line dedents one level.
+    Outdent,
+    /// Indent lines that follow this node even when its body is still empty —
+    /// for layout languages where the block (`if x:` … ) has no delimiter token,
+    /// so [`Indent`]'s "open past the point" test can't fire on the first line.
+    Extend,
+}
+
+/// A compiled indent query plus the indent kind of each capture index.
+struct IndentQuery {
+    query: Query,
+    kinds: Vec<Option<IndentKind>>,
 }
 
 /// Detection + sub-highlighter cache for language injection.
@@ -148,6 +175,7 @@ impl Highlighter {
             language,
             capture_faces,
             injection: None,
+            indent: None,
         })
     }
 
@@ -170,12 +198,20 @@ impl Highlighter {
             if let Some(src) = injection_query(language) {
                 hl.injection = build_injection(&hl.language, src);
             }
+            if let Some(src) = indent_query(language) {
+                hl.indent = build_indent(&hl.language, src);
+            }
             return Some(hl);
         }
         // Runtime-installed grammar: owns its highlights query as a `String`.
-        // No injection wiring — only the bundled markdown grammar injects.
+        // No injection wiring — only the bundled markdown grammar injects. An
+        // `indents.scm` in the grammar repo enables structural auto-indent.
         let (lang, query) = crate::grammar::installed(language)?;
-        Self::new(lang, &query)
+        let mut hl = Self::new(lang, &query)?;
+        if let Some(src) = crate::grammar::installed_indent(language) {
+            hl.indent = build_indent(&hl.language, &src);
+        }
+        Some(hl)
     }
 }
 
@@ -206,6 +242,57 @@ fn build_injection(language: &Language, src: &str) -> Option<Injection> {
         query,
         cache: RefCell::new(HashMap::new()),
     })
+}
+
+/// The bundled structural-indent query (`indents.scm`) for a language id, or
+/// `None`. Languages without one fall back to copy-previous-line indentation;
+/// Lisps are handled by a dedicated aligner in the editor, not here. Adding a
+/// language's indent query is a single `include_str!` arm.
+fn indent_query(language: &str) -> Option<&'static str> {
+    Some(match language {
+        "rust" => include_str!("../grammars/queries/indents/rust.scm"),
+        "c" => include_str!("../grammars/queries/indents/c.scm"),
+        "cpp" => include_str!("../grammars/queries/indents/cpp.scm"),
+        "go" => include_str!("../grammars/queries/indents/go.scm"),
+        "java" => include_str!("../grammars/queries/indents/java.scm"),
+        "javascript" => include_str!("../grammars/queries/indents/javascript.scm"),
+        "typescript" => include_str!("../grammars/queries/indents/typescript.scm"),
+        "tsx" => include_str!("../grammars/queries/indents/tsx.scm"),
+        "json" => include_str!("../grammars/queries/indents/json.scm"),
+        "css" => include_str!("../grammars/queries/indents/css.scm"),
+        "python" => include_str!("../grammars/queries/indents/python.scm"),
+        "yaml" => include_str!("../grammars/queries/indents/yaml.scm"),
+        "scala" => include_str!("../grammars/queries/indents/scala.scm"),
+        "ruby" => include_str!("../grammars/queries/indents/ruby.scm"),
+        "lua" => include_str!("../grammars/queries/indents/lua.scm"),
+        "zig" => include_str!("../grammars/queries/indents/zig.scm"),
+        "r" => include_str!("../grammars/queries/indents/r.scm"),
+        "ocaml" => include_str!("../grammars/queries/indents/ocaml.scm"),
+        "haskell" => include_str!("../grammars/queries/indents/haskell.scm"),
+        "elixir" => include_str!("../grammars/queries/indents/elixir.scm"),
+        "html" => include_str!("../grammars/queries/indents/html.scm"),
+        "bash" => include_str!("../grammars/queries/indents/bash.scm"),
+        _ => return None,
+    })
+}
+
+/// Compile an indent query and record the indent kind of each capture, or `None`
+/// if it won't compile against this grammar (the language then falls back to
+/// copy-previous-line indentation rather than breaking).
+fn build_indent(language: &Language, src: &str) -> Option<IndentQuery> {
+    let query = Query::new(language, src).ok()?;
+    let kinds = query
+        .capture_names()
+        .iter()
+        .map(|name| match *name {
+            "indent" => Some(IndentKind::Indent),
+            "indent.always" => Some(IndentKind::IndentAlways),
+            "outdent" | "outdent.always" => Some(IndentKind::Outdent),
+            "extend" => Some(IndentKind::Extend),
+            _ => None,
+        })
+        .collect();
+    Some(IndentQuery { query, kinds })
 }
 
 /// Map a fenced-block info-string tag (`rust`, `rs`, `py`, `c++`, …) to a
@@ -509,6 +596,143 @@ impl Highlighter {
         chain
     }
 
+    /// The byte offset of the bracket matching the single-char delimiter token
+    /// that begins at `byte` (`(`/`)`, `[`/`]`, `{`/`}`), found structurally via
+    /// the parse tree — so a bracket inside a string or comment isn't a token
+    /// and yields `None`. `None` when `byte` isn't on a bracket token or its
+    /// partner can't be located. The editor falls back to a text scan.
+    pub fn bracket_match(&self, byte: usize) -> Option<usize> {
+        let tree = self.tree.as_ref()?;
+        let node = tree.root_node().descendant_for_byte_range(byte, byte + 1)?;
+        if node.start_byte() != byte {
+            return None;
+        }
+        let partner = match node.kind() {
+            "(" => ")",
+            ")" => "(",
+            "[" => "]",
+            "]" => "[",
+            "{" => "}",
+            "}" => "{",
+            _ => return None,
+        };
+        let opening = matches!(node.kind(), "(" | "[" | "{");
+        let parent = node.parent()?;
+        // The pair's other delimiter is a sibling token of the partner kind: the
+        // nearest one after an opener, or before a closer.
+        let mut best: Option<usize> = None;
+        let mut i = 0;
+        while let Some(child) = parent.child(i) {
+            i += 1;
+            if child.kind() != partner {
+                continue;
+            }
+            let s = child.start_byte();
+            match (opening, s > byte, s < byte) {
+                (true, true, _) => best = Some(best.map_or(s, |b: usize| b.min(s))),
+                (false, _, true) => best = Some(best.map_or(s, |b: usize| b.max(s))),
+                _ => {}
+            }
+        }
+        best
+    }
+
+    /// The structural indentation depth, in steps (each step = one `tab_width`),
+    /// for a line. `anchor` is a byte sitting on the syntax the line should
+    /// follow — for a fresh newline, the previous non-blank byte; for reindent,
+    /// the line's own first non-blank byte — and the ancestor chain is walked
+    /// from there. `ref_byte` is the line's logical start, against which an
+    /// `@indent` scope is tested for being genuinely open. `target_row` is the
+    /// line's display row. `outdent_byte`, when set, dedents one step if an
+    /// `@outdent` node begins exactly there. Returns `None` when this grammar
+    /// carries no indent query, so the caller can fall back.
+    ///
+    /// Splitting `anchor` from `ref_byte` is what lets a layout language indent
+    /// the first line of an as-yet-empty body: anchoring on the header's colon
+    /// finds the (still-open) compound statement that a raw position past the
+    /// newline would have fallen outside of. `@indent` scopes still open past
+    /// `ref_byte` add a step (deduped per start row, so `if x {` doesn't
+    /// double-count the `if` and its block); `@extend` scopes add a step purely
+    /// by being an open ancestor (no delimiter token needed); an `@outdent`
+    /// token on the line removes one.
+    pub fn indent_level(
+        &self,
+        rope: &Rope,
+        anchor: usize,
+        ref_byte: usize,
+        target_row: usize,
+        outdent_byte: Option<usize>,
+    ) -> Option<usize> {
+        let iq = self.indent.as_ref()?;
+        let tree = self.tree.as_ref()?;
+        let root = tree.root_node();
+
+        // Bound the query to the enclosing top-level node so cost is one form's
+        // worth, not the whole file, on every keystroke.
+        let mut scope = root
+            .descendant_for_byte_range(anchor, anchor)
+            .unwrap_or(root);
+        while let Some(parent) = scope.parent() {
+            if parent == root {
+                break;
+            }
+            scope = parent;
+        }
+
+        let provider = |node: Node| {
+            rope.byte_slice(node.byte_range())
+                .chunks()
+                .map(str::as_bytes)
+        };
+        let mut cursor = QueryCursor::new();
+        let mut kinds: HashMap<usize, IndentKind> = HashMap::new();
+        let mut outdent_starts: Vec<usize> = Vec::new();
+        let mut matches = cursor.matches(&iq.query, scope, provider);
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                let Some(kind) = iq.kinds.get(cap.index as usize).copied().flatten() else {
+                    continue;
+                };
+                if kind == IndentKind::Outdent {
+                    outdent_starts.push(cap.node.start_byte());
+                } else {
+                    // Prefer Extend if a node carries both (empty-body case).
+                    let slot = kinds.entry(cap.node.id()).or_insert(kind);
+                    if kind == IndentKind::Extend {
+                        *slot = kind;
+                    }
+                }
+            }
+        }
+
+        let mut levels = 0usize;
+        let mut used_rows: Vec<usize> = Vec::new();
+        let mut node = root.descendant_for_byte_range(anchor, anchor);
+        while let Some(n) = node {
+            if let Some(kind) = kinds.get(&n.id()).copied() {
+                let srow = n.start_position().row;
+                let open_past = n.start_byte() < ref_byte && n.end_byte() > ref_byte;
+                let qualifies = match kind {
+                    IndentKind::Indent | IndentKind::IndentAlways => srow < target_row && open_past,
+                    IndentKind::Extend => srow < target_row,
+                    IndentKind::Outdent => false,
+                };
+                if qualifies && (kind == IndentKind::IndentAlways || !used_rows.contains(&srow)) {
+                    levels += 1;
+                    used_rows.push(srow);
+                }
+            }
+            node = n.parent();
+        }
+        if let Some(ob) = outdent_byte
+            && levels > 0
+            && outdent_starts.contains(&ob)
+        {
+            levels -= 1;
+        }
+        Some(levels)
+    }
+
     /// Run an arbitrary tree-sitter query over the current tree, returning each
     /// capture as `(capture_name, start_byte, end_byte, node_kind)`. Returns
     /// `None` if the query source won't compile against this grammar, and an
@@ -685,6 +909,186 @@ mod tests {
             );
         }
         assert!(Highlighter::for_language("cobol").is_none());
+    }
+
+    /// Every bundled indent query must compile against its grammar — a bad node
+    /// name would otherwise silently drop that language back to copy-previous
+    /// indentation.
+    #[test]
+    fn bundled_indent_queries_compile() {
+        for lang in BUNDLED_LANGUAGES {
+            let Some(src) = indent_query(lang) else {
+                continue;
+            };
+            let (langfn, _) = grammar(lang).unwrap();
+            let language: Language = langfn.into();
+            assert!(
+                Query::new(&language, src).is_ok(),
+                "indent query for {lang} failed to compile"
+            );
+        }
+    }
+
+    /// Rust: a brace block indents its body one step and dedents on the closer.
+    #[test]
+    fn rust_indent_levels() {
+        let src = "fn main() {\n    foo();\n}\n";
+        let rope = Rope::from_str(src);
+        let mut h = Highlighter::for_language("rust").unwrap();
+        h.set_text(&rope);
+        // The body line sits one step in (reindent: anchor == ref).
+        let body = src.find("foo").unwrap();
+        assert_eq!(h.indent_level(&rope, body, body, 1, Some(body)), Some(1));
+        // The closing brace line dedents back to zero.
+        let close = src.rfind('}').unwrap();
+        assert_eq!(h.indent_level(&rope, close, close, 2, Some(close)), Some(0));
+        // Pressing RET right after the opener indents the new line one step
+        // (newline: anchor is the `{`, ref is the position past it).
+        let brace = src.find('{').unwrap();
+        assert_eq!(
+            h.indent_level(&rope, brace, brace + 1, 1, Some(brace + 1)),
+            Some(1)
+        );
+        // Nested: a body inside two blocks sits two steps in.
+        let nested = "fn f() {\n    if x {\n        y();\n    }\n}\n";
+        let nrope = Rope::from_str(nested);
+        h.set_text(&nrope);
+        let y = nested.find("y()").unwrap();
+        assert_eq!(h.indent_level(&nrope, y, y, 2, Some(y)), Some(2));
+    }
+
+    /// Python: `@extend` indents the body of a compound statement even though
+    /// there is no brace token to open a block — including an empty body.
+    #[test]
+    fn python_indent_uses_extend() {
+        let mut h = Highlighter::for_language("python").unwrap();
+
+        // Non-empty body indents one step under the def.
+        let src = "def f():\n    pass\n";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        let body = src.find("pass").unwrap();
+        assert_eq!(h.indent_level(&rope, body, body, 1, Some(body)), Some(1));
+
+        // Empty body: RET right after the header colon still indents — anchoring
+        // on the colon finds the compound statement the bare position would miss.
+        let empty = "def f():\n";
+        let erope = Rope::from_str(empty);
+        h.set_text(&erope);
+        let colon = empty.find(':').unwrap();
+        assert_eq!(
+            h.indent_level(&erope, colon, colon + 1, 1, Some(colon + 1)),
+            Some(1)
+        );
+    }
+
+    /// Spot-check the other indent-query styles actually produce levels (not
+    /// just compile): a JS statement block, a JSON object, and Ruby's
+    /// keyword-delimited `def … end` (an `@extend` body with an `end` outdent).
+    #[test]
+    fn other_languages_indent() {
+        // JavaScript: function body indents, `}` dedents.
+        let mut h = Highlighter::for_language("javascript").unwrap();
+        let js = "function f() {\n  go();\n}\n";
+        let jr = Rope::from_str(js);
+        h.set_text(&jr);
+        let go = js.find("go(").unwrap();
+        assert_eq!(h.indent_level(&jr, go, go, 1, Some(go)), Some(1));
+        let jclose = js.rfind('}').unwrap();
+        assert_eq!(
+            h.indent_level(&jr, jclose, jclose, 2, Some(jclose)),
+            Some(0)
+        );
+
+        // JSON: a value inside an object sits one step in.
+        let mut h = Highlighter::for_language("json").unwrap();
+        let json = "{\n  \"a\": 1\n}\n";
+        let jsr = Rope::from_str(json);
+        h.set_text(&jsr);
+        let key = json.find("\"a\"").unwrap();
+        assert_eq!(h.indent_level(&jsr, key, key, 1, Some(key)), Some(1));
+
+        // Ruby: method body indents via @extend; `end` dedents to zero.
+        let mut h = Highlighter::for_language("ruby").unwrap();
+        let rb = "def f\n  x\nend\n";
+        let rr = Rope::from_str(rb);
+        h.set_text(&rr);
+        let x = rb.find("x").unwrap();
+        assert_eq!(h.indent_level(&rr, x, x, 1, Some(x)), Some(1));
+        let end = rb.find("end").unwrap();
+        assert_eq!(h.indent_level(&rr, end, end, 2, Some(end)), Some(0));
+    }
+
+    /// Functional check for the newly-added indent queries: each indents a body
+    /// one step and dedents the closing line back to zero.
+    #[test]
+    fn added_languages_indent() {
+        // (language, source, body-needle, closer-needle)
+        let cases = [
+            ("r", "f <- function(x) {\n  g(x)\n}\n", "g(x)", "}"),
+            ("elixir", "def f do\n  x\nend\n", "x", "end"),
+            ("html", "<div>\n  <p>hi</p>\n</div>\n", "<p>", "</div>"),
+            ("bash", "if true; then\n  echo hi\nfi\n", "echo", "fi"),
+            ("ocaml", "let r = {\n  a = 1;\n}\n", "a = 1", "}"),
+            (
+                "haskell",
+                "main = do\n  putStrLn \"hi\"\n  pure ()\n",
+                "putStrLn",
+                "",
+            ),
+        ];
+        for (lang, src, body, closer) in cases {
+            let mut h = Highlighter::for_language(lang).unwrap();
+            let rope = Rope::from_str(src);
+            h.set_text(&rope);
+            let b = src.find(body).unwrap();
+            let brow = src[..b].matches('\n').count();
+            assert_eq!(
+                h.indent_level(&rope, b, b, brow, Some(b)),
+                Some(1),
+                "{lang}: body line should indent one step"
+            );
+            if !closer.is_empty() {
+                let c = src.rfind(closer).unwrap();
+                let crow = src[..c].matches('\n').count();
+                assert_eq!(
+                    h.indent_level(&rope, c, c, crow, Some(c)),
+                    Some(0),
+                    "{lang}: closing line should dedent to zero"
+                );
+            }
+        }
+    }
+
+    /// `bracket_match` pairs delimiters via the tree, from either side, and
+    /// ignores a bracket that lives inside a string literal (it isn't a token).
+    #[test]
+    fn bracket_match_pairs_and_skips_strings() {
+        let src = "fn f() { g([1, 2]); }\n";
+        let rope = Rope::from_str(src);
+        let mut h = Highlighter::for_language("rust").unwrap();
+        h.set_text(&rope);
+        // Outer braces pair, from both directions.
+        let open = src.find('{').unwrap();
+        let close = src.rfind('}').unwrap();
+        assert_eq!(h.bracket_match(open), Some(close));
+        assert_eq!(h.bracket_match(close), Some(open));
+        // The square brackets pair.
+        let lb = src.find('[').unwrap();
+        let rb = src.find(']').unwrap();
+        assert_eq!(h.bracket_match(lb), Some(rb));
+        assert_eq!(h.bracket_match(rb), Some(lb));
+        // A non-bracket byte has no match.
+        assert_eq!(h.bracket_match(src.find('g').unwrap()), None);
+
+        // A `)` inside a string is not a token: the call's `(` matches the real
+        // closing `)`, skipping the one in the string.
+        let s = "fn f() { g(\")\"); }\n";
+        let srope = Rope::from_str(s);
+        h.set_text(&srope);
+        let call_open = s.find("g(").unwrap() + 1; // the call paren, not `f()`
+        let real_close = s.rfind(')').unwrap(); // the call's closer, after the string
+        assert_eq!(h.bracket_match(call_open), Some(real_close));
     }
 
     /// A non-Scheme grammar actually colors tokens (Rust here).

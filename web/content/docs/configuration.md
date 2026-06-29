@@ -55,6 +55,12 @@ Set options with `(set-option "name" value)`. Values are **typed** — pass a nu
 (set-option "cursor-style" "auto")  ; "auto" | "bar" | "block"
 (set-option "cursor-width" 2)       ; bar width in px
 
+;; Editing
+(set-option "electric-indent" #t)   ; RET keeps/structures indent, TAB reindents
+;; show-paren: on by default for code, off for markdown / toml / plain text.
+;; Per-major-mode, so re-enable (or disable) it per language:
+(set-option "show-paren:markdown" #t)  ; e.g. turn it back on in Markdown
+
 ;; Gutter & chrome
 (set-option "line-numbers"  #t)
 (set-option "scroll-bar"    #t)

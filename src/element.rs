@@ -186,6 +186,9 @@ pub struct PrepaintState {
     selections: Vec<PaintQuad>,
     /// Background highlight quads for the active search query's matches.
     search: Vec<PaintQuad>,
+    /// Background highlight quads for the bracket at point and its match
+    /// (Emacs `show-paren-mode`).
+    paren: Vec<PaintQuad>,
     /// Scroll-bar track + thumb quads (Emacs scroll-bar-mode), right edge.
     scrollbar: Vec<PaintQuad>,
     /// Per-line SVG icons (file tree): (bounds, asset path, tint color).
@@ -287,6 +290,7 @@ impl Element for EditorElement {
         let cursor_color = theme.color("cursor", rgb(0x528bff).into());
         let region_color = theme.color("region", rgba(0x3a5fcd55).into());
         let search_color = theme.color("search", rgba(0xffc83d66).into());
+        let paren_color = theme.color("show-paren", rgba(0x5fafef66).into());
         let hl_line_color = theme.color("hl-line", rgba(0xffffff10).into());
         let settings = cx.global::<crate::settings::Settings>();
         let popup_max_rows = settings.completion_max_rows();
@@ -456,6 +460,13 @@ impl Element for EditorElement {
             }
             _ => Vec::new(),
         };
+        // Matching-delimiter highlight (Emacs show-paren), selected pane only,
+        // recomputed each frame so it tracks the cursor.
+        let paren = if selected && settings.show_paren_for(editor.pane_major_mode(pane)) {
+            editor.show_paren_ranges()
+        } else {
+            Vec::new()
+        };
 
         // Word-wrap (Emacs visual-line-mode): when on, soft-wrap each line at the
         // text-area width; when off, leave lines unwrapped and shift them left by
@@ -480,6 +491,7 @@ impl Element for EditorElement {
         let mut cursor_px: Option<Point<Pixels>> = None;
         let mut selections = Vec::new();
         let mut search_quads = Vec::new();
+        let mut paren_quads = Vec::new();
         let mut diagnostic_quads = Vec::new();
         let mut icons: Vec<(Bounds<Pixels>, SharedString, Hsla)> = Vec::new();
         let mut avy: Vec<(PaintQuad, ShapedLine, Point<Pixels>)> = Vec::new();
@@ -826,6 +838,23 @@ impl Element for EditorElement {
                 }
             }
 
+            // Matching-delimiter highlight: the bracket pair (each one char).
+            for m in &paren {
+                if m.start <= range.end && m.end >= range.start {
+                    push_range_quads(
+                        &mut paren_quads,
+                        &wrapped,
+                        0,
+                        to_display(m.start.max(range.start) - range.start, &holes),
+                        to_display(m.end.min(range.end) - range.start, &holes),
+                        line_origin,
+                        line_height,
+                        paren_color,
+                        px(0.),
+                    );
+                }
+            }
+
             // File-tree icon, painted in a reserved column (the Scheme renders
             // leading space at `col` so it doesn't overlap the label).
             if let Some((col, name)) = editor.pane_line_icon(pane, i) {
@@ -998,6 +1027,7 @@ impl Element for EditorElement {
             hl_line: hl_line_quad,
             selections,
             search: search_quads,
+            paren: paren_quads,
             scrollbar,
             icons,
             images: image_quads,
@@ -1056,6 +1086,10 @@ impl Element for EditorElement {
             }
             // Search highlights sit behind the selection and the text.
             for quad in prepaint.search.drain(..) {
+                window.paint_quad(quad);
+            }
+            // Matching-delimiter highlights, likewise behind selection and text.
+            for quad in prepaint.paren.drain(..) {
                 window.paint_quad(quad);
             }
             for quad in prepaint.selections.drain(..) {

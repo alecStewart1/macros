@@ -174,6 +174,71 @@ Macros resolves captures to these faces (direct prefix matches plus the common a
 
 Markup languages can also use the `@markup.*` / `@text.*` families (headings, bold, links) — those map onto the faces above too; the bundled `latex` and `markdown` queries are worked examples. To restyle any of these, set the face in your theme (see [Themes & faces](/docs/themes-and-faces)).
 
+## Auto-indentation (indent query)
+
+When `electric-indent` is on (the default), pressing **RET** indents the new line and **TAB** reindents the current one. How the target indent is computed depends on what the language provides, in this order:
+
+1. **Lisps** (`scheme`, `clojure`, …) use a built-in paren-aligning indenter — continuation lines align under a call's first argument, special-form bodies indent two columns. No query needed.
+2. **A tree-sitter `indents.scm` query** drives structural indentation for every other language that ships (or installs) one — a brace block indents its body and dedents on `}`, and so on.
+3. **No query?** The new line simply copies the previous line's leading whitespace. A reasonable default — just not structure-aware.
+
+Turn the whole feature off with `(set-option "electric-indent" "false")`.
+
+### How the indent query works
+
+`queries/indents.scm` tags nodes with a small set of captures. The indenter walks the syntax around the line and tallies them:
+
+| Capture | Meaning |
+|---------|---------|
+| `@indent` | This node's body is indented one step — a brace block, a bracketed list, an argument list. Counts only while the node is genuinely open past the line. |
+| `@outdent` | A closing token (`}`, `)`, `end`) whose own line dedents one step. |
+| `@extend` | Indent the lines that follow this node **even when its body is still empty** — for layout languages (`if x:` …) where there is no delimiter token to open a block. |
+| `@indent.always` | Like `@indent`, but exempt from the "one step per start row" dedup (rarely needed). |
+
+A step is one [`tab-width`](/docs/configuration). Two `@indent` nodes that open on the *same* row count once, so capturing both an `if` statement and its block won't double-indent.
+
+A brace-delimited language is usually just its block-like nodes plus the closing brackets. For Rust:
+
+```scheme
+[
+  (block)
+  (declaration_list)
+  (field_declaration_list)
+  (arguments)
+  (parameters)
+  (match_block)
+] @indent
+
+["}" ")" "]"] @outdent
+```
+
+A layout language (no closing token for blocks) leans on `@extend` for its compound statements and `@indent` only for brackets. For Python — capture the *top* compound statements, not their `elif`/`else`/`except` clauses, so a clause body still resolves to one level:
+
+```scheme
+[
+  (if_statement)
+  (for_statement)
+  (while_statement)
+  (function_definition)
+  (class_definition)
+] @extend
+
+[(list) (dictionary) (argument_list) (parameters)] @indent
+
+[")" "]" "}"] @outdent
+```
+
+Keyword-delimited languages (Ruby, Lua) combine both: `@extend` on `def`/`class`/`do` blocks, with `"end"` as an `@outdent` token.
+
+The bundled queries live in `grammars/queries/indents/` and are the best templates. If a query won't compile against its grammar, the language silently falls back to copy-previous-indent — so a typo degrades gracefully rather than breaking. Lisps deliberately have **no** indent query (the built-in aligner is better at column alignment than the step model).
+
+### Adding an indent query
+
+- **Bundled grammar:** drop a `queries/indents/<id>.scm` next to the others and add one `include_str!` arm to `indent_query` in `src/highlight.rs`. The `bundled_indent_queries_compile` test confirms it compiles against the grammar.
+- **Runtime grammar:** if the repo you point `install-language` at ships a `queries/indents.scm`, it's picked up automatically and enables auto-indent — no extra arguments. (It must compile against the grammar, or the install fails, the same as the highlights query.)
+
+To discover the node names a grammar uses, open a file and run `(tree-sitter-node-at <byte> "callback")` (see [Custom fontification](#custom-fontification-from-scheme)) or read the grammar's own `queries/indents.scm` upstream.
+
 ## Building a major mode
 
 A major mode is a keymap named after the mode, plus commands, activated on `find-file-hook`. The minimal recipe:

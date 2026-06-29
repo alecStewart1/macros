@@ -2370,7 +2370,7 @@ fn engine_thread(
                 Err(error) => RawResult {
                     commands: drain(&queue),
                     value: None,
-                    error: Some(error.to_string()),
+                    error: Some(steel_error_string(&error)),
                 },
             },
             Task::Call(name, arg) => {
@@ -2381,7 +2381,7 @@ fn engine_thread(
                 let error = engine
                     .call_function_by_name_with_args(&name, args)
                     .err()
-                    .map(|e| e.to_string());
+                    .map(|e| steel_error_string(&e));
                 RawResult {
                     commands: drain(&queue),
                     value: None,
@@ -2403,7 +2403,18 @@ fn engine_thread(
                 let message = if let Some(error) = error {
                     Some(format!("error: {error}"))
                 } else if interactive {
-                    Some(value.map_or_else(|| "Done".to_string(), |v| format!("=> {v}")))
+                    match value {
+                        Some(v) => Some(format!("=> {v}")),
+                        // A `(message ...)` side-effect already echoed something;
+                        // don't clobber it with a generic "Done".
+                        None if commands
+                            .iter()
+                            .any(|c| matches!(c, EditorCommand::Message(_))) =>
+                        {
+                            None
+                        }
+                        None => Some("Done".to_string()),
+                    }
                 } else {
                     None
                 };
@@ -2578,7 +2589,19 @@ fn build_engine(
 
     // Commands carrying a payload.
     register_unary(&mut engine, queue, "insert", EditorCommand::Insert);
-    register_unary(&mut engine, queue, "message", EditorCommand::Message);
+    // `message` accepts any value, not just strings: strings render verbatim,
+    // everything else via its Steel display — so (message (+ 1 2)) shows "3"
+    // rather than raising a ConversionError.
+    {
+        let q = queue.clone();
+        engine.register_fn("message", move |arg: SteelVal| {
+            let text = match arg {
+                SteelVal::StringV(s) => s.to_string(),
+                other => other.to_string(),
+            };
+            q.lock().unwrap().push(EditorCommand::Message(text));
+        });
+    }
     // Shadow of every binding (mode, chord, command), for help/discoverability
     // read bridges. Written alongside the DefineKey command; lives on the engine
     // thread with the read fns.
@@ -4481,9 +4504,61 @@ pub(crate) fn format_value(value: &SteelVal) -> Option<String> {
     }
 }
 
+/// SteelErr's Display is "Error: <Kind>: <message>". Drop the redundant
+/// "Error: " label and the internal "<Kind>: " category token (e.g.
+/// `FreeIdentifier`, `ConversionError`) so callers can apply their own single
+/// "error: " prefix without it stacking up into
+/// "error: Error: FreeIdentifier: ...".
+pub(crate) fn steel_error_string(err: &impl std::fmt::Display) -> String {
+    let s = err.to_string();
+    let s = s.strip_prefix("Error: ").unwrap_or(&s);
+    // The kind is a single token with no spaces; only strip it when it matches
+    // that shape so a real message containing a colon is never truncated.
+    if let Some((kind, rest)) = s.split_once(": ")
+        && !kind.is_empty()
+        && kind.chars().all(|c| c.is_alphanumeric())
+    {
+        return rest.to_string();
+    }
+    s.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_recovers_after_error() {
+        let (engine, _rx) = ScriptEngine::new();
+        // Define a function, then call a NONEXISTENT one (free-identifier
+        // error) — mirrors the visual-mode eval-region repro.
+        let _ = engine.eval("(define (foobar a b) (+ a b))");
+        let err = engine.eval("(message (foobarx 10 10))");
+        assert!(err.is_err(), "expected free-identifier error");
+        // After the error, the SAME engine must still evaluate cleanly.
+        let ok = engine.eval("(foobar 10 10)");
+        let value = ok.ok().and_then(|r| r.value);
+        assert_eq!(value.as_deref(), Some("20"), "engine wedged after error");
+    }
+
+    #[test]
+    fn single_run_evaluates_forms_top_to_bottom() {
+        let (engine, _rx) = ScriptEngine::new();
+        // Both forms in ONE eval, exactly as a whole-region eval would submit
+        // them: the later form must see the define from the earlier form.
+        let result = engine.eval("(define (foobar a b) (+ a b))\n(foobar 10 10)");
+        let value = result.ok().and_then(|r| r.value);
+        assert_eq!(value.as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn last_sexp_only_misses_earlier_define() {
+        let (engine, _rx) = ScriptEngine::new();
+        // What `eval-last-sexp` (C-c C-e) actually submits: ONLY the last form.
+        // foobar is never defined here, so this must error.
+        let result = engine.eval("(foobar 10 10)");
+        assert!(result.is_err());
+    }
 
     #[test]
     fn helm_parses_sources_from_scheme() {

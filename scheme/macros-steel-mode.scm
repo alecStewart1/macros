@@ -28,6 +28,7 @@
 ;; keys, mutate buffers) — that is the whole point of an extension file, and the
 ;; reason this is its own mode rather than a flag on `steel`.
 (define-key "macros-steel" "ctrl-c ctrl-e" 'eval-last-sexp)
+(define-key "macros-steel" "ctrl-x ctrl-e" 'eval-last-sexp)  ; Emacs muscle memory
 (define-key "macros-steel" "ctrl-c ctrl-b" 'eval-buffer)
 ;; Editor-API documentation for the symbol at point: a one-line echo (eldoc), or
 ;; the full doc buffer.

@@ -968,14 +968,22 @@ impl Editor {
                 self.eval_interactive(&source, cx);
             }
             EvalLastSexp => {
-                let point = self.point();
-                let text = self.buffer.slice_to_string(0..point);
-                match last_sexp(&text) {
-                    Some(range) => {
-                        let source = text[range].to_string();
-                        self.eval_interactive(&source, cx);
+                // With an active selection, evaluate the whole region (all forms,
+                // top-to-bottom) like Emacs `eval-region`; otherwise fall back to
+                // the single sexp before point (`eval-last-sexp`).
+                if let Some(region) = self.region() {
+                    let source = self.buffer.slice_to_string(region);
+                    self.eval_interactive(&source, cx);
+                } else {
+                    let point = self.point();
+                    let text = self.buffer.slice_to_string(0..point);
+                    match last_sexp(&text) {
+                        Some(range) => {
+                            let source = text[range].to_string();
+                            self.eval_interactive(&source, cx);
+                        }
+                        None => self.echo("Nothing to evaluate", cx),
                     }
-                    None => self.echo("Nothing to evaluate", cx),
                 }
             }
             Message(text) => self.echo(text, cx),
