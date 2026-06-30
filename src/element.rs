@@ -289,6 +289,20 @@ impl Element for EditorElement {
         let theme = cx.global::<Theme>();
         let cursor_color = theme.color("cursor", rgb(0x528bff).into());
         let region_color = theme.color("region", rgba(0x3a5fcd55).into());
+        // Helix multiple selections: each secondary selection paints a dimmer
+        // span, and its caret a dimmer cursor, so the primary stays distinct.
+        // Themes can set these explicitly; otherwise derive them from the primary
+        // region/cursor by knocking the alpha down.
+        let secondary_region_color = theme.color("secondary-region", {
+            let mut c = region_color;
+            c.a *= 0.6;
+            c
+        });
+        let secondary_cursor_color = theme.color("secondary-cursor", {
+            let mut c = cursor_color;
+            c.a *= 0.7;
+            c
+        });
         let search_color = theme.color("search", rgba(0xffc83d66).into());
         let paren_color = theme.color("show-paren", rgba(0x5fafef66).into());
         let hl_line_color = theme.color("hl-line", rgba(0xffffff10).into());
@@ -497,6 +511,13 @@ impl Element for EditorElement {
         let mut avy: Vec<(PaintQuad, ShapedLine, Point<Pixels>)> = Vec::new();
         let mut extra_cursors: Vec<PaintQuad> = Vec::new();
         let extra_cursor_positions = editor.extra_cursor_positions();
+        // Secondary selection spans (Helix multiple selections); selected pane
+        // only, like the carets. Each is highlighted with `secondary_region_color`.
+        let extra_selections = if selected {
+            editor.extra_selections()
+        } else {
+            Vec::new()
+        };
         let mut image_quads: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
         let mut gutter = Vec::new();
         let mut fold_chevrons: Vec<(Bounds<Pixels>, SharedString, Hsla)> = Vec::new();
@@ -775,7 +796,7 @@ impl Element for EditorElement {
                         let origin = point(lx + cpos.x, content_top + cpos.y);
                         extra_cursors.push(fill(
                             Bounds::new(origin, size(cursor_width, line_height)),
-                            cursor_color,
+                            secondary_cursor_color,
                         ));
                     }
                 }
@@ -819,6 +840,25 @@ impl Element for EditorElement {
                     region_color,
                     px(0.),
                 );
+            }
+
+            // Secondary selections (Helix multiple selections): one dimmer span
+            // per selection that overlaps this line. Each carries its own color,
+            // so they coexist with the primary highlight in the same quad list.
+            for &(ss, se) in &extra_selections {
+                if se > ss && ss <= range.end && se >= range.start {
+                    push_range_quads(
+                        &mut selections,
+                        &wrapped,
+                        0,
+                        to_display(ss.max(range.start) - range.start, &holes),
+                        to_display(se.min(range.end) - range.start, &holes),
+                        line_origin,
+                        line_height,
+                        secondary_region_color,
+                        px(0.),
+                    );
+                }
             }
 
             // Search matches: a translucent background highlight per match.

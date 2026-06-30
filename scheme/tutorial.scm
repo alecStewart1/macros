@@ -410,6 +410,158 @@ This is the end of the tutorial.  To close this buffer, type C-x k Return.  To
 quit Macros, type C-x C-c.
 ")
 
+(define *helix-tutorial-text* "\
+MACROS TUTORIAL (HELIX KEYS)
+
+Welcome.  This is a hands-on tour of Macros' Helix-style editing.  You are
+reading it inside an ordinary, editable buffer, so you can practice every
+command right here, on this text.  Nothing you do is permanent: this copy is
+rebuilt fresh each time you open it, so experiment freely.
+
+Helix has two main modes:
+
+ NORMAL   the resting mode; letters run commands.  This is where you start.
+ INSERT   what you get after i, a, c, o; letters type themselves.  Esc returns.
+
+The big idea — SELECTION FIRST.  In Helix you SELECT, then ACT.  A motion does
+not just move the cursor, it selects: w selects the next word, x selects the
+line.  Then a verb acts on what is selected: d deletes the selection, c changes
+it, y copies it.  Noun first, then verb.  You always see what you are about to
+act on, highlighted, before you act.
+
+Two keys are written in shorthand below:
+
+ C-x   hold Control and press x.
+ M-x   hold Meta and press x.  Meta is Alt on most keyboards, or Option on a
+       Mac.  No Meta key?  Press Esc, let go, then the next key.
+
+Lines that begin with >> are things to try.  Do what they say before reading on.
+
+
+* LESSON 0: THE EMACS KEYS YOU NEED
+-----------------------------------
+Helix mode handles editing, but files, buffers, and quitting still go through
+Macros' Emacs chords — and they work in EVERY mode, so learn these first.  You
+genuinely need them.
+
+   C-g        cancel a half-typed command — your get-out-of-trouble key
+   C-x C-s    save the current buffer to its file
+   C-x C-f    open (visit) a file by name
+   C-x b      switch to another buffer       C-x C-b   list all buffers
+   C-x k      kill (close) a buffer          C-x C-c   quit Macros
+   M-x        run any command by name (a fuzzy list helps you find it)
+
+>> Press C-x C-f to begin opening a file, then C-g to cancel.  Press M-x, type
+   part of a command name to see the list, then C-g to back out.
+
+(Prefer Vim-style file commands?  Helix's Ex line has them too: press : then try
+:w, :e file, :q — but the Emacs chords above always work.)
+
+
+* LESSON 1: MOVING (AND SELECTING AS YOU GO)
+--------------------------------------------
+The home-row keys move point:
+
+   h  left      l  right      j  down      k  up
+
+>> Steer around this paragraph with h j k l until it feels natural.
+
+Word motions SELECT the word they cross — watch the highlight:
+
+   w  select forward to the next word     b  select back a word
+   e  select to the end of the word
+
+>> Put point on this line and press w a few times.  Each press highlights the
+   next word.  Now press b to walk the selection back.
+
+   0  go to the start of the line     $  go to the end of the line
+   g g  go to the top of the file     g e  go to the very bottom
+
+>> Jump to the top with g g, then back down here with j, or g e for the end.
+
+
+* LESSON 2: SELECTING LINES, AND THE PRIMARY VERBS
+--------------------------------------------------
+   x   select the whole current line (press again to add the next line)
+
+>> Put point on this line and press x.  The whole line lights up.  Press x once
+   more to extend the selection down to the following line.
+
+Now the verbs.  Each acts on the current selection:
+
+   d   delete the selection (and copy it, so p can put it back)
+   c   change: delete the selection and drop you into INSERT to retype it
+   y   yank (copy) the selection         p   paste after
+
+>> Type a junk word here: FIXME.  Put point on it, press w to select it, then d
+   to delete it.  Press u to undo if you like.
+
+>> Select this whole line with x, press y to copy it, then p to paste a copy
+   below.  Delete the extra line with x then d.
+
+
+* LESSON 3: INSERTING TEXT
+--------------------------
+From Normal mode, enter Insert with:
+
+   i   insert before the selection      a   append after it
+   o   open a new line below            O   open a new line above
+
+Type your text, then press Esc to return to Normal.
+
+>> Press o to open a line below this one, type a sentence, and press Esc.
+>> Press u to undo it if you want the tutorial tidy again.
+
+
+* LESSON 4: MULTIPLE SELECTIONS (THE HELIX SUPERPOWER)
+------------------------------------------------------
+This is what makes Helix Helix.  You can have MANY selections at once, and every
+motion and verb acts on ALL of them together.
+
+   C   add a cursor on the line below (repeat to add more)
+   ,   keep only the primary selection (drop the extras)
+   ;   collapse every selection back to a single cursor
+   v   toggle SELECT mode: motions now EXTEND the selection instead of replacing
+
+>> Put point on the first 'x' below, then press C twice to drop a cursor on each
+   of the next two lines.  You now have three cursors:
+
+     change me
+     change me
+     change me
+
+>> With the three cursors active, press w to select 'change' on every line at
+   once, then press c, type 'fix', and press Esc.  All three change together.
+   Press , to drop back to one selection when you are done.
+
+>> Now try v: press v (SELECT mode on), then l l l to grow one selection a
+   character at a time, then d to delete it.  Press v again to turn it off.
+
+
+* LESSON 5: SEARCH AND UNDO
+---------------------------
+   /text Return   search for text        n  next match     N  previous match
+   u  undo        U  redo
+
+(For saving, opening files, and quitting, use the Emacs chords from Lesson 0 —
+C-x C-s, C-x C-f, C-x C-c — they work here too.)
+
+>> Search for the word 'Helix' with /Helix Return, then press n to jump to the
+   next one.
+
+
+* WHERE TO GO NEXT
+------------------
+You now know enough to edit the Helix way: select, then act, on one cursor or
+many.  From here Macros has much more: LSP code navigation, a magit-style git
+interface, project-wide search, dired, org-mode, themes, and a full Steel
+(Scheme) extension language.  The Helix keymaps are all Scheme too — rebind
+anything in ~/.config/macros/init.scm with (define-key \"helix-normal\" ...).
+
+This is the end of the tutorial.  To close this buffer, type C-x k Return.  To
+quit Macros, type C-x C-c.
+")
+
 ;; Open a fresh, editable copy of `text` in buffer `name`, point at the top, with
 ;; an echo-area hint. Rebuilding from scratch each time gives a clean slate.
 (define (tutorial-open name text hint)
@@ -432,17 +584,30 @@ quit Macros, type C-x C-c.
   (tutorial-open "*VIM-TUTORIAL*" *vim-tutorial-text*
                  "Welcome to the Vim tutorial. Evil mode is on. Try the >> commands."))
 
+;; The Helix tutorial. Entering it switches ON Helix mode so the selection-first
+;; keys it teaches are live while you practice.
+(define (help-with-helix-tutorial)
+  (helix-mode)
+  (tutorial-open "*HELIX-TUTORIAL*" *helix-tutorial-text*
+                 "Welcome to the Helix tutorial. Helix mode is on. Try the >> commands."))
+
 ;; help-with-tutorial (C-h t): open the tutorial that matches your *current*
-;; keybindings — the vim one under evil-mode, the emacs one otherwise. It does
-;; NOT change the mode (the welcome-screen [emacs]/[evil/vim] labels do that).
+;; keybindings — Helix under helix-mode, vim under evil-mode, emacs otherwise. It
+;; does NOT change the mode (the welcome-screen labels do that). Helix is checked
+;; first because evil-enabled? is also true under Helix (shared state machine).
 (define (help-with-tutorial)
-  (if (evil-enabled?)
-      (tutorial-open "*VIM-TUTORIAL*" *vim-tutorial-text*
-                     "Welcome to the Vim tutorial. Try the >> commands.")
-      (tutorial-open "*TUTORIAL*" *emacs-tutorial-text*
-                     "Welcome to the Macros tutorial. Try the commands marked with >>.")))
+  (cond ((helix-enabled?)
+         (tutorial-open "*HELIX-TUTORIAL*" *helix-tutorial-text*
+                        "Welcome to the Helix tutorial. Try the >> commands."))
+        ((evil-enabled?)
+         (tutorial-open "*VIM-TUTORIAL*" *vim-tutorial-text*
+                        "Welcome to the Vim tutorial. Try the >> commands."))
+        (else
+         (tutorial-open "*TUTORIAL*" *emacs-tutorial-text*
+                        "Welcome to the Macros tutorial. Try the commands marked with >>."))))
 
 (define-key "fundamental" "ctrl-h t" 'help-with-tutorial)
 (register-command 'help-with-tutorial)
 (register-command 'help-with-emacs-tutorial)
 (register-command 'help-with-vim-tutorial)
+(register-command 'help-with-helix-tutorial)

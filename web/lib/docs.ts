@@ -38,6 +38,7 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "Editing",
     items: [
       { slug: "modal-editing", label: "Modal editing (evil)", blurb: "Vim-style motions, operators, text objects" },
+      { slug: "helix", label: "Modal editing (helix)", blurb: "Selection-first motions, verbs, multiple selections" },
       { slug: "editing-commands", label: "Editing commands", blurb: "Kill/yank, region, multiple cursors, occur" },
       { slug: "completion", label: "Completion", blurb: "The corfu-style popup and CAPFs" },
       { slug: "snippets", label: "Snippets", blurb: "YASnippet-style templates with tab-stops" },

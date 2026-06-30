@@ -390,6 +390,16 @@ pub struct Editor {
     /// along on edits via the marker store. Edits (typed text, newline, delete)
     /// are replicated to each. Empty when only the primary cursor is active.
     extra_cursors: Vec<u64>,
+    /// Anchor marker for each secondary selection, paired by index with
+    /// [`Self::extra_cursors`] (the head). For a bare multiple-cursor the anchor
+    /// sits on the head (empty selection, no highlight); Helix's selection-first
+    /// model sets them apart so each secondary selection paints its own span.
+    extra_anchors: Vec<u64>,
+    /// When true the modal layer resolves plain keys against the `helix-*`
+    /// keymaps instead of the `evil-*` ones (Helix's selection-first bindings,
+    /// installed by scheme/helix.scm). The Normal/Insert state machine itself is
+    /// shared with evil; only the keymap names change.
+    modal_helix: bool,
     /// Mode name -> Steel functions to run when that mode is enabled.
     hooks: HashMap<String, Vec<String>>,
     /// Point's buffer line at the last `post-command-hook` fire, so the hook runs
@@ -1512,6 +1522,8 @@ impl Editor {
             snippet_index: 0,
             avy_hints: Vec::new(),
             extra_cursors: Vec::new(),
+            extra_anchors: Vec::new(),
+            modal_helix: false,
             hooks: HashMap::new(),
             last_hook_line: None,
             capf_functions: Vec::new(),
@@ -3215,6 +3227,7 @@ impl Editor {
                 |d| d.to_string_lossy().into_owned(),
             );
         let region = self.region().map(|r| (r.start, r.end));
+        let selections = self.all_selections();
         let props = self
             .overlays
             .props
@@ -3256,6 +3269,7 @@ impl Editor {
             // only the slice they need, off the UI thread.
             text: self.buffer.rope().clone(),
             region,
+            selections,
             props,
             locals,
             diagnostics,
@@ -3289,6 +3303,7 @@ impl Editor {
             visible_lines: self.visible_line_range(),
             cursor_screen_row: self.cursor_screen_row(),
             evil_enabled: self.evil != EvilState::Disabled,
+            helix_enabled: self.modal_helix,
         });
     }
 

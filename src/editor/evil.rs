@@ -14,12 +14,39 @@ impl Editor {
     }
 
     /// The keymap name plain keys resolve against in the current evil state.
+    /// Under Helix the selection-first bindings live in a single `helix-normal`
+    /// map — Helix keeps selections in Normal instead of a separate Visual state.
     pub(super) fn evil_keymap(&self) -> &'static str {
+        if self.modal_helix {
+            return "helix-normal";
+        }
         match self.evil {
             EvilState::Visual => "evil-visual",
             EvilState::VisualLine => "evil-visual-line",
             EvilState::VisualBlock => "evil-visual-block",
             _ => "evil-normal",
+        }
+    }
+
+    /// The keymap consulted for chords while in Insert state (e.g. Escape →
+    /// Normal). Helix and evil keep separate insert maps so each owns its Escape.
+    pub(super) fn evil_insert_keymap(&self) -> &'static str {
+        if self.modal_helix {
+            "helix-insert"
+        } else {
+            "evil-insert"
+        }
+    }
+
+    /// Keymap-name prefix for special-buffer (magit/dired/…) modal overlays: the
+    /// active style's Normal map, scoped per major mode as `<prefix>:<major>`.
+    /// Lets Helix overlay its own collection bindings on read-only buffers, just
+    /// like evil-collection does, instead of inheriting evil's.
+    pub(super) fn modal_collection_prefix(&self) -> &'static str {
+        if self.modal_helix {
+            "helix-normal"
+        } else {
+            "evil-normal"
         }
     }
 
@@ -35,6 +62,16 @@ impl Editor {
     /// state and (like vim) shows nothing. The bar reverts to this whenever
     /// `status` clears.
     pub fn evil_mode_name(&self) -> Option<&'static str> {
+        // Helix keeps selections in Normal, so — unlike vim — show a persistent
+        // mode indicator there too (the echo row doubles as the modal banner), so
+        // it's obvious you're in Helix and not plain Emacs keys.
+        if self.modal_helix {
+            return match self.evil {
+                EvilState::Disabled => None,
+                EvilState::Insert => Some("-- INSERT --"),
+                _ => Some("-- HELIX --"),
+            };
+        }
         match self.evil {
             EvilState::Disabled | EvilState::Normal => None,
             EvilState::Insert => Some("-- Insert --"),
@@ -45,6 +82,38 @@ impl Editor {
     }
 
     pub(super) fn evil_enable(&mut self, cx: &mut Context<Self>) {
+        self.evil = EvilState::Normal;
+        self.mark_active = false;
+        cx.notify();
+    }
+
+    /// Enter Helix modal editing: reuse the Normal/Insert state machine but route
+    /// keys through the `helix-*` keymaps (see [`Self::evil_keymap`]).
+    pub(super) fn helix_enable(&mut self, cx: &mut Context<Self>) {
+        self.modal_helix = true;
+        self.evil = EvilState::Normal;
+        self.mark_active = false;
+        // Normal mode shows no banner, so confirm the switch in the echo area.
+        self.echo("Helix mode enabled", cx);
+        cx.notify();
+    }
+
+    /// Leave Helix modal editing — back to plain Emacs keys.
+    pub(super) fn helix_disable(&mut self, cx: &mut Context<Self>) {
+        self.modal_helix = false;
+        self.evil = EvilState::Disabled;
+        if self.has_extra_cursors() {
+            self.mc_clear(cx);
+        }
+        self.echo("Helix mode disabled", cx);
+        cx.notify();
+    }
+
+    /// Escape from Insert back to Helix Normal. Unlike [`Self::evil_normal_state`]
+    /// this keeps any secondary cursors (so `c`/`i`/`a` across several selections
+    /// leave you with one cursor per selection, the Helix way) and does not nudge
+    /// the cursor left (Helix has no Insert-exit nudge).
+    pub(super) fn helix_normal_state(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::Normal;
         self.mark_active = false;
         cx.notify();

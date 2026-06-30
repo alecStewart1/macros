@@ -155,16 +155,20 @@
   (let* ((prefix "     ‣  Open the tutorial            ")
          (emacs-label "[emacs]")
          (gap "  ")
-         (vim-label "[evil/vim]")
+         (vim-label "[vim]")
+         (helix-label "[helix]")
          (emacs-lo (utf8-length prefix))
          (emacs-hi (+ emacs-lo (utf8-length emacs-label)))
          (vim-lo   (+ emacs-hi (utf8-length gap)))
-         (vim-hi   (+ vim-lo (utf8-length vim-label))))
+         (vim-hi   (+ vim-lo (utf8-length vim-label)))
+         (helix-lo (+ vim-hi (utf8-length gap)))
+         (helix-hi (+ helix-lo (utf8-length helix-label))))
     (welcome-emit-segmented
-      (string-append prefix emacs-label gap vim-label "   C-h t")
+      (string-append prefix emacs-label gap vim-label gap helix-label "   C-h t")
       "foreground"
       (list (list emacs-lo emacs-hi (lambda () (help-with-emacs-tutorial)))
             (list vim-lo   vim-hi   (lambda () (help-with-vim-tutorial)))
+            (list helix-lo helix-hi (lambda () (help-with-helix-tutorial)))
             (list #f #f (lambda () (help-with-tutorial))))))
   (welcome-emit "     ‣  Find a file                  C-x C-f"
                 "foreground" (lambda () (helm-find-files)))
@@ -249,6 +253,15 @@
 (define-key "evil-normal:welcome-mode" "b" 'backward-word)
 (define-key "evil-normal:welcome-mode" "0" 'move-beginning-of-line)
 (define-key "evil-normal:welcome-mode" "$" 'move-end-of-line)
+
+;; Same horizontal motion under helix-mode (its collection layer also gives this
+;; buffer only j/k), so a Helix user can reach the [helix] label and press RET.
+(define-key "helix-normal:welcome-mode" "h" 'backward-char)
+(define-key "helix-normal:welcome-mode" "l" 'forward-char)
+(define-key "helix-normal:welcome-mode" "w" 'forward-word-start)
+(define-key "helix-normal:welcome-mode" "b" 'backward-word)
+(define-key "helix-normal:welcome-mode" "0" 'move-beginning-of-line)
+(define-key "helix-normal:welcome-mode" "$" 'move-end-of-line)
 
 ;; A splash, not code — no line-number gutter.
 (set-option "line-numbers:welcome-mode" "false")

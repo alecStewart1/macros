@@ -141,8 +141,8 @@ const STRIP: { title: string; body: string }[] = [
     body: "A flycheck-style diagnostics list with gutter dots, plus next-error and previous-error to walk them.",
   },
   {
-    title: "Rainbow delimiters",
-    body: "Bracket coloring by nesting depth, driven by tree-sitter so it stays right inside strings and comments.",
+    title: "Modal editing",
+    body: "Opt into Vim-style (evil) or selection-first (helix) modal editing — built on the keymaps, fully overridable in Scheme.",
   },
   {
     title: "Magit",

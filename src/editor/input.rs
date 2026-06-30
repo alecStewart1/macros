@@ -322,7 +322,7 @@ impl Editor {
             && self.pending_keys.is_empty()
             && let Some(expr) = self
                 .keymap
-                .resolve_mode("evil-insert", &chord_string(ks))
+                .resolve_mode(self.evil_insert_keymap(), &chord_string(ks))
                 .map(str::to_string)
         {
             self.run_script(&expr, cx);
@@ -345,7 +345,7 @@ impl Editor {
                 .modes
                 .names()
                 .last()
-                .map(|m| format!("evil-normal:{m}"))
+                .map(|m| format!("{}:{m}", self.modal_collection_prefix()))
             && let Some(expr) = self
                 .keymap
                 .resolve_mode(&km, &chord_string(ks))
@@ -367,20 +367,21 @@ impl Editor {
         {
             self.pending_keys.push(chord_string(ks));
             let sequence = self.pending_keys.join(" ");
-            // Emacs keybindings are the default: plain (non-evil) editing resolves
-            // straight against the buffer's own keymap, untouched. Under evil-mode
-            // ONLY, an `evil-normal:<major>` keymap is consulted FIRST, so the
-            // Scheme evil layer (`evil-collection-init` in evil.scm) can overlay
-            // vim keys on these read-only buffers — magit, dired, … — without
-            // disturbing their Emacs-default keymaps. The overlay is pure policy
-            // in Scheme; this is only the mechanism. Inert when evil is off.
+            // Emacs keybindings are the default: plain (non-modal) editing
+            // resolves straight against the buffer's own keymap, untouched. Under
+            // evil-mode or helix-mode ONLY, a `<style>-normal:<major>` keymap is
+            // consulted FIRST (see `modal_collection_prefix`), so the Scheme modal
+            // layer (`evil-collection-init` / `helix-collection-init`) can overlay
+            // vim/helix keys on these read-only buffers — magit, dired, … —
+            // without disturbing their Emacs-default keymaps. The overlay is pure
+            // policy in Scheme; this is only the mechanism. Inert when modal off.
             let scoped: Option<String> = self
                 .evil_intercepts()
                 .then(|| {
                     self.modes
                         .names()
                         .last()
-                        .map(|m| format!("evil-normal:{m}"))
+                        .map(|m| format!("{}:{m}", self.modal_collection_prefix()))
                 })
                 .flatten();
             if let Some(expr) = scoped

@@ -116,14 +116,23 @@ Both are stored in your config directory, in `~/.config/macros/saveplace` and `~
 
 ## Turning on modal editing
 
-Macros uses standard Emacs keybindings by default. For Vim-style modal editing, enable `evil-mode` in your config:
+Macros uses standard Emacs keybindings by default, and offers modal editing in two flavors. For Vim-style modal editing, enable `evil-mode`:
 
 ```scheme
 (evil-mode)
 ;; ...and (evil-disable) turns it back off.
 ```
 
-This is vanilla `evil-mode` — plain Vim keys, no leader. See [Modal editing](/docs/modal-editing) for the full picture.
+This is vanilla `evil-mode` — plain Vim keys, no leader. See [Modal editing (evil)](/docs/modal-editing) for the full picture.
+
+Prefer Helix's selection-first model instead? Enable `helix-mode`:
+
+```scheme
+(helix-mode)
+;; ...and (helix-disable) turns it back off.
+```
+
+Motions select, then verbs act on the selection, with first-class multiple selections. See [Modal editing (helix)](/docs/helix). Turn on one or the other, not both.
 
 ## A starter init.scm
 
