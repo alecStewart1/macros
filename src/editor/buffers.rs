@@ -909,6 +909,39 @@ impl Editor {
         cx.notify();
     }
 
+    /// Re-fontify Org buffer `name` in place, whether or not it is active. The
+    /// active path is the ordinary current-buffer fontify; for a buffer living in
+    /// an inactive [`Document`] (e.g. agent-shell streaming a reply into a
+    /// non-selected pane) we publish a snapshot *of that buffer* so `org--fontify`'s
+    /// reads (`buffer-string`, `current-buffer`, `buffer-local-get`) see it, and
+    /// point [`render_redirect`](Self::render_redirect) at it so the overlay/indent
+    /// writes it emits land there too — then restore the active snapshot. This is
+    /// the `run_hook_blocking` pattern (publish → `call_action` → apply), so it
+    /// reuses the exact Org fontifier without disturbing focus or the active buffer.
+    pub(super) fn fontify_org_buffer(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.active_name == name {
+            self.publish_point();
+            for command in self.script.call_action("org--fontify", None) {
+                self.apply_command(command, cx);
+            }
+            return;
+        }
+        let Some(idx) = self.inactive.iter().position(|d| d.name == name) else {
+            // Not shown anywhere (or unknown) → nothing on screen to refresh.
+            return;
+        };
+        self.publish_inactive_snapshot(idx);
+        self.render_redirect = Some(idx);
+        // org--fontify emits only overlay/indent writes (no buffer create/kill),
+        // so `idx` stays valid across the apply loop.
+        for command in self.script.call_action("org--fontify", None) {
+            self.apply_command(command, cx);
+        }
+        self.render_redirect = None;
+        // Restore the active-buffer snapshot for the next read bridge.
+        self.publish_point();
+    }
+
     /// Borrow the rope buffer named `name` — the active buffer or any inactive
     /// pane buffer. Used by the cross-buffer ediff primitives.
     pub(super) fn buffer_named(&self, name: &str) -> Option<&Buffer> {

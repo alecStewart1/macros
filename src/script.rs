@@ -422,6 +422,12 @@ pub enum EditorCommand {
         name: String,
         text: String,
     },
+    /// Re-run Org fontification against the buffer `name`, even when it is not the
+    /// active buffer — e.g. agent-shell streaming a reply into a buffer the user
+    /// is viewing in a non-selected pane. The editor publishes a snapshot of that
+    /// buffer and redirects the resulting overlay writes into it, so the existing
+    /// `org--fontify` colorizes it in place without disturbing focus.
+    FontifyOrgBuffer(String),
     /// Diff two buffers by name (the `similar` crate) and call Steel fn
     /// `callback` with one "tag\tas\tae\tbs\tbe\tabs\tabe\tbbs\tbbe" record per
     /// non-equal hunk — line ranges + byte ranges for each side. Powers the
@@ -2000,6 +2006,7 @@ impl ScriptEngine {
                 "goto-char",
                 "read-string-impl",
                 "append-to-buffer",
+                "fontify-org-buffer",
                 "set-modeline-project",
                 "set-modeline-git",
                 "set-mode-line-slot",
@@ -3556,6 +3563,12 @@ fn build_engine(
     register_binary(&mut engine, queue, "append-to-buffer", |name, text| {
         EditorCommand::AppendToBuffer { name, text }
     });
+    register_unary(
+        &mut engine,
+        queue,
+        "fontify-org-buffer",
+        EditorCommand::FontifyOrgBuffer,
+    );
     register_unary(
         &mut engine,
         queue,

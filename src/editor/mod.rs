@@ -3314,6 +3314,30 @@ impl Editor {
         });
     }
 
+    /// Publish a snapshot built from the inactive buffer at `idx` (its text, name,
+    /// path, and buffer-locals) so a `call_action` run sees that buffer rather than
+    /// the active one. Only the fields the Org fontifier reads are filled — point,
+    /// region, windows, and the rest stay at their defaults, since `org--fontify`
+    /// never reads them. Restore with [`publish_point`](Self::publish_point).
+    fn publish_inactive_snapshot(&self, idx: usize) {
+        let doc = &self.inactive[idx];
+        self.script.set_snapshot(crate::script::EditorSnapshot {
+            name: doc.name.clone(),
+            path: doc
+                .path
+                .as_deref()
+                .map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
+            // O(1) copy-on-write clone of the rope, as in `publish_point`.
+            text: doc.buffer.rope().clone(),
+            locals: doc
+                .locals
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            ..Default::default()
+        });
+    }
+
     /// The cursor's row within the viewport, in display rows (folds collapsed) —
     /// the distance from the first visible row to the cursor's row. Paired with
     /// [`scroll_cursor_to_row`](Self::scroll_cursor_to_row) to keep a buffer

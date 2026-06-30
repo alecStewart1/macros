@@ -263,16 +263,24 @@ impl Editor {
                 }
             }
             SetLineIndent { line, cols } => {
+                let indents = match self.render_redirect {
+                    Some(i) => &mut self.inactive[i].overlays.indents,
+                    None => &mut self.overlays.indents,
+                };
                 if cols == 0 {
-                    self.overlays.indents.remove(&line);
+                    indents.remove(&line);
                 } else {
-                    self.overlays.indents.insert(line, cols);
+                    indents.insert(line, cols);
                 }
                 cx.notify();
             }
             ClearLineIndents => {
-                if !self.overlays.indents.is_empty() {
-                    self.overlays.indents.clear();
+                let indents = match self.render_redirect {
+                    Some(i) => &mut self.inactive[i].overlays.indents,
+                    None => &mut self.overlays.indents,
+                };
+                if !indents.is_empty() {
+                    indents.clear();
                     cx.notify();
                 }
             }
@@ -455,6 +463,7 @@ impl Editor {
                 line_faces,
             } => self.render_buffer_quiet(name, mode, text, line_faces, cx),
             AppendToBuffer { name, text } => self.append_to_buffer(name, text, cx),
+            FontifyOrgBuffer(name) => self.fontify_org_buffer(name, cx),
             DiffBuffers { a, b, callback } => self.diff_buffers(&a, &b, &callback),
             BufferCopyLines {
                 src,
@@ -704,7 +713,17 @@ impl Editor {
                 }
                 None => self.overlay_set_face(start, end, face, cx),
             },
-            OverlayHide { start, end } => self.overlay_hide(start, end, cx),
+            OverlayHide { start, end } => match self.render_redirect {
+                Some(i) => {
+                    let len = self.inactive[i].buffer.len();
+                    let (start, end) = (start.min(len), end.min(len));
+                    if start < end {
+                        self.inactive[i].overlays.hidden.push(start..end);
+                        cx.notify();
+                    }
+                }
+                None => self.overlay_hide(start, end, cx),
+            },
             FoldLines {
                 start_line,
                 end_line,
@@ -725,11 +744,17 @@ impl Editor {
                 // it also cleared hides it would wipe another feature's
                 // concealment (e.g. markdown/org heading markers). Clear hides
                 // with `clear-overlay-hides`.
-                self.overlays.faces.clear();
+                match self.render_redirect {
+                    Some(i) => self.inactive[i].overlays.faces.clear(),
+                    None => self.overlays.faces.clear(),
+                }
                 cx.notify();
             }
             ClearOverlayHides => {
-                self.overlays.hidden.clear();
+                match self.render_redirect {
+                    Some(i) => self.inactive[i].overlays.hidden.clear(),
+                    None => self.overlays.hidden.clear(),
+                }
                 cx.notify();
             }
             ClearLineSuffixes => {
