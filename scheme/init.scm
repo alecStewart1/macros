@@ -19,7 +19,7 @@
 (set-option "font-family" "Lilex")           ; single family name; must be installed
 (set-option "font-size" 13)
 (set-option "line-height" 20)
-(set-option "tab-width" 4)
+(set-option "tab-width" 4)            ; spaces per auto-indent step, all languages (Lisp body offset too)
 ;; Completion popup (corfu-style). Behaviour is in Rust; policy lives here.
 (set-option "completion-style" "popup")     ; "popup" or "minibuffer"
 (set-option "completion-auto" #t)            ; pop up automatically while typing
@@ -42,6 +42,20 @@
 ;; Width (px) of the line between split windows. Also the drag-to-resize hit
 ;; area — raise it (e.g. 3) if the divider is hard to grab with the mouse.
 (set-option "divider-width" 1)
+
+;; Editing & display behaviour. All shown at their built-in defaults — uncomment
+;; and flip a value to change it. Several are per-major-mode: append `:<mode>`
+;; to the name to override one mode, e.g. (set-option "hl-line:magit-status-mode" #t).
+;; (set-option "electric-indent" #t)     ; auto-indent on RET, reindent on TAB; #f → plain newline
+;; (set-option "show-paren" #t)          ; highlight the matching bracket at point (off in prose modes)
+;; (set-option "word-wrap" #t)           ; soft-wrap long lines; #f → truncate + horizontal scroll
+;; (set-option "hl-line" #f)             ; highlight the cursor's line (off by default)
+;; (set-option "diagnostics-gutter" #t)  ; colored dot in the gutter on lines with LSP diagnostics
+;; (set-option "cursor-blink" #t)        ; #f → steady (non-blinking) cursor, no idle redraw
+;; (set-option "cursor-blink-interval" 530) ; blink half-period in ms (min 60)
+;; (set-option "completion-capf" #t)     ; consult Scheme completion-at-point fns before the LSP
+;; (set-option "auto-revert" #f)         ; re-read unmodified buffers when the file changes on disk
+;; (set-option "auto-update" #t)         ; check macros.dev for a newer release at launch (daily)
 
 ;; Fast search (ripgrep as a library) — used by projectile find-file & grep.
 ;; .gitignore/.ignore are respected automatically; add extra rules here.

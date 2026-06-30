@@ -214,14 +214,15 @@ function WhyIBuiltThis() {
         }}
       >
         <p style={{ margin: 0 }}>
-          I&apos;ve used Emacs for more than twenty years, and I genuinely love
-          it. It&apos;s been a constant companion through my whole career, and so
-          much of what I&apos;ve enjoyed about programming traces back to it. I
-          never would have learned Lisp if it weren&apos;t for Emacs, and learning
-          Lisp shaped my career in ways I couldn&apos;t have predicted. It set me
-          down the path of programming languages, which led to a roughly 10+ year
-          stretch where I wrote compilers and related tooling, a completely
-          different trajectory than the one I had been on.
+          I&apos;ve used Emacs for more than twenty years, it&apos;s oddly
+          addicting. It&apos;s been with me for most of my career, and much of
+          what I enjoy about programming centers on it, the look, the feel, the
+          experience of writing in it. I never would have learned Lisp if it
+          weren&apos;t for Emacs, and learning Lisp shaped my career in ways I
+          couldn&apos;t have predicted. It set me down the path of programming
+          languages, which led to a roughly 10+ year stretch where I wrote
+          compilers and related tooling, a completely different trajectory than
+          the one I had been on.
         </p>
         <p style={{ margin: 0 }}>
           Tinkering in it and trying new packages has always been a joy: getting

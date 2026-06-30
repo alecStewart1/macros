@@ -2510,8 +2510,9 @@ impl Editor {
             .as_deref()
             .is_some_and(is_lisp_language)
         {
+            let tab = cx.global::<crate::settings::Settings>().tab_width();
             let text = self.buffer.slice_to_string(self.lisp_defun_start(p)..p);
-            let indent = " ".repeat(lisp_indent_for(&text));
+            let indent = " ".repeat(lisp_indent_for(&text, tab));
             self.insert_text(&format!("\n{indent}"), cx);
             return;
         }
@@ -2739,11 +2740,13 @@ impl Editor {
     /// Reindent the current line to its Lisp indentation (Emacs TAB in a Lisp
     /// buffer).
     fn lisp_reindent_line(&mut self, cx: &mut Context<Self>) {
+        let tab = cx.global::<crate::settings::Settings>().tab_width();
         let line = self.buffer.line_range_at(self.point());
         let target = lisp_indent_for(
             &self
                 .buffer
                 .slice_to_string(self.lisp_defun_start(line.start)..line.start),
+            tab,
         );
         self.reindent_current_line(target, cx);
     }
@@ -4029,7 +4032,8 @@ fn load_inline_image(path: &Path) -> Option<CachedImage> {
 fn language_for_path(path: &Path) -> Option<&'static str> {
     let ext = path.extension().and_then(|e| e.to_str())?;
     let language = match ext {
-        "scm" | "ss" | "sld" | "sls" | "rkt" | "steel" => "scheme",
+        "scm" | "ss" | "sld" | "sls" | "steel" => "scheme",
+        "rkt" => "racket",
         "rs" => "rust",
         "py" | "pyi" => "python",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
@@ -4137,9 +4141,10 @@ fn lisp_form_indents_body(head: &str) -> bool {
 /// of the enclosing top-level form (a line beginning at column 0) up to the
 /// insertion point — is `text`. A pragmatic Lisp indenter: continuation lines
 /// align under the enclosing form's first argument, while the body of a known
-/// special form indents two columns past its opening paren. Strings, line and
-/// block comments, and char literals are skipped so their parens don't count.
-fn lisp_indent_for(text: &str) -> usize {
+/// special form indents `tab_width` columns past its opening paren (the same
+/// `tab-width` option the tree-sitter languages use). Strings, line and block
+/// comments, and char literals are skipped so their parens don't count.
+fn lisp_indent_for(text: &str, tab_width: usize) -> usize {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     // Open delimiters still unclosed at the end: (column, char-index just past
@@ -4276,7 +4281,7 @@ fn lisp_indent_for(text: &str) -> usize {
         c += 1;
     }
     if lisp_form_indents_body(&chars[head_start..j].iter().collect::<String>()) {
-        return open_col + 2;
+        return open_col + tab_width;
     }
     // Function call: align under the first argument when it shares the head's
     // line; otherwise one past the opener.
@@ -5476,7 +5481,7 @@ mod tests {
     #[test]
     fn language_by_extension() {
         assert_eq!(language_for_path(Path::new("main.scm")), Some("scheme"));
-        assert_eq!(language_for_path(Path::new("a.rkt")), Some("scheme"));
+        assert_eq!(language_for_path(Path::new("a.rkt")), Some("racket"));
         assert_eq!(language_for_path(Path::new("paper.tex")), Some("latex"));
         assert_eq!(language_for_path(Path::new("doc.typ")), Some("typst"));
         assert_eq!(language_for_path(Path::new("flow.mmd")), Some("mermaid"));
@@ -5489,33 +5494,50 @@ mod tests {
 
     #[test]
     fn lisp_indent_aligns_and_bodies() {
+        // Body offset tracks `tab-width`; alignment cases are width-independent.
+        // Here we pass the classic 2-column width.
+        let ind = |s| lisp_indent_for(s, 2);
         // Top level: no enclosing form.
-        assert_eq!(lisp_indent_for(""), 0);
-        assert_eq!(lisp_indent_for("(define x 1)\n"), 0);
+        assert_eq!(ind(""), 0);
+        assert_eq!(ind("(define x 1)\n"), 0);
         // Function call: continuation aligns under the first argument.
-        assert_eq!(lisp_indent_for("(foo bar\n"), 5);
+        assert_eq!(ind("(foo bar\n"), 5);
         // Operator alone on its line → one past the opener.
-        assert_eq!(lisp_indent_for("(foo\n"), 1);
-        // Special form indents its body two columns past the opener.
-        assert_eq!(lisp_indent_for("(define (f x)\n"), 2);
-        assert_eq!(lisp_indent_for("(let ((x 1))\n"), 2);
-        assert_eq!(lisp_indent_for("(when ready\n"), 2);
+        assert_eq!(ind("(foo\n"), 1);
+        // Special form indents its body `tab-width` columns past the opener.
+        assert_eq!(ind("(define (f x)\n"), 2);
+        assert_eq!(ind("(let ((x 1))\n"), 2);
+        assert_eq!(ind("(when ready\n"), 2);
         // Nesting: indent follows the innermost open form, offset by its column.
-        assert_eq!(lisp_indent_for("(define (f x)\n  (when y\n"), 4);
+        assert_eq!(ind("(define (f x)\n  (when y\n"), 4);
         // A list used as the head aligns under it (let-binding lists).
-        assert_eq!(lisp_indent_for("(let ((a 1)\n"), 6);
+        assert_eq!(ind("(let ((a 1)\n"), 6);
+    }
+
+    #[test]
+    fn lisp_indent_body_follows_tab_width() {
+        // The body offset is `tab-width`, configurable from init.scm. Alignment
+        // under the first argument stays column-based regardless of the width.
+        assert_eq!(lisp_indent_for("(define (f x)\n", 4), 4);
+        assert_eq!(lisp_indent_for("(when ready\n", 8), 8);
+        assert_eq!(lisp_indent_for("(define (f x)\n    (when y\n", 4), 8);
+        // Function-call alignment is unaffected by the width setting.
+        assert_eq!(lisp_indent_for("(foo bar\n", 4), 5);
+        assert_eq!(lisp_indent_for("(foo bar\n", 2), 5);
     }
 
     #[test]
     fn lisp_indent_skips_strings_and_comments() {
+        // None of these hit the body branch, so the width is irrelevant.
+        let ind = |s| lisp_indent_for(s, 4);
         // A paren inside a string is not an open form.
-        assert_eq!(lisp_indent_for("(foo \"(\"\n"), 5);
+        assert_eq!(ind("(foo \"(\"\n"), 5);
         // A paren inside a line comment is ignored.
-        assert_eq!(lisp_indent_for("(foo ; (\n"), 1);
+        assert_eq!(ind("(foo ; (\n"), 1);
         // Char literal `#\(` is not an opener; aligns under the first arg `c`.
-        assert_eq!(lisp_indent_for("(char=? c #\\(\n"), 8);
+        assert_eq!(ind("(char=? c #\\(\n"), 8);
         // Block comment hides its parens.
-        assert_eq!(lisp_indent_for("(foo #| ( |#\n"), 1);
+        assert_eq!(ind("(foo #| ( |#\n"), 1);
     }
 
     #[test]

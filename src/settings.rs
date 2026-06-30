@@ -284,7 +284,10 @@ impl Settings {
         self.f32_or("line-height", 22.0)
     }
 
-    /// Spaces inserted by `indent-for-tab-command`.
+    /// Spaces per indentation step, used by auto-indent across all languages:
+    /// each tree-sitter structural level is `tab-width` columns, and a Lisp
+    /// special form indents its body `tab-width` past the opener. Set from Scheme
+    /// with `(set-option "tab-width" N)`; default 4.
     pub fn tab_width(&self) -> usize {
         self.usize_or("tab-width", 4)
     }

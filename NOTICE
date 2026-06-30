@@ -37,6 +37,16 @@ directly. The highlight queries under `grammars/queries/` are derived from
 [nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter)
 (Apache-2.0).
 
+## Vendored tree-sitter Racket grammar
+
+Macros bundles the C source of the **tree-sitter-racket** grammar
+(Copyright (c) 2022 6cdh), parser and external scanner, compiled into the binary
+by `build.rs`. It is licensed under the **MIT License**; the full text ships in
+the repository at [`grammars/tree-sitter-racket/LICENSE`](grammars/tree-sitter-racket/LICENSE).
+Like Mermaid, it is vendored directly because no crate publishes the grammar
+against tree-sitter 0.26. The `grammars/queries/racket.scm` highlight query is an
+original work authored for this editor.
+
 ## Rust dependencies
 
 Macros links a large set of Rust crates — the tree-sitter grammars, the GPUI

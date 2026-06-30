@@ -21,6 +21,20 @@ mod mermaid {
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_mermaid) };
 }
 
+/// The vendored Racket grammar (`grammars/tree-sitter-racket`), compiled from C
+/// by build.rs (parser + external scanner). No crate publishes Racket against
+/// tree-sitter 0.26, so we link its generated `tree_sitter_racket()` and wrap it
+/// as a `LanguageFn`, matching the `LANGUAGE` const every grammar crate provides.
+mod racket {
+    use tree_sitter_language::LanguageFn;
+
+    unsafe extern "C" {
+        fn tree_sitter_racket() -> *const ();
+    }
+
+    pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_racket) };
+}
+
 /// The capture names we recognize, in the order tree-sitter assigns highlight
 /// indices. Each maps 1:1 to a theme face of the same name. Dotted captures in
 /// the grammar's query (e.g. `constant.builtin`) resolve to their prefix here.
@@ -81,6 +95,7 @@ pub const BUNDLED_LANGUAGES: &[&str] = &[
     "latex",
     "typst",
     "mermaid",
+    "racket",
 ];
 
 /// A contiguous run of source bytes and the face (if any) to draw it with.
@@ -321,7 +336,8 @@ fn injection_lang_id(tag: &str) -> Option<&'static str> {
         "lua" => "lua",
         "yaml" | "yml" => "yaml",
         "toml" => "toml",
-        "scheme" | "scm" | "lisp" | "racket" => "scheme",
+        "scheme" | "scm" | "lisp" => "scheme",
+        "racket" | "rkt" => "racket",
         "zig" => "zig",
         "r" => "r",
         "ocaml" | "ml" => "ocaml",
@@ -444,6 +460,12 @@ fn grammar(language: &str) -> Option<(LanguageFn, &'static str)> {
         "mermaid" => (
             mermaid::LANGUAGE,
             include_str!("../grammars/queries/mermaid.scm"),
+        ),
+        // Racket has its own grammar (`.rkt`); Steel/Scheme files still use the
+        // `scheme` grammar above. Query mirrors scheme.scm's classic-Lisp style.
+        "racket" => (
+            racket::LANGUAGE,
+            include_str!("../grammars/queries/racket.scm"),
         ),
         _ => return None,
     };
@@ -1316,13 +1338,15 @@ mod tests {
         );
     }
 
-    /// The Steel-aware query colors more than the stock R7RS one: a Steel
-    /// special form (`require`) as a keyword, the name a `define` introduces as
-    /// a function, a Steel builtin (`displayln`) as a function, parens as the
-    /// dim `bracket` face, and a `#:kw` argument as a constant.
+    /// The Steel-aware query colors *roles*, not call position (the classic
+    /// Emacs/DrRacket convention): a special form (`require`) as a keyword, the
+    /// name a `define` introduces as a function, a Steel builtin (`displayln`)
+    /// as a function, a `#:kw` argument as a constant, and parens as the dim
+    /// `bracket` face. An ordinary, unknown call head (`bind-key`) is left
+    /// uncaptured so it paints with the plain foreground, same as its arguments.
     #[test]
     fn scheme_highlights_steel_forms() {
-        let src = "(require \"x\")\n(define (greet n) (displayln n #:end \"!\"))\n";
+        let src = "(require \"x\")\n(define (greet n) (displayln n #:end \"!\"))\n(bind-key \"m\" 'greet)\n";
         let rope = Rope::from_str(src);
         let mut h = Highlighter::scheme().unwrap();
         h.set_text(&rope);
@@ -1342,6 +1366,36 @@ mod tests {
         assert_eq!(face_at("displayln"), Some("function"), "Steel builtin");
         assert_eq!(face_at("#:end"), Some("constant"), "keyword argument");
         assert_eq!(face_at("("), Some("bracket"), "dim bracket face");
+        // An unknown user-defined call head is NOT painted as a function.
+        assert_eq!(face_at("bind-key"), None, "ordinary call head stays plain");
+    }
+
+    /// The vendored Racket grammar loads and its query colors the same roles as
+    /// the Scheme one: `#lang`, special forms, defined names, builtins, keyword
+    /// args, and dim brackets — while ordinary call heads stay plain.
+    #[test]
+    fn racket_highlights_roles() {
+        let src = "#lang racket\n(define (greet n) (printf \"~a\" n))\n(my-call 1 #:x 2)\n";
+        let rope = Rope::from_str(src);
+        let mut h = Highlighter::for_language("racket").expect("racket grammar/query loads");
+        h.set_text(&rope);
+        let spans = h.spans_in(&rope, 0..rope.len_bytes());
+
+        let face_at = |needle: &str| {
+            let at = src.find(needle).unwrap();
+            spans
+                .iter()
+                .find(|s| s.range.contains(&at))
+                .and_then(|s| s.face.map(face_name))
+        };
+
+        assert_eq!(face_at("racket"), Some("keyword"), "#lang name");
+        assert_eq!(face_at("define"), Some("keyword"), "special form");
+        assert_eq!(face_at("greet"), Some("function"), "defined name");
+        assert_eq!(face_at("printf"), Some("function"), "builtin");
+        assert_eq!(face_at("#:x"), Some("constant"), "keyword argument");
+        assert_eq!(face_at("("), Some("bracket"), "dim bracket face");
+        assert_eq!(face_at("my-call"), None, "ordinary call head stays plain");
     }
 
     #[test]

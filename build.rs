@@ -1,10 +1,11 @@
 //! Build script. Two jobs:
 //!
-//! 1. Compile the vendored Mermaid tree-sitter parser (`grammars/tree-sitter-mermaid`)
-//!    from C and link it in, so `src/highlight.rs` can bind `tree_sitter_mermaid()`
-//!    as a `LanguageFn`. Every other grammar arrives prebuilt via a crate; Mermaid
-//!    has no crate exposing the modern API against tree-sitter 0.26, so we vendor
-//!    its `parser.c` (no external scanner) and compile it here.
+//! 1. Compile the vendored tree-sitter parsers under `grammars/` from C and link
+//!    them in, so `src/highlight.rs` can bind their `tree_sitter_<name>()` entry
+//!    points as `LanguageFn`s. Every other grammar arrives prebuilt via a crate;
+//!    these have no crate exposing the modern API against tree-sitter 0.26, so we
+//!    vendor their C sources and compile them here. Mermaid is a lone `parser.c`;
+//!    Racket additionally has a small external `scanner.c` (here-string bodies).
 //!
 //! 2. Windows-only: embed the application icon and version metadata into
 //!    `macros.exe` via a compiled resource (.res), so the installed Start-menu /
@@ -24,7 +25,17 @@ fn main() {
         println!("cargo:rustc-env=BUILD_TARGET={target}");
     }
 
-    compile_mermaid_grammar();
+    // Mermaid: parser only. Racket: parser + external scanner.
+    compile_grammar(
+        "tree-sitter-mermaid",
+        "grammars/tree-sitter-mermaid/src",
+        false,
+    );
+    compile_grammar(
+        "tree-sitter-racket",
+        "grammars/tree-sitter-racket/src",
+        true,
+    );
 
     #[cfg(windows)]
     {
@@ -41,18 +52,22 @@ fn main() {
     }
 }
 
-/// Compile the vendored Mermaid grammar's `parser.c` into a static lib linked
-/// into the binary. The grammar has no external scanner, so this is the single
-/// translation unit plus its bundled `tree_sitter` headers.
-fn compile_mermaid_grammar() {
-    let dir = "grammars/tree-sitter-mermaid/src";
+/// Compile a vendored grammar's C sources into a static lib linked into the
+/// binary: `parser.c` (always) plus `scanner.c` when `has_scanner`, alongside the
+/// grammar's bundled `tree_sitter` headers. `name` is both the cc output lib name
+/// and matches the `tree_sitter_<…>()` entry point bound in `src/highlight.rs`.
+fn compile_grammar(name: &str, dir: &str, has_scanner: bool) {
+    let mut build = cc::Build::new();
+    build.include(dir).file(format!("{dir}/parser.c"));
     println!("cargo:rerun-if-changed={dir}/parser.c");
-    cc::Build::new()
-        .include(dir)
-        .file(format!("{dir}/parser.c"))
+    if has_scanner {
+        build.file(format!("{dir}/scanner.c"));
+        println!("cargo:rerun-if-changed={dir}/scanner.c");
+    }
+    build
         // tree-sitter's generated parser.c trips these on -Wall; they're benign.
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-unused-but-set-variable")
         .warnings(false)
-        .compile("tree-sitter-mermaid");
+        .compile(name);
 }

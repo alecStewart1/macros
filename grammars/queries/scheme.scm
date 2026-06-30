@@ -24,21 +24,24 @@
 ;; --- Keyword arguments: #:foo --------------------------------------------
 (keyword) @constant.builtin
 
+;; This query follows the "classic" Lisp convention (Emacs / DrRacket): color
+;; *roles*, not call position. Only special forms, the names definitions
+;; introduce, and known builtins are colored; an ordinary call head like
+;; `(bind-key ...)` stays plain foreground, same as its arguments. (The opposite
+;; "modern tree-sitter" style would add `(list . "(" . (symbol) @function)` to
+;; paint every head — intentionally omitted.)
+;;
 ;; NB: ordinary symbols are deliberately *not* captured — an unhighlighted byte
 ;; already paints with the editor foreground (the variable color). Capturing
 ;; `(symbol) @variable` here would be counterproductive: tree-sitter emits
 ;; matches in root-node order, so a bare-symbol match (rooted at the symbol)
 ;; always lands *after* an enclosing `(list ...)` match and would win the tie,
-;; clobbering the head/keyword coloring below. Leaving plain references uncaptured
-;; lets the specific rules win.
-
-;; The head of a list sits in call position -> function color. This also makes
-;; arithmetic heads like (+ 1 2) read as calls rather than plain text.
+;; clobbering the keyword/builtin coloring below. Leaving plain references
+;; uncaptured lets the specific rules win.
 ;;
-;; NB: the opening "(" is the list's first *child* in this grammar, so the head
-;; symbol must be anchored after it — a bare `(list . (symbol))` anchors against
-;; the "(" and never matches (this is one bug that left the stock query flat).
-(list . "(" . (symbol) @function)
+;; NB: the opening "(" is the list's first *child* in this grammar, so a head
+;; symbol must be anchored after it — `(list . (symbol))` anchors against the
+;; "(" and never matches (one bug that left the stock query flat).
 
 ;; --- Special forms (Steel-aware) -----------------------------------------
 (list . "(" . (symbol) @keyword
