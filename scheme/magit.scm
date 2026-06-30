@@ -2136,6 +2136,19 @@
 (define-key "evil-normal:magit-status" "0" 'move-beginning-of-line)
 (define-key "evil-normal:magit-status" "^" 'evil-first-non-blank)
 
+;; Helix overlay (consulted only under helix-mode, before the keymap above). The
+;; same shape as the evil overlay: helix-collection gives magit j/k, which takes
+;; `k` over from discard — so re-expose discard on `x` (free in magit; `X`/shift-x
+;; is reset). `g g` makes `g` a prefix, shadowing single-`g` refresh, so re-expose
+;; refresh on `g r`. The motion helpers are evil.scm's (plain point moves, modal-
+;; agnostic). Everything else — s/u/c/b/P/F/z/l/… — stays as magit bound it.
+(define-key "helix-normal:magit-status" "x" 'magit-discard)
+(define-key "helix-normal:magit-status" "g g" 'evil-goto-first-line)
+(define-key "helix-normal:magit-status" "shift-g" 'evil-goto-last-line)
+(define-key "helix-normal:magit-status" "g r" 'magit-refresh)
+(define-key "helix-normal:magit-status" "0" 'move-beginning-of-line)
+(define-key "helix-normal:magit-status" "^" 'evil-first-non-blank)
+
 ;; Log / commit / stash-list buffers.
 (define-key "magit-log-mode" "enter" 'magit-log-show)
 (define-key "magit-log-mode" "shift-a" 'magit-log-cherry-pick)

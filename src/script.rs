@@ -265,6 +265,18 @@ pub enum EditorCommand {
     HelmActions,
     /// Toggle the selected candidate's multi-select mark (`C-SPC`).
     HelmToggleMark,
+    // Helix (selection-first modal editing, scheme/helix.scm)
+    /// Enter Helix modal editing: turn on the shared Normal/Insert state machine
+    /// and route plain keys against the `helix-*` keymaps.
+    HelixMode,
+    /// Leave Helix modal editing (back to plain Emacs keys).
+    HelixDisable,
+    /// Return to Helix Normal from Insert, *keeping* any secondary cursors (so
+    /// `c`/`i` across multiple selections survive Escape, unlike evil's Normal).
+    HelixNormalState,
+    /// Replace the whole selection set with these `(anchor, head)` pairs (first =
+    /// primary). The workhorse Helix selection-first motions drive through this.
+    SetSelections(Vec<(usize, usize)>),
     // Evil (modal editing)
     EvilMode,
     EvilNormalState,
@@ -720,6 +732,10 @@ pub struct EditorSnapshot {
     pub text: Rope,
     /// The active region's byte range, if the mark is active.
     pub region: Option<(usize, usize)>,
+    /// Every selection as an `(anchor, head)` pair — primary first, then any
+    /// secondary (multiple-cursor / Helix) selections. For `(selections)`, which
+    /// scheme/helix.scm reads to move and edit each selection independently.
+    pub selections: Vec<(usize, usize)>,
     /// Text properties `(start, end, key, value)`, for `get-text-property`.
     pub props: Vec<(usize, usize, String, String)>,
     /// Buffer-local variables `(key, value)`, for `buffer-local-get`.
@@ -749,6 +765,11 @@ pub struct EditorSnapshot {
     /// Scheme can branch on the active keybinding style (e.g. open the vim or the
     /// emacs tutorial to match what the user is using).
     pub evil_enabled: bool,
+    /// Whether Helix (selection-first) modal editing is active. Distinct from
+    /// `evil_enabled`, which is also true under Helix (the Normal/Insert state
+    /// machine is shared) — `(helix-enabled?)` lets Scheme branch on the style,
+    /// e.g. open the Helix tutorial instead of the Vim one.
+    pub helix_enabled: bool,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the
@@ -1925,6 +1946,7 @@ impl ScriptEngine {
                 "position->byte",
                 "lsp-server-ready?",
                 "evil-enabled?",
+                "helix-enabled?",
                 "line-bounds",
                 "diagnostics",
                 "regexp-quote",
@@ -1934,6 +1956,17 @@ impl ScriptEngine {
                 "region-end",
                 "region-active?",
                 "region-text",
+                "selections",
+                "set-selections",
+                "grapheme-forward",
+                "grapheme-backward",
+                "word-forward",
+                "word-forward-start",
+                "word-backward",
+                "line-start-pos",
+                "line-end-pos",
+                "line-of-pos",
+                "line-start-of-line",
                 "search-forward",
                 "goto-char",
                 "read-string-impl",
@@ -2531,6 +2564,9 @@ fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("helm-mark", HelmToggleMark),
         ("enable-lsp", EnableLsp),
         ("macros-steel-mode", EnterMacrosSteel),
+        ("helix-mode", HelixMode),
+        ("helix-disable", HelixDisable),
+        ("helix-normal-state", HelixNormalState),
         ("evil-mode", EvilMode),
         ("evil-normal-state", EvilNormalState),
         ("evil-insert-state", EvilInsertState),
@@ -3327,6 +3363,21 @@ fn build_engine(
     register_binary(&mut engine, queue, "set-region", |start, end| {
         EditorCommand::SetRegion { start, end }
     });
+    {
+        // `(set-selections '(a0 h0 a1 h1 …))` — replace the whole selection set
+        // from a flat list of alternating anchor/head byte offsets (the first
+        // pair is the primary). The Scheme reader returns selections in the same
+        // flat shape (see the `selections` read), so a motion is read → map →
+        // set-selections. An odd trailing element is ignored.
+        let q = queue.clone();
+        engine.register_fn("set-selections", move |flat: SteelVal| {
+            let v = steel_usize_list(&flat);
+            let pairs = v.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+            q.lock()
+                .unwrap()
+                .push(EditorCommand::SetSelections(pairs));
+        });
+    }
     register_binary(
         &mut engine,
         queue,
@@ -4073,6 +4124,8 @@ fn build_engine(
     register_snapshot_read(&mut engine, point, "lsp-server-ready?", |s| s.lsp_ready);
     // `(evil-enabled?)` → #t when modal (evil) editing is active.
     register_snapshot_read(&mut engine, point, "evil-enabled?", |s| s.evil_enabled);
+    // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
+    register_snapshot_read(&mut engine, point, "helix-enabled?", |s| s.helix_enabled);
     // `(diagnostics)` → the active buffer's LSP diagnostics, each a record
     // "line\tcol\tseverity\tmessage" (line/col 0-based). The library splits it.
     register_snapshot_read(&mut engine, point, "diagnostics", |s| s.diagnostics.clone());
@@ -4154,6 +4207,15 @@ fn build_engine(
             s.region.map_or(-1, |(_, b)| b as isize)
         });
         register_snapshot_read(&mut engine, point, "region-active?", |s| s.region.is_some());
+        // `(selections)` → a flat list `(a0 h0 a1 h1 …)` of every selection's
+        // anchor/head byte offsets, primary first (Helix multiple selections).
+        // Flat (not pairs) so it round-trips straight into `(set-selections …)`.
+        register_snapshot_read(&mut engine, point, "selections", |s| {
+            s.selections
+                .iter()
+                .flat_map(|&(a, h)| [a, h])
+                .collect::<Vec<usize>>()
+        });
         // The selected text, or "" when no region is active (Emacs has no single
         // primitive for this; it's `(buffer-substring (region-beginning) …)`).
         let shared = point.clone();
@@ -4219,6 +4281,39 @@ fn build_engine(
         let m = markers.clone();
         engine.register_fn("delete-marker", move |id: u64| {
             m.lock().unwrap().positions.remove(&id);
+        });
+    }
+    // --- Pure position motions (compute, don't move) ----------------------
+    // These resolve a *new byte offset* from a given one against the published
+    // buffer, reusing the editor's grapheme/word/line logic. Plain motions
+    // (`forward-char`, …) move the primary cursor as a side effect; these are
+    // pure, so Helix's selection-first commands can compute a fresh head for
+    // *every* selection and hand the lot back via `(set-selections …)`.
+    macro_rules! register_pos_fn {
+        ($name:literal, $f:expr) => {{
+            let shared = point.clone();
+            engine.register_fn($name, move |pos: usize| -> usize {
+                let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
+                let f: fn(&crate::buffer::Buffer, usize) -> usize = $f;
+                f(&buf, pos.min(buf.len()))
+            });
+        }};
+    }
+    register_pos_fn!("grapheme-forward", |b, p| b.next_grapheme(p));
+    register_pos_fn!("grapheme-backward", |b, p| b.prev_grapheme(p));
+    register_pos_fn!("word-forward", |b, p| b.forward_word(p));
+    register_pos_fn!("word-forward-start", |b, p| b.forward_word_start(p));
+    register_pos_fn!("word-backward", |b, p| b.backward_word(p));
+    register_pos_fn!("line-start-pos", |b, p| b.line_range_at(p).start);
+    register_pos_fn!("line-end-pos", |b, p| b.line_range_at(p).end);
+    register_pos_fn!("line-of-pos", |b, p| b.line_index_at_byte(p));
+    {
+        // `(line-start-of-line n)` → first byte of (0-based) line `n`, clamped.
+        let shared = point.clone();
+        engine.register_fn("line-start-of-line", move |line: usize| -> usize {
+            let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
+            let last = buf.line_count().saturating_sub(1);
+            buf.line_range(line.min(last)).start
         });
     }
     // --- Regexp (over strings, and over the buffer from point) ------------
@@ -4395,6 +4490,22 @@ fn fuzzy_rank(pattern: &str, candidates: &[String]) -> Vec<String> {
 fn steel_string_list(value: &SteelVal) -> Vec<String> {
     steel_list(value)
         .map(|items| items.iter().filter_map(steel_string).collect())
+        .unwrap_or_default()
+}
+
+/// A list of non-negative integers (anything else dropped). Used by
+/// `(set-selections …)` to read its flat anchor/head offset list.
+fn steel_usize_list(value: &SteelVal) -> Vec<usize> {
+    steel_list(value)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| match v {
+                    SteelVal::IntV(i) if *i >= 0 => Some(*i as usize),
+                    _ => None,
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -5657,6 +5768,90 @@ mod magit_tests {
                 Some("\"y\""),
                 "{cmd} is not registered for M-x"
             );
+        }
+    }
+
+    /// Helix selection-first motions read every selection from the snapshot and
+    /// hand a new set back via `set-selections` — the multi-selection core that
+    /// scheme/helix.scm drives. Exercised end to end through the engine.
+    #[test]
+    fn helix_selection_motions_drive_set_selections() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        // "hello world\n" is 12 bytes; the second line starts at byte 12.
+        let set = |sels: Vec<(usize, usize)>| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str("hello world\nsecond line\n"),
+                selections: sels,
+                ..Default::default()
+            });
+        };
+        let sels = |src: &str| match engine.eval(src).unwrap().commands.as_slice() {
+            [EditorCommand::SetSelections(p)] => p.clone(),
+            other => panic!("expected one SetSelections, got {other:?}"),
+        };
+
+        // `l` collapses to a bare cursor one grapheme right.
+        set(vec![(0, 0)]);
+        assert_eq!(sels("(helix-char-right)"), vec![(1, 1)]);
+
+        // `w` selects from the caret to the next word start: "hello " = (0, 6).
+        set(vec![(0, 0)]);
+        assert_eq!(sels("(helix-word-next)"), vec![(0, 6)]);
+
+        // Two selections move independently — the whole point of multi-selection.
+        set(vec![(0, 0), (12, 12)]);
+        assert_eq!(sels("(helix-char-right)"), vec![(1, 1), (13, 13)]);
+
+        // Extend mode keeps each anchor and grows only the head.
+        set(vec![(0, 0)]);
+        engine.eval("(set! *helix-extend* #t)").unwrap();
+        assert_eq!(sels("(helix-char-right)"), vec![(0, 1)]);
+        engine.eval("(set! *helix-extend* #f)").unwrap();
+    }
+
+    /// Opening the Helix tutorial switches the editor into Helix mode first, so
+    /// the selection-first keys it teaches are live (mirrors the Vim tutorial's
+    /// `evil-mode`). The `HelixMode` command must precede the buffer setup.
+    #[test]
+    fn helix_tutorial_switches_to_helix_mode() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        let cmds = engine.eval("(help-with-helix-tutorial)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::HelixMode)),
+            "help-with-helix-tutorial must enable Helix mode; got {cmds:?}"
+        );
+    }
+
+    /// Helix `d` yanks every selection to the clipboard, deletes them
+    /// high-offset-first, and leaves one cursor per deletion.
+    #[test]
+    fn helix_delete_yanks_deletes_and_recollapses() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("hello world\n"),
+            selections: vec![(0, 5)], // "hello"
+            ..Default::default()
+        });
+        match engine.eval("(helix-delete)").unwrap().commands.as_slice() {
+            [
+                EditorCommand::ClipboardSet(text),
+                EditorCommand::DeleteRegion { start, end },
+                EditorCommand::SetSelections(p),
+            ] => {
+                assert_eq!(text, "hello");
+                assert_eq!((*start, *end), (0, 5));
+                assert_eq!(p, &vec![(0, 0)]);
+            }
+            other => panic!("unexpected command sequence: {other:?}"),
         }
     }
 

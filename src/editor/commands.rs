@@ -640,6 +640,9 @@ impl Editor {
     ) -> Result<(), EditorCommand> {
         use EditorCommand::*;
         match command {
+            HelixMode => self.helix_enable(cx),
+            HelixDisable => self.helix_disable(cx),
+            HelixNormalState => self.helix_normal_state(cx),
             EvilMode => self.evil_enable(cx),
             EvilNormalState => self.evil_normal_state(cx),
             EvilInsertState => self.evil_insert_state(cx),
@@ -859,6 +862,7 @@ impl Editor {
             McAddAbove => self.mc_add_line(-1, cx),
             McMarkNext => self.mc_mark_next(cx),
             McClear => self.mc_clear(cx),
+            SetSelections(sels) => self.set_selections(sels, cx),
             // Back-compat sugar over the generic slot mechanism.
             SetModelineProject(name) => {
                 self.set_mode_line_slot("project".into(), name);

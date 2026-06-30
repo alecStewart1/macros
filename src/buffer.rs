@@ -58,6 +58,14 @@ impl Buffer {
         }
     }
 
+    /// Wrap an existing [`Rope`] without copying its text (the clone is O(1)
+    /// copy-on-write). Lets a read-only consumer — e.g. the Scheme position
+    /// bridges working off the published snapshot rope — reuse the buffer's
+    /// grapheme/word/line motion logic without rebuilding storage from a string.
+    pub fn from_rope(rope: Rope) -> Self {
+        Self { rope }
+    }
+
     /// Total length in bytes.
     pub fn len(&self) -> usize {
         self.rope.len_bytes()

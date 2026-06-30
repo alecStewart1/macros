@@ -133,22 +133,102 @@ impl Editor {
     }
 
     /// Add a secondary cursor at byte `pos` (ignored if it coincides with an
-    /// existing cursor). Returns whether one was added.
+    /// existing cursor). Returns whether one was added. The paired anchor marker
+    /// sits on the head, so a bare cursor is an empty selection (no highlight).
     pub(super) fn mc_add_cursor_at(&mut self, pos: usize) -> bool {
         let pos = pos.min(self.buffer.len());
         if pos == self.selected_range.start || self.extra_cursor_positions().contains(&pos) {
             return false;
         }
-        let id = self.script.add_marker(pos);
-        self.extra_cursors.push(id);
+        self.extra_cursors.push(self.script.add_marker(pos));
+        self.extra_anchors.push(self.script.add_marker(pos));
         true
+    }
+
+    /// Drop the marker pair (head + anchor) backing every secondary selection,
+    /// leaving only the primary. Shared by `mc-clear` and `set-selections`.
+    pub(super) fn clear_extra_selections(&mut self) {
+        for id in std::mem::take(&mut self.extra_cursors) {
+            self.script.remove_marker(id);
+        }
+        for id in std::mem::take(&mut self.extra_anchors) {
+            self.script.remove_marker(id);
+        }
     }
 
     /// Drop all secondary cursors.
     pub(super) fn mc_clear(&mut self, cx: &mut Context<Self>) {
-        for id in std::mem::take(&mut self.extra_cursors) {
-            self.script.remove_marker(id);
+        self.clear_extra_selections();
+        cx.notify();
+    }
+
+    /// The secondary selections as resolved `(start, end)` byte ranges, dropping
+    /// any whose anchor and head coincide (a bare cursor highlights nothing). The
+    /// renderer paints one `secondary-region` span per entry.
+    pub fn extra_selections(&self) -> Vec<(usize, usize)> {
+        self.extra_anchors
+            .iter()
+            .zip(&self.extra_cursors)
+            .filter_map(|(&a, &h)| {
+                let a = self.script.marker_pos(a)?;
+                let h = self.script.marker_pos(h)?;
+                (a != h).then_some((a.min(h), a.max(h)))
+            })
+            .collect()
+    }
+
+    /// Every selection as an `(anchor, head)` pair — the primary first, then the
+    /// secondaries in insertion order. Published in the snapshot for Scheme's
+    /// `(selections)`; `head` is the moving cursor end, `anchor` the fixed end.
+    pub(super) fn all_selections(&self) -> Vec<(usize, usize)> {
+        let head = self.cursor_offset();
+        let anchor = if self.mark_active {
+            if self.selection_reversed {
+                self.selected_range.end
+            } else {
+                self.selected_range.start
+            }
+        } else {
+            head
+        };
+        let mut sels = vec![(anchor, head)];
+        for (&a, &h) in self.extra_anchors.iter().zip(&self.extra_cursors) {
+            if let (Some(a), Some(h)) = (self.script.marker_pos(a), self.script.marker_pos(h)) {
+                sels.push((a, h));
+            }
         }
+        sels
+    }
+
+    /// Replace the whole selection set from a list of `(anchor, head)` pairs
+    /// (Scheme's `(set-selections …)`). The first pair becomes the primary
+    /// selection; the rest become marker-backed secondaries. An empty `anchor ==
+    /// head` pair is a bare cursor. The selection-first motions in
+    /// scheme/helix.scm drive every Normal-mode move through this.
+    pub(super) fn set_selections(&mut self, sels: Vec<(usize, usize)>, cx: &mut Context<Self>) {
+        self.clear_extra_selections();
+        let len = self.buffer.len();
+        let clamp = |x: usize| x.min(len);
+        let mut it = sels.into_iter();
+        let Some((anchor, head)) = it.next() else {
+            cx.notify();
+            return;
+        };
+        let (anchor, head) = (clamp(anchor), clamp(head));
+        if anchor == head {
+            self.collapse_to(head);
+        } else {
+            self.selected_range = anchor.min(head)..anchor.max(head);
+            self.selection_reversed = head < anchor;
+            self.marked_range = None;
+            self.mark_active = true;
+        }
+        for (anchor, head) in it {
+            let (anchor, head) = (clamp(anchor), clamp(head));
+            self.extra_cursors.push(self.script.add_marker(head));
+            self.extra_anchors.push(self.script.add_marker(anchor));
+        }
+        self.ensure_cursor_visible();
         cx.notify();
     }
 
