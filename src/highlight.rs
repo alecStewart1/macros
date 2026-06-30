@@ -35,6 +35,10 @@ pub const FACE_NAMES: &[&str] = &[
     "operator",
     "punctuation",
     "variable",
+    // Brackets/parens. Distinct from `punctuation` so themes can render the
+    // structural delimiters a touch dimmer than ordinary punctuation. Fed by
+    // the `@punctuation.bracket` capture (see `face_for_capture`).
+    "bracket",
 ];
 
 /// The theme face name for a highlight index.
@@ -183,7 +187,7 @@ impl Highlighter {
     pub fn scheme() -> Option<Self> {
         Self::new(
             tree_sitter_scheme::LANGUAGE,
-            tree_sitter_scheme::HIGHLIGHTS_QUERY,
+            include_str!("../grammars/queries/scheme.scm"),
         )
     }
 
@@ -335,9 +339,11 @@ fn injection_lang_id(tag: &str) -> Option<&'static str> {
 /// and an extension mapping in `language_for_path`.
 fn grammar(language: &str) -> Option<(LanguageFn, &'static str)> {
     let entry = match language {
+        // A Steel-aware highlights query (richer than the crate's stock R7RS
+        // `HIGHLIGHTS_QUERY`, which left most Steel code uncolored).
         "scheme" => (
             tree_sitter_scheme::LANGUAGE,
-            tree_sitter_scheme::HIGHLIGHTS_QUERY,
+            include_str!("../grammars/queries/scheme.scm"),
         ),
         "rust" => (
             tree_sitter_rust::LANGUAGE,
@@ -790,6 +796,12 @@ fn point((row, column): (usize, usize)) -> Point {
 /// Resolve a capture name to a face index, using the dotted prefix
 /// (`string.special` -> `string`).
 fn face_for_capture(name: &str) -> Option<usize> {
+    // Brackets get their own face so themes can dim structural delimiters
+    // without touching other punctuation. Checked before the base-name fallback
+    // below, which would otherwise resolve `punctuation.bracket` to `punctuation`.
+    if name == "punctuation.bracket" {
+        return FACE_NAMES.iter().position(|face| *face == "bracket");
+    }
     let base = name.split('.').next().unwrap_or(name);
     if let Some(i) = FACE_NAMES.iter().position(|face| *face == base) {
         return Some(i);
@@ -1302,6 +1314,34 @@ mod tests {
             faces.contains(&"string"),
             "expected a string face, got {faces:?}"
         );
+    }
+
+    /// The Steel-aware query colors more than the stock R7RS one: a Steel
+    /// special form (`require`) as a keyword, the name a `define` introduces as
+    /// a function, a Steel builtin (`displayln`) as a function, parens as the
+    /// dim `bracket` face, and a `#:kw` argument as a constant.
+    #[test]
+    fn scheme_highlights_steel_forms() {
+        let src = "(require \"x\")\n(define (greet n) (displayln n #:end \"!\"))\n";
+        let rope = Rope::from_str(src);
+        let mut h = Highlighter::scheme().unwrap();
+        h.set_text(&rope);
+        let spans = h.spans_in(&rope, 0..rope.len_bytes());
+
+        // Map: for a substring, the face covering its first byte.
+        let face_at = |needle: &str| {
+            let at = src.find(needle).unwrap();
+            spans
+                .iter()
+                .find(|s| s.range.contains(&at))
+                .and_then(|s| s.face.map(face_name))
+        };
+
+        assert_eq!(face_at("require"), Some("keyword"), "Steel special form");
+        assert_eq!(face_at("greet"), Some("function"), "defined name");
+        assert_eq!(face_at("displayln"), Some("function"), "Steel builtin");
+        assert_eq!(face_at("#:end"), Some("constant"), "keyword argument");
+        assert_eq!(face_at("("), Some("bracket"), "dim bracket face");
     }
 
     #[test]

@@ -40,6 +40,7 @@
 (set-face "operator" "#d6d6dd")
 (set-face "punctuation" "#d6d6dd")
 (set-face "variable" "#d6d6dd")
+(set-face "bracket" "#7d818a")           ; dimmed structural delimiters
 
 ;; LSP feature faces (document highlight, inlay hints, code lens)
 (set-face "lsp-highlight" "#ffffff21")   ; editor.wordHighlightBackground

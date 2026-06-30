@@ -40,6 +40,7 @@
 (set-face "operator" "#141414")
 (set-face "punctuation" "#141414")
 (set-face "variable" "#141414")
+(set-face "bracket" "#8a8a8a")           ; dimmed structural delimiters
 
 ;; LSP feature faces (document highlight, inlay hints, code lens)
 (set-face "lsp-highlight" "#d4e3e8")     ; search-match teal
