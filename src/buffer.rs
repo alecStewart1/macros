@@ -151,8 +151,18 @@ impl Buffer {
         (start..start + text.len(), text)
     }
 
-    /// The bytes in `range` as an owned string.
+    /// The bytes in `range` as an owned string. An inverted range (`start > end`)
+    /// would abort the whole process in ropey (a non-unwinding panic), so guard it:
+    /// such a range is always a caller bug — `debug_assert` surfaces it in dev — but
+    /// in release the editor degrades to an empty slice rather than crashing.
     pub fn slice_to_string(&self, range: Range<usize>) -> String {
+        debug_assert!(
+            range.start <= range.end,
+            "slice_to_string inverted range: {range:?}"
+        );
+        if range.start >= range.end {
+            return String::new();
+        }
         self.rope.byte_slice(range).to_string()
     }
 

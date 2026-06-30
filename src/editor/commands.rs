@@ -951,6 +951,13 @@ impl Editor {
                 );
             }
             EnterMacrosSteel => {
+                // Drop diagnostics the previous server (e.g. plain `scheme`, which
+                // doesn't know the editor API) already published for this buffer, so
+                // its "unknown function" warnings clear immediately; the now-active
+                // `macros-scheme` server republishes via the mode hook below.
+                if let Some(uri) = self.active_uri() {
+                    self.diagnostics.remove(&uri);
+                }
                 let mut modes = ModeStack::default();
                 modes.push(Mode::new("fundamental"));
                 modes.push(Mode::new("macros-steel").with_language("macros-scheme"));

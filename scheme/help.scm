@@ -2,9 +2,18 @@
 ;; describe-key / apropos / describe-bindings. Loads after helm.scm so its
 ;; M-x rebinding wins.
 
-;; All invocable command names: built-ins + registered Scheme commands.
+;; Drop consecutive duplicates from a SORTED string list (one O(n) pass).
+(define (help--dedup-sorted xs)
+  (let loop ((xs xs) (acc '()))
+    (cond ((null? xs) (reverse acc))
+          ((and (pair? acc) (equal? (car xs) (car acc))) (loop (cdr xs) acc))
+          (else (loop (cdr xs) (cons (car xs) acc))))))
+
+;; All invocable command names: built-ins + registered Scheme commands. Deduped,
+;; because a command can legitimately appear in BOTH lists — a Rust nullary
+;; builtin that a Scheme file also `register-command`s — and M-x must list it once.
 (define (all-commands)
-  (sort-strings (append (command-list) *interactive-commands*)))
+  (help--dedup-sorted (sort-strings (append (command-list) *interactive-commands*))))
 
 ;; Run a command (built-in OR Scheme fn) by name — `(name)` via eval-string.
 (define (execute-command name)

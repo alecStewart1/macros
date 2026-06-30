@@ -237,15 +237,37 @@ pub fn user_config() -> Option<(PathBuf, String)> {
     })
 }
 
+/// Working trees of locally-developed packages (`package-install-local`), whose
+/// `*.scm` are editor-extension code even though they live outside the config dir.
+/// Registered at config eval via `register-macros-scheme-dir`; consulted by
+/// [`is_macros_scheme_path`]. `Mutex::new` is const, so no lazy-init dance.
+static LOCAL_SCHEME_DIRS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Register a local package working tree so its `*.scm` resolve to `macros-scheme`
+/// (see [`is_macros_scheme_path`]). Idempotent. Must run before the file is opened
+/// — `package-install-local` calls it at config-eval time, the file is edited later.
+pub fn register_local_scheme_dir(dir: PathBuf) {
+    let mut dirs = LOCAL_SCHEME_DIRS.lock().unwrap();
+    if !dirs.contains(&dir) {
+        dirs.push(dir);
+    }
+}
+
 /// Whether `path` is editor-aware Scheme — config / extension code that should
 /// use the `macros-scheme` language (a built-in Steel server seeded with the
 /// editor API, plus the `macros-steel` major mode) rather than the vanilla
-/// `scheme` server. True when the file lives under the user's config directory,
-/// or is named `*.macros.scm` (an explicit opt-in usable from anywhere). Plain
-/// `.scm` files are left as "just the interpreter".
+/// `scheme` server. True when the file lives under the user's config directory, a
+/// registered local-package dir, or is named `*.macros.scm` (an explicit opt-in
+/// usable from anywhere). Plain `.scm` files are left as "just the interpreter".
 pub fn is_macros_scheme_path(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    name.ends_with(".macros.scm") || config_dirs().iter().any(|dir| path.starts_with(dir))
+    name.ends_with(".macros.scm")
+        || config_dirs().iter().any(|dir| path.starts_with(dir))
+        || LOCAL_SCHEME_DIRS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|dir| path.starts_with(dir))
 }
 
 /// The active config directory: where `init.scm` was found, else the primary
@@ -278,6 +300,25 @@ pub fn include_prelude(dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_local_dir_is_macros_scheme_path() {
+        let dir = PathBuf::from("/tmp/macros-probe-pkg");
+        // Before registration: a plain `.scm` under it is not editor-aware.
+        assert!(!is_macros_scheme_path(&dir.join("foo.scm")));
+        register_local_scheme_dir(dir.clone());
+        // After: files under it resolve to macros-scheme…
+        assert!(is_macros_scheme_path(&dir.join("foo.scm")));
+        assert!(is_macros_scheme_path(&dir.join("sub/bar.scm")));
+        // …but a SIBLING dir sharing a name prefix does not (component-wise check).
+        assert!(!is_macros_scheme_path(&PathBuf::from(
+            "/tmp/macros-probe-pkg-other/baz.scm"
+        )));
+        // `*.macros.scm` still works independent of registration.
+        assert!(is_macros_scheme_path(&PathBuf::from(
+            "/elsewhere/init.macros.scm"
+        )));
+    }
 
     #[test]
     fn embeds_startup_and_themes() {

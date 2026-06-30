@@ -1402,7 +1402,18 @@ fn build_popup(
     let width = max_width + padding + padding;
     let rows = shaped.len();
     let height = line_height * rows as f32;
-    let top = anchor.y + line_height;
+    // Default below the cursor line. Flip ABOVE it when the box would spill past
+    // the pane's bottom edge (off the window) AND there's more room above the
+    // cursor than below — so it stays on-screen instead of being clipped. When
+    // flipped, the box's bottom rests just above the cursor line (`anchor.y`).
+    let below_top = anchor.y + line_height;
+    let space_below = editor_bounds.bottom() - below_top;
+    let space_above = anchor.y - editor_bounds.top();
+    let top = if height > space_below && space_above > space_below {
+        anchor.y - height
+    } else {
+        below_top
+    };
     // Keep the box within the editor horizontally.
     let max_left = editor_bounds.right() - width;
     let mut left = anchor.x;

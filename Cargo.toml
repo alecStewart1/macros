@@ -1,9 +1,9 @@
 [package]
 name = "macros"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
-repository = "https://codeberg.org/likelihood/macros"
+repository = "https://codeberg.org/macros-app/macros"
 authors = ["Kyle Gwinnup"]
 license = "MIT"
 

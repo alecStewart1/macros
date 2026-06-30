@@ -918,7 +918,7 @@ impl Editor {
             self.helm_complete(cx); // TAB → complete to selection / descend folders
             return;
         }
-        if self.popup_special_key("tab", EditorCommand::CompletionAccept, cx) {
+        if self.popup_special_key("tab", EditorCommand::CompletionNext, cx) {
             return;
         }
         if self.minibuffer.is_some() {

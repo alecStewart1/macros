@@ -74,6 +74,15 @@ impl Editor {
             .cloned()
         {
             let point = self.point();
+            // Point can sit BEFORE the anchor when an edit moved it back without
+            // the popup having refiltered-closed first (e.g. a fast backspace then
+            // Enter/Tab, or a CAPF that reported an anchor ahead of point). The
+            // `anchor..point` prefix range would then invert and abort the editor in
+            // `byte_slice`. There's nothing to replace — drop the accept.
+            if point < popup.anchor {
+                cx.notify();
+                return;
+            }
             if choice.additional_edits.is_empty() {
                 let cursor = self.edit(popup.anchor..point, &choice.insert_text);
                 self.collapse_to(cursor);

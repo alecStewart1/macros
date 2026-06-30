@@ -156,6 +156,14 @@
 ;;
 ;;   (package-install-local "/Users/me/dev/macros-foo"
 ;;     'config (lambda () (set-option "foo-mode" "on")))
+
+;; Files under a locally-developed package are this editor's OWN extension code,
+;; so they should open in the editor-aware `macros-steel` mode + `macros-scheme`
+;; LSP (seeded with the editor API), not the vanilla `scheme` server where
+;; `append-to-buffer` and friends read as "unknown function". Path auto-detection
+;; otherwise covers only `*.macros.scm` and the config dir — a local working tree
+;; is neither — so register each dir with the Rust path check (`is_macros_scheme_path`),
+;; which `make-document` consults to pick BOTH the mode and the language on open.
 (define (package-install-local dir . opts)
   (let* ((name    (or (pkg--opt opts 'name) (basename dir)))
          (entry   (or (pkg--opt opts 'entry) (string-append name ".scm")))
@@ -172,6 +180,7 @@
       ((not (file-directory? dir))
        (message (string-append "package: " name " — local dir not found: " dir)))
       (else
+       (register-macros-scheme-dir dir)   ; *.scm here → macros-steel mode + macros-scheme LSP
        (pkg--load name dir entry config)))))
 
 ;; M-x package-list — echo the installed packages (dirs under *packages-directory*).

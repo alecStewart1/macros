@@ -1747,6 +1747,10 @@ const SPECIAL_FORMS: &[&str] = &[
     "syntax-rules",
     "require",
     "provide",
+    // Steel error handling: a form, not a readable global, so the analyzer's
+    // vanilla engine doesn't surface it — list it so `(with-handler …)` (used in
+    // the bundled library and configs) isn't flagged "unknown".
+    "with-handler",
 ];
 
 /// The identifier prefix immediately before the LSP position `(line, char)`.

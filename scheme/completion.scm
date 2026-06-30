@@ -5,8 +5,8 @@
 (define-key "completion" "ctrl-p" 'completion-previous)
 (define-key "completion" "down" 'completion-next)
 (define-key "completion" "up" 'completion-previous)
-(define-key "completion" "tab" 'completion-accept)
-(define-key "completion" "enter" 'completion-accept)
+(define-key "completion" "tab" 'completion-next)     ; TAB cycles the candidates…
+(define-key "completion" "enter" 'completion-accept) ; …ENTER accepts the selected one
 (define-key "completion" "ctrl-g" 'completion-abort)
 
 ;; --- completion-at-point-functions (CAPF) -----------------------------------

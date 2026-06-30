@@ -3626,6 +3626,14 @@ impl Editor {
     /// for its file extension, or — when there's no file — the active mode's
     /// language (so `*scratch*` in steel-mode resolves to `scheme`).
     fn active_language(&self) -> Option<String> {
+        // An explicitly-entered `macros-steel` mode (`M-x macros-steel-mode`) forces
+        // the editor-aware `macros-scheme` server even for a plain `.scm` file whose
+        // path wouldn't otherwise match — the escape hatch's whole purpose. Without
+        // this the extension map below would resolve `.scm` to `scheme` and the
+        // mode's declared language would be silently ignored.
+        if self.modes.active_language() == Some("macros-scheme") {
+            return Some("macros-scheme".to_string());
+        }
         if let Some(language) = self
             .active_path
             .as_ref()

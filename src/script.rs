@@ -2020,6 +2020,7 @@ impl ScriptEngine {
                 "file-exists?",
                 "file-directory?",
                 "packages-directory",
+                "register-macros-scheme-dir",
                 "parent-directory",
                 "read-file",
                 "write-file",
@@ -3716,6 +3717,13 @@ fn build_engine(
             .join("packages")
             .to_string_lossy()
             .into_owned()
+    });
+    // `(register-macros-scheme-dir dir)` → treat `*.scm` under `dir` as editor
+    // extension code (the `macros-steel` mode + editor-aware `macros-scheme` LSP),
+    // even though it's outside the config dir. `package-install-local` calls this
+    // so a local working tree's sources resolve correctly on open.
+    engine.register_fn("register-macros-scheme-dir", |dir: String| {
+        crate::runtime::register_local_scheme_dir(std::path::PathBuf::from(dir));
     });
     engine.register_fn("parent-directory", |path: String| -> String {
         // Parent of a path, trailing slash trimmed first so a directory's own

@@ -212,8 +212,19 @@ impl Editor {
                 }
             } else if method == "textDocument/publishDiagnostics" {
                 let (uri, diagnostics) = lsp::parse_diagnostics(&message["params"]);
-                self.diagnostics.insert(uri, diagnostics);
-                cx.notify();
+                // Diagnostics are keyed only by URI, and each server runs its own
+                // async task — so after a language switch (e.g. `scheme` →
+                // `macros-scheme` via `macros-steel-mode`) the OLD server's
+                // late-arriving publish could clobber the new one's. For the active
+                // buffer, accept diagnostics only from its CURRENT language server;
+                // a stale server's are dropped. (Background buffers — a different
+                // URI — are unaffected.)
+                let stale_for_active = self.active_uri().as_deref() == Some(&uri)
+                    && self.active_language().as_deref() != Some(&language);
+                if !stale_for_active {
+                    self.diagnostics.insert(uri, diagnostics);
+                    cx.notify();
+                }
             } else if method == "$/stderr" {
                 // Server stderr, captured into `*lsp-log*` (tagged by language)
                 // and appended live to the buffer if it's open.
