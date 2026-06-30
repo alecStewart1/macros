@@ -448,6 +448,12 @@ pub struct Editor {
     mb_dynamic: Option<(String, u64)>,
 
     scroll_offset: Pixels,
+    /// Set whenever point moves and the view should follow it (`ensure_cursor_visible`),
+    /// consumed by the post-paint `reconcile_cursor_scroll`. Gating the reconcile on
+    /// this flag means it only corrects the scroll right after a cursor move — it does
+    /// NOT fight a passive repaint, so a mouse-wheel scroll away from the cursor sticks
+    /// instead of being yanked back to the (unmoved) cursor.
+    cursor_follow_pending: bool,
     /// Horizontal scroll of the selected pane, in pixels. Always 0 when word-wrap
     /// is on; otherwise it shifts long lines left so off-screen text is reachable.
     h_scroll_offset: Pixels,
@@ -1553,6 +1559,7 @@ impl Editor {
             autoscroll_dy: 0.0,
             autoscroll_pos: point(px(0.), px(0.)),
             scroll_offset: px(0.),
+            cursor_follow_pending: false,
             h_scroll_offset: px(0.),
             viewport_width: px(0.),
             char_width: px(8.),
@@ -1990,6 +1997,9 @@ impl Editor {
     }
 
     fn ensure_cursor_visible(&mut self) {
+        // Point moved (or a command asked to reveal it): let the post-paint
+        // `reconcile_cursor_scroll` correct the wrapped-geometry estimate this frame.
+        self.cursor_follow_pending = true;
         let lh = f32::from(self.line_height);
         let vh = f32::from(self.viewport_height);
         if lh <= 0.0 || vh <= 0.0 {
@@ -2030,6 +2040,12 @@ impl Editor {
     /// and we nudge the scroll by just enough to bring it fully into view. This is
     /// the authoritative scroll-follow; converges in one extra frame.
     pub fn reconcile_cursor_scroll(&mut self, cursor_top: Option<Pixels>, cx: &mut Context<Self>) {
+        // Only follow the cursor on the frame after it moved. On a passive repaint
+        // (mouse-wheel scroll, fontify, resize) the flag is clear, so a scroll away
+        // from the cursor sticks instead of being yanked back to it.
+        if !std::mem::take(&mut self.cursor_follow_pending) {
+            return;
+        }
         let Some(cursor_top) = cursor_top else {
             return;
         };

@@ -20,9 +20,30 @@ impl Editor {
         names
     }
 
-    /// Publish the buffer list to Scheme (for `(buffer-names)`).
+    /// Publish the buffer list to Scheme (for `(buffer-names)`), plus the
+    /// name → absolute path map for file-visiting buffers (`buffer-file-name-of`).
     pub(super) fn sync_buffers(&self) {
         self.script.set_buffer_names(self.buffer_names());
+        let abs = |p: &Path| -> String {
+            if p.is_absolute() {
+                p.to_string_lossy().into_owned()
+            } else {
+                std::env::current_dir()
+                    .map_or_else(|_| p.to_path_buf(), |cwd| cwd.join(p))
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        let mut paths = HashMap::new();
+        if let Some(p) = self.active_path.as_deref() {
+            paths.insert(self.active_name.clone(), abs(p));
+        }
+        for d in &self.inactive {
+            if let Some(p) = d.path.as_deref() {
+                paths.insert(d.name.clone(), abs(p));
+            }
+        }
+        self.script.set_buffer_paths(paths);
     }
 
     pub fn buffer_name(&self) -> &str {

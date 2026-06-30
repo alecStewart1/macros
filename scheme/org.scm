@@ -413,6 +413,36 @@
 
 (define (org--total-lines) (length (org--lines)))
 
+;; A drawer is `:NAME:` … `:end:` (Emacs `org-drawer`); its body folds away,
+;; leaving the `:NAME:` header — the heading fold model, but the range is the
+;; lines from the header to its `:end:`. The opener and `:end:` share the
+;; `org--drawer-line?` shape, so `:end:` (case-insensitive, like `:END:`) is
+;; matched explicitly.
+(define (org--drawer-end-line? line)
+  (>= (string-match "(?i)^[ \t]*:end:[ \t]*$" line) 0))
+(define (org--drawer-opener? line)
+  (and (org--drawer-line? line) (not (org--drawer-end-line? line))))
+
+;; Pair each opener with its `:end:` → (open-line . end-line) list, document
+;; order. Pure (takes the line list) so the pairing is unit-testable. An opener
+;; with no `:end:` yet — a tool drawer still streaming — is dropped, so a fold
+;; never swallows the live tail.
+(define (org--pair-drawers lines)
+  (let loop ((ls lines) (i 0) (open #f) (acc '()))
+    (cond
+      ((null? ls) (reverse acc))
+      ((and open (org--drawer-end-line? (car ls)))
+       (loop (cdr ls) (+ i 1) #f (cons (cons open i) acc)))
+      ((and (not open) (org--drawer-opener? (car ls)))
+       (loop (cdr ls) (+ i 1) i acc))
+      (else (loop (cdr ls) (+ i 1) open acc)))))
+(define (org--drawers) (org--pair-drawers (org--lines)))
+(define (org--drawer-end-of line drawers)
+  (let loop ((ds drawers))
+    (cond ((null? ds) #f)
+          ((= (car (car ds)) line) (cdr (car ds)))
+          (else (loop (cdr ds))))))
+
 (define (org--find-heading headings line)
   (cond ((null? headings) #f)
         ((= (car (car headings)) line) (car headings))
@@ -495,13 +525,19 @@
 ;; fold-lines / unfold-all, so we clear and re-apply).
 (define (org--reapply-folds)
   (unfold-all)
-  (let ((headings (org--headings)) (total (org--total-lines)))
+  (let ((headings (org--headings)) (drawers (org--drawers)) (total (org--total-lines)))
     (for-each
      (lambda (pair)
-       (when (org--find-heading headings (car pair))
-         (for-each (lambda (r)
-                     (when (>= (cdr r) (car r)) (fold-lines (car r) (+ (cdr r) 1))))
-                   (org--fold-ranges-for headings total (car pair) (cdr pair)))))
+       (let ((line (car pair)) (st (cdr pair)))
+         (cond
+           ((org--find-heading headings line)
+            (for-each (lambda (r)
+                        (when (>= (cdr r) (car r)) (fold-lines (car r) (+ (cdr r) 1))))
+                      (org--fold-ranges-for headings total line st)))
+           ;; A folded drawer: hide its body and `:end:` line, keep the header.
+           (else
+            (let ((end (and (eq? st 'folded) (org--drawer-end-of line drawers))))
+              (when end (fold-lines (+ line 1) (+ end 1))))))))
      (org--fold-state-get))))
 
 ;; Paint a gutter chevron on every headline (down = expanded, right = folded),
@@ -511,7 +547,12 @@
   (for-each (lambda (h)
               (set-fold-marker (car h)
                                (not (eq? (org--heading-state (car h)) 'folded))))
-            (org--headings)))
+            (org--headings))
+  ;; Drawer openers fold too (binary: open or folded), so chevron them as well.
+  (for-each (lambda (d)
+              (set-fold-marker (car d)
+                               (not (eq? (org--heading-state (car d)) 'folded))))
+            (org--drawers)))
 
 ;; Toggle the fold of the heading on `line` — the chevron click entry point (a
 ;; click can't move point first, so this takes an explicit line rather than
@@ -520,7 +561,8 @@
 ;; so the arrow always matches what's actually visible (no "open arrow but body
 ;; still hidden" `children` state).
 (define (org-fold-toggle-at-line line)
-  (when (org--heading-level (org--line-text line))
+  (when (or (org--heading-level (org--line-text line))
+            (org--drawer-opener? (org--line-text line)))
     (let ((next (if (eq? (org--heading-state line) 'folded) 'subtree 'folded)))
       (org--set-heading-state line next)
       (org--reapply-folds)
@@ -528,6 +570,15 @@
 
 ;; Route chevron clicks in Org buffers (fold-style "org") to the headline toggle.
 (fold-register-style "org" org-fold-toggle-at-line)
+
+;; Fold every drawer in the current buffer (collapse each to its `:NAME:` header)
+;; and repaint the chevrons. Used by agent-shell to tuck a finished turn's tool
+;; activity away. A drawer the user later expands (TAB) is removed from the fold
+;; state, so it re-folds only if this runs again.
+(define (org-fold-all-drawers)
+  (for-each (lambda (d) (org--set-heading-state (car d) 'folded)) (org--drawers))
+  (org--reapply-folds)
+  (org--refresh-fold-markers))
 
 ;; TAB — on a headline, cycle local visibility subtree→folded→children→subtree
 ;; (like Emacs); inside a src block, indent the code; in plain body do nothing
@@ -545,6 +596,12 @@
          (message (cond ((eq? next 'folded) "Org: folded")
                         ((eq? next 'children) "Org: children")
                         (else "Org: subtree")))))
+      ((org--drawer-opener? line)
+       (let ((next (if (eq? (org--heading-state L) 'folded) 'subtree 'folded)))
+         (org--set-heading-state L next)
+         (org--reapply-folds)
+         (org--refresh-fold-markers)
+         (message (if (eq? next 'folded) "Org: drawer folded" "Org: drawer open"))))
       ((org--src-block-bounds L) (indent-for-tab-command))
       (else #f))))
 

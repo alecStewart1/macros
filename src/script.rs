@@ -740,6 +740,10 @@ pub struct HelmSourceSpec {
 
 type Queue = Arc<Mutex<Vec<EditorCommand>>>;
 type BufferNames = Arc<Mutex<Vec<String>>>;
+/// Buffer name → absolute file path, for buffers visiting a file. Lets Scheme
+/// resolve a non-active buffer's path (`buffer-file-name-of`) — the snapshot
+/// bridges only expose the active buffer. Published alongside `BufferNames`.
+type BufferPaths = Arc<Mutex<HashMap<String, String>>>;
 /// A snapshot of the active buffer, published by the editor before it dispatches
 /// a command so the read bridges (`buffer-string`, `point`, `region-text`, …)
 /// see the buffer as of the moment the command was invoked — Emacs's command
@@ -1902,6 +1906,7 @@ pub struct ScriptEngine {
     /// keybindings (motion, etc.) apply synchronously without a thread hop.
     builtins: HashMap<String, EditorCommand>,
     buffers: BufferNames,
+    buffer_paths: BufferPaths,
     point: SharedSnapshot,
     markers: Markers,
     options: Options,
@@ -1933,6 +1938,7 @@ impl ScriptEngine {
                 "helm",
                 "helm-from",
                 "buffer-names",
+                "buffer-file-name-of",
                 "switch-to-buffer",
                 "kill-buffer-named",
                 "set-major-mode",
@@ -2105,6 +2111,7 @@ impl ScriptEngine {
             .collect();
 
         let buffers: BufferNames = Arc::new(Mutex::new(Vec::new()));
+        let buffer_paths: BufferPaths = Arc::new(Mutex::new(HashMap::new()));
         let point: SharedSnapshot = Arc::new(ArcSwap::from_pointee(EditorSnapshot::default()));
         let markers: Markers = Arc::new(Mutex::new(MarkerStore::default()));
         let options: Options = Arc::new(Mutex::new(HashMap::new()));
@@ -2112,6 +2119,7 @@ impl ScriptEngine {
         let (outcomes, outcomes_rx) = unbounded::<ScriptOutcome>();
 
         let thread_buffers = buffers.clone();
+        let thread_buffer_paths = buffer_paths.clone();
         let thread_point = point.clone();
         let thread_markers = markers.clone();
         let thread_options = options.clone();
@@ -2120,6 +2128,7 @@ impl ScriptEngine {
                 jobs_rx,
                 outcomes,
                 thread_buffers,
+                thread_buffer_paths,
                 thread_point,
                 thread_markers,
                 thread_options,
@@ -2133,6 +2142,7 @@ impl ScriptEngine {
                 global_names,
                 builtins,
                 buffers,
+                buffer_paths,
                 point,
                 markers,
                 options,
@@ -2195,6 +2205,12 @@ impl ScriptEngine {
     /// Update the buffer list Scheme sees via `(buffer-names)`.
     pub fn set_buffer_names(&self, names: Vec<String>) {
         *self.buffers.lock().unwrap() = names;
+    }
+
+    /// Publish the buffer name → file path map Scheme reads via
+    /// `(buffer-file-name-of name)`. Only file-visiting buffers appear.
+    pub fn set_buffer_paths(&self, paths: HashMap<String, String>) {
+        *self.buffer_paths.lock().unwrap() = paths;
     }
 
     /// Publish the current editor options so Scheme can read them via
@@ -2361,12 +2377,13 @@ fn engine_thread(
     jobs: Receiver<Job>,
     outcomes: UnboundedSender<ScriptOutcome>,
     buffers: BufferNames,
+    buffer_paths: BufferPaths,
     point: SharedSnapshot,
     markers: Markers,
     options: Options,
 ) {
     let queue: Queue = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = build_engine(&queue, &buffers, &point, &markers, &options);
+    let mut engine = build_engine(&queue, &buffers, &buffer_paths, &point, &markers, &options);
 
     while let Ok(Job {
         task,
@@ -2650,6 +2667,7 @@ fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
 fn build_engine(
     queue: &Queue,
     buffers: &BufferNames,
+    buffer_paths: &BufferPaths,
     point: &SharedSnapshot,
     markers: &Markers,
     options: &Options,
@@ -2972,6 +2990,20 @@ fn build_engine(
         let shared = buffers.clone();
         engine.register_fn("buffer-names", move || -> Vec<String> {
             shared.lock().unwrap().clone()
+        });
+    }
+    {
+        // `(buffer-file-name-of name)` → that buffer's absolute file path, or ""
+        // if the buffer has no file (or doesn't exist). Unlike `buffer-file-name`
+        // (active buffer only), this resolves any open buffer by name.
+        let shared = buffer_paths.clone();
+        engine.register_fn("buffer-file-name-of", move |name: String| -> String {
+            shared
+                .lock()
+                .unwrap()
+                .get(&name)
+                .cloned()
+                .unwrap_or_default()
         });
     }
     {
@@ -5468,6 +5500,34 @@ mod tests {
     }
 
     #[test]
+    fn buffer_file_name_of_bridge() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.set_buffer_paths(HashMap::from([(
+            "main.rs".to_string(),
+            "/proj/src/main.rs".to_string(),
+        )]));
+
+        // A file-visiting buffer resolves to its absolute path.
+        assert_eq!(
+            engine
+                .eval(r#"(buffer-file-name-of "main.rs")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(r#""/proj/src/main.rs""#)
+        );
+        // An unknown / fileless buffer yields the empty string.
+        assert_eq!(
+            engine
+                .eval(r#"(buffer-file-name-of "*scratch*")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(r#""""#)
+        );
+    }
+
+    #[test]
     fn call_action_runs_named_function_with_candidate() {
         let (engine, _rx) = ScriptEngine::new();
         // An action is just a named Steel function taking the chosen candidate.
@@ -6734,6 +6794,23 @@ mod magit_tests {
         // A leaf heading (no body) folds to nothing.
         assert_eq!(
             v(r"(length (org--fold-ranges-for HS 6 5 (quote folded)))"),
+            "0"
+        );
+
+        // --- Drawer folding -------------------------------------------------
+        // `:end:` is matched case-insensitively and distinct from an opener.
+        assert_eq!(v(r#"(if (org--drawer-end-line? ":END:") 1 0)"#), "1");
+        assert_eq!(v(r#"(if (org--drawer-opener? ":tools:") 1 0)"#), "1");
+        assert_eq!(v(r#"(if (org--drawer-opener? ":end:") 1 0)"#), "0");
+        // Pairing opener→`:end:` over a line list (lines 1..3 are the drawer).
+        engine
+            .eval(r#"(define DL (list "intro" ":tools:" "  a" "  b" ":end:" "after"))"#)
+            .unwrap();
+        assert_eq!(v(r"(length (org--pair-drawers DL))"), "1");
+        assert_eq!(v(r"(car (org--pair-drawers DL))"), "(1 . 4)");
+        // An unterminated opener (still streaming) is dropped — no fold.
+        assert_eq!(
+            v(r#"(length (org--pair-drawers (list ":tools:" "  a")))"#),
             "0"
         );
 

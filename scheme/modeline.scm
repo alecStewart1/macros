@@ -32,8 +32,10 @@
 
 ;; The default layout — identical to the Rust fallback:
 ;;   -- name  (modes)  [project]  git:branch  lsp …  E:n W:n
-;; Reorder, drop, restyle, or add slots here to taste.
-(set-mode-line-format
+;; Reorder, drop, restyle, or add slots here to taste. Held in a global so a
+;; module loaded later (e.g. a plugin) can contribute a segment via
+;; `mode-line-add-segment` without restating the whole list.
+(define *mode-line-format*
  (list (ml-field 'modified)
        "  "
        (ml-field 'buffer-name)
@@ -44,3 +46,15 @@
        (ml-slot* "git" "magit-branch" "  git:" "")
        (ml-field* 'lsp "" "  lsp " "")
        (ml-field* 'diagnostics "" "  " "")))
+
+(set-mode-line-format *mode-line-format*)
+
+;; Append a segment (any `ml-field`/`ml-slot`/`ml-text` token, or a bare string)
+;; to the mode line and re-apply — the extension point for modules that add their
+;; own field/slot without owning the whole format, e.g.
+;;   (mode-line-add-segment (ml-slot* "agent" "" "  " ""))
+;; Idempotent: re-adding the same segment (a reload) is a no-op.
+(define (mode-line-add-segment seg)
+  (unless (member seg *mode-line-format*)
+    (set! *mode-line-format* (append *mode-line-format* (list seg)))
+    (set-mode-line-format *mode-line-format*)))
