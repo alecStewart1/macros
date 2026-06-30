@@ -1195,6 +1195,18 @@
   (magit-confirm "Unstage all changes?"
     (lambda () (magit-do (list "reset" "-q" "HEAD") "Unstaged everything"))))
 
+;; Discard every file in a whole section — `k`/`x` on its header. "untracked"
+;; means `clean` the lot, "unstaged" means `checkout HEAD` the lot.
+(define (magit-discard-section type)
+  (let ((files (magit-files-of-type type)))
+    (if (null? files)
+        (message "Nothing to discard in section")
+        (magit-confirm (string-append "Discard " (int->string (length files)) " file(s)?")
+          (lambda ()
+            (if (equal? type "untracked")
+                (magit-discard-files files '())
+                (magit-discard-files '() files)))))))
+
 ;; Discard one side wholesale: untracked files via `clean`, tracked via `checkout`.
 (define (magit-discard-files untracked unstaged)
   (when (not (null? untracked))
@@ -1221,10 +1233,13 @@
                   (magit-confirm "Discard region?"
                     (lambda () (when (magit-apply-patch-text patch #f #t) (message "Discarded region"))))))))
       (let ((h (magit-hunk-at-line (buffer-line)))
-            (g (and (magit-structural?) (magit-group-on-heading (buffer-line)))))
+            (g (and (magit-structural?) (magit-group-on-heading (buffer-line))))
+            (ht (magit-heading-type-at-line (buffer-line))))
         (cond
           (h (magit-confirm "Discard hunk?"
                (lambda () (when (magit-apply-hunk h #f #t) (message "Discarded hunk")))))
+          ((and ht (or (equal? ht "untracked") (equal? ht "unstaged")))
+           (magit-discard-section ht))
           (g (let ((patch (magit-group-patch g)))
                (when patch
                  (magit-confirm (string-append "Discard "
