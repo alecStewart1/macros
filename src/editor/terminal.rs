@@ -103,6 +103,107 @@ impl Editor {
         }
     }
 
+    /// Open a streaming HTTP POST (`make-http-stream`): a worker thread sends the
+    /// request with `ureq` (blocking, rustls TLS), then reads the response body
+    /// line by line and forwards each line to the foreground, which calls the
+    /// Steel `on_line` fn with it. `on_done` runs with the stream id when the body
+    /// closes. The HTTP analogue of [`make_process`](Self::make_process) — same
+    /// channel + `cx.spawn` drain, so the callbacks' editor commands flow through
+    /// the normal outcome drain (`append-to-buffer`, etc.). The UI never blocks.
+    ///
+    /// A non-2xx status surfaces its body as one `error: HTTP <code>: <body>`
+    /// line; a transport failure as `error: <e>`. Cancellation flips the shared
+    /// flag (see [`http_stream_cancel`](Self::http_stream_cancel)); the reader
+    /// checks it between lines and drops the connection.
+    pub(super) fn http_stream(
+        &mut self,
+        args: crate::script::HttpStreamArgs,
+        cx: &mut Context<Self>,
+    ) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let crate::script::HttpStreamArgs {
+            id,
+            url,
+            headers,
+            body,
+            on_line,
+            on_done,
+        } = args;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.http_streams.insert(id, cancel.clone());
+
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ProcMsg>();
+        std::thread::spawn(move || {
+            // No read timeout: a model stream can pause between tokens. A connect
+            // timeout still bounds the initial handshake.
+            let agent = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(15))
+                .build();
+            let mut req = agent.post(&url);
+            for (k, v) in &headers {
+                req = req.set(k, v);
+            }
+            match req.send_string(&body) {
+                Ok(resp) => {
+                    for line in BufReader::new(resp.into_reader()).lines() {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let Ok(l) = line else { break };
+                        if tx.unbounded_send(ProcMsg::Line(l)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                // Non-2xx: ureq returns the response so we can relay the API's own
+                // error JSON (e.g. a 401 from a bad key) into the transcript.
+                Err(ureq::Error::Status(code, resp)) => {
+                    let detail = resp.into_string().unwrap_or_default();
+                    let _ =
+                        tx.unbounded_send(ProcMsg::Line(format!("error: HTTP {code}: {detail}")));
+                }
+                Err(e) => {
+                    let _ = tx.unbounded_send(ProcMsg::Line(format!("error: {e}")));
+                }
+            }
+            let _ = tx.unbounded_send(ProcMsg::Exit);
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Some(msg) = rx.next().await {
+                let alive = this
+                    .update(cx, |editor, _| match &msg {
+                        ProcMsg::Line(line) => editor.script.dispatch_action(&on_line, Some(line)),
+                        ProcMsg::Exit => {
+                            editor.http_streams.remove(&id);
+                            if !on_done.is_empty() {
+                                editor
+                                    .script
+                                    .dispatch_action(&on_done, Some(&id.to_string()));
+                            }
+                        }
+                    })
+                    .is_ok();
+                if !alive || matches!(msg, ProcMsg::Exit) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Cancel an in-flight HTTP stream (`http-stream-cancel`): flip its flag so the
+    /// reader thread stops forwarding lines and drops the connection on its next
+    /// loop. The `on_done` callback still fires when the body closes.
+    pub(super) fn http_stream_cancel(&mut self, id: u64) {
+        if let Some(flag) = self.http_streams.get(&id) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     // --- Embedded terminal ------------------------------------------------
 
     /// Spawn a terminal (`make-terminal`): start the PTY/shell and show it in a

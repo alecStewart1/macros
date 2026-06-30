@@ -33,6 +33,24 @@ pub struct GrammarInstall {
     pub subdir: String,
 }
 
+/// Payload for [`EditorCommand::HttpStream`]. Boxed in the enum because it's the
+/// largest variant by far (a `Vec` plus several `String`s); see the variant doc.
+#[derive(Debug, Clone)]
+pub struct HttpStreamArgs {
+    /// Stream id (for `http-stream-cancel`).
+    pub id: u64,
+    /// Request URL.
+    pub url: String,
+    /// Request headers as `(key, value)` pairs.
+    pub headers: Vec<(String, String)>,
+    /// JSON request body.
+    pub body: String,
+    /// Steel fn called with each response line as it arrives.
+    pub on_line: String,
+    /// Steel fn called with the stream id once the body closes.
+    pub on_done: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
     // Motion
@@ -556,6 +574,17 @@ pub enum EditorCommand {
     },
     /// Kill process `id` (Emacs `kill-process`).
     KillProcess {
+        id: u64,
+    },
+    /// Open a streaming HTTP POST (see [`HttpStreamArgs`]); the transport for
+    /// talking directly to a model provider's SSE endpoint (e.g. Anthropic) from
+    /// Steel — the HTTP analogue of `make-process`. Boxed: its payload is far
+    /// larger than any other variant, and unboxed it would bloat every
+    /// `Result<(), EditorCommand>` (clippy `result_large_err`).
+    HttpStream(Box<HttpStreamArgs>),
+    /// Cancel in-flight HTTP stream `id`: the reader stops forwarding lines and
+    /// drops the connection (the chat client's "cancel turn").
+    HttpStreamCancel {
         id: u64,
     },
     // ANVIL REPL — a second, independent Steel interpreter (see `crate::anvil`).
@@ -3978,6 +4007,48 @@ fn build_engine(
     });
     register_unary(&mut engine, queue, "kill-process", |id| {
         EditorCommand::KillProcess { id }
+    });
+    {
+        // `(make-http-stream url headers body on-line on-done)` → a stream id
+        // (used by http-stream-cancel). `headers` is a flat list of alternating
+        // key/value strings: (list "x-api-key" key "anthropic-version" "..."). A
+        // POST with the given JSON `body`; `on-line` is called per response line
+        // (SSE `data:`/`event:` lines arrive verbatim), `on-done` with the id when
+        // the stream closes. Callbacks may be "name" strings or 'name symbols.
+        let q = queue.clone();
+        let ids = async_ids.clone();
+        engine.register_fn(
+            "make-http-stream",
+            move |url: String,
+                  headers: SteelVal,
+                  body: String,
+                  on_line: SteelVal,
+                  on_done: SteelVal|
+                  -> usize {
+                let id = ids.next();
+                let flat = steel_string_list(&headers);
+                let headers = flat
+                    .chunks_exact(2)
+                    .map(|kv| (kv[0].clone(), kv[1].clone()))
+                    .collect();
+                let on_line = steel_string(&on_line).unwrap_or_default();
+                let on_done = steel_string(&on_done).unwrap_or_default();
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::HttpStream(Box::new(HttpStreamArgs {
+                        id,
+                        url,
+                        headers,
+                        body,
+                        on_line,
+                        on_done,
+                    })));
+                id as usize
+            },
+        );
+    }
+    register_unary(&mut engine, queue, "http-stream-cancel", |id| {
+        EditorCommand::HttpStreamCancel { id }
     });
     // --- ANVIL REPL (a second, independent Steel interpreter) -------------
     {
@@ -7643,6 +7714,49 @@ mod magit_tests {
         assert!(matches!(
             engine.eval(r#"(run-with-timer 500 "tick")"#).unwrap().commands.as_slice(),
             [EditorCommand::RunWithTimer { ms: 500, callback }] if callback == "tick"
+        ));
+        // make-http-stream pairs its flat key/value header list and keeps body +
+        // callbacks intact.
+        match engine
+            .eval(
+                r#"(make-http-stream "https://api.anthropic.com/v1/messages"
+                      (list "x-api-key" "sk-test" "anthropic-version" "2023-06-01")
+                      "{\"stream\":true}" "on-line" "on-done")"#,
+            )
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [EditorCommand::HttpStream(args)] => {
+                let HttpStreamArgs {
+                    url,
+                    headers,
+                    body,
+                    on_line,
+                    on_done,
+                    ..
+                } = args.as_ref();
+                assert_eq!(url, "https://api.anthropic.com/v1/messages");
+                assert_eq!(
+                    headers.as_slice(),
+                    [
+                        ("x-api-key".to_string(), "sk-test".to_string()),
+                        ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                    ]
+                );
+                assert_eq!(body, r#"{"stream":true}"#);
+                assert_eq!(on_line, "on-line");
+                assert_eq!(on_done, "on-done");
+            }
+            other => panic!("expected HttpStream, got {other:?}"),
+        }
+        assert!(matches!(
+            engine
+                .eval(r"(http-stream-cancel 7)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::HttpStreamCancel { id: 7 }]
         ));
     }
 
