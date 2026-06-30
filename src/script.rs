@@ -493,10 +493,13 @@ pub enum EditorCommand {
     /// `parse_mode_line_format`).
     SetModeLineFormat(Vec<String>),
     // Transient popup (the magit / `transient.el` pattern).
-    /// Open a transient popup: a title plus `(key, label, command)` rows.
+    /// Open a transient popup: a title plus `(key, label, command)` rows. When
+    /// `sticky`, selecting a row keeps the popup open (the row command re-opens
+    /// to refresh, or calls `transient-quit`) instead of auto-closing.
     Transient {
         title: String,
         columns: Vec<TransientColumn>,
+        sticky: bool,
     },
     /// Close any open transient popup.
     TransientQuit,
@@ -690,10 +693,13 @@ pub enum EditorCommand {
         prompt: String,
         callback: String,
     },
-    /// `y-or-n-p`: yes/no prompt, then call `callback` with "yes"/"no".
+    /// `y-or-n-p`: yes/no prompt, then call `callback` with "yes"/"no". When
+    /// `sticky`, the prompt can't be aborted (C-g/Escape) and stays until the
+    /// user answers — for prompts that must resolve a pending request.
     YesOrNo {
         prompt: String,
         callback: String,
+        sticky: bool,
     },
 }
 
@@ -1983,6 +1989,7 @@ impl ScriptEngine {
                 "setenv",
                 "goto-line",
                 "transient",
+                "transient-sticky",
                 "transient-quit",
                 "buffer-line",
                 "current-buffer",
@@ -2104,6 +2111,7 @@ impl ScriptEngine {
                 "completing-read-impl",
                 "read-file-name",
                 "y-or-n-p",
+                "y-or-n-p-sticky",
                 "make-marker",
                 "marker-position",
                 "set-marker",
@@ -3486,9 +3494,25 @@ fn build_engine(
         let q = queue.clone();
         engine.register_fn("transient", move |title: String, rows: SteelVal| {
             let columns = parse_transient_columns(&rows);
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::Transient { title, columns });
+            q.lock().unwrap().push(EditorCommand::Transient {
+                title,
+                columns,
+                sticky: false,
+            });
+        });
+    }
+    {
+        // Like `transient`, but selecting a row keeps the popup open — the row's
+        // command re-opens it (to refresh state) or calls `transient-quit`. For
+        // menus where you toggle several options before dismissing.
+        let q = queue.clone();
+        engine.register_fn("transient-sticky", move |title: String, rows: SteelVal| {
+            let columns = parse_transient_columns(&rows);
+            q.lock().unwrap().push(EditorCommand::Transient {
+                title,
+                columns,
+                sticky: true,
+            });
         });
     }
     register_nullary(
@@ -3634,10 +3658,29 @@ fn build_engine(
         let q = queue.clone();
         engine.register_fn("y-or-n-p", move |prompt: String, callback: SteelVal| {
             let callback = steel_string(&callback).unwrap_or_default();
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::YesOrNo { prompt, callback });
+            q.lock().unwrap().push(EditorCommand::YesOrNo {
+                prompt,
+                callback,
+                sticky: false,
+            });
         });
+    }
+    {
+        // Like `y-or-n-p`, but the prompt can't be aborted (C-g/Escape) — it
+        // stays in the echo area until answered. For prompts that must resolve a
+        // pending request, so a dropped read can't strand the requester.
+        let q = queue.clone();
+        engine.register_fn(
+            "y-or-n-p-sticky",
+            move |prompt: String, callback: SteelVal| {
+                let callback = steel_string(&callback).unwrap_or_default();
+                q.lock().unwrap().push(EditorCommand::YesOrNo {
+                    prompt,
+                    callback,
+                    sticky: true,
+                });
+            },
+        );
     }
     {
         // Value of buffer-local `key` on the active buffer, or "".
@@ -7523,7 +7566,7 @@ mod magit_tests {
             .commands
             .as_slice()
         {
-            [EditorCommand::Transient { title, columns }] => {
+            [EditorCommand::Transient { title, columns, .. }] => {
                 assert_eq!(title, "Branch");
                 let rows: Vec<_> = columns.iter().flat_map(|c| &c.rows).collect();
                 // checkout, checkout-remote, create, set-upstream, rename, delete
@@ -7534,7 +7577,7 @@ mod magit_tests {
         // The dispatch menu lists the command groups; Push uses the raw `shift-p`
         // chord (prettified to "P" only at display time).
         match engine.eval("(magit-dispatch)").unwrap().commands.as_slice() {
-            [EditorCommand::Transient { title, columns }] => {
+            [EditorCommand::Transient { title, columns, .. }] => {
                 assert_eq!(title, "Magit");
                 let rows: Vec<_> = columns.iter().flat_map(|c| &c.rows).collect();
                 assert!(rows.iter().any(|r| r.key == "shift-p" && r.label == "Push"));
@@ -7994,7 +8037,7 @@ mod magit_tests {
             .unwrap();
         match result.commands.as_slice() {
             // Flat form → a single untitled column.
-            [EditorCommand::Transient { title, columns }] => {
+            [EditorCommand::Transient { title, columns, .. }] => {
                 assert_eq!(title, "Commit");
                 assert_eq!(columns.len(), 1);
                 assert_eq!(columns[0].title, None);

@@ -233,6 +233,10 @@ struct Minibuffer {
     /// Transient hint shown after the input (e.g. completion feedback).
     message: String,
     purpose: MinibufferPurpose,
+    /// When set, C-g/Escape cannot abort this read — it stays open until the
+    /// user submits an answer. Used for permission prompts that must resolve a
+    /// pending request (a dropped read would strand the requester forever).
+    sticky: bool,
 }
 
 /// A snapshot of the active minibuffer for rendering, split at the cursor.
@@ -719,6 +723,10 @@ pub struct Editor {
 struct TransientState {
     title: String,
     columns: Vec<crate::script::TransientColumn>,
+    /// When set, selecting a row does NOT auto-close the popup — the row's
+    /// command decides (re-open to refresh, or `transient-quit` to dismiss). For
+    /// menus where you set several options in a row (e.g. agent model + mode).
+    sticky: bool,
 }
 
 /// One rendered transient row: the key to press and what it does.
@@ -3599,10 +3607,20 @@ impl Editor {
         &mut self,
         title: String,
         columns: Vec<crate::script::TransientColumn>,
+        sticky: bool,
         cx: &mut Context<Self>,
     ) {
-        self.transient = Some(TransientState { title, columns });
+        self.transient = Some(TransientState {
+            title,
+            columns,
+            sticky,
+        });
         cx.notify();
+    }
+
+    /// Whether the open transient stays put after a row is selected.
+    fn transient_is_sticky(&self) -> bool {
+        self.transient.as_ref().is_some_and(|t| t.sticky)
     }
 
     fn transient_quit(&mut self, cx: &mut Context<Self>) {
@@ -3625,7 +3643,10 @@ impl Editor {
     /// A mouse click on a transient row: close the popup and run its command,
     /// mirroring the keyboard dispatch in `on_key_down`.
     pub fn transient_click(&mut self, command: &str, cx: &mut Context<Self>) {
-        if self.transient.take().is_none() {
+        // A sticky popup stays open on selection (the command re-opens to refresh
+        // or calls `transient-quit`); a normal one closes (`take`) before its
+        // command runs. Either way, bail if there's nothing open.
+        if !self.transient_is_sticky() && self.transient.take().is_none() {
             return;
         }
         cx.notify();

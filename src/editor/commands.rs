@@ -512,7 +512,11 @@ impl Editor {
         use EditorCommand::*;
         match command {
             SelectWindow(id) => self.select_pane(id, cx),
-            Transient { title, columns } => self.open_transient(title, columns, cx),
+            Transient {
+                title,
+                columns,
+                sticky,
+            } => self.open_transient(title, columns, sticky, cx),
             TransientQuit => self.transient_quit(cx),
             SplitWindowBelow => self.split_window(true, cx),
             SplitWindowRight => self.split_window(false, cx),
@@ -1093,9 +1097,16 @@ impl Editor {
                     ),
                 }
             }
-            YesOrNo { prompt, callback } => {
+            YesOrNo {
+                prompt,
+                callback,
+                sticky,
+            } => {
                 let prompt = format!("{prompt} (yes or no) ");
                 self.open_minibuffer(&prompt, MinibufferPurpose::SchemeYesNo(callback), "", cx);
+                if sticky && let Some(mb) = self.minibuffer.as_mut() {
+                    mb.sticky = true;
+                }
             }
             other => return Err(other),
         }

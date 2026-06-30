@@ -125,7 +125,12 @@ impl Editor {
             if (ks.modifiers.control && ks.key == "g") || ks.key == "escape" {
                 self.transient_quit(cx);
             } else if let Some(command) = self.transient_command(&chord_string(ks)) {
-                self.transient = None;
+                // A sticky popup stays open after a row runs (the command re-opens
+                // it to refresh, or calls `transient-quit`); a normal one closes
+                // first so its command runs without the menu in the way.
+                if !self.transient_is_sticky() {
+                    self.transient = None;
+                }
                 cx.notify();
                 // Transient rows store a bare command name (e.g. `magit-do-commit`);
                 // wrap it in parens so it's *called*, not just evaluated to the

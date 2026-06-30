@@ -35,6 +35,7 @@ impl Editor {
             cursor: initial.len(),
             message: String::new(),
             purpose,
+            sticky: false,
         });
         self.minibuffer_history_pos = None;
         self.minibuffer_stash = String::new();
@@ -221,6 +222,16 @@ impl Editor {
     }
 
     pub(super) fn mb_abort(&mut self, cx: &mut Context<Self>) {
+        // A sticky read (e.g. an agent permission prompt) can't be aborted — it
+        // must resolve a pending request, so C-g/Escape only nudges the user to
+        // answer rather than dropping the read and stranding the requester.
+        if let Some(mb) = self.minibuffer.as_mut()
+            && mb.sticky
+        {
+            mb.message = "(answer y or n)".into();
+            cx.notify();
+            return;
+        }
         // Aborting an incremental search returns point to where it began and
         // drops the match highlight (Emacs C-g out of isearch).
         let isearch = self.is_isearch();
