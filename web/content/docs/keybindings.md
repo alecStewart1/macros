@@ -81,7 +81,7 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 | <kbd>C-x (</kbd> / <kbd>C-x )</kbd> | `start-kbd-macro` / `end-kbd-macro` |
 | <kbd>C-x e</kbd> | `call-last-kbd-macro` |
 
-Feature-specific prefixes live in their own pages: <kbd>C-c C-l …</kbd> for [LSP](/docs/lsp), <kbd>C-c p …</kbd> for [projects](/docs/projects), and <kbd>C-h …</kbd> for [help](/docs/getting-help). Vim-style [modal editing](/docs/modal-editing) is available too, but off by default.
+Feature-specific prefixes live in their own pages: <kbd>C-c C-l …</kbd> for [LSP](/docs/lsp), <kbd>C-c p …</kbd> for [projects](/docs/projects), and <kbd>C-h …</kbd> for [help](/docs/getting-help). Modal editing is available too, but off by default — in either a Vim-style ([evil](/docs/modal-editing)) or selection-first ([helix](/docs/helix)) flavor.
 
 ## Prefix arguments
 

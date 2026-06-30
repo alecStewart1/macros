@@ -5,7 +5,16 @@ description: Vim-style modal editing — motions, operators, and text objects, t
 
 # Modal editing (evil)
 
-Macros ships with **evil-mode**: Vim-style modal editing built on the editor's keymaps. It mirrors GNU Emacs's evil-mode — plain Vim modal editing, **no leader key**. It is **not on by default**; Macros uses standard Emacs bindings unless you opt in.
+Macros offers modal editing in **two flavors**, both built entirely on the editor's keymaps, both opt-in, and both fully overridable from Scheme:
+
+- **evil** (this page) — Vim-style, *verb-then-motion* (`d w` deletes a word). Enable with `(evil-mode)`.
+- **[helix](/docs/helix)** — selection-first, *motion-then-verb* (`w` selects a word, `d` deletes it), with first-class multiple selections. Enable with `(helix-mode)`.
+
+Turn on one or the other, not both. Macros uses standard Emacs bindings unless you opt in — modal editing is **not on by default**.
+
+## evil-mode
+
+Macros ships with **evil-mode**: Vim-style modal editing that mirrors GNU Emacs's evil-mode — plain Vim modal editing, **no leader key**.
 
 Enable it from your `init.scm` (see [Configuration](/docs/configuration)):
 

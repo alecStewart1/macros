@@ -23,7 +23,7 @@ Macros runs on **macOS**, **Windows**, and **Linux**. It's native — built on Z
 
 ## First launch
 
-On first launch you get a `*scratch*` buffer and the built-in default configuration. **Macros uses standard Emacs keybindings by default.** If you prefer Vim-style modal editing, add `(evil-mode)` to your config (see [Configuration](/docs/configuration)).
+On first launch you get a `*scratch*` buffer and the built-in default configuration. **Macros uses standard Emacs keybindings by default.** If you prefer modal editing, add `(evil-mode)` (Vim-style) or `(helix-mode)` (Helix-style, selection-first) to your config (see [Configuration](/docs/configuration)).
 
 The fastest way to learn the editor is from inside it:
 
@@ -50,7 +50,7 @@ Whether or not you use modal editing, these editor-level commands always work:
 | <kbd>C-g</kbd> | `keyboard-quit` | Cancel / escape the current action |
 | <kbd>C-x C-c</kbd> | `quit` | Quit Macros |
 
-If you enable modal editing, you move around in Normal state with <kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> and enter Insert state with <kbd>i</kbd>. See [Modal editing](/docs/modal-editing).
+If you enable modal editing, you move around in Normal state with <kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> and enter Insert state with <kbd>i</kbd>. See [Modal editing (evil)](/docs/modal-editing) or [Modal editing (helix)](/docs/helix).
 
 ## Where to go next
 

@@ -31,6 +31,6 @@ It stays faithful to the GNU Emacs tutorial, but every key it teaches is a bindi
 - Windows — splitting and moving between panes.
 - Getting more help.
 
-> If [modal editing](/docs/modal-editing) is on (the default), remember you move in Normal state with <kbd>h</kbd>/<kbd>j</kbd>/<kbd>k</kbd>/<kbd>l</kbd> and type in Insert state. The tutorial's Emacs-style motion keys (<kbd>C-f</kbd>, <kbd>C-n</kbd>, …) work in every state.
+> Macros uses standard Emacs bindings by default. If you've opted into modal editing — [evil](/docs/modal-editing) or [helix](/docs/helix) — remember you move in Normal state with <kbd>h</kbd>/<kbd>j</kbd>/<kbd>k</kbd>/<kbd>l</kbd> and type in Insert state. The tutorial's Emacs-style motion keys (<kbd>C-f</kbd>, <kbd>C-n</kbd>, …) work in every state.
 
 When you're done, explore further with <kbd>M-x</kbd>, <kbd>C-h f</kbd>, and <kbd>C-h a</kbd> — see [Getting help](/docs/getting-help).
