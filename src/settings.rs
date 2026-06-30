@@ -95,6 +95,9 @@ pub const KNOWN_OPTIONS: &[&str] = &[
     "cursor-blink",
     "scroll-bar",
     "diagnostics-gutter",
+    "magit-gutter",
+    "magit-gutter-width",
+    "magit-gutter-deleted",
     "lsp-log-on-start",
     "auto-update",
     "helm-fuzzy",
@@ -123,6 +126,7 @@ fn option_kind(key: &str) -> Option<(Kind, Option<f64>, Option<f64>)> {
         }
         "tab-width" | "completion-auto-prefix" => (Int, Some(0.0), None),
         "completion-max-rows" => (Int, Some(1.0), None),
+        "magit-gutter-width" => (Float, Some(1.0), Some(8.0)),
         "completion-style" | "cursor-style" | "font-family" => (Str, None, None),
         "completion-auto"
         | "completion-show-detail"
@@ -131,6 +135,8 @@ fn option_kind(key: &str) -> Option<(Kind, Option<f64>, Option<f64>)> {
         | "cursor-blink"
         | "scroll-bar"
         | "diagnostics-gutter"
+        | "magit-gutter"
+        | "magit-gutter-deleted"
         | "lsp-log-on-start"
         | "auto-update"
         | "helm-fuzzy"
@@ -423,6 +429,27 @@ impl Settings {
     /// the line-number gutter itself is shown.
     pub fn diagnostics_gutter(&self) -> bool {
         self.bool_or("diagnostics-gutter", true)
+    }
+
+    /// Show working-tree-vs-HEAD change bars in the line-number gutter (the
+    /// git-gutter / diff-hl feature): a bar for added/modified lines, a wedge
+    /// where lines were deleted. On by default; `(set-option "magit-gutter" #f)`
+    /// hides it (or toggle with `M-x magit-gutter-mode`). Like the diagnostic
+    /// dots, only drawn when the line-number gutter itself is shown.
+    pub fn git_gutter(&self) -> bool {
+        self.bool_or("magit-gutter", true)
+    }
+
+    /// Width (px) of a git-gutter change bar. Default 2; `(set-option
+    /// "magit-gutter-width" N)`, clamped to 1–8.
+    pub fn git_gutter_width(&self) -> f32 {
+        self.f32_or("magit-gutter-width", 2.0)
+    }
+
+    /// Whether the git-gutter draws a wedge for deleted lines. On by default;
+    /// `(set-option "magit-gutter-deleted" #f)` shows only added/modified bars.
+    pub fn git_gutter_deleted(&self) -> bool {
+        self.bool_or("magit-gutter-deleted", true)
     }
 
     /// Pop open `*lsp-log*` in a split when an external language server starts,

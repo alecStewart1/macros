@@ -148,6 +148,12 @@ pub enum EditorCommand {
     ToggleLineNumbers,
     ToggleScrollBar,
     ToggleWordWrap,
+    /// Toggle the git-gutter / diff-hl change bars (`magit-gutter` option) and
+    /// recompute the active buffer's marks. Bound to `magit-gutter-mode`.
+    ToggleGitGutter,
+    /// Recompute the active buffer's working-tree-vs-HEAD gutter marks
+    /// (`magit-gutter-refresh`); Scheme wires this to save / find-file hooks.
+    GitGutterRefresh,
     /// Toggle electric-pair-mode: auto-insert the closing delimiter on a typed
     /// opener (and wrap an active region). Off by default.
     ToggleElectricPair,
@@ -2515,6 +2521,73 @@ fn drain(queue: &Queue) -> Vec<EditorCommand> {
     queue.lock().unwrap().drain(..).collect()
 }
 
+/// Working-tree-vs-HEAD gutter marks (git-gutter / diff-hl) for `file`, diffing
+/// the supplied `text` — the live buffer rope, so marks update before a save —
+/// against the file's blob as committed at HEAD. Returns `(0-based line, mark)`
+/// for changed lines only; an empty vec when `file` is outside a repo or its
+/// parent can't be resolved.
+///
+/// A file not tracked at HEAD (brand new, or never committed) diffs against an
+/// empty HEAD, so every line reads as `Added` — matching how diff-hl shows a new
+/// file. Binary / non-UTF-8 HEAD blobs likewise fall back to "all added", which
+/// is harmless for the text buffers this runs on.
+pub(crate) fn git_diff_marks(
+    file: &std::path::Path,
+    text: &str,
+) -> Vec<(usize, crate::editor::DiffMark)> {
+    let Some(dir) = file.parent() else {
+        return Vec::new();
+    };
+    let Ok(repo) = gix::discover(dir) else {
+        return Vec::new();
+    };
+    // Resolve `file` to a repo-root-relative path the way `gix_blame` does.
+    let abs = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let Some(wd) = repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()) else {
+        return Vec::new();
+    };
+    let Ok(rel) = abs.strip_prefix(&wd) else {
+        return Vec::new();
+    };
+    // HEAD's blob for this path, or "" when it isn't tracked there (→ all added).
+    let head_text = (|| -> Option<String> {
+        let entry = repo.head_tree().ok()?.lookup_entry_by_path(rel).ok()??;
+        String::from_utf8(entry.object().ok()?.data.clone()).ok()
+    })()
+    .unwrap_or_default();
+
+    diff_line_marks(&head_text, text)
+}
+
+/// The pure core of [`git_diff_marks`]: a line-level diff of `head` → `text`
+/// mapped to gutter marks. Insert → `Added`, Replace → `Modified`, Delete →
+/// a single `Removed` on the line that now sits where the text was removed
+/// (clamped to the last line for an end-of-file deletion). Split out so the
+/// mapping is testable without a git repo.
+fn diff_line_marks(head: &str, text: &str) -> Vec<(usize, crate::editor::DiffMark)> {
+    use crate::editor::DiffMark;
+    let new_total = text.lines().count();
+    let diff = similar::TextDiff::from_lines(head, text);
+    let mut marks = Vec::new();
+    for op in diff.ops() {
+        let (tag, _old, new) = op.as_tag_tuple();
+        match tag {
+            similar::DiffTag::Equal => {}
+            similar::DiffTag::Insert => {
+                marks.extend((new.start..new.end).map(|l| (l, DiffMark::Added)));
+            }
+            similar::DiffTag::Replace => {
+                marks.extend((new.start..new.end).map(|l| (l, DiffMark::Modified)));
+            }
+            similar::DiffTag::Delete => {
+                let line = new.start.min(new_total.saturating_sub(1));
+                marks.push((line, DiffMark::Removed));
+            }
+        }
+    }
+    marks
+}
+
 /// The nullary commands: each Steel name pushes its variant. Shared by engine
 /// registration (on the thread) and the handle's fast-path table.
 fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
@@ -2573,6 +2646,8 @@ fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("line-numbers-mode", ToggleLineNumbers),
         ("scroll-bar-mode", ToggleScrollBar),
         ("word-wrap-mode", ToggleWordWrap),
+        ("magit-gutter-mode", ToggleGitGutter),
+        ("magit-gutter-refresh", GitGutterRefresh),
         ("electric-pair-mode", ToggleElectricPair),
         ("snippet-next-field", SnippetNextField),
         ("snippet-prev-field", SnippetPrevField),
@@ -4759,6 +4834,30 @@ pub(crate) fn steel_error_string(err: &impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_line_marks_classifies_add_modify_delete() {
+        use crate::editor::DiffMark::*;
+        // Added lines at the end.
+        let m = diff_line_marks("a\nb\n", "a\nb\nc\nd\n");
+        assert_eq!(m, vec![(2, Added), (3, Added)]);
+
+        // A modified middle line.
+        let m = diff_line_marks("a\nb\nc\n", "a\nB\nc\n");
+        assert_eq!(m, vec![(1, Modified)]);
+
+        // A deletion rides the line that now follows the removed text.
+        let m = diff_line_marks("a\nb\nc\nd\n", "a\nd\n");
+        assert_eq!(m, vec![(1, Removed)]);
+
+        // A deletion at end-of-file clamps to the last remaining line.
+        let m = diff_line_marks("a\nb\nc\n", "a\n");
+        assert_eq!(m, vec![(0, Removed)]);
+
+        // Untracked (empty HEAD) → every line added; identical → nothing.
+        assert_eq!(diff_line_marks("", "x\ny\n"), vec![(0, Added), (1, Added)]);
+        assert!(diff_line_marks("a\nb\n", "a\nb\n").is_empty());
+    }
 
     #[test]
     fn engine_recovers_after_error() {

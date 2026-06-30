@@ -189,6 +189,24 @@ struct Document {
     overlays: Overlays,
     /// Buffer-local variables (Scheme `buffer-local-set`/`-get`).
     locals: HashMap<String, String>,
+    /// Working-tree-vs-HEAD gutter marks by line index (git-gutter / diff-hl),
+    /// recomputed by `magit-gutter-refresh`. Mirrors `line_faces`.
+    diff_marks: HashMap<usize, DiffMark>,
+}
+
+/// A working-tree-vs-HEAD change marker for one buffer line — the git-gutter /
+/// diff-hl feature. Computed by [`crate::script::git_diff_marks`] and painted in
+/// the line-number gutter's far-left edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DiffMark {
+    /// New since HEAD — a full-height bar (`magit-gutter-added`).
+    Added,
+    /// Content changed since HEAD — a full-height bar (`magit-gutter-modified`).
+    Modified,
+    /// One or more lines were deleted just above this one — a small wedge at the
+    /// line's top edge (`magit-gutter-removed`). Deletions own no line of their
+    /// own, so the mark rides the line that now follows the removed text.
+    Removed,
 }
 
 /// A decoded raster image kept in the editor-wide cache, with its intrinsic
@@ -588,6 +606,9 @@ pub struct Editor {
     overlays: Overlays,
     /// Buffer-local variables for the active buffer.
     locals: HashMap<String, String>,
+    /// Working-tree-vs-HEAD gutter marks for the active buffer, by line index
+    /// (git-gutter / diff-hl). Mirrors `line_faces`; recomputed on save / open.
+    diff_marks: HashMap<usize, DiffMark>,
     /// The open transient popup, if any (the magit / `transient.el` pattern).
     transient: Option<TransientState>,
     /// Named mode-line registers written from Scheme (`set-mode-line-slot`),
@@ -1613,6 +1634,7 @@ impl Editor {
             image_cache: HashMap::new(),
             overlays: Overlays::default(),
             locals: HashMap::new(),
+            diff_marks: HashMap::new(),
             transient: None,
             mode_line_slots: HashMap::new(),
             mode_line_format: default_mode_line_format(),
@@ -2972,6 +2994,32 @@ impl Editor {
             format!("{label} {}", if current { "disabled" } else { "enabled" }),
             cx,
         );
+    }
+
+    /// Recompute the active buffer's git-gutter (diff-hl) marks: its working-tree
+    /// text (the live rope, so marks track unsaved edits) diffed against HEAD.
+    /// Cleared when the gutter is disabled or the buffer isn't visiting a file.
+    /// Only repaints when the marks actually changed, so it's cheap to call from
+    /// frequent hooks (save / find-file). Driven by `magit-gutter-refresh`.
+    fn refresh_git_gutter(&mut self, cx: &mut Context<Self>) {
+        let enabled = cx.global::<crate::settings::Settings>().git_gutter();
+        let new_marks: HashMap<usize, DiffMark> = if enabled {
+            match self.active_path.clone() {
+                Some(path) => {
+                    let text = self.buffer.full_text();
+                    crate::script::git_diff_marks(&path, &text)
+                        .into_iter()
+                        .collect()
+                }
+                None => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+        if new_marks != self.diff_marks {
+            self.diff_marks = new_marks;
+            cx.notify();
+        }
     }
 
     /// Append a line to a log buffer, creating it (as an inactive editable
@@ -4398,6 +4446,7 @@ fn blank_document(
         line_images: HashMap::new(),
         overlays: Overlays::default(),
         locals: HashMap::new(),
+        diff_marks: HashMap::new(),
     }
 }
 

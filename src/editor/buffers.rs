@@ -77,6 +77,7 @@ impl Editor {
             line_images: std::mem::take(&mut self.line_images),
             overlays: std::mem::take(&mut self.overlays),
             locals: std::mem::take(&mut self.locals),
+            diff_marks: std::mem::take(&mut self.diff_marks),
         }
     }
 
@@ -105,6 +106,7 @@ impl Editor {
             line_images,
             overlays,
             locals,
+            diff_marks,
         } = doc;
         self.active_name = name;
         self.active_path = path;
@@ -126,6 +128,7 @@ impl Editor {
         self.line_images = line_images;
         self.overlays = overlays;
         self.locals = locals;
+        self.diff_marks = diff_marks;
         // Markers are positions in the previous buffer; drop them on a switch.
         self.script.clear_markers();
         // Secondary cursors / snippet fields are marker-backed, so they're gone

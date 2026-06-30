@@ -96,3 +96,6 @@
 (set-face "magit-header" "#888888")          ; "Head:" label column
 (set-face "magit-branch" "#206595")          ; branch / upstream names
 (set-face "hl-line" "#00000010")             ; current-line band (translucent black)
+(set-face "magit-gutter-added" "#3f8b2f")    ; git-gutter added bar
+(set-face "magit-gutter-modified" "#b07d1a") ; git-gutter modified bar
+(set-face "magit-gutter-removed" "#bf3340")  ; git-gutter deletion mark

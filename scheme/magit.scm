@@ -51,6 +51,17 @@
 ;; Current-line band (hl-line, painted by the Rust element as a background).
 ;; Translucent white reads well on any dark theme.
 (set-face "hl-line" "#ffffff14")
+;; Git-gutter (diff-hl): per-line change bars in the line-number gutter of
+;; ordinary file buffers — added (green bar), modified (amber bar), removed
+;; (red mark where lines were deleted). These mark the working tree against
+;; HEAD, the inverse of the magit-status diff faces above. Configure with
+;;   (set-option "magit-gutter" #f)          ; disable entirely
+;;   (set-option "magit-gutter-width" 3)     ; bar width in px (1–8, default 2)
+;;   (set-option "magit-gutter-deleted" #f)  ; hide deletion marks
+;; or toggle live with M-x magit-gutter-mode; M-x magit-gutter-refresh recomputes.
+(set-face "magit-gutter-added" "#6cae3e")
+(set-face "magit-gutter-modified" "#c7a23a")
+(set-face "magit-gutter-removed" "#c1574b")
 
 ;; --- git plumbing -----------------------------------------------------------
 
@@ -2012,6 +2023,16 @@
     (magit-render)
     (set! *magit-quiet* #f)))
 (add-hook "after-save-hook" "magit-maybe-refresh")
+
+;; Git-gutter (diff-hl): recompute the active buffer's working-tree-vs-HEAD
+;; change bars when it's saved or first opened. Both hooks run with no args, so
+;; the nullary `magit-gutter-refresh` command can be registered directly. The
+;; Rust side no-ops cheaply when the gutter is off or the buffer has no file, so
+;; this is safe to fire on every save. For a live, edit-by-edit gutter, also add
+;; it to a more frequent hook in init.scm, e.g.
+;;   (add-hook "post-command-hook" "magit-gutter-refresh")
+(add-hook "after-save-hook" "magit-gutter-refresh")
+(add-hook "find-file-hook" "magit-gutter-refresh")
 
 ;; Live refresh from the repo watch (watch-tree in magit-render). Fires once per
 ;; debounced change batch with the watched repo root. Render fully (overlays) when

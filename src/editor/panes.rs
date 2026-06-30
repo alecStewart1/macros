@@ -117,6 +117,13 @@ impl Editor {
         icons.get(&line).map(|(col, name)| (*col, name.as_ref()))
     }
 
+    /// Working-tree-vs-HEAD gutter marks for pane `id` (git-gutter / diff-hl),
+    /// resolved active/inactive like the line faces so an unfocused window keeps
+    /// its file's marks.
+    pub fn pane_diff_marks(&self, id: usize) -> &HashMap<usize, DiffMark> {
+        self.pane_field(id, || &self.diff_marks, |d| &d.diff_marks)
+    }
+
     pub fn pane_diagnostics(&self, id: usize) -> Vec<Diagnostic> {
         if id == self.selected_pane {
             self.active_diagnostics()

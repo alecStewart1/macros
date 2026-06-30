@@ -197,6 +197,10 @@ pub struct PrepaintState {
     images: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
     /// Squiggle/underline quads for LSP diagnostics.
     diagnostics: Vec<PaintQuad>,
+    /// git-gutter (diff-hl) change markers, painted at the gutter's far-left
+    /// edge: full-height bars for added/modified lines, a short top-edge bar
+    /// where lines were deleted.
+    git_gutter: Vec<PaintQuad>,
     /// The completion popup overlay, if open.
     popup: Option<PopupLayout>,
     /// Left edge of the text area (past the line-number gutter, if any).
@@ -389,6 +393,14 @@ impl Element for EditorElement {
         // Diagnostic gutter dots ride alongside the line numbers, so they need the
         // gutter to exist; gate on both the option and line numbers being shown.
         let diag_gutter = line_numbers && settings.diagnostics_gutter();
+        // git-gutter (diff-hl): change bars at the gutter's far-left edge. Like
+        // the diagnostic dots, gated on the line-number gutter existing.
+        let git_gutter_on = line_numbers && settings.git_gutter();
+        let git_gutter_w = px(settings.git_gutter_width());
+        let git_gutter_del = settings.git_gutter_deleted();
+        let gg_added = theme.color("magit-gutter-added", rgb(0x6cae3e).into());
+        let gg_modified = theme.color("magit-gutter-modified", rgb(0xc7a23a).into());
+        let gg_removed = theme.color("magit-gutter-removed", rgb(0xc1574b).into());
 
         // Folds collapse lines into fewer rows; inline images expand a line into
         // extra rows below it. Either way `rows[k]` is the buffer line drawn
@@ -463,6 +475,7 @@ impl Element for EditorElement {
         // contiguous `selection` range. `None` unless in block-wise Visual.
         let block_sel = editor.pane_visual_block(pane);
         let diagnostics = editor.pane_diagnostics(pane);
+        let diff_marks = editor.pane_diff_marks(pane);
         // Search matches highlight only in the selected pane (the active buffer),
         // and only over the visible line span — O(viewport), recomputed each
         // frame so it can't go stale.
@@ -507,6 +520,7 @@ impl Element for EditorElement {
         let mut search_quads = Vec::new();
         let mut paren_quads = Vec::new();
         let mut diagnostic_quads = Vec::new();
+        let mut git_gutter_quads: Vec<PaintQuad> = Vec::new();
         let mut icons: Vec<(Bounds<Pixels>, SharedString, Hsla)> = Vec::new();
         let mut avy: Vec<(PaintQuad, ShapedLine, Point<Pixels>)> = Vec::new();
         let mut extra_cursors: Vec<PaintQuad> = Vec::new();
@@ -738,6 +752,34 @@ impl Element for EditorElement {
                         let mut quad = fill(Bounds::new(point(dx, dy), size(dot, dot)), color);
                         quad.corner_radii = Corners::all(dot / 2.0);
                         diagnostic_quads.push(quad);
+                    }
+                }
+
+                // git-gutter (diff-hl): a full-height change bar at the gutter's
+                // left edge for added/modified lines; a short top-edge bar for a
+                // deletion that happened just above this line. Sits left of the
+                // diagnostic dot column, so the two can coexist on a line.
+                if git_gutter_on {
+                    let gx = bounds.left() + px(1.);
+                    let gy = bounds.top() + top;
+                    match diff_marks.get(&i) {
+                        Some(crate::editor::DiffMark::Removed) => {
+                            if git_gutter_del {
+                                let w = (git_gutter_w * 2.0).min(px(8.));
+                                let bar = Bounds::new(point(gx, gy), size(w, px(2.)));
+                                git_gutter_quads.push(fill(bar, gg_removed));
+                            }
+                        }
+                        Some(mark) => {
+                            let color = if *mark == crate::editor::DiffMark::Added {
+                                gg_added
+                            } else {
+                                gg_modified
+                            };
+                            let bar = Bounds::new(point(gx, gy), size(git_gutter_w, line_h));
+                            git_gutter_quads.push(fill(bar, color));
+                        }
+                        None => {}
                     }
                 }
             }
@@ -1072,6 +1114,7 @@ impl Element for EditorElement {
             icons,
             images: image_quads,
             diagnostics: diagnostic_quads,
+            git_gutter: git_gutter_quads,
             popup,
             text_left,
             line_x: text_x,
@@ -1153,6 +1196,10 @@ impl Element for EditorElement {
                 label.paint(origin, line_height, window, cx).ok();
             }
             for quad in prepaint.diagnostics.drain(..) {
+                window.paint_quad(quad);
+            }
+            // git-gutter change bars + deletion marks, in the gutter's left edge.
+            for quad in prepaint.git_gutter.drain(..) {
                 window.paint_quad(quad);
             }
             // Scroll bar sits above the text on the right edge.

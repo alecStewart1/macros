@@ -330,6 +330,12 @@ impl Editor {
                 self.h_scroll_offset = px(0.);
                 self.toggle_setting(key, on, "Word wrap", cx);
             }
+            ToggleGitGutter => {
+                let on = cx.global::<crate::settings::Settings>().git_gutter();
+                self.toggle_setting("magit-gutter", on, "Git gutter", cx);
+                self.refresh_git_gutter(cx);
+            }
+            GitGutterRefresh => self.refresh_git_gutter(cx),
             ToggleElectricPair => {
                 self.electric_pair = !self.electric_pair;
                 self.echo(

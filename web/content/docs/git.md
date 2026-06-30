@@ -85,6 +85,48 @@ Each annotation shows the short hash, author, a humanized date ("3 weeks ago"), 
 
 The status buffer's <kbd>B</kbd> is a separate view: it opens a full `git blame` of the file at point in a read-only buffer.
 
+## Git gutter (diff-hl)
+
+In any file buffer, Macros marks the lines you've changed since `HEAD` in the line-number gutter, the way Emacs's `diff-hl` / `git-gutter` do — a small colored marker at the gutter's left edge on each changed line:
+
+| Marker | Meaning | Face |
+| --- | --- | --- |
+| green bar | line added since `HEAD` | `magit-gutter-added` |
+| amber bar | line modified since `HEAD` | `magit-gutter-modified` |
+| red mark | line(s) deleted just above this point | `magit-gutter-removed` |
+
+The marks come from diffing the buffer's **live text** (not the on-disk file) against the file's blob as committed at `HEAD`, computed in pure Rust via gitoxide — no subprocess. A brand-new, untracked file reads as entirely added.
+
+### Refreshing
+
+The gutter recomputes when a buffer is saved (`after-save-hook`) or first opened (`find-file-hook`). To make it update edit-by-edit, add the refresh to a more frequent hook in your `init.scm`:
+
+```scheme
+(add-hook "post-command-hook" "magit-gutter-refresh")
+```
+
+You can also force a recompute at any time with <kbd>M-x</kbd> `magit-gutter-refresh`, and toggle the whole feature on/off for the session with <kbd>M-x</kbd> `magit-gutter-mode`.
+
+### Customizing
+
+The gutter is on by default. Tune it with `set-option`:
+
+```scheme
+(set-option "magit-gutter" #f)          ; disable the gutter entirely
+(set-option "magit-gutter-width" 3)     ; bar width in px (1–8, default 2)
+(set-option "magit-gutter-deleted" #f)  ; hide the deletion marks
+```
+
+Recolor the markers by redefining their faces (in `init.scm`, or in a theme so they survive a runtime `load-theme`):
+
+```scheme
+(set-face "magit-gutter-added" "#6cae3e")
+(set-face "magit-gutter-modified" "#c7a23a")
+(set-face "magit-gutter-removed" "#c1574b")
+```
+
+Like the [diagnostic gutter dots](/docs/diagnostics), the markers are only drawn when the line-number gutter itself is shown for that buffer.
+
 ## Customizing
 
 `magit-status` is on <kbd>C-x g</kbd> by default. Rebind it, or any key inside the status buffer (the `"magit-status"` map), from your `init.scm`:
