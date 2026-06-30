@@ -3373,9 +3373,7 @@ fn build_engine(
         engine.register_fn("set-selections", move |flat: SteelVal| {
             let v = steel_usize_list(&flat);
             let pairs = v.chunks_exact(2).map(|c| (c[0], c[1])).collect();
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SetSelections(pairs));
+            q.lock().unwrap().push(EditorCommand::SetSelections(pairs));
         });
     }
     register_binary(
