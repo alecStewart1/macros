@@ -3596,6 +3596,11 @@ impl Editor {
         cx.spawn(async move |this, cx| {
             timer.await;
             this.update(cx, |editor, _| {
+                // Publish the active buffer so a timer callback reading
+                // `(current-buffer)` sees the real focus, not a stale snapshot
+                // (mirrors `run_script`/`run_hook`). Agent-shell's coalesced
+                // write flush relies on this to avoid stealing focus.
+                editor.publish_point();
                 editor.script.dispatch_action(&callback, None)
             })
             .ok();

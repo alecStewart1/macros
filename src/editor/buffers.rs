@@ -12,6 +12,12 @@ use crate::buffer::Buffer;
 
 use super::*;
 
+/// Returns `true` when `name` looks like a special buffer (`*scratch*`,
+/// `*Messages*`, etc.) — i.e. it starts and ends with `*`.
+fn is_special_buffer_name(name: &str) -> bool {
+    name.starts_with('*') && name.ends_with('*') && name.len() > 1
+}
+
 impl Editor {
     /// Names of all open buffers (active first).
     pub(super) fn buffer_names(&self) -> Vec<String> {
@@ -649,7 +655,12 @@ impl Editor {
     }
 
     pub(super) fn any_modified(&self) -> bool {
-        self.modified || self.inactive.iter().any(|d| d.modified)
+        let active_dominated = self.modified && !is_special_buffer_name(&self.active_name);
+        let inactive_dirty = self
+            .inactive
+            .iter()
+            .any(|d| d.modified && !is_special_buffer_name(&d.name));
+        active_dominated || inactive_dirty
     }
 
     pub fn is_modified(&self) -> bool {
@@ -665,6 +676,17 @@ impl Editor {
     /// macOS.
     pub fn confirm_quit(&mut self, cx: &mut Context<Self>) -> bool {
         if self.any_modified() {
+            let mut dirty: Vec<&str> = Vec::new();
+            if self.modified && !is_special_buffer_name(&self.active_name) {
+                dirty.push(&self.active_name);
+            }
+            for doc in &self.inactive {
+                if doc.modified && !is_special_buffer_name(&doc.name) {
+                    dirty.push(&doc.name);
+                }
+            }
+            let listing = dirty.join(", ");
+            self.echo(format!("Modified buffers: {listing}"), cx);
             self.open_minibuffer(
                 "Save modified buffers before quitting? (yes/no, C-g to cancel) ",
                 MinibufferPurpose::QuitSave,

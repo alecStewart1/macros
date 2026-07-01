@@ -63,6 +63,13 @@ impl Editor {
                 let alive = this
                     .update(cx, |editor, _| match &msg {
                         ProcMsg::Line(line) => {
+                            // Publish the active buffer first, so a callback
+                            // reading `(current-buffer)` sees the buffer the user
+                            // is actually in — not a stale snapshot. Without this,
+                            // async output routed by current-buffer (e.g.
+                            // agent-shell streaming) can steal focus to the wrong
+                            // buffer. Mirrors `run_script`/`run_hook`.
+                            editor.publish_point();
                             editor.script.dispatch_action(&on_output, Some(line))
                         }
                         ProcMsg::Exit => {
@@ -176,7 +183,13 @@ impl Editor {
             while let Some(msg) = rx.next().await {
                 let alive = this
                     .update(cx, |editor, _| match &msg {
-                        ProcMsg::Line(line) => editor.script.dispatch_action(&on_line, Some(line)),
+                        ProcMsg::Line(line) => {
+                            // Publish the active buffer so a callback reading
+                            // `(current-buffer)` sees the real focus (see
+                            // `make_process`); the built-in agent streams here.
+                            editor.publish_point();
+                            editor.script.dispatch_action(&on_line, Some(line))
+                        }
                         ProcMsg::Exit => {
                             editor.http_streams.remove(&id);
                             if !on_done.is_empty() {
