@@ -21,7 +21,7 @@ fn is_special_buffer_name(name: &str) -> bool {
 impl Editor {
     /// Names of all open buffers (active first).
     pub(super) fn buffer_names(&self) -> Vec<String> {
-        let mut names = vec![self.active_name.clone()];
+        let mut names = vec![self.active.name.clone()];
         names.extend(self.inactive.iter().map(|d| d.name.clone()));
         names
     }
@@ -34,15 +34,17 @@ impl Editor {
             if p.is_absolute() {
                 p.to_string_lossy().into_owned()
             } else {
-                std::env::current_dir()
-                    .map_or_else(|_| p.to_path_buf(), |cwd| cwd.join(p))
+                // Resolve against the startup cwd (the editor never `chdir`s),
+                // avoiding a `current_dir` syscall — see `process_cwd`'s doc.
+                Path::new(&self.process_cwd)
+                    .join(p)
                     .to_string_lossy()
                     .into_owned()
             }
         };
         let mut paths = HashMap::new();
-        if let Some(p) = self.active_path.as_deref() {
-            paths.insert(self.active_name.clone(), abs(p));
+        if let Some(p) = self.active.path.as_deref() {
+            paths.insert(self.active.name.clone(), abs(p));
         }
         for d in &self.inactive {
             if let Some(p) = d.path.as_deref() {
@@ -53,98 +55,34 @@ impl Editor {
     }
 
     pub fn buffer_name(&self) -> &str {
-        &self.active_name
+        &self.active.name
     }
 
-    /// Snapshot the active buffer's state into a [`Document`], emptying the
-    /// active fields (the caller installs another document next).
+    /// Snapshot the active buffer's state into a [`Document`], leaving a blank
+    /// placeholder behind (the caller installs another document next).
     pub(super) fn snapshot_active(&mut self) -> Document {
         // Flush any pending full-sync change while this buffer is still active —
-        // after the swap below `self.buffer` is a different document.
+        // after the swap below `self.active` is a different document.
         self.flush_lsp_fullsync();
-        Document {
-            name: std::mem::take(&mut self.active_name),
-            path: self.active_path.take(),
-            buffer: std::mem::take(&mut self.buffer),
-            selected_range: std::mem::replace(&mut self.selected_range, 0..0),
-            selection_reversed: std::mem::take(&mut self.selection_reversed),
-            marked_range: self.marked_range.take(),
-            mark_active: std::mem::take(&mut self.mark_active),
-            undo_tree: std::mem::replace(&mut self.undo_tree, new_undo_tree()),
-            undo_current: std::mem::take(&mut self.undo_current),
-            scroll_offset: self.scroll_offset,
-            modes: std::mem::take(&mut self.modes),
-            highlighter: self.highlighter.take(),
-            modified: self.modified,
-            hooks_ran: self.hooks_ran,
-            special: self.special.take(),
-            line_faces: std::mem::take(&mut self.line_faces),
-            line_icons: std::mem::take(&mut self.line_icons),
-            line_images: std::mem::take(&mut self.line_images),
-            overlays: std::mem::take(&mut self.overlays),
-            locals: std::mem::take(&mut self.locals),
-            diff_marks: std::mem::take(&mut self.diff_marks),
-        }
+        std::mem::replace(
+            &mut self.active,
+            blank_document(String::new(), None, "", ModeStack::default()),
+        )
     }
 
     pub(super) fn install_active(&mut self, doc: Document) {
-        // Destructured (not field-by-field on `doc`) so adding a buffer-local
-        // field to `Document` is a compile error here until it's restored too —
-        // otherwise a new field would silently leak across buffer switches.
-        let Document {
-            name,
-            path,
-            buffer,
-            selected_range,
-            selection_reversed,
-            marked_range,
-            mark_active,
-            undo_tree,
-            undo_current,
-            scroll_offset,
-            modes,
-            highlighter,
-            modified,
-            hooks_ran,
-            special,
-            line_faces,
-            line_icons,
-            line_images,
-            overlays,
-            locals,
-            diff_marks,
-        } = doc;
-        self.active_name = name;
-        self.active_path = path;
-        self.buffer = buffer;
-        self.selected_range = selected_range;
-        self.selection_reversed = selection_reversed;
-        self.marked_range = marked_range;
-        self.mark_active = mark_active;
-        self.undo_tree = undo_tree;
-        self.undo_current = undo_current;
-        self.scroll_offset = scroll_offset;
-        self.modes = modes;
-        self.highlighter = highlighter;
-        self.modified = modified;
-        self.hooks_ran = hooks_ran;
-        self.special = special;
-        self.line_faces = line_faces;
-        self.line_icons = line_icons;
-        self.line_images = line_images;
-        self.overlays = overlays;
-        self.locals = locals;
-        self.diff_marks = diff_marks;
+        self.active = doc;
         // Markers are positions in the previous buffer; drop them on a switch.
         self.script.clear_markers();
-        // Secondary cursors / snippet fields are marker-backed, so they're gone
-        // with the markers — forget their (now dangling) ids and any avy hints.
+        // Secondary selections / snippet fields are marker-backed, so they're
+        // gone with the markers — forget their (now dangling) head+anchor pairs
+        // and any avy hints.
         self.extra_cursors.clear();
         self.snippet_fields.clear();
         self.avy_hints.clear();
         // The selected window now shows this buffer (Emacs: switching the active
         // buffer changes what the selected window displays).
-        let active = self.active_name.clone();
+        let active = self.active.name.clone();
         let selected = self.selected_pane;
         if let Some(pane) = self.panes.iter_mut().find(|p| p.id == selected) {
             pane.buffer = active;
@@ -206,7 +144,7 @@ impl Editor {
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
-        let name = self.active_name.clone();
+        let name = self.active.name.clone();
         self.echo(name, cx);
     }
 
@@ -216,8 +154,8 @@ impl Editor {
         if path.as_os_str().is_empty() {
             return;
         }
-        if self.active_path.as_deref() == Some(path.as_path()) {
-            self.echo(format!("Already in {}", self.active_name), cx);
+        if self.active.path.as_deref() == Some(path.as_path()) {
+            self.echo(format!("Already in {}", self.active.name), cx);
             return;
         }
         if let Some(index) = self
@@ -226,7 +164,7 @@ impl Editor {
             .position(|d| d.path.as_deref() == Some(path.as_path()))
         {
             self.activate(index, cx);
-            self.echo(format!("Switched to {}", self.active_name), cx);
+            self.echo(format!("Switched to {}", self.active.name), cx);
             return;
         }
 
@@ -240,11 +178,22 @@ impl Editor {
         let read_path = path.clone();
         let read = cx
             .background_executor()
-            .spawn(async move { std::fs::read_to_string(&read_path).unwrap_or_default() });
+            .spawn(async move { std::fs::read_to_string(&read_path) });
         cx.spawn(async move |this, cx| {
-            let contents = read.await;
-            this.update(cx, |editor, cx| editor.open_file(name, path, contents, cx))
-                .ok();
+            let result = read.await;
+            this.update(cx, |editor, cx| match result {
+                Ok(contents) => editor.open_file(name, path, contents, cx),
+                // A missing file is the ordinary "visit a new file" flow: an
+                // empty buffer that creates the file on first save.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    editor.open_file(name, path, String::new(), cx)
+                }
+                // Anything else (permissions, non-UTF-8 data, …) must NOT open
+                // an empty file-visiting buffer — saving that buffer would
+                // truncate the file on disk. Report and leave the editor as-is.
+                Err(err) => editor.echo(format!("Could not open {name}: {err}"), cx),
+            })
+            .ok();
         })
         .detach();
     }
@@ -299,7 +248,7 @@ impl Editor {
     /// buffer keeps its own file; this just drops a copy.
     pub(super) fn write_buffer_to(&mut self, path: &str, cx: &mut Context<Self>) {
         let target = expand_path(path.trim());
-        match std::fs::write(&target, self.buffer.full_text()) {
+        match std::fs::write(&target, self.active.buffer.full_text()) {
             Ok(()) => self.echo(format!("Wrote {target}"), cx),
             Err(err) => self.echo(format!("Save failed: {err}"), cx),
         }
@@ -316,9 +265,10 @@ impl Editor {
         let target = match other {
             Some(id) => id,
             None => {
+                // Narrow split: the sidebar (the current pane) keeps this share.
+                const SIDEBAR_SPLIT_RATIO: f32 = 0.22;
                 let new_id = self.next_pane_id; // split assigns this id to the new pane
-                // Narrow split: the sidebar (the current pane) keeps ~22%.
-                self.split_window_ratio(false, 0.22, cx);
+                self.split_window_ratio(false, SIDEBAR_SPLIT_RATIO, cx);
                 new_id
             }
         };
@@ -329,19 +279,16 @@ impl Editor {
     /// `:e!` / `M-x revert-buffer`: re-read the visited file from disk,
     /// discarding unsaved changes. Point is kept (clamped to the new length).
     pub(super) fn revert_buffer(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.active_path.clone() else {
+        let Some(path) = self.active.path.clone() else {
             self.echo("Buffer is not visiting a file", cx);
             return;
         };
         match std::fs::read_to_string(&path) {
             Ok(contents) => {
-                let point = self.point().min(contents.len());
-                let len = self.buffer.len();
-                self.edit(0..len, &contents);
-                self.parse_full();
-                self.move_to(point.min(self.buffer.len()), cx);
-                self.modified = false;
-                self.echo(format!("Reverted {}", self.active_name), cx);
+                let point = self.point();
+                self.replace_whole_buffer(&contents, point, cx);
+                self.active.modified = false;
+                self.echo(format!("Reverted {}", self.active.name), cx);
             }
             Err(err) => self.echo(format!("Revert failed: {err}"), cx),
         }
@@ -362,13 +309,13 @@ impl Editor {
             // watched dir is the changed path's parent — or the path itself if a
             // watched dir's own entry (rename/attrs) is what fired.
             for dir in [path.parent(), Some(path.as_path())].into_iter().flatten() {
-                if self.fs_watch_dirs.contains(dir) && !changed_dirs.iter().any(|d| d == dir) {
+                if self.fs.dirs.contains(dir) && !changed_dirs.iter().any(|d| d == dir) {
                     changed_dirs.push(dir.to_path_buf());
                 }
             }
             // Recursive roots: a change anywhere in the subtree fires the hook
             // with the ROOT, deduped so a bulk change refreshes magit once.
-            for root in &self.fs_watch_trees {
+            for root in &self.fs.trees {
                 if path.starts_with(root) && !changed_dirs.iter().any(|d| d == root) {
                     changed_dirs.push(root.clone());
                 }
@@ -388,7 +335,7 @@ impl Editor {
         // Only touch disk if some buffer actually visits this path — a watched
         // directory reports churn in files we don't have open, and reading those
         // would be pure waste.
-        let visited = self.active_path.as_deref() == Some(path)
+        let visited = self.active.path.as_deref() == Some(path)
             || self
                 .inactive
                 .iter()
@@ -399,25 +346,22 @@ impl Editor {
         let Ok(disk) = std::fs::read_to_string(path) else {
             return; // unreadable / mid-rename / deleted — leave the buffer as-is
         };
-        if self.active_path.as_deref() == Some(path) {
-            if self.buffer.full_text() == disk {
+        if self.active.path.as_deref() == Some(path) {
+            if self.active.buffer.full_text() == disk {
                 return; // identical (e.g. our own write) — nothing to revert
             }
-            if self.modified {
+            if self.active.modified {
                 self.echo(
-                    format!("{} changed on disk (unsaved edits kept)", self.active_name),
+                    format!("{} changed on disk (unsaved edits kept)", self.active.name),
                     cx,
                 );
                 return;
             }
-            let point = self.point().min(disk.len());
-            let len = self.buffer.len();
-            self.edit(0..len, &disk);
-            self.parse_full();
-            self.move_to(point.min(self.buffer.len()), cx);
-            self.modified = false;
+            let point = self.point();
+            self.replace_whole_buffer(&disk, point, cx);
+            self.active.modified = false;
             self.echo(
-                format!("Reverted {} (changed on disk)", self.active_name),
+                format!("Reverted {} (changed on disk)", self.active.name),
                 cx,
             );
             return;
@@ -467,12 +411,12 @@ impl Editor {
     /// buffer. Diffs against `fs_watched` so only the delta is (un)watched. Cheap
     /// and idempotent; call it whenever the buffer set or the option changes.
     pub(super) fn reconcile_watches(&mut self, cx: &mut Context<Self>) {
-        if self.fs_debouncer.is_none() {
+        if self.fs.debouncer.is_none() {
             return;
         }
-        let mut desired: HashSet<PathBuf> = self.fs_watch_dirs.clone();
+        let mut desired: HashSet<PathBuf> = self.fs.dirs.clone();
         if cx.global::<crate::settings::Settings>().auto_revert() {
-            if let Some(path) = &self.active_path {
+            if let Some(path) = &self.active.path {
                 desired.insert(path.clone());
             }
             for doc in &self.inactive {
@@ -481,50 +425,51 @@ impl Editor {
                 }
             }
         }
-        let debouncer = self.fs_debouncer.as_mut().unwrap();
+        let debouncer = self.fs.debouncer.as_mut().unwrap();
         for path in &desired {
-            if !self.fs_watched.contains(path)
+            if !self.fs.watched.contains(path)
                 && debouncer
                     .watcher()
                     .watch(path, RecursiveMode::NonRecursive)
                     .is_ok()
             {
-                self.fs_watched.insert(path.clone());
+                self.fs.watched.insert(path.clone());
             }
         }
-        let stale: Vec<PathBuf> = self.fs_watched.difference(&desired).cloned().collect();
+        let stale: Vec<PathBuf> = self.fs.watched.difference(&desired).cloned().collect();
         for path in stale {
             let _ = debouncer.watcher().unwatch(&path);
-            self.fs_watched.remove(&path);
+            self.fs.watched.remove(&path);
         }
 
         // Recursive roots (magit repo watch) — same delta dance, recursive mode.
-        let want_rec = self.fs_watch_trees.clone();
+        let want_rec = self.fs.trees.clone();
         for path in &want_rec {
-            if !self.fs_watched_recursive.contains(path)
+            if !self.fs.watched_recursive.contains(path)
                 && debouncer
                     .watcher()
                     .watch(path, RecursiveMode::Recursive)
                     .is_ok()
             {
-                self.fs_watched_recursive.insert(path.clone());
+                self.fs.watched_recursive.insert(path.clone());
             }
         }
         let stale_rec: Vec<PathBuf> = self
-            .fs_watched_recursive
+            .fs
+            .watched_recursive
             .difference(&want_rec)
             .cloned()
             .collect();
         for path in stale_rec {
             let _ = debouncer.watcher().unwatch(&path);
-            self.fs_watched_recursive.remove(&path);
+            self.fs.watched_recursive.remove(&path);
         }
     }
 
     /// `C-x b`: switch to an already-open buffer by name.
     pub(super) fn switch_to_buffer(&mut self, name: &str, cx: &mut Context<Self>) {
         let name = name.trim();
-        if name == self.active_name {
+        if name == self.active.name {
             cx.notify();
             return;
         }
@@ -536,7 +481,7 @@ impl Editor {
 
     /// `C-x C-s`: write the active buffer back to its file.
     pub(super) fn save_buffer(&mut self, cx: &mut Context<Self>) {
-        if self.active_path.is_none() {
+        if self.active.path.is_none() {
             self.echo("Buffer is not visiting a file", cx);
             return;
         }
@@ -560,38 +505,47 @@ impl Editor {
     /// through the normal (async, hook-running) save path.
     pub(super) fn save_some_buffers(&mut self, cx: &mut Context<Self>) {
         let mut saved = 0;
+        // Failed inactive writes are reported (and keep `modified` set) rather
+        // than being silently dropped from the count.
+        let mut failed: Vec<String> = Vec::new();
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
-                && std::fs::write(&path, doc.buffer.full_text()).is_ok()
             {
-                doc.modified = false;
-                saved += 1;
+                match std::fs::write(&path, doc.buffer.full_text()) {
+                    Ok(()) => {
+                        doc.modified = false;
+                        saved += 1;
+                    }
+                    Err(err) => failed.push(format!("{}: {err}", doc.name)),
+                }
             }
         }
-        if self.active_path.is_some() && self.modified {
+        if self.active.path.is_some() && self.active.modified {
+            // Async; reports its own failure (and restores `modified`) later.
             self.write_active_to_disk(cx);
             saved += 1;
         }
-        self.echo(
-            match saved {
-                0 => "No unsaved buffers".to_string(),
-                1 => "Saved 1 buffer".to_string(),
-                n => format!("Saved {n} buffers"),
-            },
-            cx,
-        );
+        let mut message = match saved {
+            0 => "No unsaved buffers".to_string(),
+            1 => "Saved 1 buffer".to_string(),
+            n => format!("Saved {n} buffers"),
+        };
+        if !failed.is_empty() {
+            message.push_str(&format!("; {} failed: {}", failed.len(), failed.join("; ")));
+        }
+        self.echo(message, cx);
     }
 
     /// Write the active buffer to its file off the UI thread. Optimistically
     /// clears `modified`; restores it (and reports) if the write fails.
     pub(super) fn write_active_to_disk(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.active_path.clone() else {
+        let Some(path) = self.active.path.clone() else {
             return;
         };
-        let text = self.buffer.full_text();
-        let name = self.active_name.clone();
-        self.modified = false;
+        let text = self.active.buffer.full_text();
+        let name = self.active.name.clone();
+        self.active.modified = false;
         let write = cx
             .background_executor()
             .spawn(async move { std::fs::write(&path, text) });
@@ -603,7 +557,7 @@ impl Editor {
                     editor.run_hook("after-save-hook"); // Emacs after-save-hook
                 }
                 Err(err) => {
-                    editor.modified = true;
+                    editor.active.modified = true;
                     editor.echo(format!("Save failed: {err}"), cx);
                 }
             })
@@ -655,16 +609,16 @@ impl Editor {
     }
 
     pub(super) fn any_modified(&self) -> bool {
-        let active_dominated = self.modified && !is_special_buffer_name(&self.active_name);
+        let active_dirty = self.active.modified && !is_special_buffer_name(&self.active.name);
         let inactive_dirty = self
             .inactive
             .iter()
             .any(|d| d.modified && !is_special_buffer_name(&d.name));
-        active_dominated || inactive_dirty
+        active_dirty || inactive_dirty
     }
 
     pub fn is_modified(&self) -> bool {
-        self.modified
+        self.active.modified
     }
 
     /// Handle an OS window-close request (the title-bar close button) and
@@ -677,8 +631,8 @@ impl Editor {
     pub fn confirm_quit(&mut self, cx: &mut Context<Self>) -> bool {
         if self.any_modified() {
             let mut dirty: Vec<&str> = Vec::new();
-            if self.modified && !is_special_buffer_name(&self.active_name) {
-                dirty.push(&self.active_name);
+            if self.active.modified && !is_special_buffer_name(&self.active.name) {
+                dirty.push(&self.active.name);
             }
             for doc in &self.inactive {
                 if doc.modified && !is_special_buffer_name(&doc.name) {
@@ -703,21 +657,60 @@ impl Editor {
     /// synchronously. Used on quit, so writes are blocking (no UI to keep
     /// responsive) and skip the async format-on-save path. Buffers not visiting
     /// a file (e.g. `*scratch*`) can't be saved and are left untouched.
-    pub(super) fn save_all_modified(&mut self, cx: &mut Context<Self>) {
-        if self.modified
-            && let Some(path) = self.active_path.clone()
+    ///
+    /// Returns whether every write succeeded; failed buffers keep `modified` set
+    /// and are reported in the echo area, so the quit path can abort rather than
+    /// silently discard the changes.
+    pub(super) fn save_all_modified(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut failed: Vec<String> = Vec::new();
+        if self.active.modified
+            && let Some(path) = self.active.path.clone()
         {
-            match std::fs::write(&path, self.buffer.full_text()) {
-                Ok(()) => self.modified = false,
-                Err(err) => self.echo(format!("Save failed: {err}"), cx),
+            match std::fs::write(&path, self.active.buffer.full_text()) {
+                Ok(()) => self.active.modified = false,
+                Err(err) => failed.push(format!("{}: {err}", self.active.name)),
             }
         }
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
-                && std::fs::write(&path, doc.buffer.full_text()).is_ok()
             {
-                doc.modified = false;
+                match std::fs::write(&path, doc.buffer.full_text()) {
+                    Ok(()) => doc.modified = false,
+                    Err(err) => failed.push(format!("{}: {err}", doc.name)),
+                }
+            }
+        }
+        if failed.is_empty() {
+            true
+        } else {
+            self.echo(format!("Save failed — {}", failed.join("; ")), cx);
+            false
+        }
+    }
+
+    /// Write the active buffer to its file synchronously — the quit path
+    /// (`:wq` / `:x`), where the write must complete before `cx.quit()` tears
+    /// the app down (the async `write_active_to_disk` would be cancelled
+    /// mid-flight). Runs the synchronous `before-save-hook` but, like
+    /// [`save_all_modified`](Self::save_all_modified), skips the async LSP
+    /// format-on-save. Returns whether the buffer is now safely on disk.
+    pub(super) fn save_active_sync(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(path) = self.active.path.clone() else {
+            self.echo("Buffer is not visiting a file", cx);
+            return false;
+        };
+        self.run_hook_blocking("before-save-hook", cx);
+        match std::fs::write(&path, self.active.buffer.full_text()) {
+            Ok(()) => {
+                self.active.modified = false;
+                self.echo(format!("Wrote {}", self.active.name), cx);
+                self.run_hook("after-save-hook");
+                true
+            }
+            Err(err) => {
+                self.echo(format!("Save failed: {err}"), cx);
+                false
             }
         }
     }
@@ -725,7 +718,7 @@ impl Editor {
     /// `C-x k`: kill the active buffer (confirming first if it has unsaved
     /// changes), then show the most-recent other buffer (or a fresh scratch).
     pub(super) fn kill_buffer(&mut self, cx: &mut Context<Self>) {
-        if self.modified {
+        if self.active.modified {
             self.open_confirm(
                 "Buffer modified; kill anyway?",
                 PendingAction::KillActiveBuffer,
@@ -740,7 +733,7 @@ impl Editor {
     /// window`), confirming first if the buffer has unsaved changes. With a sole
     /// window, the buffer is killed and `delete_window` just declines.
     pub(super) fn kill_buffer_and_window(&mut self, cx: &mut Context<Self>) {
-        if self.modified {
+        if self.active.modified {
             self.open_confirm(
                 "Buffer modified; kill anyway?",
                 PendingAction::KillBufferAndWindow,
@@ -753,7 +746,7 @@ impl Editor {
     }
 
     pub(super) fn kill_active_buffer(&mut self, cx: &mut Context<Self>) {
-        let killed = self.active_name.clone();
+        let killed = self.active.name.clone();
         let replacement = self
             .inactive
             .pop()
@@ -786,7 +779,7 @@ impl Editor {
     /// Kill a buffer by name: the active one (via the normal path), or just drop
     /// an inactive [`Document`] (ibuffer/dired). Last buffer stays as scratch.
     pub(super) fn kill_buffer_named(&mut self, name: &str, cx: &mut Context<Self>) {
-        if name == self.active_name {
+        if name == self.active.name {
             self.kill_active_buffer(cx);
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
             self.inactive.remove(idx);
@@ -835,9 +828,9 @@ impl Editor {
         self.inactive.retain(|d| d.name != name);
         self.inactive.push(current);
         self.install_active(make_special_document(name, &mode, &text));
-        self.line_faces = faces;
+        self.active.line_faces = faces;
         self.move_to(0, cx);
-        self.modified = false;
+        self.active.modified = false;
         cx.notify();
     }
 
@@ -861,17 +854,17 @@ impl Editor {
             .into_iter()
             .map(|(line, face)| (line, SharedString::from(face)))
             .collect();
-        if self.active_name == name {
+        if self.active.name == name {
             // Active: identical to the in-place branch of `render_buffer`.
-            self.line_icons.clear();
-            let line = self.buffer.line_index_at_byte(self.point());
-            self.buffer = Buffer::new(&text);
-            self.line_faces = faces;
+            self.active.line_icons.clear();
+            let line = self.active.buffer.line_index_at_byte(self.point());
+            self.active.buffer = Buffer::new(&text);
+            self.active.line_faces = faces;
             self.lines.clear();
-            let last = self.buffer.line_count().saturating_sub(1);
-            let offset = self.buffer.line_range(line.min(last)).start;
+            let last = self.active.buffer.line_count().saturating_sub(1);
+            let offset = self.active.buffer.line_range(line.min(last)).start;
             self.move_to(offset, cx);
-            self.modified = false;
+            self.active.modified = false;
             self.render_redirect = None;
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
             // Shown in a non-selected pane: rebuild that inactive buffer in place,
@@ -907,7 +900,7 @@ impl Editor {
     /// switch to it — an output-buffer primitive (Emacs `append-to-buffer`).
     /// Unlike `render-buffer`, the target is a normal editable buffer.
     pub(super) fn append_to_buffer(&mut self, name: String, text: String, cx: &mut Context<Self>) {
-        if self.active_name != name {
+        if self.active.name != name {
             // If the buffer is displayed in another (non-selected) window, append
             // there in place — output flows into the buffer's own window without
             // yanking focus away from what the user is editing (e.g. a streaming
@@ -946,10 +939,10 @@ impl Editor {
                 self.install_active(make_document(name, None, ""));
             }
         }
-        let end = self.buffer.len();
-        self.buffer.replace(end..end, &text);
+        let end = self.active.buffer.len();
+        self.active.buffer.replace(end..end, &text);
         self.lines.clear();
-        let new_end = self.buffer.len();
+        let new_end = self.active.buffer.len();
         self.move_to(new_end, cx);
         self.parse_full();
         cx.notify();
@@ -965,7 +958,7 @@ impl Editor {
     /// the `run_hook_blocking` pattern (publish → `call_action` → apply), so it
     /// reuses the exact Org fontifier without disturbing focus or the active buffer.
     pub(super) fn fontify_org_buffer(&mut self, name: String, cx: &mut Context<Self>) {
-        if self.active_name == name {
+        if self.active.name == name {
             self.publish_point();
             for command in self.script.call_action("org--fontify", None) {
                 self.apply_command(command, cx);
@@ -988,17 +981,34 @@ impl Editor {
         self.publish_point();
     }
 
+    /// The [`Document`] named `name` — the active buffer or an inactive
+    /// snapshot. The one lookup every "operate on buffer N by name" method
+    /// resolves through, so the active-vs-inactive dispatch lives here.
+    pub(super) fn doc(&self, name: &str) -> Option<&Document> {
+        if self.active.name == name {
+            Some(&self.active)
+        } else {
+            self.inactive.iter().find(|d| d.name == name)
+        }
+    }
+
+    /// Mutable twin of [`Self::doc`]. NOTE: text edits made through the
+    /// returned document bypass the active buffer's edit pipeline (undo, LSP
+    /// did-change, marker adjustment, re-highlight) — callers that modify the
+    /// ACTIVE buffer's *text* must use the `edit`-based paths instead; this is
+    /// for decorations/overlays and for inactive-buffer surgery.
+    pub(super) fn doc_mut(&mut self, name: &str) -> Option<&mut Document> {
+        if self.active.name == name {
+            Some(&mut self.active)
+        } else {
+            self.inactive.iter_mut().find(|d| d.name == name)
+        }
+    }
+
     /// Borrow the rope buffer named `name` — the active buffer or any inactive
     /// pane buffer. Used by the cross-buffer ediff primitives.
     pub(super) fn buffer_named(&self, name: &str) -> Option<&Buffer> {
-        if self.active_name == name {
-            Some(&self.buffer)
-        } else {
-            self.inactive
-                .iter()
-                .find(|d| d.name == name)
-                .map(|d| &d.buffer)
-        }
+        self.doc(name).map(|d| &d.buffer)
     }
 
     /// Diff buffers `a` and `b` and hand each non-equal hunk to Steel `callback`.
@@ -1055,8 +1065,8 @@ impl Editor {
             }
             None => return,
         };
-        if self.active_name == dst {
-            let (s, e) = line_span(&self.buffer, ds, de);
+        if self.active.name == dst {
+            let (s, e) = line_span(&self.active.buffer, ds, de);
             self.replace_region(s, e, &text, cx);
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == dst) {
             let len = {
@@ -1095,29 +1105,19 @@ impl Editor {
         face: String,
         cx: &mut Context<Self>,
     ) {
-        if self.active_name == name {
-            let (s, e) = line_span(&self.buffer, sline, eline);
-            if s < e {
-                self.overlays.faces.push((s..e, SharedString::from(face)));
-                cx.notify();
-            }
-        } else if let Some(doc) = self.inactive.iter_mut().find(|d| d.name == name) {
-            let (s, e) = line_span(&doc.buffer, sline, eline);
-            if s < e {
-                doc.overlays.faces.push((s..e, SharedString::from(face)));
-                cx.notify();
-            }
+        let Some(doc) = self.doc_mut(name) else {
+            return;
+        };
+        let (s, e) = line_span(&doc.buffer, sline, eline);
+        if s < e {
+            doc.overlays.faces.push((s..e, SharedString::from(face)));
+            cx.notify();
         }
     }
 
     /// Drop all face overlays from buffer `name` (active or inactive).
     pub(super) fn buffer_clear_highlights(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.active_name == name {
-            if !self.overlays.faces.is_empty() {
-                self.overlays.faces.clear();
-                cx.notify();
-            }
-        } else if let Some(doc) = self.inactive.iter_mut().find(|d| d.name == name)
+        if let Some(doc) = self.doc_mut(name)
             && !doc.overlays.faces.is_empty()
         {
             doc.overlays.faces.clear();

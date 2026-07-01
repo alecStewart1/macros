@@ -13,6 +13,71 @@ use crate::terminal::{TermEvent, Terminal};
 
 use super::*;
 
+/// Encode a [`Keystroke`] as the bytes a PTY expects, for the embedded terminal.
+/// Returns `None` for keystrokes that produce nothing (e.g. an unhandled control
+/// chord), which are then swallowed. Meta (`alt`) is sent as an ESC prefix.
+pub(super) fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
+    let m = &ks.modifiers;
+    let key = ks.key.as_str();
+
+    // Named / navigation keys → control bytes or CSI sequences.
+    let named: Option<Vec<u8>> = match key {
+        "enter" | "return" => Some(vec![b'\r']),
+        "escape" => Some(vec![0x1b]),
+        "backspace" => Some(vec![0x7f]),
+        "delete" => Some(b"\x1b[3~".to_vec()),
+        "tab" => Some(if m.shift {
+            b"\x1b[Z".to_vec()
+        } else {
+            vec![b'\t']
+        }),
+        "up" => Some(b"\x1b[A".to_vec()),
+        "down" => Some(b"\x1b[B".to_vec()),
+        "right" => Some(b"\x1b[C".to_vec()),
+        "left" => Some(b"\x1b[D".to_vec()),
+        "home" => Some(b"\x1b[H".to_vec()),
+        "end" => Some(b"\x1b[F".to_vec()),
+        "pageup" => Some(b"\x1b[5~".to_vec()),
+        "pagedown" => Some(b"\x1b[6~".to_vec()),
+        _ => None,
+    };
+    if let Some(named) = named {
+        return Some(named);
+    }
+
+    // Control chords → C0 control bytes (C-a = 0x01, … C-/ = 0x1f).
+    if m.control {
+        let byte = match key {
+            "space" | "@" => Some(0x00u8),
+            k if k.len() == 1 => match k.as_bytes()[0] {
+                c @ b'a'..=b'z' => Some(c - b'a' + 1),
+                b'[' => Some(0x1b),
+                b'\\' => Some(0x1c),
+                b']' => Some(0x1d),
+                b'^' => Some(0x1e),
+                b'_' | b'/' => Some(0x1f),
+                _ => None,
+            },
+            _ => None,
+        };
+        return byte.map(|b| if m.alt { vec![0x1b, b] } else { vec![b] });
+    }
+
+    // Printable text (shifted char from the IME, else a single-char key name).
+    let text = ks
+        .key_char
+        .clone()
+        .filter(|t| !t.is_empty())
+        .or_else(|| (key.chars().count() == 1).then(|| key.to_string()))?;
+    let mut bytes = text.into_bytes();
+    if m.alt {
+        let mut v = vec![0x1b];
+        v.append(&mut bytes);
+        return Some(v);
+    }
+    Some(bytes)
+}
+
 impl Editor {
     /// Spawn `program` asynchronously (Emacs `make-process`): a worker thread
     /// reads its stdout line by line and forwards each line to the foreground,
@@ -246,7 +311,8 @@ impl Editor {
             Some((program, args))
         };
         let cwd = self
-            .active_path
+            .active
+            .path
             .as_deref()
             .and_then(Path::parent)
             .map(Path::to_path_buf);
@@ -309,7 +375,7 @@ impl Editor {
     pub(super) fn active_terminal_id(&self) -> Option<u64> {
         self.terminals
             .values()
-            .find(|t| t.buffer_name == self.active_name)
+            .find(|t| t.buffer_name == self.active.name)
             .map(|t| t.id)
     }
 

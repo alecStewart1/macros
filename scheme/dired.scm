@@ -102,36 +102,33 @@
     (dired-render)
     (message "Deleted")))
 
-(define *dired-src* "")
+;; Rename / copy: the source path is captured in the prompt's closure (point is
+;; in the minibuffer by the time the callback runs, so it can't be re-read).
 (define (dired-rename)
   (let ((p (dired-at-point)))
     (when p
-      (set! *dired-src* p)
-      (read-string (string-append "Rename " (basename p) " to: ") "dired-rename-to"))))
-(define (dired-rename-to name)
-  (when (not (equal? (trim-end name) ""))
-    (call-process "mv" (list *dired-src* (path-join *dired-dir* name)))
-    (dired-render) (message "Renamed")))
+      (read-string (string-append "Rename " (basename p) " to: ")
+        (lambda (name)
+          (when (not (equal? (trim-end name) ""))
+            (call-process "mv" (list p (path-join *dired-dir* name)))
+            (dired-render) (message "Renamed")))))))
 (define (dired-copy)
   (let ((p (dired-at-point)))
     (when p
-      (set! *dired-src* p)
-      (read-string (string-append "Copy " (basename p) " to: ") "dired-copy-to"))))
-(define (dired-copy-to name)
-  (when (not (equal? (trim-end name) ""))
-    (call-process "cp" (list "-r" *dired-src* (path-join *dired-dir* name)))
-    (dired-render) (message "Copied")))
+      (read-string (string-append "Copy " (basename p) " to: ")
+        (lambda (name)
+          (when (not (equal? (trim-end name) ""))
+            (call-process "cp" (list "-r" p (path-join *dired-dir* name)))
+            (dired-render) (message "Copied")))))))
 (define (dired-mkdir) (read-string "Create directory: " 'dired-mkdir-finish))
 (define (dired-mkdir-finish name)
   (when (not (equal? (trim-end name) ""))
     (call-process "mkdir" (list "-p" (path-join *dired-dir* name)))
     (dired-render) (message "Created directory")))
 
-;; A directory listing, not code — no line-number gutter.
-(set-option "line-numbers:dired-mode" "false")
-
 ;; --- keymap -----------------------------------------------------------------
-(define-key "dired-mode" "enter" 'dired-visit)
+;; The standard list keys (RET/n/p + no line numbers), then dired's own set.
+(define-list-mode-keys "dired-mode" 'dired-visit)
 (define-key "dired-mode" "^" 'dired-up)
 (define-key "dired-mode" "g" 'dired-refresh)
 (define-key "dired-mode" "d" 'dired-mark)
@@ -140,9 +137,7 @@
 (define-key "dired-mode" "shift-r" 'dired-rename)
 (define-key "dired-mode" "shift-c" 'dired-copy)
 (define-key "dired-mode" "+" 'dired-mkdir)
-(define-key "dired-mode" "n" 'next-line)
-(define-key "dired-mode" "p" 'previous-line)
-(define-key "dired-mode" "q" 'dired-quit)
+(define-key "dired-mode" "q" 'dired-quit)  ; dired q ≠ kill-buffer
 
 (define-key "fundamental" "ctrl-x d" 'dired)
 (register-command 'dired)

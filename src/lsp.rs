@@ -10,12 +10,36 @@ use serde_json::{Value, json};
 use steel::rvals::SteelVal;
 use steel::steel_vm::engine::Engine;
 
+/// An LSP diagnostic severity. Declared worst-first so the derived `Ord`
+/// makes "worst severity" an explicit `min()` (matching the wire encoding,
+/// where 1 = error is the smallest value).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Severity {
+    Error = 1,
+    Warning = 2,
+    Info = 3,
+    Hint = 4,
+}
+
+impl Severity {
+    /// From the wire integer (1–4). Anything else — including a missing field —
+    /// is treated as an error, matching the old `unwrap_or(1)` default.
+    pub fn from_wire(n: u64) -> Self {
+        match n {
+            2 => Severity::Warning,
+            3 => Severity::Info,
+            4 => Severity::Hint,
+            _ => Severity::Error,
+        }
+    }
+}
+
 /// A diagnostic from the language server, already mapped to buffer byte offsets.
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     pub range: Range<usize>,
-    /// LSP severity: 1=error, 2=warning, 3=info, 4=hint.
-    pub severity: u8,
+    pub severity: Severity,
     pub message: String,
 }
 
@@ -273,19 +297,36 @@ impl LspClient {
 pub struct RawDiagnostic {
     pub start: (usize, usize),
     pub end: (usize, usize),
-    pub severity: u8,
+    pub severity: Severity,
     pub message: String,
 }
 
-/// The text-sync kind the server wants, from its `initialize` result:
-/// 1 = full document, 2 = incremental. `textDocumentSync` may be a bare number
-/// or an object with a `change` field. Defaults to full (the safe choice).
-pub fn parse_sync_kind(result: &Value) -> u8 {
+/// How a server wants document changes synced, from its `initialize` result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncKind {
+    /// Sync kind 0: the server wants no `didChange` notifications at all.
+    None,
+    /// Sync kind 1: resend the whole document on change.
+    Full,
+    /// Sync kind 2: send only the changed range.
+    Incremental,
+}
+
+/// The text-sync kind the server wants, from its `initialize` result.
+/// `textDocumentSync` may be a bare number or an object with a `change` field.
+/// A missing field defaults to full (the safe choice); an out-of-range value
+/// means no sync (matching the old "unrecognized number ⇒ send nothing").
+pub fn parse_sync_kind(result: &Value) -> SyncKind {
     let sync = &result["capabilities"]["textDocumentSync"];
-    if let Some(n) = sync.as_u64() {
-        return n as u8;
+    let n = sync
+        .as_u64()
+        .or_else(|| sync["change"].as_u64())
+        .unwrap_or(1);
+    match n {
+        1 => SyncKind::Full,
+        2 => SyncKind::Incremental,
+        _ => SyncKind::None,
     }
-    sync["change"].as_u64().unwrap_or(1) as u8
 }
 
 /// An LSP `Position` on the wire. Missing fields default to 0 (the same lossy
@@ -321,24 +362,19 @@ impl From<WirePos> for (usize, usize) {
     }
 }
 
-/// The narrower `selectionRange` (the identifier) when present, else the full
-/// `range` — for `DocumentSymbol`/`CallHierarchyItem`, which carry both.
-fn selection_or_range(v: &Value) -> &Value {
-    if v.get("selectionRange").is_some() {
-        &v["selectionRange"]
-    } else {
-        &v["range"]
-    }
-}
-
 fn position(value: &Value) -> (usize, usize) {
     serde_json::from_value::<WirePos>(value.clone()).map_or((0, 0), Into::into)
 }
 
-/// Parse a `Range` object into `(start, end)` `(line, col)` tuples. Missing or
-/// malformed endpoints become `(0, 0)`.
-fn range(value: &Value) -> ((usize, usize), (usize, usize)) {
-    serde_json::from_value::<WireRange>(value.clone()).map_or(((0, 0), (0, 0)), Into::into)
+/// A `Diagnostic` on the wire — just the fields we consume. A missing/malformed
+/// field takes its default, matching the old per-field `unwrap_or` digs.
+#[derive(serde::Deserialize, Default)]
+struct WireDiagnostic {
+    #[serde(default)]
+    range: WireRange,
+    severity: Option<u64>,
+    #[serde(default)]
+    message: String,
 }
 
 /// Parse a `textDocument/publishDiagnostics` params object into `(uri, diags)`.
@@ -349,12 +385,14 @@ pub fn parse_diagnostics(params: &Value) -> (String, Vec<RawDiagnostic>) {
         .map(|arr| {
             arr.iter()
                 .map(|d| {
-                    let (start, end) = range(&d["range"]);
+                    let wire: WireDiagnostic =
+                        serde_json::from_value(d.clone()).unwrap_or_default();
+                    let (start, end) = wire.range.into();
                     RawDiagnostic {
                         start,
                         end,
-                        severity: d["severity"].as_u64().unwrap_or(1) as u8,
-                        message: d["message"].as_str().unwrap_or_default().to_string(),
+                        severity: wire.severity.map_or(Severity::Error, Severity::from_wire),
+                        message: wire.message,
                     }
                 })
                 .collect()
@@ -397,24 +435,71 @@ pub fn parse_completion(result: &Value) -> Vec<CompletionItem> {
         .unwrap_or_default()
 }
 
+/// A `CompletionItem` on the wire — the fields we consume, typed. Two fields
+/// stay raw `Value`s because they're genuinely polymorphic: `documentation`
+/// (string-or-`MarkupContent`) and `additionalTextEdits` (parsed by the shared
+/// [`parse_text_edits`]). The original JSON is kept separately as
+/// [`CompletionItem::data`] to echo back to `completionItem/resolve`.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WireCompletionItem {
+    label: Option<String>,
+    insert_text: Option<String>,
+    /// `TextEdit` or `InsertReplaceEdit` — both carry `newText`.
+    text_edit: Option<WireNewText>,
+    kind: Option<u64>,
+    #[serde(default)]
+    documentation: Value,
+    #[serde(default)]
+    additional_text_edits: Value,
+    #[serde(default)]
+    label_details: WireLabelDetails,
+    detail: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WireNewText {
+    new_text: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct WireLabelDetails {
+    detail: Option<String>,
+    description: Option<String>,
+}
+
+impl WireCompletionItem {
+    /// The signature/type annotation, preferring `labelDetails` (params +
+    /// return or module) and falling back to `detail`.
+    fn signature(&self) -> Option<String> {
+        let detail = self.label_details.detail.as_deref().unwrap_or("");
+        let description = self.label_details.description.as_deref().unwrap_or("");
+        let combined = format!("{detail} {description}");
+        let combined = combined.trim();
+        if !combined.is_empty() {
+            return Some(combined.to_string());
+        }
+        self.detail.clone().filter(|s| !s.is_empty())
+    }
+}
+
 fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
-    let label = item["label"].as_str()?.to_string();
-    let insert_text = item["insertText"]
-        .as_str()
-        .or_else(|| item["textEdit"]["newText"].as_str())
-        .unwrap_or(label.as_str())
-        .to_string();
-    let kind = item["kind"]
-        .as_u64()
-        .and_then(completion_kind)
-        .map(str::to_string);
+    let wire: WireCompletionItem = serde_json::from_value(item.clone()).ok()?;
+    let detail = wire.signature();
+    let label = wire.label?;
+    let insert_text = wire
+        .insert_text
+        .or(wire.text_edit.and_then(|e| e.new_text))
+        .unwrap_or_else(|| label.clone());
+    let kind = wire.kind.and_then(completion_kind).map(str::to_string);
     Some(CompletionItem {
         label,
         insert_text,
-        detail: completion_detail(item),
+        detail,
         kind,
-        documentation: parse_documentation(&item["documentation"]),
-        additional_edits: parse_text_edits(&item["additionalTextEdits"]),
+        documentation: parse_documentation(&wire.documentation),
+        additional_edits: parse_text_edits(&wire.additional_text_edits),
         data: item.clone(),
         resolved: false,
     })
@@ -423,14 +508,15 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
 /// Merge a `completionItem/resolve` result into `item` — servers fill in
 /// `documentation` and `additionalTextEdits` (auto-imports) lazily.
 pub fn merge_resolved_completion(item: &mut CompletionItem, resolved: &Value) {
-    if let Some(doc) = parse_documentation(&resolved["documentation"]) {
+    let wire: WireCompletionItem = serde_json::from_value(resolved.clone()).unwrap_or_default();
+    if let Some(doc) = parse_documentation(&wire.documentation) {
         item.documentation = Some(doc);
     }
-    let edits = parse_text_edits(&resolved["additionalTextEdits"]);
+    let edits = parse_text_edits(&wire.additional_text_edits);
     if !edits.is_empty() {
         item.additional_edits = edits;
     }
-    if let Some(detail) = completion_detail(resolved) {
+    if let Some(detail) = wire.signature() {
         item.detail = Some(detail);
     }
     item.resolved = true;
@@ -502,17 +588,34 @@ pub struct CodeLens {
     pub data: Value,
 }
 
+/// A `CodeLens` on the wire — position plus the (possibly absent) command title.
+#[derive(serde::Deserialize, Default)]
+struct WireCodeLens {
+    #[serde(default)]
+    range: WireRange,
+    command: Option<WireCommandTitle>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct WireCommandTitle {
+    title: Option<String>,
+}
+
 /// Parse a `textDocument/codeLens` result.
 pub fn parse_code_lenses(result: &Value) -> Vec<CodeLens> {
     result
         .as_array()
         .map(|arr| {
             arr.iter()
-                .map(|lens| CodeLens {
-                    line: lens["range"]["start"]["line"].as_u64().unwrap_or(0) as usize,
-                    character: lens["range"]["start"]["character"].as_u64().unwrap_or(0) as usize,
-                    title: lens["command"]["title"].as_str().map(str::to_string),
-                    data: lens.clone(),
+                .map(|lens| {
+                    let wire: WireCodeLens =
+                        serde_json::from_value(lens.clone()).unwrap_or_default();
+                    CodeLens {
+                        line: wire.range.start.line,
+                        character: wire.range.start.character,
+                        title: wire.command.and_then(|c| c.title),
+                        data: lens.clone(),
+                    }
                 })
                 .collect()
         })
@@ -521,24 +624,10 @@ pub fn parse_code_lenses(result: &Value) -> Vec<CodeLens> {
 
 /// The title of a resolved code lens (`codeLens/resolve` fills in `command`).
 pub fn parse_code_lens_title(resolved: &Value) -> Option<String> {
-    resolved["command"]["title"].as_str().map(str::to_string)
-}
-
-/// The signature/type annotation, preferring `labelDetails` (params + return or
-/// module) and falling back to `detail`.
-fn completion_detail(item: &Value) -> Option<String> {
-    let label_details = &item["labelDetails"];
-    let detail = label_details["detail"].as_str().unwrap_or("");
-    let description = label_details["description"].as_str().unwrap_or("");
-    let combined = format!("{detail} {description}");
-    let combined = combined.trim();
-    if !combined.is_empty() {
-        return Some(combined.to_string());
-    }
-    item["detail"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    serde_json::from_value::<WireCodeLens>(resolved.clone())
+        .ok()?
+        .command?
+        .title
 }
 
 /// Map an LSP `CompletionItemKind` to a short tag.
@@ -631,54 +720,76 @@ pub struct SymbolInfo {
     pub depth: usize,
 }
 
+/// A `DocumentSymbol | SymbolInformation` on the wire: a flat
+/// `SymbolInformation` carries its own `location`, a hierarchical
+/// `DocumentSymbol` only ranges + `children`.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WireSymbol {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    kind: u64,
+    location: Option<WireLocation>,
+    container_name: Option<String>,
+    #[serde(default)]
+    range: WireRange,
+    selection_range: Option<WireRange>,
+    #[serde(default)]
+    children: Vec<WireSymbol>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct WireLocation {
+    uri: Option<String>,
+    #[serde(default)]
+    range: WireRange,
+}
+
 /// Parse a `documentSymbol` (nested `DocumentSymbol[]` or flat
 /// `SymbolInformation[]`) or `workspace/symbol` result. `fallback_uri` is used
 /// for `DocumentSymbol`s, which carry only ranges, not URIs.
 pub fn parse_symbols(result: &Value, fallback_uri: &str) -> Vec<SymbolInfo> {
     fn push(
-        item: &Value,
+        item: WireSymbol,
         fallback_uri: &str,
         container: &str,
         depth: usize,
         out: &mut Vec<SymbolInfo>,
     ) {
-        let name = item["name"].as_str().unwrap_or("").to_string();
-        let kind = item["kind"].as_u64().unwrap_or(0);
-        if let Some(loc) = item.get("location") {
+        if let Some(loc) = item.location {
             // `SymbolInformation`: a flat item carrying its own location.
             out.push(SymbolInfo {
-                name,
-                kind,
-                uri: loc["uri"].as_str().unwrap_or(fallback_uri).to_string(),
-                start: position(&loc["range"]["start"]),
-                container: item["containerName"]
-                    .as_str()
-                    .unwrap_or(container)
-                    .to_string(),
+                name: item.name,
+                kind: item.kind,
+                uri: loc.uri.unwrap_or_else(|| fallback_uri.to_string()),
+                start: loc.range.start.into(),
+                container: item.container_name.unwrap_or_else(|| container.to_string()),
                 depth,
             });
         } else {
-            // `DocumentSymbol`: hierarchical, ranges only.
-            let range = selection_or_range(item);
+            // `DocumentSymbol`: hierarchical, ranges only. Prefer the narrower
+            // `selectionRange` (the identifier) over the whole definition.
+            let range = item.selection_range.unwrap_or(item.range);
             out.push(SymbolInfo {
-                name: name.clone(),
-                kind,
+                name: item.name.clone(),
+                kind: item.kind,
                 uri: fallback_uri.to_string(),
-                start: position(&range["start"]),
+                start: range.start.into(),
                 container: container.to_string(),
                 depth,
             });
-            if let Some(children) = item["children"].as_array() {
-                for child in children {
-                    push(child, fallback_uri, &name, depth + 1, out);
-                }
+            for child in item.children {
+                push(child, fallback_uri, &item.name, depth + 1, out);
             }
         }
     }
     let mut out = Vec::new();
     if let Some(arr) = result.as_array() {
         for item in arr {
-            push(item, fallback_uri, "", 0, &mut out);
+            if let Ok(sym) = serde_json::from_value::<WireSymbol>(item.clone()) {
+                push(sym, fallback_uri, "", 0, &mut out);
+            }
         }
     }
     out
@@ -719,12 +830,23 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
+/// A `TextEdit` on the wire. `range` is required (an edit without one is
+/// meaningless and is skipped, as before); a missing `newText` deletes.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireTextEdit {
+    range: WireRange,
+    #[serde(default)]
+    new_text: String,
+}
+
 fn parse_one_edit(v: &Value) -> Option<TextEdit> {
-    let (start, end) = range(v.get("range")?);
+    let edit: WireTextEdit = serde_json::from_value(v.clone()).ok()?;
+    let (start, end) = edit.range.into();
     Some(TextEdit {
         start,
         end,
-        new_text: v["newText"].as_str().unwrap_or("").to_string(),
+        new_text: edit.new_text,
     })
 }
 
@@ -778,6 +900,21 @@ pub struct CodeAction {
     pub command: Option<(String, Value)>,
 }
 
+/// A `Command | CodeAction` on the wire. `edit` (a `WorkspaceEdit`, itself two
+/// shapes — see [`parse_workspace_edit`]) and `command` (a bare string on a
+/// `Command`, a nested object on a `CodeAction`) are genuinely polymorphic, so
+/// they stay raw `Value`s.
+#[derive(serde::Deserialize, Default)]
+struct WireCodeAction {
+    title: Option<String>,
+    #[serde(default)]
+    edit: Value,
+    #[serde(default)]
+    command: Value,
+    #[serde(default)]
+    arguments: Value,
+}
+
 /// Parse a `(Command | CodeAction)[]` result.
 pub fn parse_code_actions(result: &Value) -> Vec<CodeAction> {
     let Some(arr) = result.as_array() else {
@@ -785,19 +922,17 @@ pub fn parse_code_actions(result: &Value) -> Vec<CodeAction> {
     };
     arr.iter()
         .filter_map(|item| {
-            let title = item["title"].as_str()?.to_string();
+            let wire: WireCodeAction = serde_json::from_value(item.clone()).ok()?;
+            let title = wire.title?;
             // A bare `Command` has a string `command`; a `CodeAction` may have an
             // `edit` and/or a nested `command` object.
-            let (edit, command) = if let Some(cmd) = item["command"].as_str() {
-                (None, Some((cmd.to_string(), item["arguments"].clone())))
+            let (edit, command) = if let Value::String(cmd) = &wire.command {
+                (None, Some((cmd.clone(), wire.arguments)))
             } else {
-                let edit = item
-                    .get("edit")
-                    .filter(|e| !e.is_null())
-                    .map(parse_workspace_edit);
-                let command = item["command"]["command"]
+                let edit = (!wire.edit.is_null()).then(|| parse_workspace_edit(&wire.edit));
+                let command = wire.command["command"]
                     .as_str()
-                    .map(|c| (c.to_string(), item["command"]["arguments"].clone()));
+                    .map(|c| (c.to_string(), wire.command["arguments"].clone()));
                 (edit, command)
             };
             Some(CodeAction {
@@ -894,19 +1029,32 @@ pub fn apply_semantic_delta(prev: &[i64], result: &Value) -> Vec<i64> {
 /// `Location` (its `selectionRange`, falling back to `range`) plus name via the
 /// returned `(name, Location)` pairs.
 pub fn parse_call_hierarchy(result: &Value, key: &str) -> Vec<(String, Location)> {
+    /// The `CallHierarchyItem` inside an incoming/outgoing call.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WireHierarchyItem {
+        name: Option<String>,
+        #[serde(default)]
+        uri: String,
+        #[serde(default)]
+        range: WireRange,
+        selection_range: Option<WireRange>,
+    }
+
     let Some(arr) = result.as_array() else {
         return Vec::new();
     };
     arr.iter()
         .filter_map(|call| {
-            let item = call.get(key)?;
-            let range = selection_or_range(item);
+            let item: WireHierarchyItem = serde_json::from_value(call.get(key)?.clone()).ok()?;
+            // Prefer the narrower `selectionRange` (the identifier).
+            let range = item.selection_range.unwrap_or(item.range);
             Some((
-                item["name"].as_str().unwrap_or("?").to_string(),
+                item.name.unwrap_or_else(|| "?".to_string()),
                 Location {
-                    uri: item["uri"].as_str().unwrap_or("").to_string(),
-                    start: position(&range["start"]),
-                    end: position(&range["end"]),
+                    uri: item.uri,
+                    start: range.start.into(),
+                    end: range.end.into(),
                 },
             ))
         })
@@ -928,11 +1076,12 @@ pub fn parse_signature_help(result: &Value) -> Option<String> {
 /// Apply LSP `TextEdit`s to `text`, returning the new text. Edits are applied
 /// last-position-first so earlier byte offsets stay valid as we splice.
 pub fn apply_edits_to_text(text: &str, edits: &[TextEdit]) -> String {
+    let buf = crate::buffer::Buffer::new(text);
     let mut spans: Vec<(usize, usize, &str)> = edits
         .iter()
         .map(|e| {
-            let a = lsp_to_byte(text, e.start.0, e.start.1);
-            let b = lsp_to_byte(text, e.end.0, e.end.1);
+            let a = buf.position_to_byte(e.start.0, e.start.1);
+            let b = buf.position_to_byte(e.end.0, e.end.1);
             (a.min(b), a.max(b), e.new_text.as_str())
         })
         .collect();
@@ -950,9 +1099,55 @@ pub fn apply_edits_to_text(text: &str, edits: &[TextEdit]) -> String {
 }
 
 /// Convert a `file://` URI to a filesystem path string (inverse of
-/// [`path_to_uri`] for local paths).
+/// [`path_to_uri`] for local paths), percent-decoding the path — servers like
+/// rust-analyzer encode spaces and non-ASCII (`%20`, `%C3%A9`, …).
 pub fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://").unwrap_or(uri).to_string()
+    let Some(rest) = uri.strip_prefix("file://") else {
+        return uri.to_string();
+    };
+    let path = percent_decode(rest);
+    // Windows drive form: `file:///C:/…` → `C:/…`.
+    #[cfg(windows)]
+    if let Some(drive) = path.strip_prefix('/') {
+        let mut chars = drive.chars();
+        if let (Some(letter), Some(':')) = (chars.next(), chars.next())
+            && letter.is_ascii_alphabetic()
+        {
+            return drive.to_string();
+        }
+    }
+    path
+}
+
+/// Percent-decode `%XX` escapes in `s`; malformed escapes pass through
+/// literally. Decoded bytes are reassembled as (lossy) UTF-8.
+fn percent_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push(hi << 4 | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 impl Drop for LspClient {
@@ -1134,15 +1329,21 @@ impl SteelLsp {
         self.publish_diagnostics(uri);
     }
 
-    fn completion(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+    /// Queue a response carrying `result` under a fresh request id, returning
+    /// that id — the shared tail of every builtin request handler.
+    fn respond(&mut self, result: Value) -> i64 {
         let id = self.next_id;
         self.next_id += 1;
-        let text = self.docs.get(uri).cloned().unwrap_or_default();
-        let items = self.complete(&text, line, character);
         let _ = self
             .tx
-            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": items }));
+            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
         id
+    }
+
+    fn completion(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+        let text = self.docs.get(uri).cloned().unwrap_or_default();
+        let items = self.complete(&text, line, character);
+        self.respond(json!(items))
     }
 
     fn publish_diagnostics(&mut self, uri: &str) {
@@ -1175,10 +1376,11 @@ impl SteelLsp {
         };
         if diagnostics.is_empty() {
             let known = self.known_names();
+            let buf = crate::buffer::Buffer::new(text);
             for (name, start, end) in crate::analyze::unbound_operators(text, &known) {
                 diagnostics.push(warning(
-                    byte_to_lsp(text, start),
-                    byte_to_lsp(text, end),
+                    buf.byte_to_position(start),
+                    buf.byte_to_position(end),
                     &format!("unknown function: {name}"),
                 ));
             }
@@ -1288,23 +1490,18 @@ impl SteelLsp {
     /// index. A `'name` reference resolves like a bare one — the quote is a word
     /// boundary. Replies with a single `Location`, or `null` when unresolved.
     fn definition(&mut self, uri: &str, line: usize, character: usize) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
         let text = self.docs.get(uri).cloned().unwrap_or_default();
         let result = symbol_at(&text, line, character)
             .and_then(|sym| self.locate_definition(&text, uri, &sym))
             .unwrap_or(Value::Null);
-        let _ = self
-            .tx
-            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-        id
+        self.respond(result)
     }
 
     fn locate_definition(&self, text: &str, uri: &str, sym: &str) -> Option<Value> {
         // 1) A definition in the open document (the user's own, or an override).
         for (i, line) in text.lines().enumerate() {
             if crate::runtime::define_name(line).as_deref() == Some(sym) {
-                let col = word_occurrences(line, sym).first().map_or(0, |&(_, c)| c);
+                let col = word_occurrences(line, sym).first().copied().unwrap_or(0);
                 return Some(location_json(uri, i, col, sym));
             }
         }
@@ -1323,17 +1520,12 @@ impl SteelLsp {
     /// `;;` comment block if it defines the symbol, else the bundled editor-API
     /// doc. Replies with `null` when there's nothing documented.
     fn hover(&mut self, uri: &str, line: usize, character: usize) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
         let text = self.docs.get(uri).cloned().unwrap_or_default();
         let result = symbol_at(&text, line, character)
             .and_then(|sym| self.doc_for(&text, &sym))
             .map(|doc| json!({ "contents": { "kind": "plaintext", "value": doc } }))
             .unwrap_or(Value::Null);
-        let _ = self
-            .tx
-            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-        id
+        self.respond(result)
     }
 
     fn doc_for(&self, text: &str, sym: &str) -> Option<String> {
@@ -1355,29 +1547,22 @@ impl SteelLsp {
     /// boundary occurrence — which includes quoted `'name` references, since the
     /// quote is a boundary. (Cross-file references aren't tracked here.)
     fn references(&mut self, uri: &str, line: usize, character: usize) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
         let text = self.docs.get(uri).cloned().unwrap_or_default();
         let mut locs: Vec<Value> = Vec::new();
         if let Some(sym) = symbol_at(&text, line, character) {
             for (li, l) in text.lines().enumerate() {
-                for (_, c) in word_occurrences(l, &sym) {
+                for c in word_occurrences(l, &sym) {
                     locs.push(location_json(uri, li, c, &sym));
                 }
             }
         }
-        let _ = self
-            .tx
-            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": locs }));
-        id
+        self.respond(json!(locs))
     }
 
     /// prepareRename: allow renaming only a symbol **defined in this document**
     /// (so a config renames its own commands, never a bundled or external one we
     /// can't fully update). Replies with the token's range, or `null` to decline.
     fn prepare_rename(&mut self, uri: &str, line: usize, character: usize) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
         let text = self.docs.get(uri).cloned().unwrap_or_default();
         let result = symbol_at_span(&text, line, character)
             .filter(|(sym, _, _)| defined_in_doc(&text, sym))
@@ -1388,10 +1573,7 @@ impl SteelLsp {
                 })
             })
             .unwrap_or(Value::Null);
-        let _ = self
-            .tx
-            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-        id
+        self.respond(result)
     }
 
     /// rename: a `WorkspaceEdit` replacing every word-boundary occurrence (quoted
@@ -1399,8 +1581,6 @@ impl SteelLsp {
     /// document and only for symbols it defines — `prepare_rename` already gated
     /// that, and this re-checks so a direct rename can't escape the guard.
     fn rename(&mut self, uri: &str, line: usize, character: usize, new_name: &str) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
         let text = self.docs.get(uri).cloned().unwrap_or_default();
         let mut edits: Vec<Value> = Vec::new();
         if let Some(sym) = symbol_at(&text, line, character)
@@ -1408,7 +1588,7 @@ impl SteelLsp {
         {
             let len: usize = sym.chars().map(char::len_utf16).sum();
             for (li, l) in text.lines().enumerate() {
-                for (_, c) in word_occurrences(l, &sym) {
+                for c in word_occurrences(l, &sym) {
                     edits.push(json!({
                         "range": {
                             "start": { "line": li, "character": c },
@@ -1421,10 +1601,7 @@ impl SteelLsp {
         }
         let mut changes = serde_json::Map::new();
         changes.insert(uri.to_string(), Value::Array(edits));
-        let _ = self.tx.unbounded_send(
-            json!({ "jsonrpc": "2.0", "id": id, "result": { "changes": changes } }),
-        );
-        id
+        self.respond(json!({ "changes": changes }))
     }
 }
 
@@ -1443,59 +1620,53 @@ fn symbol_at(text: &str, line: usize, character: usize) -> Option<String> {
 }
 
 /// Like [`symbol_at`] but also returns the token's `(start, end)` UTF-16 columns
-/// on its line — used to report a rename range.
+/// on its line — used to report a rename range. Position/column conversion goes
+/// through the canonical rope implementation in [`crate::buffer::Buffer`]; only
+/// the identifier-boundary walk is local.
 fn symbol_at_span(text: &str, line: usize, character: usize) -> Option<(String, usize, usize)> {
-    let chars: Vec<char> = text.lines().nth(line)?.chars().collect();
-    // UTF-16 column → char index.
-    let mut utf16 = 0usize;
-    let mut idx = chars.len();
-    for (i, c) in chars.iter().enumerate() {
-        if utf16 >= character {
-            idx = i;
+    let line_str = text.lines().nth(line)?;
+    let buf = crate::buffer::Buffer::new(line_str);
+    let idx = buf.position_to_byte(0, character);
+    let mut start = idx.min(line_str.len());
+    while let Some(c) = line_str[..start].chars().next_back() {
+        if !is_ident_char(c) {
             break;
         }
-        utf16 += c.len_utf16();
+        start -= c.len_utf8();
     }
-    let mut start = idx.min(chars.len());
-    while start > 0 && is_ident_char(chars[start - 1]) {
-        start -= 1;
-    }
-    let mut end = idx.min(chars.len());
-    while end < chars.len() && is_ident_char(chars[end]) {
-        end += 1;
+    let mut end = idx.min(line_str.len());
+    while let Some(c) = line_str[end..].chars().next() {
+        if !is_ident_char(c) {
+            break;
+        }
+        end += c.len_utf8();
     }
     if start >= end {
         return None;
     }
-    let name: String = chars[start..end].iter().collect();
-    let start16: usize = chars[..start].iter().map(|c| c.len_utf16()).sum();
-    let span16: usize = chars[start..end].iter().map(|c| c.len_utf16()).sum();
-    Some((name, start16, start16 + span16))
+    Some((
+        line_str[start..end].to_string(),
+        buf.byte_to_position(start).1,
+        buf.byte_to_position(end).1,
+    ))
 }
 
-/// `(0, utf16-col)` of every word-boundary occurrence of `sym` in a single line.
-/// (The line index is the caller's; this returns 0 in that slot.)
-fn word_occurrences(line: &str, sym: &str) -> Vec<(usize, usize)> {
-    let chars: Vec<char> = line.chars().collect();
+/// UTF-16 column of every word-boundary occurrence of `sym` in a single line.
+fn word_occurrences(line: &str, sym: &str) -> Vec<usize> {
+    let buf = crate::buffer::Buffer::new(line);
     let mut out = Vec::new();
-    let (mut i, mut col16) = (0usize, 0usize);
-    while i < chars.len() {
-        if is_ident_char(chars[i]) {
-            let start16 = col16;
-            let mut j = i;
-            let mut word = String::new();
-            while j < chars.len() && is_ident_char(chars[j]) {
-                word.push(chars[j]);
-                col16 += chars[j].len_utf16();
-                j += 1;
-            }
-            if word == sym {
-                out.push((0, start16));
-            }
-            i = j;
-        } else {
-            col16 += chars[i].len_utf16();
-            i += 1;
+    let mut word_start: Option<usize> = None;
+    // A trailing '\n' sentinel (never an identifier char) flushes a final word.
+    for (b, c) in line
+        .char_indices()
+        .chain(std::iter::once((line.len(), '\n')))
+    {
+        if is_ident_char(c) {
+            word_start.get_or_insert(b);
+        } else if let Some(ws) = word_start.take()
+            && &line[ws..b] == sym
+        {
+            out.push(buf.byte_to_position(ws).1);
         }
     }
     out
@@ -1513,24 +1684,11 @@ fn location_json(uri: &str, line: usize, character: usize, sym: &str) -> Value {
     })
 }
 
-/// Map an LSP position `(line, utf16-col)` to a byte offset in `text`.
+/// Map an LSP position `(line, utf16-col)` to a byte offset in `text`, via the
+/// canonical rope conversion in [`crate::buffer::Buffer`]. For repeated
+/// conversions over one document build the `Buffer` once instead.
 fn lsp_to_byte(text: &str, line: usize, character: usize) -> usize {
-    let (mut current_line, mut col) = (0usize, 0usize);
-    for (i, c) in text.char_indices() {
-        if current_line == line && col >= character {
-            return i;
-        }
-        if c == '\n' {
-            if current_line == line {
-                return i; // target column past end of line
-            }
-            current_line += 1;
-            col = 0;
-        } else {
-            col += c.len_utf16();
-        }
-    }
-    text.len()
+    crate::buffer::Buffer::new(text).position_to_byte(line, character)
 }
 
 /// A warning-severity (2) LSP diagnostic — used for heuristic findings.
@@ -1538,30 +1696,13 @@ fn warning(start: (usize, usize), end: (usize, usize), message: &str) -> Value {
     diagnostic_with_severity(start, end, 2, message)
 }
 
-/// Map a byte offset in `text` to an LSP position `(line, utf16-col)`.
-fn byte_to_lsp(text: &str, byte: usize) -> (usize, usize) {
-    let byte = byte.min(text.len());
-    let (mut line, mut col) = (0usize, 0usize);
-    for (i, c) in text.char_indices() {
-        if i >= byte {
-            break;
-        }
-        if c == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += c.len_utf16();
-        }
-    }
-    (line, col)
-}
-
 /// Turn a compiler error into an LSP diagnostic, using its span when present.
 fn steel_error_diagnostic(text: &str, err: &steel::rerrs::SteelErr) -> Value {
+    let buf = crate::buffer::Buffer::new(text);
     let (start, end) = match err.span() {
         Some(span) => (
-            byte_to_lsp(text, span.start as usize),
-            byte_to_lsp(text, span.end as usize),
+            buf.byte_to_position(span.start as usize),
+            buf.byte_to_position(span.end as usize),
         ),
         None => ((0, 0), (0, 1)),
     };
@@ -1754,28 +1895,18 @@ const SPECIAL_FORMS: &[&str] = &[
 ];
 
 /// The identifier prefix immediately before the LSP position `(line, char)`.
+/// The UTF-16 column maps to bytes via the canonical rope conversion.
 fn prefix_at(text: &str, line: usize, character: usize) -> String {
     let line_str = text.lines().nth(line).unwrap_or("");
-    // Map the UTF-16 column to a char index within the line.
-    let mut utf16 = 0usize;
-    let mut idx = 0usize;
-    for (ci, c) in line_str.chars().enumerate() {
-        if utf16 >= character {
-            idx = ci;
+    let end = crate::buffer::Buffer::new(line_str).position_to_byte(0, character);
+    let mut start = end;
+    while let Some(c) = line_str[..start].chars().next_back() {
+        if !is_ident_char(c) {
             break;
         }
-        utf16 += c.len_utf16();
-        idx = ci + 1;
+        start -= c.len_utf8();
     }
-    let trailing: String = line_str
-        .chars()
-        .take(idx)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take_while(|c| is_ident_char(*c))
-        .collect();
-    trailing.chars().rev().collect()
+    line_str[start..end].to_string()
 }
 
 /// Distinct identifiers appearing in `text` (excluding pure-number tokens).
@@ -1837,9 +1968,28 @@ fn read_frames<R: BufRead>(mut reader: R, tx: UnboundedSender<Value>) {
     }
 }
 
-/// Convert a filesystem path to a `file://` URI (good enough for local paths).
+/// Convert a filesystem path to a `file://` URI, percent-encoding every byte
+/// outside RFC 3986's unreserved set (plus `/`) — LSP servers send and compare
+/// encoded URIs, so a path with a space must go out as `%20` or diagnostics
+/// keyed by the server's URI won't match ours. On Windows, `\` separators
+/// become `/` and the drive path gains the leading slash (`file:///C:/…`).
 pub fn path_to_uri(path: &Path) -> String {
-    format!("file://{}", path.to_string_lossy())
+    let path = path.to_string_lossy();
+    let mut out = String::with_capacity(path.len() + 8);
+    out.push_str("file://");
+    if !path.starts_with('/') {
+        out.push('/'); // Windows drive form, e.g. `C:\…`
+    }
+    for &b in path.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            b'\\' if cfg!(windows) => out.push('/'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2441,6 +2591,35 @@ mod tests {
     fn uri_path_roundtrip() {
         assert_eq!(uri_to_path("file:///Users/x/a.rs"), "/Users/x/a.rs");
         assert_eq!(uri_to_path("/already/a/path"), "/already/a/path");
+    }
+
+    #[test]
+    fn uri_percent_encoding_roundtrips() {
+        // A plain path is untouched apart from the scheme.
+        assert_eq!(
+            path_to_uri(Path::new("/Users/x/a.rs")),
+            "file:///Users/x/a.rs"
+        );
+        // Spaces and non-ASCII must be percent-encoded on the way out (that's
+        // what rust-analyzer et al. send back) and decoded on the way in.
+        let space = Path::new("/Users/x/my project/a b.rs");
+        assert_eq!(path_to_uri(space), "file:///Users/x/my%20project/a%20b.rs");
+        assert_eq!(
+            uri_to_path(&path_to_uri(space)),
+            "/Users/x/my project/a b.rs"
+        );
+
+        let unicode = Path::new("/tmp/café/naïve.rs");
+        assert_eq!(path_to_uri(unicode), "file:///tmp/caf%C3%A9/na%C3%AFve.rs");
+        assert_eq!(uri_to_path(&path_to_uri(unicode)), "/tmp/café/naïve.rs");
+
+        // Other reserved characters round-trip too.
+        let odd = Path::new("/tmp/a#b?c&d.rs");
+        assert_eq!(uri_to_path(&path_to_uri(odd)), "/tmp/a#b?c&d.rs");
+
+        // Decoding tolerates malformed escapes (passed through literally).
+        assert_eq!(uri_to_path("file:///x/100%zz"), "/x/100%zz");
+        assert_eq!(uri_to_path("file:///x/50%"), "/x/50%");
     }
 
     #[test]

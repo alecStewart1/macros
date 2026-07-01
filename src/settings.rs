@@ -65,90 +65,94 @@ enum Kind {
     Str,
 }
 
+/// One known option: its user-facing name, declared type, and (for numbers)
+/// the bounds enforced at write time. The single source of truth —
+/// [`KNOWN_OPTIONS`] and [`option_kind`] both derive from it.
+struct OptionSpec {
+    name: &'static str,
+    kind: Kind,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+const fn opt(name: &'static str, kind: Kind, min: Option<f64>, max: Option<f64>) -> OptionSpec {
+    OptionSpec {
+        name,
+        kind,
+        min,
+        max,
+    }
+}
+
+/// Every option key Rust knows about, with its type and bounds. Scheme-only
+/// options (stored verbatim) aren't listed — Rust doesn't know their names
+/// ahead of time.
+const OPTIONS: &[OptionSpec] = &[
+    opt("font-size", Kind::Float, None, None),
+    opt("line-height", Kind::Float, None, None),
+    opt("helm-height", Kind::Float, Some(0.1), Some(0.95)),
+    opt("cursor-width", Kind::Float, Some(1.0), None),
+    opt("divider-width", Kind::Float, Some(1.0), None),
+    opt("cursor-blink-interval", Kind::Float, Some(60.0), None),
+    opt("helm-bevel-top", Kind::Float, Some(0.0), None),
+    opt("helm-bevel-right", Kind::Float, Some(0.0), None),
+    opt("helm-bevel-bottom", Kind::Float, Some(0.0), None),
+    opt("helm-bevel-left", Kind::Float, Some(0.0), None),
+    opt("tab-width", Kind::Int, Some(0.0), None),
+    opt("completion-auto-prefix", Kind::Int, Some(0.0), None),
+    opt("completion-max-rows", Kind::Int, Some(1.0), None),
+    opt("completion-style", Kind::Str, None, None),
+    opt("cursor-style", Kind::Str, None, None),
+    opt("font-family", Kind::Str, None, None),
+    opt("completion-auto", Kind::Bool, None, None),
+    opt("completion-show-detail", Kind::Bool, None, None),
+    opt("completion-show-kind", Kind::Bool, None, None),
+    opt("completion-capf", Kind::Bool, None, None),
+    opt("cursor-blink", Kind::Bool, None, None),
+    opt("scroll-bar", Kind::Bool, None, None),
+    opt("diagnostics-gutter", Kind::Bool, None, None),
+    opt("magit-gutter", Kind::Bool, None, None),
+    opt("magit-gutter-width", Kind::Float, Some(1.0), Some(8.0)),
+    opt("magit-gutter-deleted", Kind::Bool, None, None),
+    opt("lsp-log-on-start", Kind::Bool, None, None),
+    opt("auto-update", Kind::Bool, None, None),
+    opt("helm-fuzzy", Kind::Bool, None, None),
+    opt("line-numbers", Kind::Bool, None, None),
+    opt("hl-line", Kind::Bool, None, None),
+    opt("word-wrap", Kind::Bool, None, None),
+    opt("auto-revert", Kind::Bool, None, None),
+    opt("electric-indent", Kind::Bool, None, None),
+    opt("show-paren", Kind::Bool, None, None),
+];
+
+/// The names in [`OPTIONS`], as a const array so [`KNOWN_OPTIONS`] keeps its
+/// `&[&str]` shape without a second hand-maintained list.
+const fn option_names() -> [&'static str; OPTIONS.len()] {
+    let mut out = [""; OPTIONS.len()];
+    let mut i = 0;
+    while i < OPTIONS.len() {
+        out[i] = OPTIONS[i].name;
+        i += 1;
+    }
+    out
+}
+
 /// Every option key Rust knows about — exposed to Scheme as `(option-list)` so
 /// `helm-apropos` can surface options (e.g. searching "font" finds `font-size`)
-/// alongside functions and variables. Keep in sync with [`option_kind`]; the
-/// `known_options_have_a_kind` test guards against drift. Scheme-only options
-/// (stored verbatim, no `option_kind` arm) aren't listed — Rust doesn't know
-/// their names ahead of time.
-pub const KNOWN_OPTIONS: &[&str] = &[
-    "font-size",
-    "line-height",
-    "helm-height",
-    "cursor-width",
-    "divider-width",
-    "cursor-blink-interval",
-    "helm-bevel-top",
-    "helm-bevel-right",
-    "helm-bevel-bottom",
-    "helm-bevel-left",
-    "tab-width",
-    "completion-auto-prefix",
-    "completion-max-rows",
-    "completion-style",
-    "cursor-style",
-    "font-family",
-    "completion-auto",
-    "completion-show-detail",
-    "completion-show-kind",
-    "completion-capf",
-    "cursor-blink",
-    "scroll-bar",
-    "diagnostics-gutter",
-    "magit-gutter",
-    "magit-gutter-width",
-    "magit-gutter-deleted",
-    "lsp-log-on-start",
-    "auto-update",
-    "helm-fuzzy",
-    "line-numbers",
-    "hl-line",
-    "word-wrap",
-    "auto-revert",
-    "electric-indent",
-    "show-paren",
-];
+/// alongside functions and variables. Derived from [`OPTIONS`].
+pub const KNOWN_OPTIONS: &[&str] = &option_names();
 
 /// Type + numeric bounds for a known option, looked up by its base name (the
 /// part before any `:mode` suffix). `None` means the option is unknown to Rust —
-/// it is stored verbatim so Scheme-only options still round-trip.
+/// it is stored verbatim so Scheme-only options still round-trip. A linear scan
+/// of [`OPTIONS`] (cold path: options are only set from Scheme).
 fn option_kind(key: &str) -> Option<(Kind, Option<f64>, Option<f64>)> {
-    use Kind::*;
     // Per-mode options (`base:mode`) carry their type in the base name.
     let base = key.split(':').next().unwrap_or(key);
-    let spec = match base {
-        "font-size" | "line-height" => (Float, None, None),
-        "helm-height" => (Float, Some(0.1), Some(0.95)),
-        "cursor-width" | "divider-width" => (Float, Some(1.0), None),
-        "cursor-blink-interval" => (Float, Some(60.0), None),
-        "helm-bevel-top" | "helm-bevel-right" | "helm-bevel-bottom" | "helm-bevel-left" => {
-            (Float, Some(0.0), None)
-        }
-        "tab-width" | "completion-auto-prefix" => (Int, Some(0.0), None),
-        "completion-max-rows" => (Int, Some(1.0), None),
-        "magit-gutter-width" => (Float, Some(1.0), Some(8.0)),
-        "completion-style" | "cursor-style" | "font-family" => (Str, None, None),
-        "completion-auto"
-        | "completion-show-detail"
-        | "completion-show-kind"
-        | "completion-capf"
-        | "cursor-blink"
-        | "scroll-bar"
-        | "diagnostics-gutter"
-        | "magit-gutter"
-        | "magit-gutter-deleted"
-        | "lsp-log-on-start"
-        | "auto-update"
-        | "helm-fuzzy"
-        | "line-numbers"
-        | "hl-line"
-        | "word-wrap"
-        | "auto-revert"
-        | "electric-indent"
-        | "show-paren" => (Bool, None, None),
-        _ => return None,
-    };
-    Some(spec)
+    OPTIONS
+        .iter()
+        .find(|spec| spec.name == base)
+        .map(|spec| (spec.kind, spec.min, spec.max))
 }
 
 /// Coerce a raw value (as supplied to `set-option`) to `kind`, applying the
@@ -436,19 +440,19 @@ impl Settings {
     /// where lines were deleted. On by default; `(set-option "magit-gutter" #f)`
     /// hides it (or toggle with `M-x magit-gutter-mode`). Like the diagnostic
     /// dots, only drawn when the line-number gutter itself is shown.
-    pub fn git_gutter(&self) -> bool {
+    pub fn magit_gutter(&self) -> bool {
         self.bool_or("magit-gutter", true)
     }
 
     /// Width (px) of a git-gutter change bar. Default 2; `(set-option
     /// "magit-gutter-width" N)`, clamped to 1–8.
-    pub fn git_gutter_width(&self) -> f32 {
+    pub fn magit_gutter_width(&self) -> f32 {
         self.f32_or("magit-gutter-width", 2.0)
     }
 
     /// Whether the git-gutter draws a wedge for deleted lines. On by default;
     /// `(set-option "magit-gutter-deleted" #f)` shows only added/modified bars.
-    pub fn git_gutter_deleted(&self) -> bool {
+    pub fn magit_gutter_deleted(&self) -> bool {
         self.bool_or("magit-gutter-deleted", true)
     }
 

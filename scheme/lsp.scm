@@ -29,11 +29,7 @@
 ;; --- result list buffers (*lsp-xref*, *lsp-symbols*) ------------------------
 ;; Read-only; RET visits the target for the current row, q closes, n/p move.
 ;; A reference/symbol list, not code — no line-number gutter.
-(set-option "line-numbers:lsp-xref-mode" "false")
-(define-key "lsp-xref-mode" "enter" 'lsp-xref-visit)
-(define-key "lsp-xref-mode" "q" 'kill-buffer)
-(define-key "lsp-xref-mode" "n" 'next-line)
-(define-key "lsp-xref-mode" "p" 'previous-line)
+(define-list-mode-keys "lsp-xref-mode" 'lsp-xref-visit)
 
 ;; Code actions buffer: RET applies the action on the current row.
 (define-key "lsp-actions-mode" "enter" 'lsp-apply-code-action)
@@ -240,10 +236,6 @@
 (define *lsp-formatters*   '())  ; ext  -> formatter spec (list | string)
 (define *lsp-auto-features* '()) ; ext  -> fn name to run on open/save
 
-(define (lsp--alist-get alist key)
-  (cond ((null? alist) #f)
-        ((equal? (car (car alist)) key) (cdr (car alist)))
-        (else (lsp--alist-get (cdr alist) key))))
 (define (lsp--plist-get plist key)
   (cond ((or (null? plist) (null? (cdr plist))) #f)
         ((equal? (car plist) key) (car (cdr plist)))
@@ -285,11 +277,11 @@
   (if (equal? spec 'lsp)
       (set-lsp-format-on-save lang #t)         ; async LSP format, handled in Rust
       (for-each (lambda (e) (set! *lsp-formatters* (cons (cons e spec) *lsp-formatters*)))
-                (or (lsp--alist-get *lsp-lang-exts* lang) '()))))
+                (or (alist-ref *lsp-lang-exts* lang) '()))))
 
 (define (lsp--auto-feature lang fnname)
   (for-each (lambda (e) (set! *lsp-auto-features* (cons (cons e fnname) *lsp-auto-features*)))
-            (or (lsp--alist-get *lsp-lang-exts* lang) '())))
+            (or (alist-ref *lsp-lang-exts* lang) '())))
 
 ;; The extension of a file name ("src/main.rs" -> "rs"; "" if none).
 (define (lsp--file-ext name)
@@ -310,7 +302,7 @@
     (when (and (equal? code "0") (> (string-length out) 0))
       (replace-region 0 (point-max) out))))
 (define (lsp-run-before-save-formatter)
-  (let ((spec (lsp--alist-get *lsp-formatters* (lsp--file-ext (current-buffer)))))
+  (let ((spec (alist-ref *lsp-formatters* (lsp--file-ext (current-buffer)))))
     (cond ((not spec) #f)
           ((list? spec) (lsp--shell-format spec))
           ((string? spec) (eval-string (string-append "(" spec ")")))
@@ -340,20 +332,15 @@
             ((equal? (car (car fs)) ext) #t)
             (else (loop (cdr fs)))))))
 
-;; Live refresh: coalesce bursts of edits with a counter — every edit schedules
-;; a 300ms timer, but only the last to fire (counter back to 0) runs the
-;; features. Zero cost for buffers/languages with nothing configured. This is
-;; what makes inlay hints / semantic tokens update as you type (Zed-style).
-(define *lsp-live-pending* 0)
+;; Live refresh (core's make-debounce): coalesce bursts of edits — every edit
+;; schedules a 300ms timer, but only the last to fire runs the features. Zero
+;; cost for buffers/languages with nothing configured. This is what makes inlay
+;; hints / semantic tokens update as you type (Zed-style).
+(define lsp--live-debounce
+  (make-debounce "lsp-live" 300
+                 (lambda () (when (lsp-server-ready?) (lsp-run-auto-features)))))
 (define (lsp-schedule-live)
-  (when (lsp--has-live-features?)
-    (set! *lsp-live-pending* (+ *lsp-live-pending* 1))
-    (run-with-timer 300 "lsp-live-fire")))
-(define (lsp-live-fire)
-  (when (> *lsp-live-pending* 0)
-    (set! *lsp-live-pending* (- *lsp-live-pending* 1)))
-  (when (and (= *lsp-live-pending* 0) (lsp-server-ready?))
-    (lsp-run-auto-features)))
+  (when (lsp--has-live-features?) (lsp--live-debounce)))
 (add-hook "after-change-functions" "lsp-schedule-live")
 
 ;; --- default keybindings (Emacs / eglot-style) ------------------------------

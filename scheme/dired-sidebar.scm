@@ -47,8 +47,7 @@
 
 ;; Vertical indent guides: one "│ " per ancestor level. Each is 2 columns wide so
 ;; the icon/name columns line up under the 3 reserved icon columns below.
-(define (dired-subtree-rails depth)
-  (if (<= depth 0) "" (string-append "│ " (dired-subtree-rails (- depth 1)))))
+(define (dired-subtree-rails depth) (string-repeat "│ " depth))
 
 ;; Whole-line face for an entry, or #f to leave it the default foreground.
 ;; Dotfiles dim regardless of kind; other directories take the accent.
@@ -203,11 +202,6 @@
 (define *dired-sidebar-entries* '())     ; (line path is-dir) from the last render
 (define *dired-sidebar-window* #f)       ; the pane id hosting the sidebar
 (define *dired-sidebar-quiet* #f)        ; #t during an FS auto-refresh
-;; Operands captured BEFORE a minibuffer prompt — the read-string callback runs
-;; with the minibuffer current, so point is no longer in the tree; we can't read
-;; the entry under point there.
-(define *dired-sidebar-src* "")          ; rename/copy source path
-(define *dired-sidebar-target-dir* "")   ; mkdir parent directory
 
 (define (dired-sidebar-render)
   (set! *dired-sidebar-entries*
@@ -342,34 +336,32 @@
 (define (dired-sidebar-rename)
   (let ((p (dired-sidebar-path)))
     (when p
-      (set! *dired-sidebar-src* (dired-subtree-strip-slash p))
-      (read-string (string-append "Rename " (basename *dired-sidebar-src*) " to: ")
-                   "dired-sidebar-rename-to"))))
-(define (dired-sidebar-rename-to name)
-  (when (not (equal? (trim-end name) ""))
-    (call-process "mv" (list *dired-sidebar-src*
-                             (path-join (parent-directory *dired-sidebar-src*) name)))
-    (dired-sidebar-render) (message "Renamed")))
+      ;; The source is captured in the closure — the callback runs with the
+      ;; minibuffer current, so the entry under point can't be re-read there.
+      (let ((src (dired-subtree-strip-slash p)))
+        (read-string (string-append "Rename " (basename src) " to: ")
+          (lambda (name)
+            (when (not (equal? (trim-end name) ""))
+              (call-process "mv" (list src (path-join (parent-directory src) name)))
+              (dired-sidebar-render) (message "Renamed"))))))))
 
 (define (dired-sidebar-copy)
   (let ((p (dired-sidebar-path)))
     (when p
-      (set! *dired-sidebar-src* (dired-subtree-strip-slash p))
-      (read-string (string-append "Copy " (basename *dired-sidebar-src*) " to: ")
-                   "dired-sidebar-copy-to"))))
-(define (dired-sidebar-copy-to name)
-  (when (not (equal? (trim-end name) ""))
-    (call-process "cp" (list "-r" *dired-sidebar-src*
-                             (path-join (parent-directory *dired-sidebar-src*) name)))
-    (dired-sidebar-render) (message "Copied")))
+      (let ((src (dired-subtree-strip-slash p)))
+        (read-string (string-append "Copy " (basename src) " to: ")
+          (lambda (name)
+            (when (not (equal? (trim-end name) ""))
+              (call-process "cp" (list "-r" src (path-join (parent-directory src) name)))
+              (dired-sidebar-render) (message "Copied"))))))))
 
 (define (dired-sidebar-mkdir)
-  (set! *dired-sidebar-target-dir* (dired-sidebar-context-dir))
-  (read-string "Create directory: " 'dired-sidebar-mkdir-finish))
-(define (dired-sidebar-mkdir-finish name)
-  (when (not (equal? (trim-end name) ""))
-    (call-process "mkdir" (list "-p" (path-join *dired-sidebar-target-dir* name)))
-    (dired-sidebar-render) (message "Created directory")))
+  (let ((dir (dired-sidebar-context-dir)))
+    (read-string "Create directory: "
+      (lambda (name)
+        (when (not (equal? (trim-end name) ""))
+          (call-process "mkdir" (list "-p" (path-join dir name)))
+          (dired-sidebar-render) (message "Created directory"))))))
 
 ;; --- keymap -----------------------------------------------------------------
 ;; Single keys resolve against this mode keymap under both Emacs and evil: as a

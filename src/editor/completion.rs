@@ -10,7 +10,7 @@ impl Editor {
         };
         let point = self.point();
         let prefix = if point >= popup.anchor {
-            self.buffer.slice_to_string(popup.anchor..point)
+            self.active.buffer.slice_to_string(popup.anchor..point)
         } else {
             String::new()
         };
@@ -180,7 +180,7 @@ impl Editor {
             return;
         }
         let point = self.point();
-        let word_start = self.buffer.backward_word(point);
+        let word_start = self.active.buffer.backward_word(point);
         if point.saturating_sub(word_start) < min_prefix.max(1) {
             return;
         }

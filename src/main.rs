@@ -198,130 +198,131 @@ fn main() {
                     })
                     .detach();
 
-                    // Update lifecycle: on macOS, offer to relocate a bundle stuck
-                    // on a read-only volume; otherwise run a once-a-day check
-                    // against macros.dev and offer to install a newer release. All
-                    // network/IO happens on the background executor; the modal
-                    // prompts run on the main thread between awaits. Detached so it
-                    // never blocks the reveal path above.
-                    cx.spawn_in(window, async move |_workspace, cx| {
-                        // Let the window reveal before any modal appears.
-                        cx.background_executor().timer(Duration::from_secs(2)).await;
-
-                        // macOS: a bundle on a read-only volume (mounted DMG or
-                        // Gatekeeper App Translocation) can't self-update. Offer to
-                        // move it into /Applications and relaunch from there; if the
-                        // user accepts, we quit and skip the update check this run.
-                        if update::needs_relocation() {
-                            let answer = cx
-                                .update(|window, cx| {
-                                    window.prompt(
-                                        PromptLevel::Warning,
-                                        "Move Macros to the Applications folder?",
-                                        Some(
-                                            "Macros is running from a read-only location (a disk \
-                                         image or a quarantined download), so automatic updates \
-                                         can't be installed. Macros can move itself to \
-                                         Applications and relaunch from there.",
-                                        ),
-                                        &["Move to Applications", "Not Now"],
-                                        cx,
-                                    )
-                                })
-                                .ok();
-                            if let Some(rx) = answer
-                                && matches!(rx.await, Ok(0))
-                            {
-                                let moved = cx
-                                    .background_executor()
-                                    .spawn(async { update::relocate() })
-                                    .await;
-                                match moved {
-                                    Ok(()) => {
-                                        cx.update(|_, cx| cx.quit()).ok();
-                                    }
-                                    Err(err) => {
-                                        cx.update(|window, cx| {
-                                            window.prompt(
-                                            PromptLevel::Critical,
-                                            "Couldn't move Macros to Applications",
-                                            Some(&format!(
-                                                "{err}\n\nYou can move Macros.app there yourself \
-                                                 with Finder."
-                                            )),
-                                            &["OK"],
-                                            cx,
-                                        )
-                                        })
-                                        .ok();
-                                    }
-                                }
-                            }
-                            return;
-                        }
-
-                        // Once-a-day update check, honoring the `auto-update`
-                        // option (default on; `(set-auto-update #f)` turns it
-                        // off). Silent on network error so a flaky connection
-                        // never nags the user at launch.
-                        let auto_update = cx
-                            .update(|_, cx| cx.global::<settings::Settings>().auto_update())
-                            .unwrap_or(true);
-                        if !auto_update {
-                            return;
-                        }
-                        // Skip silently when the once-a-day gate hasn't elapsed —
-                        // only announce a check in `*Messages*` when we actually
-                        // hit the network this launch.
-                        if !update::due_for_check() {
-                            return;
-                        }
-                        _workspace
-                            .update(cx, |ws, cx| ws.log_message("Checking for updates…", cx))
-                            .ok();
-                        let found = cx
-                            .background_executor()
-                            .spawn(async { update::check_gated() })
-                            .await;
-                        let available = match found {
-                            Ok(Some(available)) => available,
-                            // Already current: report it, then stop. Errors stay
-                            // quiet so a flaky connection never nags at launch.
-                            Ok(None) => {
-                                _workspace
-                                    .update(cx, |ws, cx| {
-                                        ws.log_message(
-                                            format!(
-                                                "Macros is up to date (v{}).",
-                                                update::current_version()
-                                            ),
-                                            cx,
-                                        )
-                                    })
-                                    .ok();
-                                return;
-                            }
-                            Err(_) => return,
-                        };
-
-                        // Don't download anything yet — just surface the update
-                        // as a pill on the right of the title bar. The user clicks
-                        // it to download (with a live progress ticker) and then to
-                        // restart; that flow lives in `Workspace`.
-                        _workspace
-                            .update(cx, |ws, cx| {
-                                ws.log_message(
-                                    format!("Macros {} is available.", available.version),
-                                    cx,
-                                );
-                                ws.show_update_available(available, cx);
-                            })
-                            .ok();
-                    })
-                    .detach();
+                    // Update lifecycle (relocation prompt / once-a-day check):
+                    // see `spawn_update_check`.
+                    spawn_update_check(window, cx);
                 })
                 .unwrap();
 
             cx.activate(true);
         });
+}
+
+/// Update lifecycle, spawned once at startup: on macOS, offer to relocate a
+/// bundle stuck on a read-only volume (a mounted DMG or a Gatekeeper-
+/// translocated download can't self-update); otherwise run a once-a-day check
+/// against macros.dev and surface a newer release as a title-bar pill. All
+/// network/IO happens on the background executor; the modal prompts run on the
+/// main thread between awaits. Detached so it never blocks the startup reveal
+/// path.
+fn spawn_update_check(window: &mut gpui::Window, cx: &mut gpui::Context<Workspace>) {
+    cx.spawn_in(window, async move |workspace, cx| {
+        // Let the window reveal before any modal appears.
+        cx.background_executor().timer(Duration::from_secs(2)).await;
+
+        // macOS: a bundle on a read-only volume (mounted DMG or
+        // Gatekeeper App Translocation) can't self-update. Offer to
+        // move it into /Applications and relaunch from there; if the
+        // user accepts, we quit and skip the update check this run.
+        if update::needs_relocation() {
+            let answer = cx
+                .update(|window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        "Move Macros to the Applications folder?",
+                        Some(
+                            "Macros is running from a read-only location (a disk \
+                         image or a quarantined download), so automatic updates \
+                         can't be installed. Macros can move itself to \
+                         Applications and relaunch from there.",
+                        ),
+                        &["Move to Applications", "Not Now"],
+                        cx,
+                    )
+                })
+                .ok();
+            if let Some(rx) = answer
+                && matches!(rx.await, Ok(0))
+            {
+                let moved = cx
+                    .background_executor()
+                    .spawn(async { update::relocate() })
+                    .await;
+                match moved {
+                    Ok(()) => {
+                        cx.update(|_, cx| cx.quit()).ok();
+                    }
+                    Err(err) => {
+                        cx.update(|window, cx| {
+                            window.prompt(
+                                PromptLevel::Critical,
+                                "Couldn't move Macros to Applications",
+                                Some(&format!(
+                                    "{err}\n\nYou can move Macros.app there yourself \
+                                 with Finder."
+                                )),
+                                &["OK"],
+                                cx,
+                            )
+                        })
+                        .ok();
+                    }
+                }
+            }
+            return;
+        }
+
+        // Once-a-day update check, honoring the `auto-update`
+        // option (default on; `(set-auto-update #f)` turns it
+        // off). Silent on network error so a flaky connection
+        // never nags the user at launch.
+        let auto_update = cx
+            .update(|_, cx| cx.global::<settings::Settings>().auto_update())
+            .unwrap_or(true);
+        if !auto_update {
+            return;
+        }
+        // Skip silently when the once-a-day gate hasn't elapsed —
+        // only announce a check in `*Messages*` when we actually
+        // hit the network this launch.
+        if !update::due_for_check() {
+            return;
+        }
+        workspace
+            .update(cx, |ws, cx| ws.log_message("Checking for updates…", cx))
+            .ok();
+        let found = cx
+            .background_executor()
+            .spawn(async { update::check_gated() })
+            .await;
+        let available = match found {
+            Ok(Some(available)) => available,
+            // Already current: report it, then stop. Errors stay
+            // quiet so a flaky connection never nags at launch.
+            Ok(None) => {
+                workspace
+                    .update(cx, |ws, cx| {
+                        ws.log_message(
+                            format!("Macros is up to date (v{}).", update::current_version()),
+                            cx,
+                        )
+                    })
+                    .ok();
+                return;
+            }
+            Err(_) => return,
+        };
+
+        // Don't download anything yet — just surface the update
+        // as a pill on the right of the title bar. The user clicks
+        // it to download (with a live progress ticker) and then to
+        // restart; that flow lives in `Workspace`.
+        workspace
+            .update(cx, |ws, cx| {
+                ws.log_message(format!("Macros {} is available.", available.version), cx);
+                ws.show_update_available(available, cx);
+            })
+            .ok();
+    })
+    .detach();
 }

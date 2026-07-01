@@ -11,6 +11,7 @@ use gpui::{
 
 use crate::editor::{CompletionView, Editor};
 use crate::highlight::{HlSpan, face_name};
+use crate::lsp::Severity;
 use crate::theme::Theme;
 
 /// Horizontal padding on each side of the line-number gutter.
@@ -25,6 +26,10 @@ const BLOCK_CURSOR_ALPHA: f32 = 0.5;
 const ICON_SCALE: f32 = 0.82;
 /// Inner padding of the completion popup (and its doc side-panel).
 const POPUP_PAD: Pixels = px(8.);
+/// Column (in characters) at which the completion doc side-panel word-wraps.
+const DOC_WRAP_COLS: usize = 64;
+/// Maximum rows shown in the completion doc side-panel.
+const DOC_MAX_ROWS: usize = 16;
 /// Diameter of a diagnostic gutter dot.
 const DIAG_DOT: f32 = 7.0;
 
@@ -41,12 +46,36 @@ fn plain_run(len: usize, font: Font, color: Hsla) -> TextRun {
     }
 }
 
-/// Color for an LSP diagnostic by severity (1 = error, 2 = warning, else info/hint).
-fn diagnostic_color(severity: u8) -> gpui::Rgba {
-    match severity {
-        1 => rgb(0xf14c4c), // error
-        2 => rgb(0xcca700), // warning
-        _ => rgb(0x3794ff), // info/hint
+/// Diagnostic colors, resolved from the theme once per prepaint. The faces are
+/// `diagnostic-error` / `diagnostic-warning` / `diagnostic-info` /
+/// `diagnostic-hint` (set by every bundled theme), with the previous fixed
+/// hexes as fallbacks for themes that don't define them.
+#[derive(Clone, Copy)]
+struct DiagnosticColors {
+    error: Hsla,
+    warning: Hsla,
+    info: Hsla,
+    hint: Hsla,
+}
+
+impl DiagnosticColors {
+    fn resolve(theme: &Theme) -> Self {
+        let info = theme.color("diagnostic-info", rgb(0x3794ff).into());
+        Self {
+            error: theme.color("diagnostic-error", rgb(0xf14c4c).into()),
+            warning: theme.color("diagnostic-warning", rgb(0xcca700).into()),
+            info,
+            hint: theme.color("diagnostic-hint", info),
+        }
+    }
+
+    fn for_severity(&self, severity: Severity) -> Hsla {
+        match severity {
+            Severity::Error => self.error,
+            Severity::Warning => self.warning,
+            Severity::Info => self.info,
+            Severity::Hint => self.hint,
+        }
     }
 }
 
@@ -242,6 +271,413 @@ struct PopupLayout {
     hit: crate::editor::PopupHit,
 }
 
+/// Per-line geometry shared by the prepaint helpers: which buffer line it is,
+/// where it sits, its byte range, and the display-text mapping (`holes`)
+/// needed to position anything within it.
+struct LineCtx<'a> {
+    /// Buffer line index.
+    i: usize,
+    /// Byte range of the line in the buffer (line break excluded).
+    range: Range<usize>,
+    /// The shaped, soft-wrapped display text.
+    wrapped: &'a WrappedLine,
+    /// Hidden byte ranges spliced out of the display text (line-relative).
+    holes: &'a [(usize, usize)],
+    /// Y offset of the line's top relative to the element origin.
+    top: Pixels,
+    /// Painted height of the line (rows it occupies × line height).
+    line_h: Pixels,
+    /// Window-space top-left of the glyphs (indent, scroll, and any scaled-
+    /// heading centering already applied); `.y` is the content top.
+    line_origin: Point<Pixels>,
+    /// Uniform row height used for positioning within the line.
+    line_height: Pixels,
+}
+
+impl LineCtx<'_> {
+    /// Display index of an absolute buffer offset at or after the line start.
+    fn disp(&self, offset: usize) -> usize {
+        to_display(offset.saturating_sub(self.range.start), self.holes)
+    }
+
+    /// Emit background quads for the absolute byte range `[s, e)` where it
+    /// overlaps this line — the shared body of the selection / search / paren
+    /// / diagnostic highlights.
+    fn push_range(
+        &self,
+        out: &mut Vec<PaintQuad>,
+        s: usize,
+        e: usize,
+        color: Hsla,
+        min_width: Pixels,
+    ) {
+        if s > self.range.end || e < self.range.start {
+            return;
+        }
+        push_range_quads(
+            out,
+            self.wrapped,
+            self.disp(s.max(self.range.start)),
+            self.disp(e.min(self.range.end)),
+            self.line_origin,
+            self.line_height,
+            color,
+            min_width,
+        );
+    }
+}
+
+/// The per-frame accumulators the per-line helpers append into, drained into
+/// [`PrepaintState`] once the line loop finishes.
+#[derive(Default)]
+struct Accum {
+    selections: Vec<PaintQuad>,
+    search: Vec<PaintQuad>,
+    paren: Vec<PaintQuad>,
+    diagnostics: Vec<PaintQuad>,
+    git_gutter: Vec<PaintQuad>,
+    icons: Vec<(Bounds<Pixels>, SharedString, Hsla)>,
+    avy: Vec<(PaintQuad, ShapedLine, Point<Pixels>)>,
+    extra_cursors: Vec<PaintQuad>,
+    gutter: Vec<(ShapedLine, Point<Pixels>)>,
+    fold_chevrons: Vec<(Bounds<Pixels>, SharedString, Hsla)>,
+    fold_hitboxes: Vec<crate::editor::FoldHitbox>,
+    fold_cursors: Vec<Hitbox>,
+    virtual_text: Vec<(ShapedLine, Point<Pixels>)>,
+}
+
+/// Gutter configuration resolved once per frame: geometry, colors, and which
+/// gutter features are enabled.
+struct GutterCfg {
+    bounds: Bounds<Pixels>,
+    gutter_width: Pixels,
+    gutter_pad: Pixels,
+    /// Width of the fold-chevron column (0 when fold markers are off).
+    fold_col: Pixels,
+    chevron_sz: Pixels,
+    fold_markers: bool,
+    diag_gutter: bool,
+    git_gutter: bool,
+    git_gutter_w: Pixels,
+    git_gutter_del: bool,
+    gg_added: Hsla,
+    gg_modified: Hsla,
+    gg_removed: Hsla,
+    number_color: Hsla,
+    font: Font,
+    font_size: Pixels,
+    diag_colors: DiagnosticColors,
+}
+
+/// Cursor styling resolved once per frame, shared by the primary and
+/// secondary (multiple-cursors) carets.
+struct CursorCfg {
+    block: bool,
+    width: Pixels,
+    shown: bool,
+    /// One monospace advance — block-cursor width past EOL.
+    char_advance: Pixels,
+    color: Hsla,
+    secondary_color: Hsla,
+}
+
+/// Lay out one line's gutter: the line-number label, its fold chevron, the
+/// diagnostic dot, and the git-gutter change bar. Only called when the
+/// line-number gutter is shown (the other gutter features are gated on it).
+fn layout_gutter(
+    line: &LineCtx,
+    cfg: &GutterCfg,
+    editor: &Editor,
+    diagnostics: &[crate::lsp::Diagnostic],
+    diff_marks: &std::collections::HashMap<usize, crate::editor::DiffMark>,
+    window: &mut Window,
+    acc: &mut Accum,
+) {
+    let i = line.i;
+    let bounds = cfg.bounds;
+
+    // Line-number label, right-aligned in the gutter. Shares the line's
+    // content offset, so on a scaled line it centers to the same midpoint.
+    let label = SharedString::from((i + 1).to_string());
+    let n = label.len();
+    let shaped_num = window.text_system().shape_line(
+        label,
+        cfg.font_size,
+        &[plain_run(n, cfg.font.clone(), cfg.number_color)],
+        None,
+    );
+    let nx = bounds.left() + cfg.gutter_width - cfg.gutter_pad - shaped_num.x_for_index(n);
+    acc.gutter.push((shaped_num, point(nx, line.line_origin.y)));
+
+    // Fold chevron, centered in its reserved gutter column for any line Scheme
+    // marked foldable: down = open (expanded), right = collapsed. The whole
+    // column is the clickable/hover region, which is reported back so a click
+    // toggles the fold.
+    let marker = cfg.fold_markers.then(|| editor.fold_marker_at(i)).flatten();
+    if let Some(open) = marker {
+        let glyph = Bounds::new(
+            point(
+                bounds.left() + (cfg.fold_col - cfg.chevron_sz) / 2.0,
+                bounds.top() + line.top + (line.line_h - cfg.chevron_sz) / 2.0,
+            ),
+            size(cfg.chevron_sz, cfg.chevron_sz),
+        );
+        let name = if open {
+            "chevron-down"
+        } else {
+            "chevron-right"
+        };
+        acc.fold_chevrons.push((
+            glyph,
+            SharedString::from(format!("icons/{name}.svg")),
+            cfg.number_color,
+        ));
+        let hit = Bounds::new(
+            point(bounds.left(), bounds.top() + line.top),
+            size(cfg.fold_col, line.line_h),
+        );
+        acc.fold_hitboxes.push(crate::editor::FoldHitbox {
+            bounds: hit,
+            line: i,
+        });
+        acc.fold_cursors
+            .push(window.insert_hitbox(hit, HitboxBehavior::Normal));
+    }
+
+    // Diagnostic gutter dot: a colored circle on the far-left of the gutter
+    // for any line carrying a diagnostic, colored by the worst severity
+    // present (error > warning > info/hint).
+    if cfg.diag_gutter && marker.is_none() {
+        let worst = diagnostics
+            .iter()
+            .filter(|d| d.range.start <= line.range.end && d.range.end >= line.range.start)
+            .map(|d| d.severity)
+            .min();
+        if let Some(severity) = worst {
+            let color = cfg.diag_colors.for_severity(severity);
+            let dot = px(DIAG_DOT);
+            let dx = bounds.left() + px(3.);
+            let dy = bounds.top() + line.top + px((f32::from(line.line_h) - DIAG_DOT) / 2.0);
+            let mut quad = fill(Bounds::new(point(dx, dy), size(dot, dot)), color);
+            quad.corner_radii = Corners::all(dot / 2.0);
+            acc.diagnostics.push(quad);
+        }
+    }
+
+    // git-gutter (diff-hl): a full-height change bar at the gutter's left edge
+    // for added/modified lines; a short top-edge bar for a deletion that
+    // happened just above this line. Sits left of the diagnostic dot column,
+    // so the two can coexist on a line.
+    if cfg.git_gutter {
+        use crate::editor::DiffMark;
+        let gx = bounds.left() + px(1.);
+        let gy = bounds.top() + line.top;
+        match diff_marks.get(&i) {
+            Some(DiffMark::Removed) if cfg.git_gutter_del => {
+                let w = (cfg.git_gutter_w * 2.0).min(px(8.));
+                let bar = Bounds::new(point(gx, gy), size(w, px(2.)));
+                acc.git_gutter.push(fill(bar, cfg.gg_removed));
+            }
+            Some(mark @ (DiffMark::Added | DiffMark::Modified)) => {
+                let color = if *mark == DiffMark::Added {
+                    cfg.gg_added
+                } else {
+                    cfg.gg_modified
+                };
+                let bar = Bounds::new(point(gx, gy), size(cfg.git_gutter_w, line.line_h));
+                acc.git_gutter.push(fill(bar, color));
+            }
+            // A deletion mark with the deleted-wedge option off, or no mark.
+            Some(DiffMark::Removed) | None => {}
+        }
+    }
+}
+
+/// Lay out the primary cursor on this line: its pixel origin (the completion-
+/// popup anchor, tracked even when blinked off) plus the paint quad when the
+/// cursor is currently shown. `None` when the cursor isn't on this line.
+fn layout_cursor(
+    line: &LineCtx,
+    buffer: &crate::buffer::Buffer,
+    cursor: usize,
+    cfg: &CursorCfg,
+) -> Option<(Point<Pixels>, Option<PaintQuad>)> {
+    if cursor < line.range.start || cursor > line.range.end {
+        return None;
+    }
+    let cpos = line
+        .wrapped
+        .position_for_index(line.disp(cursor), line.line_height)
+        .unwrap_or_default();
+    let origin = point(line.line_origin.x + cpos.x, line.line_origin.y + cpos.y);
+    let (width, color) = if cfg.block {
+        // Width of the grapheme under the cursor (or one char at EOL), but
+        // only if it sits on the same visual row.
+        let next = buffer.next_grapheme(cursor);
+        let npos = (next > cursor && next <= line.range.end)
+            .then(|| {
+                line.wrapped
+                    .position_for_index(line.disp(next), line.line_height)
+            })
+            .flatten();
+        let width = match npos {
+            Some(np) if np.y == cpos.y && np.x > cpos.x => np.x - cpos.x,
+            _ => cfg.char_advance,
+        };
+        // Translucent so the character under the block stays readable.
+        let mut color = cfg.color;
+        color.a *= BLOCK_CURSOR_ALPHA;
+        (width, color)
+    } else {
+        (cfg.width, cfg.color)
+    };
+    let quad = cfg
+        .shown
+        .then(|| fill(Bounds::new(origin, size(width, line.line_height)), color));
+    Some((origin, quad))
+}
+
+/// Secondary cursors (multiple-cursors): a thin caret at each position that
+/// falls on this line.
+fn layout_extra_cursors(
+    line: &LineCtx,
+    positions: &[usize],
+    cfg: &CursorCfg,
+    out: &mut Vec<PaintQuad>,
+) {
+    for &ec in positions {
+        if ec >= line.range.start && ec <= line.range.end {
+            let cpos = line
+                .wrapped
+                .position_for_index(line.disp(ec), line.line_height)
+                .unwrap_or_default();
+            let origin = point(line.line_origin.x + cpos.x, line.line_origin.y + cpos.y);
+            out.push(fill(
+                Bounds::new(origin, size(cfg.width, line.line_height)),
+                cfg.secondary_color,
+            ));
+        }
+    }
+}
+
+/// Lay out one line's decorations: the file-tree icon, diagnostic underlines,
+/// virtual suffix text (inlay hints / blame), and avy jump hints. The latter
+/// two only exist on the selected pane.
+#[allow(clippy::too_many_arguments)] // one call site; bundles a paint pass
+fn layout_decorations(
+    line: &LineCtx,
+    editor: &Editor,
+    pane: usize,
+    selected: bool,
+    theme: &Theme,
+    text_color: Hsla,
+    font: &Font,
+    font_size: Pixels,
+    em: Pixels,
+    diagnostics: &[crate::lsp::Diagnostic],
+    diag_colors: DiagnosticColors,
+    window: &mut Window,
+    acc: &mut Accum,
+) {
+    let i = line.i;
+    let range = &line.range;
+
+    // File-tree icon, painted in a reserved column (the Scheme renders leading
+    // space at `col` so it doesn't overlap the label).
+    if let Some((col, name)) = editor.pane_line_icon(pane, i) {
+        let ipos = line
+            .wrapped
+            .position_for_index(
+                to_display(col.min(range.end - range.start), line.holes),
+                line.line_height,
+            )
+            .unwrap_or_default();
+        let lh_f = f32::from(line.line_height);
+        let sz = lh_f * ICON_SCALE;
+        let pad = (lh_f - sz) / 2.0;
+        let origin = point(
+            line.line_origin.x + ipos.x,
+            line.line_origin.y + ipos.y + px(pad),
+        );
+        let color = editor
+            .pane_line_face(pane, i)
+            .map_or(text_color, |f| theme.color(f, text_color));
+        acc.icons.push((
+            Bounds::new(origin, size(px(sz), px(sz))),
+            SharedString::from(format!("icons/{name}.svg")),
+            color,
+        ));
+    }
+
+    // Diagnostic underlines: a 2px bar along each diagnostic's span. Drawn as
+    // a thin band at the bottom of each visual row the span covers.
+    for diagnostic in diagnostics {
+        let (d0, d1) = (diagnostic.range.start, diagnostic.range.end);
+        if d0 <= range.end && d1 >= range.start {
+            let color = diag_colors.for_severity(diagnostic.severity);
+            let mut bars = Vec::new();
+            line.push_range(&mut bars, d0, d1, color, px(4.));
+            // Keep only the bottom 2px of each row's quad.
+            for quad in bars {
+                let b = quad.bounds;
+                acc.diagnostics.push(fill(
+                    Bounds::from_corners(
+                        point(b.left(), b.bottom() - px(2.)),
+                        point(b.right(), b.bottom()),
+                    ),
+                    color,
+                ));
+            }
+        }
+    }
+
+    // Virtual suffix text (inlay hint / blame), after the line content.
+    if selected && let Some((suffix, face)) = editor.line_suffix(i) {
+        let color = theme.color(face, theme.color("dim", text_color));
+        let label = SharedString::from(format!("  {suffix}"));
+        let n = label.len();
+        let shaped_suffix = window.text_system().shape_line(
+            label,
+            font_size,
+            &[plain_run(n, font.clone(), color)],
+            None,
+        );
+        let epos = line
+            .wrapped
+            .position_for_index(line.disp(range.end), line.line_height)
+            .unwrap_or_default();
+        acc.virtual_text.push((
+            shaped_suffix,
+            point(line.line_origin.x + epos.x, line.line_origin.y + epos.y),
+        ));
+    }
+
+    // avy hints: paint each candidate's label over the buffer at its byte
+    // position (e.g. "a", "sd"). Only the focused pane carries hints.
+    if selected {
+        let hint_bg = theme.color("avy-hint-bg", gpui::hsla(0.13, 0.95, 0.55, 1.0));
+        let hint_fg = theme.color("avy-hint-fg", gpui::hsla(0.0, 0.0, 0.05, 1.0));
+        for (byte, label) in editor.avy_hints() {
+            if *byte >= range.start && *byte <= range.end {
+                let pos = line
+                    .wrapped
+                    .position_for_index(line.disp(*byte), line.line_height)
+                    .unwrap_or_default();
+                let origin = point(line.line_origin.x + pos.x, line.line_origin.y + pos.y);
+                let shaped = window.text_system().shape_line(
+                    label.clone(),
+                    font_size,
+                    &[plain_run(label.len(), font.clone(), hint_fg)],
+                    None,
+                );
+                let w = shaped.width.max(em);
+                let bg = fill(Bounds::new(origin, size(w, line.line_height)), hint_bg);
+                acc.avy.push((bg, shaped, origin));
+            }
+        }
+    }
+}
+
 impl IntoElement for EditorElement {
     type Element = Self;
 
@@ -395,12 +831,14 @@ impl Element for EditorElement {
         let diag_gutter = line_numbers && settings.diagnostics_gutter();
         // git-gutter (diff-hl): change bars at the gutter's far-left edge. Like
         // the diagnostic dots, gated on the line-number gutter existing.
-        let git_gutter_on = line_numbers && settings.git_gutter();
-        let git_gutter_w = px(settings.git_gutter_width());
-        let git_gutter_del = settings.git_gutter_deleted();
+        let git_gutter_on = line_numbers && settings.magit_gutter();
+        let git_gutter_w = px(settings.magit_gutter_width());
+        let git_gutter_del = settings.magit_gutter_deleted();
         let gg_added = theme.color("magit-gutter-added", rgb(0x6cae3e).into());
         let gg_modified = theme.color("magit-gutter-modified", rgb(0xc7a23a).into());
         let gg_removed = theme.color("magit-gutter-removed", rgb(0xc1574b).into());
+        // Diagnostic colors (gutter dots + underlines), resolved once per frame.
+        let diag_colors = DiagnosticColors::resolve(theme);
 
         // Folds collapse lines into fewer rows; inline images expand a line into
         // extra rows below it. Either way `rows[k]` is the buffer line drawn
@@ -516,14 +954,7 @@ impl Element for EditorElement {
         let mut cursor_quad = None;
         let mut hl_line_quad: Option<PaintQuad> = None;
         let mut cursor_px: Option<Point<Pixels>> = None;
-        let mut selections = Vec::new();
-        let mut search_quads = Vec::new();
-        let mut paren_quads = Vec::new();
-        let mut diagnostic_quads = Vec::new();
-        let mut git_gutter_quads: Vec<PaintQuad> = Vec::new();
-        let mut icons: Vec<(Bounds<Pixels>, SharedString, Hsla)> = Vec::new();
-        let mut avy: Vec<(PaintQuad, ShapedLine, Point<Pixels>)> = Vec::new();
-        let mut extra_cursors: Vec<PaintQuad> = Vec::new();
+        let mut acc = Accum::default();
         let extra_cursor_positions = editor.extra_cursor_positions();
         // Secondary selection spans (Helix multiple selections); selected pane
         // only, like the carets. Each is highlighted with `secondary_region_color`.
@@ -533,11 +964,34 @@ impl Element for EditorElement {
             Vec::new()
         };
         let mut image_quads: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
-        let mut gutter = Vec::new();
-        let mut fold_chevrons: Vec<(Bounds<Pixels>, SharedString, Hsla)> = Vec::new();
-        let mut fold_hitboxes: Vec<crate::editor::FoldHitbox> = Vec::new();
-        let mut fold_cursors: Vec<Hitbox> = Vec::new();
-        let mut virtual_text = Vec::new();
+
+        let gutter_cfg = GutterCfg {
+            bounds,
+            gutter_width,
+            gutter_pad,
+            fold_col,
+            chevron_sz,
+            fold_markers: fold_markers_ui,
+            diag_gutter,
+            git_gutter: git_gutter_on,
+            git_gutter_w,
+            git_gutter_del,
+            gg_added,
+            gg_modified,
+            gg_removed,
+            number_color: line_number_color,
+            font: editor_font.clone(),
+            font_size,
+            diag_colors,
+        };
+        let cursor_cfg = CursorCfg {
+            block: block_cursor,
+            width: cursor_width,
+            shown: cursor_shown,
+            char_advance,
+            color: cursor_color,
+            secondary_color: secondary_cursor_color,
+        };
 
         // Lines have variable height under wrapping (and under inline images), so
         // accumulate pixel offsets rather than multiplying a row index. Start at
@@ -616,52 +1070,41 @@ impl Element for EditorElement {
                 wrap_width.map(|w| px((f32::from(w) - f32::from(indent_px)).max(1.0)))
             };
 
-            let wrapped = if text.is_empty() {
-                window.text_system().shape_text(
-                    SharedString::default(),
-                    line_font_size,
-                    &[],
-                    line_wrap_width,
-                    None,
-                )
+            // Compute the styled runs, then shape once (the branches only
+            // differ in which spans and base color tile the line).
+            let runs = if text.is_empty() {
+                Vec::new()
             } else if let Some(face) = editor.pane_line_face(pane, i) {
                 // Special buffers (magit-style) paint whole lines by face name —
                 // but sub-line overlay accents (magit's status labels, diff +/-
                 // markers) still override their byte range, layered on top of the
                 // whole-line color as the base (no syntax spans here).
                 let color = theme.color(face, text_color);
-                let runs = line_runs(
+                line_runs(
                     &[],
                     overlay_faces,
                     range.clone(),
                     &editor_font,
                     color,
                     theme,
-                );
-                window.text_system().shape_text(
-                    SharedString::from(remove_holes(&text, &holes)),
-                    line_font_size,
-                    &punch_runs(runs, &holes),
-                    line_wrap_width,
-                    None,
                 )
             } else {
-                let runs = line_runs(
+                line_runs(
                     &highlights,
                     overlay_faces,
                     range.clone(),
                     &editor_font,
                     text_color,
                     theme,
-                );
-                window.text_system().shape_text(
-                    SharedString::from(remove_holes(&text, &holes)),
-                    line_font_size,
-                    &punch_runs(runs, &holes),
-                    line_wrap_width,
-                    None,
                 )
             };
+            let wrapped = window.text_system().shape_text(
+                SharedString::from(remove_holes(&text, &holes)),
+                line_font_size,
+                &punch_runs(runs, &holes),
+                line_wrap_width,
+                None,
+            );
             let wrapped = wrapped.ok().and_then(|mut v| v.pop()).unwrap_or_default();
             // A scaled line occupies the whole reserved block (its claimed rows ×
             // line height) so `y` advances by the rows it reserved above; an
@@ -686,102 +1129,29 @@ impl Element for EditorElement {
                 px(0.)
             };
             let content_top = bounds.top() + top + content_dy;
+            let line_origin = point(lx, content_top);
+            let lc = LineCtx {
+                i,
+                range: range.clone(),
+                wrapped: &wrapped,
+                holes: &holes,
+                top,
+                line_h,
+                line_origin,
+                line_height,
+            };
 
-            // Line-number label, right-aligned in the gutter. Shares the line's
-            // content offset, so on a scaled line it centers to the same midpoint.
+            // Gutter: line number, fold chevron, diagnostic dot, git bar.
             if line_numbers {
-                let label = SharedString::from((i + 1).to_string());
-                let n = label.len();
-                let shaped_num = window.text_system().shape_line(
-                    label,
-                    font_size,
-                    &[mk_run(n, line_number_color)],
-                    None,
+                layout_gutter(
+                    &lc,
+                    &gutter_cfg,
+                    editor,
+                    &diagnostics,
+                    diff_marks,
+                    window,
+                    &mut acc,
                 );
-                let nx = bounds.left() + gutter_width - gutter_pad - shaped_num.x_for_index(n);
-                gutter.push((shaped_num, point(nx, content_top)));
-
-                // Fold chevron, centered in its reserved gutter column for any
-                // line Scheme marked foldable: down = open (expanded), right =
-                // collapsed. The whole column is the clickable/hover region, which
-                // is reported back so a click toggles the fold.
-                let marker = fold_markers_ui.then(|| editor.fold_marker_at(i)).flatten();
-                if let Some(open) = marker {
-                    let glyph = Bounds::new(
-                        point(
-                            bounds.left() + (fold_col - chevron_sz) / 2.0,
-                            bounds.top() + top + (line_h - chevron_sz) / 2.0,
-                        ),
-                        size(chevron_sz, chevron_sz),
-                    );
-                    let name = if open {
-                        "chevron-down"
-                    } else {
-                        "chevron-right"
-                    };
-                    fold_chevrons.push((
-                        glyph,
-                        SharedString::from(format!("icons/{name}.svg")),
-                        line_number_color,
-                    ));
-                    let hit = Bounds::new(
-                        point(bounds.left(), bounds.top() + top),
-                        size(fold_col, line_h),
-                    );
-                    fold_hitboxes.push(crate::editor::FoldHitbox {
-                        bounds: hit,
-                        line: i,
-                    });
-                    fold_cursors.push(window.insert_hitbox(hit, HitboxBehavior::Normal));
-                }
-
-                // Diagnostic gutter dot: a colored circle on the far-left of the
-                // gutter for any line carrying a diagnostic, colored by the worst
-                // severity present (error > warning > info/hint).
-                if diag_gutter && marker.is_none() {
-                    let worst = diagnostics
-                        .iter()
-                        .filter(|d| d.range.start <= range.end && d.range.end >= range.start)
-                        .map(|d| d.severity)
-                        .min();
-                    if let Some(severity) = worst {
-                        let color = diagnostic_color(severity);
-                        let dot = px(DIAG_DOT);
-                        let dx = bounds.left() + px(3.);
-                        let dy = bounds.top() + top + px((f32::from(line_h) - DIAG_DOT) / 2.0);
-                        let mut quad = fill(Bounds::new(point(dx, dy), size(dot, dot)), color);
-                        quad.corner_radii = Corners::all(dot / 2.0);
-                        diagnostic_quads.push(quad);
-                    }
-                }
-
-                // git-gutter (diff-hl): a full-height change bar at the gutter's
-                // left edge for added/modified lines; a short top-edge bar for a
-                // deletion that happened just above this line. Sits left of the
-                // diagnostic dot column, so the two can coexist on a line.
-                if git_gutter_on {
-                    let gx = bounds.left() + px(1.);
-                    let gy = bounds.top() + top;
-                    match diff_marks.get(&i) {
-                        Some(crate::editor::DiffMark::Removed) => {
-                            if git_gutter_del {
-                                let w = (git_gutter_w * 2.0).min(px(8.));
-                                let bar = Bounds::new(point(gx, gy), size(w, px(2.)));
-                                git_gutter_quads.push(fill(bar, gg_removed));
-                            }
-                        }
-                        Some(mark) => {
-                            let color = if *mark == crate::editor::DiffMark::Added {
-                                gg_added
-                            } else {
-                                gg_modified
-                            };
-                            let bar = Bounds::new(point(gx, gy), size(git_gutter_w, line_h));
-                            git_gutter_quads.push(fill(bar, color));
-                        }
-                        None => {}
-                    }
-                }
             }
 
             if hl_line && cursor >= range.start && cursor <= range.end && hl_line_quad.is_none() {
@@ -793,59 +1163,22 @@ impl Element for EditorElement {
                 ));
             }
 
-            if selected && cursor >= range.start && cursor <= range.end {
-                let cpos = wrapped
-                    .position_for_index(to_display(cursor - range.start, &holes), line_height)
-                    .unwrap_or_default();
-                let origin = point(lx + cpos.x, content_top + cpos.y);
-                // Anchor for the completion popup even when blinked off.
-                cursor_px = Some(origin);
-                let (width, color) = if block_cursor {
-                    // Width of the grapheme under the cursor (or one char at EOL),
-                    // but only if it sits on the same visual row.
-                    let next = buffer.next_grapheme(cursor);
-                    let npos = (next > cursor && next <= range.end)
-                        .then(|| {
-                            wrapped.position_for_index(
-                                to_display(next - range.start, &holes),
-                                line_height,
-                            )
-                        })
-                        .flatten();
-                    let width = match npos {
-                        Some(np) if np.y == cpos.y && np.x > cpos.x => np.x - cpos.x,
-                        _ => char_advance,
-                    };
-                    // Translucent so the character under the block stays readable.
-                    let mut color = cursor_color;
-                    color.a *= BLOCK_CURSOR_ALPHA;
-                    (width, color)
-                } else {
-                    (cursor_width, cursor_color)
-                };
-                if cursor_shown {
-                    cursor_quad = Some(fill(Bounds::new(origin, size(width, line_height)), color));
-                }
-            }
-
-            // Secondary cursors (multiple-cursors): a thin caret at each.
+            // Cursors: the primary caret (also the completion-popup anchor,
+            // tracked even when blinked off) and any secondary carets.
             if selected {
-                for &ec in &extra_cursor_positions {
-                    if ec >= range.start && ec <= range.end {
-                        let cpos = wrapped
-                            .position_for_index(to_display(ec - range.start, &holes), line_height)
-                            .unwrap_or_default();
-                        let origin = point(lx + cpos.x, content_top + cpos.y);
-                        extra_cursors.push(fill(
-                            Bounds::new(origin, size(cursor_width, line_height)),
-                            secondary_cursor_color,
-                        ));
-                    }
+                if let Some((origin, quad)) = layout_cursor(&lc, buffer, cursor, &cursor_cfg) {
+                    cursor_px = Some(origin);
+                    cursor_quad = quad;
                 }
+                layout_extra_cursors(
+                    &lc,
+                    &extra_cursor_positions,
+                    &cursor_cfg,
+                    &mut acc.extra_cursors,
+                );
             }
 
-            let line_origin = point(lx, content_top);
-
+            // Range highlights, all through the same per-row quad helper.
             if let Some((top_row, bottom_row, left_col, right_col)) = block_sel {
                 // Block-wise Visual: highlight only the `[left_col, right_col]`
                 // column strip on each row within the rectangle (rows shorter
@@ -854,182 +1187,58 @@ impl Element for EditorElement {
                     let s = char_col_byte_in(&text, left_col);
                     let e = char_col_byte_in(&text, right_col + 1);
                     if e > s {
-                        push_range_quads(
-                            &mut selections,
-                            &wrapped,
-                            0,
-                            to_display(s, &holes),
-                            to_display(e, &holes),
-                            line_origin,
-                            line_height,
+                        lc.push_range(
+                            &mut acc.selections,
+                            range.start + s,
+                            range.start + e,
                             region_color,
                             px(0.),
                         );
                     }
                 }
-            } else if !selection.is_empty()
-                && selection.start <= range.end
-                && selection.end >= range.start
-            {
-                push_range_quads(
-                    &mut selections,
-                    &wrapped,
-                    0,
-                    to_display(selection.start.max(range.start) - range.start, &holes),
-                    to_display(selection.end.min(range.end) - range.start, &holes),
-                    line_origin,
-                    line_height,
+            } else if !selection.is_empty() {
+                lc.push_range(
+                    &mut acc.selections,
+                    selection.start,
+                    selection.end,
                     region_color,
                     px(0.),
                 );
             }
-
             // Secondary selections (Helix multiple selections): one dimmer span
             // per selection that overlaps this line. Each carries its own color,
             // so they coexist with the primary highlight in the same quad list.
             for &(ss, se) in &extra_selections {
-                if se > ss && ss <= range.end && se >= range.start {
-                    push_range_quads(
-                        &mut selections,
-                        &wrapped,
-                        0,
-                        to_display(ss.max(range.start) - range.start, &holes),
-                        to_display(se.min(range.end) - range.start, &holes),
-                        line_origin,
-                        line_height,
-                        secondary_region_color,
-                        px(0.),
-                    );
+                if se > ss {
+                    lc.push_range(&mut acc.selections, ss, se, secondary_region_color, px(0.));
                 }
             }
-
             // Search matches: a translucent background highlight per match.
             for m in &search {
-                if m.start <= range.end && m.end >= range.start {
-                    push_range_quads(
-                        &mut search_quads,
-                        &wrapped,
-                        0,
-                        to_display(m.start.max(range.start) - range.start, &holes),
-                        to_display(m.end.min(range.end) - range.start, &holes),
-                        line_origin,
-                        line_height,
-                        search_color,
-                        px(0.),
-                    );
-                }
+                lc.push_range(&mut acc.search, m.start, m.end, search_color, px(0.));
             }
-
             // Matching-delimiter highlight: the bracket pair (each one char).
             for m in &paren {
-                if m.start <= range.end && m.end >= range.start {
-                    push_range_quads(
-                        &mut paren_quads,
-                        &wrapped,
-                        0,
-                        to_display(m.start.max(range.start) - range.start, &holes),
-                        to_display(m.end.min(range.end) - range.start, &holes),
-                        line_origin,
-                        line_height,
-                        paren_color,
-                        px(0.),
-                    );
-                }
+                lc.push_range(&mut acc.paren, m.start, m.end, paren_color, px(0.));
             }
 
-            // File-tree icon, painted in a reserved column (the Scheme renders
-            // leading space at `col` so it doesn't overlap the label).
-            if let Some((col, name)) = editor.pane_line_icon(pane, i) {
-                let ipos = wrapped
-                    .position_for_index(
-                        to_display(col.min(range.end - range.start), &holes),
-                        line_height,
-                    )
-                    .unwrap_or_default();
-                let lh_f = f32::from(line_height);
-                let sz = lh_f * ICON_SCALE;
-                let pad = (lh_f - sz) / 2.0;
-                let origin = point(lx + ipos.x, content_top + ipos.y + px(pad));
-                let color = editor
-                    .pane_line_face(pane, i)
-                    .map_or(text_color, |f| theme.color(f, text_color));
-                icons.push((
-                    Bounds::new(origin, size(px(sz), px(sz))),
-                    SharedString::from(format!("icons/{name}.svg")),
-                    color,
-                ));
-            }
-
-            // Diagnostic underlines: a 2px bar along each diagnostic's span. Drawn
-            // as a thin band at the bottom of each visual row the span covers.
-            for diagnostic in &diagnostics {
-                let (d0, d1) = (diagnostic.range.start, diagnostic.range.end);
-                if d0 <= range.end && d1 >= range.start {
-                    let color = diagnostic_color(diagnostic.severity);
-                    let mut bars = Vec::new();
-                    push_range_quads(
-                        &mut bars,
-                        &wrapped,
-                        0,
-                        to_display(d0.max(range.start) - range.start, &holes),
-                        to_display(d1.min(range.end) - range.start, &holes),
-                        line_origin,
-                        line_height,
-                        color.into(),
-                        px(4.),
-                    );
-                    // Keep only the bottom 2px of each row's quad.
-                    for quad in bars {
-                        let b = quad.bounds;
-                        diagnostic_quads.push(fill(
-                            Bounds::from_corners(
-                                point(b.left(), b.bottom() - px(2.)),
-                                point(b.right(), b.bottom()),
-                            ),
-                            color,
-                        ));
-                    }
-                }
-            }
-
-            // Virtual suffix text (inlay hint / blame), after the line content.
-            if selected && let Some((suffix, face)) = editor.line_suffix(i) {
-                let color = theme.color(face, theme.color("dim", text_color));
-                let label = SharedString::from(format!("  {suffix}"));
-                let n = label.len();
-                let shaped_suffix =
-                    window
-                        .text_system()
-                        .shape_line(label, font_size, &[mk_run(n, color)], None);
-                let epos = wrapped
-                    .position_for_index(to_display(range.end - range.start, &holes), line_height)
-                    .unwrap_or_default();
-                virtual_text.push((shaped_suffix, point(lx + epos.x, content_top + epos.y)));
-            }
-
-            // avy hints: paint each candidate's label over the buffer at its
-            // byte position. Only the focused pane carries hints.
-            if selected {
-                let hint_bg = theme.color("avy-hint-bg", gpui::hsla(0.13, 0.95, 0.55, 1.0));
-                let hint_fg = theme.color("avy-hint-fg", gpui::hsla(0.0, 0.0, 0.05, 1.0));
-                for (byte, label) in editor.avy_hints() {
-                    if *byte >= range.start && *byte <= range.end {
-                        let pos = wrapped
-                            .position_for_index(to_display(byte - range.start, &holes), line_height)
-                            .unwrap_or_default();
-                        let origin = point(lx + pos.x, content_top + pos.y);
-                        let shaped = window.text_system().shape_line(
-                            label.clone(),
-                            font_size,
-                            &[mk_run(label.len(), hint_fg)],
-                            None,
-                        );
-                        let w = shaped.width.max(em);
-                        let bg = fill(Bounds::new(origin, size(w, line_height)), hint_bg);
-                        avy.push((bg, shaped, origin));
-                    }
-                }
-            }
+            // Decorations: file-tree icon, diagnostic underlines, virtual
+            // suffix text, avy hints.
+            layout_decorations(
+                &lc,
+                editor,
+                pane,
+                selected,
+                theme,
+                text_color,
+                &editor_font,
+                font_size,
+                em,
+                &diagnostics,
+                diag_colors,
+                window,
+                &mut acc,
+            );
 
             lines.push(LineLayout {
                 wrapped,
@@ -1107,25 +1316,25 @@ impl Element for EditorElement {
             lines,
             cursor: cursor_quad,
             hl_line: hl_line_quad,
-            selections,
-            search: search_quads,
-            paren: paren_quads,
+            selections: acc.selections,
+            search: acc.search,
+            paren: acc.paren,
             scrollbar,
-            icons,
+            icons: acc.icons,
             images: image_quads,
-            diagnostics: diagnostic_quads,
-            git_gutter: git_gutter_quads,
+            diagnostics: acc.diagnostics,
+            git_gutter: acc.git_gutter,
             popup,
             text_left,
             line_x: text_x,
             char_width: em,
-            gutter,
-            fold_chevrons,
-            fold_hitboxes,
-            fold_cursors,
-            virtual_text,
-            avy,
-            extra_cursors,
+            gutter: acc.gutter,
+            fold_chevrons: acc.fold_chevrons,
+            fold_hitboxes: acc.fold_hitboxes,
+            fold_cursors: acc.fold_cursors,
+            virtual_text: acc.virtual_text,
+            avy: acc.avy,
+            extra_cursors: acc.extra_cursors,
             cursor_rel_y: cursor_px.map(|p| p.y - bounds.top()),
         }
     }
@@ -1303,12 +1512,6 @@ impl Element for EditorElement {
     }
 }
 
-/// Emit one background-fill quad per visual row that the byte range `[s, e)`
-/// covers within a (possibly wrapped) line. `s`/`e` are absolute buffer offsets;
-/// `line_start` is the line's first byte. `origin` is the line's top-left in
-/// window space (text x already shifted for horizontal scroll). `min_width`
-/// widens a zero/near-zero span so it stays visible (used for diagnostics).
-#[allow(clippy::too_many_arguments)]
 /// Byte offset within `text` of character column `col`, clamped to the text's
 /// length (a column past the end lands at the end). Maps a block-Visual
 /// rectangle's columns to per-line byte ranges for highlighting.
@@ -1319,23 +1522,28 @@ fn char_col_byte_in(text: &str, col: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+/// Emit one background-fill quad per visual row that the display-text byte
+/// range `[disp_start, disp_end)` covers within a (possibly wrapped) line.
+/// Indices are relative to the line's display text (holes already spliced
+/// out — see [`LineCtx::disp`]). `origin` is the line's top-left in window
+/// space (text x already shifted for horizontal scroll). `min_width` widens a
+/// zero/near-zero span so it stays visible (used for diagnostics).
 #[allow(clippy::too_many_arguments)] // a focused per-row highlight helper
 fn push_range_quads(
     out: &mut Vec<PaintQuad>,
     wrapped: &WrappedLine,
-    line_start: usize,
-    s: usize,
-    e: usize,
+    disp_start: usize,
+    disp_end: usize,
     origin: Point<Pixels>,
     line_height: Pixels,
     color: Hsla,
     min_width: Pixels,
 ) {
-    if e <= s {
+    if disp_end <= disp_start {
         return;
     }
-    let local_s = s - line_start;
-    let local_e = e - line_start;
+    let local_s = disp_start;
+    let local_e = disp_end;
     let len = wrapped.len();
     // Byte index where each visual row (after the first) begins.
     let boundaries: Vec<usize> = wrapped
@@ -1510,34 +1718,39 @@ fn build_popup(
     if let Some(doc) = view.doc.as_ref() {
         let doc_fg = theme.color("completion-doc-fg", fg);
         let doc_bg = theme.color("completion-doc-bg", bg);
-        let wrap = 64usize;
-        let max_doc_rows = 16usize;
         let mut doc_lines: Vec<String> = Vec::new();
         for raw in doc.lines() {
             if raw.trim().is_empty() {
                 doc_lines.push(String::new());
             } else {
                 let mut cur = String::new();
+                let mut cur_cols = 0usize;
                 for word in raw.split_whitespace() {
+                    // Wrap by character columns, not UTF-8 bytes, so non-ASCII
+                    // docs don't wrap early.
+                    let word_cols = word.chars().count();
                     if cur.is_empty() {
                         cur = word.to_string();
-                    } else if cur.len() + 1 + word.len() <= wrap {
+                        cur_cols = word_cols;
+                    } else if cur_cols + 1 + word_cols <= DOC_WRAP_COLS {
                         cur.push(' ');
                         cur.push_str(word);
+                        cur_cols += 1 + word_cols;
                     } else {
                         doc_lines.push(std::mem::take(&mut cur));
                         cur = word.to_string();
+                        cur_cols = word_cols;
                     }
                 }
                 if !cur.is_empty() {
                     doc_lines.push(cur);
                 }
             }
-            if doc_lines.len() >= max_doc_rows {
+            if doc_lines.len() >= DOC_MAX_ROWS {
                 break;
             }
         }
-        doc_lines.truncate(max_doc_rows);
+        doc_lines.truncate(DOC_MAX_ROWS);
         if !doc_lines.is_empty() {
             let mut shaped_doc = Vec::new();
             let mut doc_w = px(0.);

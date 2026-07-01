@@ -6,14 +6,30 @@ use gpui::Context;
 
 use super::*;
 
+/// Upper bound on kill-ring entries (the spirit of Emacs `kill-ring-max`).
+/// Pushing past the cap evicts the oldest entry so the ring can't grow without
+/// limit over a long session.
+const KILL_RING_MAX: usize = 120;
+
 impl Editor {
+    /// Record `text` as the newest kill and point the yank index at it,
+    /// evicting the oldest entry when the ring is full. Whether a kill also
+    /// syncs to the OS clipboard stays per-site policy — callers that mirror it
+    /// call `set_clipboard` themselves.
+    pub(super) fn push_kill(&mut self, text: String) {
+        self.kill_ring.push(text);
+        if self.kill_ring.len() > KILL_RING_MAX {
+            self.kill_ring.remove(0);
+        }
+        self.kill_index = self.kill_ring.len() - 1;
+    }
     pub(super) fn kill_line(&mut self, cx: &mut Context<Self>) {
         let p = self.point();
-        let line = self.buffer.line_range_at(p);
+        let line = self.active.buffer.line_range_at(p);
         let range = if p < line.end {
             p..line.end
-        } else if p < self.buffer.len() {
-            p..self.buffer.next_grapheme(p) // the line break
+        } else if p < self.active.buffer.len() {
+            p..self.active.buffer.next_grapheme(p) // the line break
         } else {
             return;
         };
@@ -22,12 +38,12 @@ impl Editor {
 
     pub(super) fn kill_word(&mut self, cx: &mut Context<Self>) {
         let p = self.point();
-        self.kill_range(p..self.buffer.forward_word(p), cx);
+        self.kill_range(p..self.active.buffer.forward_word(p), cx);
     }
 
     pub(super) fn backward_kill_word(&mut self, cx: &mut Context<Self>) {
         let p = self.point();
-        self.kill_range(self.buffer.backward_word(p)..p, cx);
+        self.kill_range(self.active.buffer.backward_word(p)..p, cx);
     }
 
     pub(super) fn kill_region(&mut self, cx: &mut Context<Self>) {
@@ -43,11 +59,10 @@ impl Editor {
         }
         match self.region() {
             Some(range) => {
-                let text = self.buffer.slice_to_string(range);
+                let text = self.active.buffer.slice_to_string(range);
                 self.set_clipboard(&text, cx); // sync the system clipboard
-                self.kill_ring.push(text);
-                self.kill_index = self.kill_ring.len() - 1;
-                self.mark_active = false;
+                self.push_kill(text);
+                self.active.mark_active = false;
                 self.echo("Saved to kill ring", cx);
             }
             None => self.echo("No region selected", cx),
@@ -69,11 +84,10 @@ impl Editor {
         }
         match self.region() {
             Some(range) => {
-                let text = self.buffer.slice_to_string(range);
+                let text = self.active.buffer.slice_to_string(range);
                 self.set_clipboard(&text, cx);
-                self.kill_ring.push(text);
-                self.kill_index = self.kill_ring.len() - 1;
-                self.mark_active = false;
+                self.push_kill(text);
+                self.active.mark_active = false;
                 self.echo("Copied", cx);
                 cx.notify();
             }
@@ -89,7 +103,7 @@ impl Editor {
         }
         match self.region() {
             Some(range) => {
-                let text = self.buffer.slice_to_string(range.clone());
+                let text = self.active.buffer.slice_to_string(range.clone());
                 self.set_clipboard(&text, cx);
                 self.kill_range(range, cx); // deletes + pushes to the kill ring
                 self.echo("Cut", cx);
@@ -112,12 +126,11 @@ impl Editor {
             self.echo("Clipboard is empty", cx);
             return;
         }
-        let start = self.selected_range.start;
-        let cursor = self.edit(self.selected_range.clone(), &text);
+        let start = self.active.selected_range.start;
+        let cursor = self.edit(self.active.selected_range.clone(), &text);
         self.collapse_to(cursor);
         self.last_yank = Some(start..cursor);
-        self.kill_ring.push(text);
-        self.kill_index = self.kill_ring.len() - 1;
+        self.push_kill(text);
         cx.notify();
     }
 
@@ -132,8 +145,7 @@ impl Editor {
             && !clip.is_empty()
             && self.kill_ring.last() != Some(&clip)
         {
-            self.kill_ring.push(clip);
-            self.kill_index = self.kill_ring.len() - 1;
+            self.push_kill(clip);
             return true;
         }
         false
@@ -147,8 +159,8 @@ impl Editor {
             self.echo("Kill ring is empty", cx);
             return;
         };
-        let start = self.selected_range.start;
-        let cursor = self.edit(self.selected_range.clone(), &text);
+        let start = self.active.selected_range.start;
+        let cursor = self.edit(self.active.selected_range.clone(), &text);
         self.collapse_to(cursor);
         self.last_yank = Some(start..cursor);
         self.kill_index = self.kill_ring.len() - 1;
@@ -174,23 +186,23 @@ impl Editor {
     pub(super) fn transpose_chars(&mut self, cx: &mut Context<Self>) {
         let p = self.point();
         // Need a character on each side; at buffer end, transpose the two before.
-        let (left, mid, right) = if p < self.buffer.len() && p > 0 {
+        let (left, mid, right) = if p < self.active.buffer.len() && p > 0 {
             (
-                self.buffer.prev_grapheme(p),
+                self.active.buffer.prev_grapheme(p),
                 p,
-                self.buffer.next_grapheme(p),
+                self.active.buffer.next_grapheme(p),
             )
-        } else if p == self.buffer.len() && p > 0 {
-            let mid = self.buffer.prev_grapheme(p);
+        } else if p == self.active.buffer.len() && p > 0 {
+            let mid = self.active.buffer.prev_grapheme(p);
             if mid == 0 {
                 return;
             }
-            (self.buffer.prev_grapheme(mid), mid, p)
+            (self.active.buffer.prev_grapheme(mid), mid, p)
         } else {
             return;
         };
-        let a = self.buffer.slice_to_string(left..mid);
-        let b = self.buffer.slice_to_string(mid..right);
+        let a = self.active.buffer.slice_to_string(left..mid);
+        let b = self.active.buffer.slice_to_string(mid..right);
         let swapped = format!("{b}{a}");
         self.edit(left..right, &swapped);
         self.collapse_to(right);

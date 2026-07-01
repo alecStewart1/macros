@@ -145,16 +145,12 @@
 ;; Paint on open so an opened file is colored immediately (guarded by the flag).
 (add-hook "find-file-hook" "rainbow-refresh")
 
-;; Debounced live refresh (the LSP live-feature pattern): each edit schedules a
-;; timer; only the last to fire repaints. Cheap no-op while disabled.
-(define *rainbow-pending* 0)
+;; Debounced live refresh (core's make-debounce): each edit schedules a timer;
+;; only the last to fire repaints. Cheap no-op while disabled. The delay is
+;; passed per call so a config `(set! *rainbow-delay* …)` keeps applying.
+(define rainbow--debounce
+  (make-debounce "rainbow" 150
+                 (lambda () (when *rainbow-enabled* (rainbow-refresh)))))
 (define (rainbow--schedule)
-  (when *rainbow-enabled*
-    (set! *rainbow-pending* (+ *rainbow-pending* 1))
-    (run-with-timer *rainbow-delay* "rainbow--fire")))
-(define (rainbow--fire)
-  (when (> *rainbow-pending* 0)
-    (set! *rainbow-pending* (- *rainbow-pending* 1)))
-  (when (and (= *rainbow-pending* 0) *rainbow-enabled*)
-    (rainbow-refresh)))
+  (when *rainbow-enabled* (rainbow--debounce *rainbow-delay*)))
 (add-hook "after-change-functions" "rainbow--schedule")

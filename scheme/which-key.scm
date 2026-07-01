@@ -9,11 +9,7 @@
 
 (define *which-key-mode* "fundamental")
 
-(define (which-key-spaces n)
-  (if (<= n 0) "" (string-append " " (which-key-spaces (- n 1)))))
-(define (which-key-pad s)
-  (let ((len (string-length s)))
-    (if (>= len 18) s (string-append s (which-key-spaces (- 18 len))))))
+(define (which-key-pad s) (pad-right s 18))
 
 ;; "chord   command" body lines for every binding under `prefix`, sorted.
 (define (which-key-lines mode prefix)

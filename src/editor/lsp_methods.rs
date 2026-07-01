@@ -16,6 +16,19 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Whether a `set-lsp` command string selects the in-process Steel/Scheme
+/// server (`"builtin"` or `"builtin:<variant>"`) rather than an external
+/// shell command.
+fn is_builtin_lsp(command: &str) -> bool {
+    command == "builtin" || command.starts_with("builtin:")
+}
+
+/// Cap on the `*lsp-log*` scrollback ring (captured server stderr).
+const LSP_LOG_CAP: usize = 2000;
+
+/// Cap on the xref jump-back ring (`pop-tag-mark` locations).
+const XREF_MARKER_RING_CAP: usize = 64;
+
 impl Editor {
     /// Start a language server for the active buffer (if one is configured for
     /// its file type and isn't already running), and `didOpen` the buffer.
@@ -36,7 +49,7 @@ impl Editor {
 
         // `"builtin"` selects the in-process Steel/Scheme server; anything else
         // is a shell command for an external server (the usual case).
-        let started = if command == "builtin" || command.starts_with("builtin:") {
+        let started = if is_builtin_lsp(&command) {
             // Only the editor-aware `macros-scheme` server gets the editor API
             // seeded; the plain `scheme` server stays a vanilla interpreter.
             let seed = language == "macros-scheme";
@@ -49,7 +62,8 @@ impl Editor {
             Ok((LspBackend::Builtin(Box::new(server)), rx))
         } else {
             let root = self
-                .active_path
+                .active
+                .path
                 .as_ref()
                 .and_then(|p| p.parent())
                 .map(Path::to_path_buf)
@@ -63,7 +77,7 @@ impl Editor {
                 // Record the cause in *lsp-log* (persistent) as well as the echo
                 // area (transient) — a failed spawn is otherwise invisible.
                 let line = format!("[{language}] could not start `{command}`: {reason}");
-                push_capped(&mut self.lsp_log, line.clone(), 2000);
+                push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
                 self.append_to_log_buffer("*lsp-log*", &line);
                 self.echo(format!("Could not start {command}: {reason}"), cx);
                 return;
@@ -90,7 +104,7 @@ impl Editor {
             LspServer {
                 client,
                 ready: false,
-                sync_kind: 1,
+                sync_kind: lsp::SyncKind::Full,
                 open: HashSet::new(),
                 versions: HashMap::new(),
                 pending_completion: None,
@@ -104,7 +118,7 @@ impl Editor {
         self.echo(format!("Started {command} ({language})"), cx);
         // For external servers, optionally pop `*lsp-log*` in a split so the
         // startup stderr is visible while editing (only on an actual spawn).
-        let external = !(command == "builtin" || command.starts_with("builtin:"));
+        let external = !is_builtin_lsp(&command);
         if external && cx.global::<crate::settings::Settings>().lsp_log_on_start() {
             self.open_lsp_log_split(cx);
         }
@@ -115,7 +129,7 @@ impl Editor {
         let Some(uri) = self.active_uri() else {
             return;
         };
-        let text = self.buffer.full_text();
+        let text = self.active.buffer.full_text();
         // The server is keyed by `language` (e.g. "typescript"), but the wire
         // `languageId` must reflect the actual file kind (e.g. "typescriptreact"
         // for .tsx) so the server enables JSX parsing.
@@ -158,12 +172,12 @@ impl Editor {
             // every keystroke. `flush_lsp_fullsync` runs before any outbound
             // request and before a buffer swap, so the server never acts on a
             // stale document.
-            1 => {
+            lsp::SyncKind::Full => {
                 self.lsp_fullsync_dirty = Some((language.to_string(), uri));
                 let _ = self.lsp_flush_tx.unbounded_send(());
             }
             // Incremental sync: send just the changed range, per edit.
-            2 => {
+            lsp::SyncKind::Incremental => {
                 if let Some(server) = self.servers.get_mut(language) {
                     let version = server.versions.entry(uri.clone()).or_insert(1);
                     *version += 1;
@@ -173,20 +187,20 @@ impl Editor {
                         .did_change_incremental(&uri, version, start, end, text);
                 }
             }
-            _ => {}
+            lsp::SyncKind::None => {}
         }
     }
 
     /// Send the pending full-sync document to its server as one `did_change`.
     /// A cheap no-op when nothing is dirty. Needs no `cx`: it reads the active
-    /// buffer and emits an LSP notification. Callers must ensure `self.buffer` is
+    /// buffer and emits an LSP notification. Callers must ensure `self.active.buffer` is
     /// still the dirty document — true everywhere except mid-buffer-swap, which
     /// is why `snapshot_active` flushes before it takes the buffer.
     pub(super) fn flush_lsp_fullsync(&mut self) {
         let Some((language, uri)) = self.lsp_fullsync_dirty.take() else {
             return;
         };
-        let full = self.buffer.full_text();
+        let full = self.active.buffer.full_text();
         if let Some(server) = self.servers.get_mut(&language) {
             if !server.open.contains(&uri) {
                 return;
@@ -230,7 +244,7 @@ impl Editor {
                 // and appended live to the buffer if it's open.
                 if let Some(line) = message["params"]["line"].as_str() {
                     let line = format!("[{language}] {line}");
-                    push_capped(&mut self.lsp_log, line.clone(), 2000);
+                    push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
                     self.append_to_log_buffer("*lsp-log*", &line);
                     cx.notify();
                 }
@@ -383,9 +397,9 @@ impl Editor {
                 Some(prep) => {
                     let placeholder = prep.placeholder.unwrap_or_else(|| match prep.range {
                         Some((s, e)) => {
-                            let sb = self.buffer.position_to_byte(s.0, s.1);
-                            let eb = self.buffer.position_to_byte(e.0, e.1);
-                            self.buffer.slice_to_string(sb..eb)
+                            let sb = self.active.buffer.position_to_byte(s.0, s.1);
+                            let eb = self.active.buffer.position_to_byte(e.0, e.1);
+                            self.active.buffer.slice_to_string(sb..eb)
                         }
                         None => self.identifier_at_point(),
                     });
@@ -456,7 +470,7 @@ impl Editor {
             params,
             PendingRequest::SemanticTokens { callback, kind },
         ) {
-            self.echo("No language server for this buffer", cx);
+            self.echo(NO_LSP_FOR_BUFFER, cx);
         }
     }
 
@@ -476,8 +490,8 @@ impl Editor {
     /// `semanticTokens/range` — only a window around point (cheap on big files).
     pub(super) fn lsp_semantic_tokens_range(&mut self, callback: String, cx: &mut Context<Self>) {
         let Some(uri) = self.active_uri() else { return };
-        let point_line = self.buffer.line_index_at_byte(self.point());
-        let last = self.buffer.line_count().saturating_sub(1);
+        let point_line = self.active.buffer.line_index_at_byte(self.point());
+        let last = self.active.buffer.line_count().saturating_sub(1);
         let start = point_line.saturating_sub(200);
         let end = (point_line + 200).min(last);
         let params = json!({
@@ -526,7 +540,7 @@ impl Editor {
     /// The identifier (word of `[A-Za-z0-9_]`) surrounding point, for rename
     /// prefill when the server gives no placeholder.
     pub(super) fn identifier_at_point(&self) -> String {
-        let text = self.buffer.full_text();
+        let text = self.active.buffer.full_text();
         let point = self.point().min(text.len());
         let is_ident = |c: char| c.is_alphanumeric() || c == '_';
         let mut start = point;
@@ -572,7 +586,7 @@ impl Editor {
                 cx,
             );
         } else {
-            self.echo("No language server for this buffer", cx);
+            self.echo(NO_LSP_FOR_BUFFER, cx);
         }
     }
 
@@ -608,7 +622,7 @@ impl Editor {
         title: &str,
         cx: &mut Context<Self>,
     ) {
-        self.overlays.suffixes.insert(
+        self.active.overlays.suffixes.insert(
             line,
             (format!("  » {title}").into(), "lsp-code-lens".into()),
         );
@@ -647,10 +661,10 @@ impl Editor {
         choice: &CompletionItem,
         cx: &mut Context<Self>,
     ) {
-        let full = self.buffer.full_text();
+        let full = self.active.buffer.full_text();
         let main = lsp::TextEdit {
-            start: self.buffer.byte_to_position(anchor),
-            end: self.buffer.byte_to_position(point),
+            start: self.active.buffer.byte_to_position(anchor),
+            end: self.active.buffer.byte_to_position(point),
             new_text: choice.insert_text.clone(),
         };
         let mut edits = choice.additional_edits.clone();
@@ -660,18 +674,15 @@ impl Editor {
         // edits that fall entirely before the anchor (e.g. an import at the top).
         let mut shift: isize = 0;
         for e in &choice.additional_edits {
-            let s = self.buffer.position_to_byte(e.start.0, e.start.1);
-            let en = self.buffer.position_to_byte(e.end.0, e.end.1);
+            let s = self.active.buffer.position_to_byte(e.start.0, e.start.1);
+            let en = self.active.buffer.position_to_byte(e.end.0, e.end.1);
             if en <= anchor {
                 shift += e.new_text.len() as isize - (en as isize - s as isize);
             }
         }
         let cursor =
             ((anchor as isize + shift) as usize + choice.insert_text.len()).min(new_text.len());
-        let len = self.buffer.len();
-        self.edit(0..len, &new_text);
-        self.parse_full();
-        self.collapse_to(cursor.min(self.buffer.len()));
+        self.replace_whole_buffer(&new_text, cursor, cx);
         cx.notify();
     }
 
@@ -745,14 +756,14 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(uri) = self.active_uri() else {
-            self.echo("No language server for this buffer", cx);
+            self.echo(NO_LSP_FOR_BUFFER, cx);
             return false;
         };
-        let (line, character) = self.buffer.byte_to_position(self.point());
+        let (line, character) = self.active.buffer.byte_to_position(self.point());
         let params = build(&uri, line, character);
         let sent = self.lsp_dispatch(method, params, kind);
         if !sent {
-            self.echo("No language server for this buffer", cx);
+            self.echo(NO_LSP_FOR_BUFFER, cx);
         }
         sent
     }
@@ -826,7 +837,7 @@ impl Editor {
     pub(super) fn lsp_workspace_symbol(&mut self, query: String, cx: &mut Context<Self>) {
         let params = json!({ "query": query });
         if !self.lsp_dispatch("workspace/symbol", params, PendingRequest::WorkspaceSymbols) {
-            self.echo("No language server for this buffer", cx);
+            self.echo(NO_LSP_FOR_BUFFER, cx);
         }
     }
 
@@ -865,27 +876,30 @@ impl Editor {
     /// Request code actions for the selection (or the point's line), passing any
     /// diagnostics in range as context.
     pub(super) fn lsp_code_action(&mut self, cx: &mut Context<Self>) {
-        let (start, end) = if self.mark_active {
-            (self.selected_range.start, self.selected_range.end)
+        let (start, end) = if self.active.mark_active {
+            (
+                self.active.selected_range.start,
+                self.active.selected_range.end,
+            )
         } else {
-            let line = self.buffer.line_range_at(self.point());
+            let line = self.active.buffer.line_range_at(self.point());
             (line.start, line.end)
         };
-        let start_pos = self.buffer.byte_to_position(start);
-        let end_pos = self.buffer.byte_to_position(end);
+        let start_pos = self.active.buffer.byte_to_position(start);
+        let end_pos = self.active.buffer.byte_to_position(end);
         let context_diags: Vec<Value> = self
             .active_diagnostics()
             .into_iter()
             .filter(|d| d.range.start < end && d.range.end > start || d.range.start == start)
             .map(|d| {
-                let s = self.buffer.byte_to_position(d.range.start);
-                let e = self.buffer.byte_to_position(d.range.end);
+                let s = self.active.buffer.byte_to_position(d.range.start);
+                let e = self.active.buffer.byte_to_position(d.range.end);
                 json!({
                     "range": {
                         "start": { "line": s.0, "character": s.1 },
                         "end": { "line": e.0, "character": e.1 }
                     },
-                    "severity": d.severity,
+                    "severity": d.severity as u8,
                     "message": d.message
                 })
             })
@@ -999,11 +1013,11 @@ impl Editor {
         // Remember where we are so `xref-pop-marker` can return here.
         self.xref_push_marker();
         let path = PathBuf::from(lsp::uri_to_path(&uri));
-        let same = self.active_path.as_deref() == Some(path.as_path());
-        if !same {
-            self.visit_path(&path, || uri.clone(), cx);
+        let same = self.active.path.as_deref() == Some(path.as_path());
+        if !same && !self.visit_path(&path, || uri.clone(), cx) {
+            return; // unreadable target — stay put (the error was echoed)
         }
-        let offset = self.buffer.position_to_byte(line, character);
+        let offset = self.active.buffer.position_to_byte(line, character);
         self.move_to(offset, cx);
     }
 
@@ -1011,26 +1025,38 @@ impl Editor {
     /// inactive buffer (just activate it), otherwise read the file from disk and
     /// open it. `fallback_name` supplies the buffer name when `path` has no file
     /// component. The caller is responsible for the "is it already active?" check
-    /// and for positioning point afterward.
+    /// and for positioning point afterward. Returns whether the buffer was
+    /// switched — an unreadable file (permissions, non-UTF-8, …) is reported and
+    /// leaves the editor unchanged, so a later save can't truncate it.
     fn visit_path(
         &mut self,
         path: &Path,
         fallback_name: impl FnOnce() -> String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if let Some(index) = self
             .inactive
             .iter()
             .position(|d| d.path.as_deref() == Some(path))
         {
             self.activate(index, cx);
-        } else {
-            let contents = std::fs::read_to_string(path).unwrap_or_default();
-            let name = path
-                .file_name()
-                .map_or_else(fallback_name, |f| f.to_string_lossy().into_owned());
-            self.open_file(name, path.to_path_buf(), contents, cx);
+            return true;
         }
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            // Missing file → visit it as a fresh (empty) buffer, matching
+            // `find_file`'s new-file flow.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => {
+                self.echo(format!("Could not open {}: {err}", path.display()), cx);
+                return false;
+            }
+        };
+        let name = path
+            .file_name()
+            .map_or_else(fallback_name, |f| f.to_string_lossy().into_owned());
+        self.open_file(name, path.to_path_buf(), contents, cx);
+        true
     }
 
     // --- generic Scheme bridge + jump-back stack ----------------------------
@@ -1038,9 +1064,9 @@ impl Editor {
     /// Push the current location onto the jump-back ring (`pop-tag-mark`).
     pub(super) fn xref_push_marker(&mut self) {
         self.xref_marker_stack
-            .push((self.active_path.clone(), self.point()));
+            .push((self.active.path.clone(), self.point()));
         // Bound the ring so it can't grow without limit.
-        if self.xref_marker_stack.len() > 64 {
+        if self.xref_marker_stack.len() > XREF_MARKER_RING_CAP {
             self.xref_marker_stack.remove(0);
         }
     }
@@ -1051,13 +1077,13 @@ impl Editor {
             self.echo("No further jump-back markers", cx);
             return;
         };
-        match path {
-            Some(path) if self.active_path.as_deref() != Some(path.as_path()) => {
-                self.visit_path(&path, String::default, cx);
-            }
-            _ => {}
+        if let Some(path) = path
+            && self.active.path.as_deref() != Some(path.as_path())
+            && !self.visit_path(&path, String::default, cx)
+        {
+            return; // unreadable target — stay put (the error was echoed)
         }
-        let offset = offset.min(self.buffer.len());
+        let offset = offset.min(self.active.buffer.len());
         self.move_to(offset, cx);
     }
 
@@ -1071,21 +1097,27 @@ impl Editor {
     /// range filled in. `extra` (a JSON object) is merged over the base; for
     /// `"raw"` the base is empty and `extra` is used verbatim.
     pub(super) fn lsp_build_params(&self, kind: &str, extra: Value, uri: &str) -> Value {
-        let (line, character) = self.buffer.byte_to_position(self.point());
+        let (line, character) = self.active.buffer.byte_to_position(self.point());
         let position = json!({ "line": line, "character": character });
         let document_range = {
-            let (el, ec) = self.buffer.byte_to_position(self.buffer.len());
+            let (el, ec) = self
+                .active
+                .buffer
+                .byte_to_position(self.active.buffer.len());
             json!({ "start": { "line": 0, "character": 0 }, "end": { "line": el, "character": ec } })
         };
         let region_range = {
-            let (s, e) = if self.mark_active {
-                (self.selected_range.start, self.selected_range.end)
+            let (s, e) = if self.active.mark_active {
+                (
+                    self.active.selected_range.start,
+                    self.active.selected_range.end,
+                )
             } else {
-                let l = self.buffer.line_range_at(self.point());
+                let l = self.active.buffer.line_range_at(self.point());
                 (l.start, l.end)
             };
-            let s = self.buffer.byte_to_position(s);
-            let e = self.buffer.byte_to_position(e);
+            let s = self.active.buffer.byte_to_position(s);
+            let e = self.active.buffer.byte_to_position(e);
             json!({ "start": { "line": s.0, "character": s.1 }, "end": { "line": e.0, "character": e.1 } })
         };
         let mut params = match kind {
@@ -1122,13 +1154,13 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let Some((_, uri)) = self.lsp_language_uri() else {
-            self.echo("No language server for this buffer", cx);
+            self.echo(NO_LSP_FOR_BUFFER, cx);
             return;
         };
         let extra: Value = serde_json::from_str(&params_json).unwrap_or(Value::Null);
         let params = self.lsp_build_params(&kind, extra, &uri);
         if !self.lsp_dispatch(&method, params, PendingRequest::Script(callback)) {
-            self.echo("No language server for this buffer", cx);
+            self.echo(NO_LSP_FOR_BUFFER, cx);
         }
     }
 
@@ -1225,7 +1257,7 @@ impl Editor {
     /// RET in an `*lsp-xref*` / `*lsp-symbols*` buffer: visit row N's target.
     /// The first two rows are the header + blank line, so row 0 maps to target 0.
     pub(super) fn lsp_xref_visit(&mut self, cx: &mut Context<Self>) {
-        let row = self.buffer.line_index_at_byte(self.point());
+        let row = self.active.buffer.line_index_at_byte(self.point());
         let Some(index) = row.checked_sub(2) else {
             return; // header / blank line
         };
@@ -1256,18 +1288,15 @@ impl Editor {
     /// one undo step), keeping point clamped. When this format was triggered by
     /// format-on-save, the write is re-entered afterwards.
     pub(super) fn apply_format_edits(&mut self, edits: Vec<lsp::TextEdit>, cx: &mut Context<Self>) {
-        let current = self.buffer.full_text();
+        let current = self.active.buffer.full_text();
         let formatted = lsp::apply_edits_to_text(&current, &edits);
         if edits.is_empty() || formatted == current {
             if !self.formatting_for_save {
                 self.echo("No formatting changes", cx);
             }
         } else {
-            let point = self.point().min(formatted.len());
-            let len = self.buffer.len();
-            self.edit(0..len, &formatted);
-            self.parse_full();
-            self.move_to(point.min(self.buffer.len()), cx);
+            let point = self.point();
+            self.replace_whole_buffer(&formatted, point, cx);
             if !self.formatting_for_save {
                 self.echo("Formatted buffer", cx);
             }
@@ -1291,19 +1320,19 @@ impl Editor {
         }
         let mut files = 0;
         let mut total = 0;
+        // Files whose disk write (or read) failed — reported in the echo so a
+        // partially-applied rename is never silently presented as a success.
+        let mut failed: Vec<String> = Vec::new();
         for (uri, edits) in &edit.changes {
             let path = PathBuf::from(lsp::uri_to_path(uri));
             total += edits.len();
-            if self.active_path.as_deref() == Some(path.as_path()) {
+            if self.active.path.as_deref() == Some(path.as_path()) {
                 // Active buffer: edit in place so it's undoable + reparsed.
-                let current = self.buffer.full_text();
+                let current = self.active.buffer.full_text();
                 let updated = lsp::apply_edits_to_text(&current, edits);
                 if updated != current {
-                    let point = self.point().min(updated.len());
-                    let len = self.buffer.len();
-                    self.edit(0..len, &updated);
-                    self.parse_full();
-                    self.move_to(point.min(self.buffer.len()), cx);
+                    let point = self.point();
+                    self.replace_whole_buffer(&updated, point, cx);
                 }
             } else if let Some(doc) = self
                 .inactive
@@ -1315,20 +1344,43 @@ impl Editor {
                 let updated = lsp::apply_edits_to_text(&current, edits);
                 let len = doc.buffer.len();
                 doc.buffer.replace(0..len, &updated);
-                doc.modified = false;
-                let _ = std::fs::write(&path, &updated);
+                match std::fs::write(&path, &updated) {
+                    // Only a successful write makes the buffer clean; on failure
+                    // it keeps its (edited) unsaved state so nothing is lost.
+                    Ok(()) => doc.modified = false,
+                    Err(err) => {
+                        doc.modified = true;
+                        failed.push(format!("{}: {err}", path.display()));
+                    }
+                }
             } else {
-                // Not open: apply on disk.
-                let current = std::fs::read_to_string(&path).unwrap_or_default();
+                // Not open: apply on disk. An unreadable existing file must NOT
+                // be treated as empty — the edits would then overwrite it.
+                let current = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(err) => {
+                        failed.push(format!("{}: {err}", path.display()));
+                        continue;
+                    }
+                };
                 let updated = lsp::apply_edits_to_text(&current, edits);
-                let _ = std::fs::write(&path, &updated);
+                if let Err(err) = std::fs::write(&path, &updated) {
+                    failed.push(format!("{}: {err}", path.display()));
+                    continue;
+                }
             }
             files += 1;
         }
-        self.echo(
-            format!("Applied {total} edit(s) across {files} file(s)"),
-            cx,
-        );
+        let mut message = format!("Applied {total} edit(s) across {files} file(s)");
+        if !failed.is_empty() {
+            message.push_str(&format!(
+                "; {} file(s) failed: {}",
+                failed.len(),
+                failed.join("; ")
+            ));
+        }
+        self.echo(message, cx);
     }
 
     /// List code actions in `*lsp-actions*` (RET applies). Edit-only actions
@@ -1396,7 +1448,7 @@ impl Editor {
 
     /// RET in `*lsp-actions*`: apply the action on the current row.
     pub(super) fn lsp_apply_code_action(&mut self, cx: &mut Context<Self>) {
-        let row = self.buffer.line_index_at_byte(self.point());
+        let row = self.active.buffer.line_index_at_byte(self.point());
         let Some(index) = row.checked_sub(2) else {
             return;
         };

@@ -159,7 +159,9 @@ impl Terminal {
         let term = Term::new(config, &size, proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        let event_loop = EventLoop::new(term.clone(), proxy, pty, options_drain(), false)?;
+        // `drain_on_exit` kept `false` so a finished child stops promptly
+        // rather than blocking to flush.
+        let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)?;
         let notifier = Notifier(event_loop.channel());
         // The join handle is intentionally dropped: the loop runs until it gets a
         // `Shutdown` (sent on `Drop`) or the child exits.
@@ -369,12 +371,6 @@ impl Drop for Terminal {
         // Ask the event loop to shut down; it closes the PTY and ends the thread.
         let _ = self.notifier.0.send(Msg::Shutdown);
     }
-}
-
-/// `drain_on_exit` for the event loop — kept `false` so a finished child stops
-/// promptly rather than blocking to flush.
-fn options_drain() -> bool {
-    false
 }
 
 /// A plain-data render snapshot of the visible terminal grid — no alacritty

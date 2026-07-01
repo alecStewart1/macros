@@ -1,5 +1,6 @@
-;; Transient — a popup menu of (key label command) rows, the magit / transient.el
-;; pattern. The popup UI and key dispatch live in Rust (`transient` opens it,
+;; lib-transient — a popup menu of (key label command) rows, the magit /
+;; transient.el pattern (the "lib-" name keeps this file sorting BEFORE
+;; magit.scm, which builds its switch popups on the argument mechanism here). The popup UI and key dispatch live in Rust (`transient` opens it,
 ;; `transient-quit` closes it; pressing a row's key closes the popup and runs its
 ;; command). Everything else — argument toggles, nested menus — is plain Scheme.
 ;;
@@ -24,6 +25,13 @@
 ;; Drop all accumulated arguments (call when a transient finishes).
 (define (transient-reset-args)
   (set! *transient-args* '()))
+
+;; Drop every argument under a namespace prefix (e.g. "commit:"), so popups
+;; that namespace their flags ("popup:arg", magit-style) can clear just their
+;; own after the action runs.
+(define (transient-clear-args prefix)
+  (set! *transient-args*
+        (filter (lambda (a) (not (starts-with? a prefix))) *transient-args*)))
 
 ;; A checkbox label for a flag row: "[*] --force" when active, "[ ] --force".
 (define (transient-flag-label flag)

@@ -13,7 +13,7 @@ use super::*;
 impl Editor {
     /// Sub-line face ranges, for the element to layer over syntax highlighting.
     pub fn range_faces(&self) -> &[(Range<usize>, SharedString)] {
-        &self.overlays.faces
+        &self.active.overlays.faces
     }
 
     /// Hidden ranges (`overlay-hide`) intersecting buffer line `line`, expressed
@@ -23,11 +23,12 @@ impl Editor {
         // Out of range for the active buffer → no holes. Defensive: the caller
         // only asks for selected-pane rows (which index this buffer), but a stray
         // line index must never panic the renderer via `line_range`.
-        if self.overlays.hidden.is_empty() || line >= self.buffer.line_count() {
+        if self.active.overlays.hidden.is_empty() || line >= self.active.buffer.line_count() {
             return Vec::new();
         }
-        let lr = self.buffer.line_range(line);
+        let lr = self.active.buffer.line_range(line);
         let mut holes: Vec<(usize, usize)> = self
+            .active
             .overlays
             .hidden
             .iter()
@@ -53,31 +54,31 @@ impl Editor {
 
     /// Whether any line is folded (the element's fast path skips fold handling).
     pub fn has_folds(&self) -> bool {
-        !self.overlays.folds.is_empty()
+        !self.active.overlays.folds.is_empty()
     }
 
     /// Whether buffer line `line` is hidden by a fold.
     pub fn is_line_invisible(&self, line: usize) -> bool {
-        self.overlays.folds.iter().any(|r| r.contains(&line))
+        self.active.overlays.folds.iter().any(|r| r.contains(&line))
     }
 
     /// Whether any gutter fold chevron is set (element's fast path skips them).
     pub fn has_fold_markers(&self) -> bool {
-        !self.overlays.fold_markers.is_empty()
+        !self.active.overlays.fold_markers.is_empty()
     }
 
     /// The fold chevron state for buffer `line`, if one is set: `Some(true)` for
     /// an open (expanded) chevron, `Some(false)` for a collapsed one.
     pub fn fold_marker_at(&self, line: usize) -> Option<bool> {
-        self.overlays.fold_markers.get(&line).copied()
+        self.active.overlays.fold_markers.get(&line).copied()
     }
 
     /// Number of visible (non-folded) lines — the element's screen-row count.
     pub fn display_line_count(&self) -> usize {
-        let text = if self.overlays.folds.is_empty() {
-            self.buffer.line_count()
+        let text = if self.active.overlays.folds.is_empty() {
+            self.active.buffer.line_count()
         } else {
-            (0..self.buffer.line_count())
+            (0..self.active.buffer.line_count())
                 .filter(|i| !self.is_line_invisible(*i))
                 .count()
         };
@@ -87,7 +88,7 @@ impl Editor {
     /// Screen row a buffer line maps to once folds are collapsed and inline
     /// images on earlier lines have reserved their rows.
     pub fn display_row_of_line(&self, line: usize) -> usize {
-        let text = if self.overlays.folds.is_empty() {
+        let text = if self.active.overlays.folds.is_empty() {
             line
         } else {
             (0..line).filter(|i| !self.is_line_invisible(*i)).count()
@@ -98,20 +99,28 @@ impl Editor {
     /// Virtual left indentation (in columns) for buffer `line`, 0 if none.
     /// Display-only — the Org `org-indent-mode` look.
     pub fn line_indent(&self, line: usize) -> usize {
-        self.overlays.indents.get(&line).copied().unwrap_or(0)
+        self.active
+            .overlays
+            .indents
+            .get(&line)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Whether the active buffer is an Org buffer (set by `org-mode`). The
     /// renderer drops font ligatures here so prose markup like `**` / `***`
     /// doesn't ligate into a single shifted glyph.
     pub fn is_org(&self) -> bool {
-        self.locals.get("org-active").is_some_and(|v| v == "t")
+        self.active
+            .locals
+            .get("org-active")
+            .is_some_and(|v| v == "t")
     }
 
     // --- Inline images (Org / LaTeX preview) ------------------------------
     /// Whether the active buffer displays any inline image.
     pub fn has_line_images(&self) -> bool {
-        !self.line_images.is_empty()
+        !self.active.line_images.is_empty()
     }
 
     /// Decoded image + its displayed (width, height) in px for `line`, or `None`
@@ -119,7 +128,7 @@ impl Editor {
     /// the line's own override (set via `set-line-image`'s optional width arg),
     /// or [`INLINE_IMAGE_MAX_WIDTH`] when the override is 0; height keeps aspect.
     pub(super) fn image_display(&self, line: usize) -> Option<(Arc<RenderImage>, f32, f32)> {
-        let (path, override_w) = self.line_images.get(&line)?;
+        let (path, override_w) = self.active.line_images.get(&line)?;
         let img = self.image_cache.get(path)?;
         if img.width == 0 {
             return None;
@@ -154,10 +163,11 @@ impl Editor {
     }
 
     pub(super) fn image_rows_total(&self) -> usize {
-        if self.line_images.is_empty() {
+        if self.active.line_images.is_empty() {
             return 0;
         }
-        self.line_images
+        self.active
+            .line_images
             .keys()
             .map(|&l| self.image_rows_at(l))
             .sum()
@@ -165,12 +175,17 @@ impl Editor {
 
     /// Whether any line is scaled (e.g. headings rendered larger).
     pub fn has_line_scales(&self) -> bool {
-        !self.overlays.scales.is_empty()
+        !self.active.overlays.scales.is_empty()
     }
 
     /// The font-size multiplier for `line` (1.0 = unscaled).
     pub fn line_scale(&self, line: usize) -> f32 {
-        self.overlays.scales.get(&line).copied().unwrap_or(1.0)
+        self.active
+            .overlays
+            .scales
+            .get(&line)
+            .copied()
+            .unwrap_or(1.0)
     }
 
     /// Extra display rows a scaled line reserves beyond its own — so a heading
@@ -189,7 +204,8 @@ impl Editor {
     }
 
     pub(super) fn scale_rows_total(&self) -> usize {
-        self.overlays
+        self.active
+            .overlays
             .scales
             .keys()
             .map(|&l| self.scale_rows_at(l))
@@ -197,7 +213,8 @@ impl Editor {
     }
 
     pub(super) fn scale_rows_before(&self, line: usize) -> usize {
-        self.overlays
+        self.active
+            .overlays
             .scales
             .keys()
             .filter(|&&l| l < line)
@@ -206,10 +223,11 @@ impl Editor {
     }
 
     pub(super) fn image_rows_before(&self, line: usize) -> usize {
-        if self.line_images.is_empty() {
+        if self.active.line_images.is_empty() {
             return 0;
         }
-        self.line_images
+        self.active
+            .line_images
             .keys()
             .filter(|&&l| l < line)
             .map(|&l| self.image_rows_at(l))
@@ -217,7 +235,9 @@ impl Editor {
     }
 
     /// Record an inline image on `line` and ensure its bitmap is decoded (async,
-    /// off the UI thread). Re-uses the cache so a re-scan never re-decodes.
+    /// off the UI thread). Re-uses the cache so a re-scan never re-decodes. The
+    /// line→path record follows [`Self::redirect_target`] so a redirected batch
+    /// decorates the buffer it re-rendered; the bitmap cache is process-wide.
     pub(super) fn set_line_image(
         &mut self,
         line: usize,
@@ -226,9 +246,15 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let path = PathBuf::from(expand_path(&path));
-        self.line_images.insert(line, (path.clone(), max_width));
+        let redirected = self.render_redirect.is_some();
+        self.redirect_target()
+            .line_images
+            .insert(line, (path.clone(), max_width));
         if self.image_cache.contains_key(&path) {
-            self.ensure_cursor_visible();
+            // Only the active buffer's rows moved under the cursor.
+            if !redirected {
+                self.ensure_cursor_visible();
+            }
             cx.notify();
             return;
         }
@@ -251,50 +277,24 @@ impl Editor {
         .detach();
     }
 
-    pub(super) fn overlay_set_face(
-        &mut self,
-        start: usize,
-        end: usize,
-        face: String,
-        cx: &mut Context<Self>,
-    ) {
-        let len = self.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        if start < end {
-            self.overlays
-                .faces
-                .push((start..end, SharedString::from(face)));
-            cx.notify();
-        }
-    }
-
-    pub(super) fn overlay_hide(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
-        let len = self.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        if start < end {
-            self.overlays.hidden.push(start..end);
-            cx.notify();
-        }
-    }
-
     pub(super) fn overlay_fold_lines(
         &mut self,
         start_line: usize,
         end_line: usize,
         cx: &mut Context<Self>,
     ) {
-        let last = self.buffer.line_count();
+        let last = self.active.buffer.line_count();
         let (start, end) = (start_line.min(last), end_line.min(last));
         if start < end {
-            self.overlays.folds.push(start..end);
+            self.active.overlays.folds.push(start..end);
             self.ensure_cursor_visible();
             cx.notify();
         }
     }
 
     pub(super) fn overlay_unfold_all(&mut self, cx: &mut Context<Self>) {
-        if !self.overlays.folds.is_empty() {
-            self.overlays.folds.clear();
+        if !self.active.overlays.folds.is_empty() {
+            self.active.overlays.folds.clear();
             self.ensure_cursor_visible();
             cx.notify();
         }
@@ -306,21 +306,15 @@ impl Editor {
         open: bool,
         cx: &mut Context<Self>,
     ) {
-        self.overlays.fold_markers.insert(line, open);
+        self.active.overlays.fold_markers.insert(line, open);
         cx.notify();
     }
 
     pub(super) fn overlay_clear_fold_markers(&mut self, cx: &mut Context<Self>) {
-        if !self.overlays.fold_markers.is_empty() {
-            self.overlays.fold_markers.clear();
+        if !self.active.overlays.fold_markers.is_empty() {
+            self.active.overlays.fold_markers.clear();
             cx.notify();
         }
-    }
-
-    pub(super) fn overlay_clear(&mut self, cx: &mut Context<Self>) {
-        self.overlays = Overlays::default();
-        self.ensure_cursor_visible();
-        cx.notify();
     }
 
     pub(super) fn put_text_property(
@@ -330,10 +324,10 @@ impl Editor {
         key: String,
         value: String,
     ) {
-        let len = self.buffer.len();
+        let len = self.active.buffer.len();
         let (start, end) = (start.min(len), end.min(len));
         if start < end {
-            self.overlays.props.push((start..end, key, value));
+            self.active.overlays.props.push((start..end, key, value));
         }
     }
 

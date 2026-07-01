@@ -2,6 +2,218 @@
 
 use super::*;
 
+/// Convert parsed [`HelmSourceSpec`]s into runtime [`HelmSource`]s.
+pub(super) fn helm_sources_from_specs(
+    specs: Vec<crate::script::HelmSourceSpec>,
+) -> Vec<HelmSource> {
+    specs
+        .into_iter()
+        .map(|s| {
+            let (candidates, annotations, dynamic, raw) = match s.candidates {
+                crate::script::HelmCandidates::Static(pairs) => {
+                    let mut annotations = HashMap::new();
+                    let candidates = pairs
+                        .into_iter()
+                        .map(|(c, ann)| {
+                            if let Some(ann) = ann {
+                                annotations.insert(c.clone(), ann);
+                            }
+                            c
+                        })
+                        .collect();
+                    (candidates, annotations, None, false)
+                }
+                crate::script::HelmCandidates::Dynamic(f) => {
+                    (Vec::new(), HashMap::new(), Some(f), false)
+                }
+                crate::script::HelmCandidates::DynamicRaw(f) => {
+                    (Vec::new(), HashMap::new(), Some(f), true)
+                }
+            };
+            HelmSource {
+                name: s.name,
+                candidates,
+                annotations,
+                dynamic,
+                raw,
+                action: HelmAction::Scheme(s.actions),
+                preview: s.preview,
+            }
+        })
+        .collect()
+}
+
+/// Flatten Helm sources to `(source_index, candidate)` matching `pattern`:
+/// nucleo fuzzy ranking (best-first within each source) when `fuzzy`, else
+/// case-insensitive substring; an empty pattern keeps everything in order.
+pub(super) fn helm_filter(
+    sources: &[HelmSource],
+    pattern: &str,
+    fuzzy: bool,
+) -> Vec<(usize, String)> {
+    let empty = pattern.is_empty();
+    // Fuzzy machinery, built once and only when a non-raw source will need it.
+    let mut fuzzy_ctx = (!empty && fuzzy).then(|| {
+        (
+            Matcher::new(Config::DEFAULT),
+            Pattern::parse(pattern, CaseMatching::Smart, Normalization::Smart),
+        )
+    });
+    let needle = (!empty && !fuzzy).then(|| pattern.to_lowercase());
+    let mut out = Vec::new();
+    for (i, source) in sources.iter().enumerate() {
+        // An empty pattern keeps everything; a `raw` source self-filtered in
+        // Scheme, so it too is shown verbatim, in the order the fn returned.
+        if empty || source.raw {
+            out.extend(source.candidates.iter().map(|c| (i, c.clone())));
+        } else if let Some((matcher, parsed)) = fuzzy_ctx.as_mut() {
+            for (candidate, _score) in parsed.match_list(source.candidates.iter(), matcher) {
+                out.push((i, candidate.clone()));
+            }
+        } else if let Some(needle) = &needle {
+            for candidate in &source.candidates {
+                if candidate.to_lowercase().contains(needle) {
+                    out.push((i, candidate.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Emacs-style file prompt shortcuts for Helm file sources. When a file picker
+/// is pre-filled with the current directory, typing `/` after that trailing `/`
+/// produces `//`; the second slash shadows everything before it and jumps to
+/// the filesystem root.
+pub(super) fn helm_file_shadow_pattern(sources: &[HelmSource], pattern: &str) -> Option<String> {
+    let is_file_source = sources
+        .iter()
+        .any(|s| s.dynamic.as_deref() == Some("find-file-candidates"));
+    if !is_file_source {
+        return None;
+    }
+    let (_, tail) = pattern.rsplit_once("//")?;
+    Some(format!("/{tail}"))
+}
+
+/// For Helm file pickers, `RET` on text that is not an exact listed candidate
+/// should visit that typed path. This is how `find-file` creates a file-visiting
+/// empty buffer for a new file; directories still use candidate completion.
+pub(super) fn helm_file_accept_target(
+    sources: &[HelmSource],
+    pattern: &str,
+) -> Option<(HelmAction, String)> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.ends_with('/') {
+        return None;
+    }
+    let source = sources
+        .iter()
+        .find(|s| s.dynamic.as_deref() == Some("find-file-candidates"))?;
+    if source.candidates.iter().any(|c| c == pattern) {
+        return None;
+    }
+    if Path::new(&expand_path(pattern)).is_dir() {
+        return None;
+    }
+    Some((source.action.clone(), pattern.to_string()))
+}
+
+/// Cycle a selection index by one step with wraparound over `count` items.
+/// `forward` advances, otherwise it steps back. Returns 0 if `count` is 0.
+pub(super) fn wrap_index(selected: usize, count: usize, forward: bool) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let step = if forward { 1 } else { count - 1 };
+    (selected + step) % count
+}
+
+/// What running a Helm candidate does.
+#[derive(Clone)]
+pub(super) enum HelmAction {
+    /// `(label, function-name)` pairs — the first is the default (RET); the rest
+    /// are reachable via the TAB action menu. The function is called with the
+    /// chosen candidate string.
+    Scheme(Vec<(String, String)>),
+    /// Treat the candidate itself as a command name and run it (helm-M-x).
+    ExecuteCommand,
+    /// An action-menu session: the candidate is an action label, resolved
+    /// against `helm_action_context`.
+    ActionMenu,
+    /// Jump to one of a set of LSP locations. The vec is parallel to the
+    /// source's `candidates`; the accepted candidate's index selects the target.
+    GotoLocation(Vec<lsp::Location>),
+    /// Apply one of a set of LSP code actions. The vec is parallel to the
+    /// source's `candidates`; the accepted candidate's index selects the action.
+    ApplyCodeAction(Vec<lsp::CodeAction>),
+}
+
+/// One group of candidates in a Helm session.
+pub(super) struct HelmSource {
+    pub(super) name: String,
+    /// Current candidates — for a dynamic source, the latest query result.
+    pub(super) candidates: Vec<String>,
+    /// Optional marginalia-style annotation per candidate (candidate → text),
+    /// shown dimmed to the right of the row. Candidates absent from the map have
+    /// no annotation.
+    pub(super) annotations: HashMap<String, String>,
+    /// Name of a Scheme fn that (re)computes candidates from the pattern; `None`
+    /// for static sources.
+    pub(super) dynamic: Option<String>,
+    /// When set, the source's candidates are shown verbatim — Rust does no
+    /// pattern filtering (the dynamic fn already did, e.g. via `fuzzy-match`).
+    pub(super) raw: bool,
+    pub(super) action: HelmAction,
+    /// Name of a Scheme fn that returns the preview (as lines) for a candidate;
+    /// `None` = this source has no preview pane.
+    pub(super) preview: Option<String>,
+}
+
+/// An active Helm selection session (a generic completing-read UI): a prompt, a
+/// live filter `pattern`, the sources, the selected match index, and the
+/// `query_id` that tags in-flight dynamic-candidate requests.
+pub(super) struct HelmSession {
+    prompt: String,
+    pattern: String,
+    sources: Vec<HelmSource>,
+    selected: usize,
+    query_id: u64,
+    /// Fuzzy (nucleo) vs substring matching, captured from settings at open.
+    fuzzy: bool,
+    /// Candidates marked for multi-select (`C-SPC`). When non-empty, accepting
+    /// runs the action once per marked candidate instead of the selected one.
+    marked: Vec<String>,
+    /// Preview text for the current selection (from the source's preview fn),
+    /// shown in a side pane. Empty when the selected source has no preview.
+    preview: String,
+    /// Query id of the in-flight preview request, so a stale result is dropped.
+    preview_query: u64,
+}
+
+/// One rendered line of the Helm panel: a source header or a candidate.
+pub struct HelmRow {
+    pub text: String,
+    /// Marginalia-style annotation shown dimmed to the right (candidates only).
+    pub annotation: Option<String>,
+    pub header: bool,
+    pub selected: bool,
+    pub marked: bool,
+    /// Index into the flattened match list, for click-to-select (candidate rows
+    /// only; headers carry `None`).
+    pub index: Option<usize>,
+}
+
+/// A render snapshot of the Helm panel.
+pub struct HelmView {
+    pub prompt: String,
+    pub pattern: String,
+    pub rows: Vec<HelmRow>,
+    /// Preview text for the current selection, shown in a side pane (`None` when
+    /// the selected source has no preview fn).
+    pub preview: Option<String>,
+}
+
 /// A Helm preview computed in Rust (rather than dispatched to a Scheme fn), for
 /// the LSP location / code-action pickers.
 enum NativePreview {
@@ -486,5 +698,157 @@ impl Editor {
             rows,
             preview: (!helm.preview.is_empty()).then(|| helm.preview.clone()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn helm_fuzzy_ranks_and_filters() {
+        use super::{HelmAction, HelmSource, helm_filter};
+        let sources = vec![HelmSource {
+            name: "Files".into(),
+            candidates: vec![
+                "foo/bar.rs".into(),
+                "fxxxbxxxr.rs".into(),
+                "unrelated.txt".into(),
+            ],
+            annotations: std::collections::HashMap::new(),
+            dynamic: None,
+            raw: false,
+            action: HelmAction::ExecuteCommand,
+            preview: None,
+        }];
+
+        // Empty pattern: everything, in original order.
+        let all = helm_filter(&sources, "", true);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].1, "foo/bar.rs");
+
+        // Fuzzy "fbr": subsequence matches only; tighter match ranks first, and
+        // the non-matching candidate is dropped.
+        let fuzzy = helm_filter(&sources, "fbr", true);
+        assert!(
+            fuzzy.iter().all(|(_, c)| c != "unrelated.txt"),
+            "non-match filtered"
+        );
+        assert_eq!(fuzzy[0].1, "foo/bar.rs", "the tighter match ranks first");
+
+        // Substring mode: "bar" is a literal substring of only one candidate.
+        let subs = helm_filter(&sources, "bar", false);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].1, "foo/bar.rs");
+    }
+
+    #[test]
+    fn helm_filter_shows_raw_sources_verbatim() {
+        use super::{HelmAction, HelmSource, helm_filter};
+        // A `raw` (self-filtered) source ignores the pattern entirely: its
+        // candidates pass through unchanged and in order — the Scheme fn that
+        // produced them is the sole filter authority.
+        let sources = vec![HelmSource {
+            name: "Scheme-filtered".into(),
+            candidates: vec!["zebra".into(), "apple".into()],
+            annotations: std::collections::HashMap::new(),
+            dynamic: Some("my-filter".into()),
+            raw: true,
+            action: HelmAction::ExecuteCommand,
+            preview: None,
+        }];
+        let out = helm_filter(&sources, "nomatch", true);
+        assert_eq!(
+            out.iter().map(|(_, c)| c.as_str()).collect::<Vec<_>>(),
+            ["zebra", "apple"],
+        );
+    }
+
+    #[test]
+    fn helm_file_shadow_pattern_jumps_to_root_for_file_sources() {
+        use super::{HelmAction, HelmSource, helm_file_shadow_pattern};
+        let sources = vec![HelmSource {
+            name: "Files".into(),
+            candidates: Vec::new(),
+            annotations: std::collections::HashMap::new(),
+            dynamic: Some("find-file-candidates".into()),
+            raw: false,
+            action: HelmAction::ExecuteCommand,
+            preview: None,
+        }];
+
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/Users/me/project//"),
+            Some("/".into())
+        );
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/Users/me/project//etc"),
+            Some("/etc".into())
+        );
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/Users//me//project"),
+            Some("/project".into())
+        );
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/Users/me/project/"),
+            None
+        );
+    }
+
+    #[test]
+    fn helm_file_shadow_pattern_ignores_generic_helm_sources() {
+        use super::{HelmAction, HelmSource, helm_file_shadow_pattern};
+        let sources = vec![HelmSource {
+            name: "Commands".into(),
+            candidates: Vec::new(),
+            annotations: std::collections::HashMap::new(),
+            dynamic: None,
+            raw: false,
+            action: HelmAction::ExecuteCommand,
+            preview: None,
+        }];
+
+        assert_eq!(helm_file_shadow_pattern(&sources, "foo//bar"), None);
+    }
+
+    #[test]
+    fn helm_file_accept_target_uses_typed_new_file_path() {
+        use super::{HelmAction, HelmSource, helm_file_accept_target};
+        let sources = vec![HelmSource {
+            name: "Files".into(),
+            candidates: vec!["/tmp/existing.rs".into()],
+            annotations: std::collections::HashMap::new(),
+            dynamic: Some("find-file-candidates".into()),
+            raw: false,
+            action: HelmAction::Scheme(vec![("open".into(), "open-file".into())]),
+            preview: None,
+        }];
+
+        let Some((action, target)) = helm_file_accept_target(&sources, "/tmp/new-file.rs") else {
+            panic!("new file path should be accepted");
+        };
+        assert_eq!(target, "/tmp/new-file.rs");
+        assert!(matches!(action, HelmAction::Scheme(actions) if actions[0].1 == "open-file"));
+    }
+
+    #[test]
+    fn helm_file_accept_target_keeps_existing_candidates_and_dirs_normal() {
+        use super::{HelmAction, HelmSource, helm_file_accept_target};
+        let sources = vec![HelmSource {
+            name: "Files".into(),
+            candidates: vec!["/tmp/existing.rs".into()],
+            annotations: std::collections::HashMap::new(),
+            dynamic: Some("find-file-candidates".into()),
+            raw: false,
+            action: HelmAction::Scheme(vec![("open".into(), "open-file".into())]),
+            preview: None,
+        }];
+
+        assert_eq!(
+            helm_file_accept_target(&sources, "/tmp/existing.rs").map(|(_, t)| t),
+            None
+        );
+        assert_eq!(
+            helm_file_accept_target(&sources, "/tmp/").map(|(_, t)| t),
+            None
+        );
     }
 }

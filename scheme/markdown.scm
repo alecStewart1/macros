@@ -110,17 +110,13 @@
   (set! *md-heading-signature* #f)
   (md--fontify))
 
-;; Debounced live refresh (the Org/rainbow pattern): each edit schedules a
-;; timer; only the last to fire repaints.
-(define *markdown-fontify-pending* 0)
+;; Debounced live refresh (core's make-debounce): each edit schedules a timer;
+;; only the last to fire repaints.
+(define md--fontify-debounce
+  (make-debounce "md-fontify" 200
+                 (lambda () (when (md--active?) (md--fontify)))))
 (define (md--fontify-schedule)
-  (when (md--fontify-ok?)
-    (set! *markdown-fontify-pending* (+ *markdown-fontify-pending* 1))
-    (run-with-timer 200 "md--fontify-fire")))
-(define (md--fontify-fire)
-  (when (> *markdown-fontify-pending* 0)
-    (set! *markdown-fontify-pending* (- *markdown-fontify-pending* 1)))
-  (when (and (= *markdown-fontify-pending* 0) (md--active?)) (md--fontify)))
+  (when (md--fontify-ok?) (md--fontify-debounce)))
 
 ;; On open, always repaint (the global signature may carry over from another
 ;; markdown buffer with the same heading shape); edits use the signature guard.
@@ -129,7 +125,7 @@
 
 ;; Toggle hiding of the `#` heading markers in this buffer (the
 ;; `*markdown-hide-heading-markers*` variable) and repaint.
-(define (markdown-toggle-heading-markers)
+(define-command (markdown-toggle-heading-markers)
   (set! *markdown-hide-heading-markers* (not *markdown-hide-heading-markers*))
   (md--fontify-force)
   (message (if *markdown-hide-heading-markers*
@@ -137,21 +133,21 @@
 
 ;; Toggle the larger heading font in this buffer (the
 ;; `*markdown-scale-headings*` variable) and repaint.
-(define (markdown-toggle-heading-scale)
+(define-command (markdown-toggle-heading-scale)
   (set! *markdown-scale-headings* (not *markdown-scale-headings*))
   (md--fontify-force)
   (message (if *markdown-scale-headings*
                "Headings enlarged" "Headings at body size")))
 
 ;; --- navigation -------------------------------------------------------------
-(define (md-next-heading)
+(define-command (md-next-heading)
   (let ((lines (md-lines)))
     (let loop ((n (+ (buffer-line) 1)))
       (cond ((>= n (length lines)) (message "No next heading"))
             ((md-heading-line? (nth lines n)) (goto-line n))
             (else (loop (+ n 1)))))))
 
-(define (md-previous-heading)
+(define-command (md-previous-heading)
   (let ((lines (md-lines)))
     (let loop ((n (- (buffer-line) 1)))
       (cond ((< n 0) (message "No previous heading"))
@@ -200,12 +196,9 @@
 
 ;; Per-buffer set of folded heading line numbers (mirrors org's fold state).
 (define *md-folded* '())
-(define (md--folded-get)
-  (let ((e (alist-ref *md-folded* (current-buffer)))) (if e e '())))
+(define (md--folded-get) (buffer-state-get *md-folded* '()))
 (define (md--folded-set v)
-  (set! *md-folded*
-        (cons (cons (current-buffer) v)
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *md-folded*))))
+  (set! *md-folded* (buffer-state-set *md-folded* v)))
 (define (md--folded? line) (if (member line (md--folded-get)) #t #f))
 
 ;; Re-hide every folded section from scratch (the only unfold primitive is
@@ -251,7 +244,7 @@
 (fold-register-style "md" md--fold-toggle-at-line)
 
 ;; C-c TAB — toggle the fold of the section at point.
-(define (md-fold-section)
+(define-command (md-fold-section)
   (let* ((lines (md-lines))
          (start (md-section-heading-line lines (buffer-line))))
     (if (not start)
@@ -259,7 +252,7 @@
         (md--fold-toggle-at-line start))))
 
 ;; C-c C-a — unfold every section and repaint the chevrons all-open.
-(define (md-unfold-all)
+(define-command (md-unfold-all)
   (md--folded-set '())
   (unfold-all)
   (md--refresh-fold-markers))
@@ -272,9 +265,9 @@
       (begin (insert (string-append left right))
              (goto-char (- (point) (string-length right))))))
 
-(define (md-bold)   (md-wrap-region "**" "**"))
-(define (md-italic) (md-wrap-region "*" "*"))
-(define (md-code)   (md-wrap-region "`" "`"))
+(define-command (md-bold)   (md-wrap-region "**" "**"))
+(define-command (md-italic) (md-wrap-region "*" "*"))
+(define-command (md-code)   (md-wrap-region "`" "`"))
 
 ;; --- keymap (consulted for buffers in markdown-mode) ------------------------
 (define-key "markdown" "ctrl-c ctrl-n" 'md-next-heading)
@@ -285,12 +278,3 @@
 (define-key "markdown" "ctrl-c i" 'md-italic)
 (define-key "markdown" "ctrl-c e" 'md-code)
 
-(register-command 'md-next-heading)
-(register-command 'md-previous-heading)
-(register-command 'md-fold-section)
-(register-command 'md-unfold-all)
-(register-command 'md-bold)
-(register-command 'md-italic)
-(register-command 'md-code)
-(register-command 'markdown-toggle-heading-markers)
-(register-command 'markdown-toggle-heading-scale)

@@ -89,7 +89,7 @@
               (define-key "diff-mode" "q" 'kill-buffer))))))
 
 ;; M-x ediff: prompt for the two files in turn.
-(define (ediff)
+(define-command (ediff)
   (read-file-name "diff file A: " 'ediff--got-a))
 (define (ediff--got-a a)
   (set! *ediff-tmp-a* a)
@@ -98,15 +98,13 @@
   (ediff-render *ediff-tmp-a* b))
 
 ;; M-x ediff-current-with: diff the file in the current buffer against another.
-(define (ediff-current-with)
+(define-command (ediff-current-with)
   (let ((cur (current-buffer)))
     (if (file-exists? cur)
         (begin (set! *ediff-tmp-a* cur)
                (read-file-name "diff against: " 'ediff--got-b))
         (message "ediff: current buffer is not a file"))))
 
-(register-command 'ediff)
-(register-command 'ediff-current-with)
 
 ;; ============================================================================
 ;; ediff-buffers — interactive merge between two OPEN buffers (Emacs
@@ -201,21 +199,21 @@
             ((<= (car (car hl)) line) (loop (cdr hl) (cdr (car hl))))
             (else best)))))
 
-(define (ediff-next-hunk)
+(define-command (ediff-next-hunk)
   (let ((line (buffer-line)))
     (let loop ((hl *ediff-hunk-lines*))
       (cond ((null? hl) (message "No next hunk"))
             ((> (car (car hl)) line) (goto-line (car (car hl))))
             (else (loop (cdr hl)))))))
 
-(define (ediff-prev-hunk)
+(define-command (ediff-prev-hunk)
   (let ((line (buffer-line)))
     (let loop ((hl (reverse *ediff-hunk-lines*)))
       (cond ((null? hl) (message "No previous hunk"))
             ((< (car (car hl)) line) (goto-line (car (car hl))))
             (else (loop (cdr hl)))))))
 
-(define (ediff-copy-a->b)
+(define-command (ediff-copy-a->b)
   (let ((i (ediff--hunk-at-point)))
     (if (< i 0)
         (message "No hunk at point")
@@ -224,7 +222,7 @@
                              *ediff-b* (nth h 3) (nth h 4))
           (ediff--refresh)))))
 
-(define (ediff-copy-b->a)
+(define-command (ediff-copy-b->a)
   (let ((i (ediff--hunk-at-point)))
     (if (< i 0)
         (message "No hunk at point")
@@ -246,7 +244,7 @@
       (diff-buffers *ediff-a* *ediff-b* 'ediff--on-hunks)
       (message "ediff: pick two buffers first")))
 
-(define (ediff-buffers)
+(define-command (ediff-buffers)
   (completing-read "ediff buffer A: " (buffer-names) 'ediff--pick-a))
 (define (ediff--pick-a a)
   (set! *ediff-a* a)
@@ -255,8 +253,3 @@
   (set! *ediff-b* b)
   (ediff--refresh))
 
-(register-command 'ediff-buffers)
-(register-command 'ediff-next-hunk)
-(register-command 'ediff-prev-hunk)
-(register-command 'ediff-copy-a->b)
-(register-command 'ediff-copy-b->a)

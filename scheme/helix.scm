@@ -19,16 +19,8 @@
 ;; come from a pre-command snapshot, so a command computes every new position up
 ;; front, then queues one `set-selections`.
 
-;; --- small list / string helpers (self-contained) --------------------------
-;; Insertion sort (Steel has no guaranteed `sort`); stable enough for the small
-;; selection lists we sort by position.
-(define (helix-insert-sorted x lst less?)
-  (cond ((null? lst) (list x))
-        ((less? x (car lst)) (cons x lst))
-        (else (cons (car lst) (helix-insert-sorted x (cdr lst) less?)))))
-(define (helix-sort lst less?)
-  (if (null? lst) '()
-      (helix-insert-sorted (car lst) (helix-sort (cdr lst) less?) less?)))
+;; Sort the small selection lists by position (core's keyed `sort-by`).
+(define (helix-sort lst less?) (sort-by (lambda (x) x) less? lst))
 
 ;; --- selection plumbing ----------------------------------------------------
 ;; `(selections)` → flat (a0 h0 a1 h1 …). Chunk it into ((a0 . h0) (a1 . h1) …).
@@ -265,30 +257,18 @@
 
 ;; Vim motion shared by every special buffer: j/k by default (single `g` is
 ;; refresh in several modes, so a `g g` here would shadow it — left to each
-;; mode's own overlay). n/p keep working from the base keymap.
+;; mode's own overlay). n/p keep working from the base keymap. The binding set
+;; itself is evil.scm's, parameterized over the overlay prefix.
 (define (helix-collection-bind-mode mode)
-  (let ((km (string-append "helix-normal:" mode)))
-    (define-key km "j" 'next-line)
-    (define-key km "k" 'previous-line)))
+  (modal-collection-bind-mode "helix-normal:" mode))
 (for-each helix-collection-bind-mode *evil-collection-modes*)
 
 ;; Plain-text result buffers (compile / grep / occur) are read-only text you
-;; scroll like a file, so they get the full read-only motion set (matches
-;; evil-collection-bind-readonly-motion). `g g` is left off so single `g` stays
-;; free for each mode's own key; jump to the top with C-u or k.
+;; scroll like a file, so they get the full read-only motion set — the same
+;; evil.scm binding set, on the helix overlay prefix. `g g` is left off so
+;; single `g` stays free for each mode's own key; jump to the top with C-u or k.
 (define (helix-collection-bind-readonly-motion mode)
-  (let ((km (string-append "helix-normal:" mode)))
-    (define-key km "h" 'backward-char)
-    (define-key km "l" 'forward-char)
-    (define-key km "w" 'forward-word-start)
-    (define-key km "b" 'backward-word)
-    (define-key km "e" 'evil-forward-word-end)
-    (define-key km "0" 'move-beginning-of-line)
-    (define-key km "$" 'move-end-of-line)
-    (define-key km "^" 'evil-first-non-blank)
-    (define-key km "shift-g" 'evil-goto-last-line)
-    (define-key km "ctrl-d" 'evil-scroll-down)
-    (define-key km "ctrl-u" 'evil-scroll-up)))
+  (modal-collection-bind-readonly-motion "helix-normal:" mode))
 (for-each helix-collection-bind-readonly-motion
           (list "compile-mode" "grep-mode" "occur-mode"))
 

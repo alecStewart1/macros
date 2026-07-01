@@ -19,7 +19,7 @@ impl Editor {
     /// run once and the argument is discarded. Every command — from a key, a
     /// script, or an OS-special action — flows through here.
     pub(super) fn apply_command(&mut self, command: EditorCommand, cx: &mut Context<Self>) {
-        match self.prefix_arg.take() {
+        match self.uarg.pending.take() {
             Some(n) if n > 1 && is_repeatable(&command) => {
                 self.status = SharedString::default();
                 self.begin_undo_group();
@@ -108,11 +108,11 @@ impl Editor {
         use EditorCommand::*;
         match command {
             ForwardChar => {
-                let o = self.buffer.next_grapheme(self.point());
+                let o = self.active.buffer.next_grapheme(self.point());
                 self.goto(o, cx);
             }
             BackwardChar => {
-                let o = self.buffer.prev_grapheme(self.point());
+                let o = self.active.buffer.prev_grapheme(self.point());
                 self.goto(o, cx);
             }
             NextLine => {
@@ -124,56 +124,56 @@ impl Editor {
                 self.goto(o, cx);
             }
             ForwardWord => {
-                let o = self.buffer.forward_word(self.point());
+                let o = self.active.buffer.forward_word(self.point());
                 self.goto(o, cx);
             }
             ForwardWordStart => {
-                let o = self.buffer.forward_word_start(self.point());
+                let o = self.active.buffer.forward_word_start(self.point());
                 self.goto(o, cx);
             }
             BackwardWord => {
-                let o = self.buffer.backward_word(self.point());
+                let o = self.active.buffer.backward_word(self.point());
                 self.goto(o, cx);
             }
             BeginningOfLine => {
-                let o = self.buffer.line_range_at(self.point()).start;
+                let o = self.active.buffer.line_range_at(self.point()).start;
                 self.goto(o, cx);
             }
             EndOfLine => {
-                let o = self.buffer.line_range_at(self.point()).end;
+                let o = self.active.buffer.line_range_at(self.point()).end;
                 self.goto(o, cx);
             }
             BeginningOfBuffer => self.goto(0, cx),
             EndOfBuffer => {
-                let o = self.buffer.len();
+                let o = self.active.buffer.len();
                 self.goto(o, cx);
             }
             ExtendBackwardChar => {
-                let o = self.buffer.prev_grapheme(self.point());
+                let o = self.active.buffer.prev_grapheme(self.point());
                 self.select_to(o, cx);
             }
             ExtendForwardChar => {
-                let o = self.buffer.next_grapheme(self.point());
+                let o = self.active.buffer.next_grapheme(self.point());
                 self.select_to(o, cx);
             }
             SetMark => self.set_mark(cx),
             ExchangePointAndMark => self.exchange_point_and_mark(cx),
             MarkWholeBuffer => self.mark_whole_buffer(cx),
             GotoLine(n) => {
-                let last = self.buffer.line_count().saturating_sub(1);
-                let offset = self.buffer.line_range(n.min(last)).start;
+                let last = self.active.buffer.line_count().saturating_sub(1);
+                let offset = self.active.buffer.line_range(n.min(last)).start;
                 self.move_to(offset, cx);
             }
             ScrollCursorToRow(row) => self.scroll_cursor_to_row(row, cx),
             GotoChar(n) => {
-                let offset = n.min(self.buffer.len());
+                let offset = n.min(self.active.buffer.len());
                 self.move_to(offset, cx);
             }
             SetRegion { start, end } => {
-                let len = self.buffer.len();
-                self.mark_active = true;
-                self.selected_range = start.min(len)..end.min(len);
-                self.selection_reversed = false;
+                let len = self.active.buffer.len();
+                self.active.mark_active = true;
+                self.active.selected_range = start.min(len)..end.min(len);
+                self.active.selection_reversed = false;
                 self.ensure_cursor_visible();
                 cx.notify();
             }
@@ -236,18 +236,13 @@ impl Editor {
             ScrollDown => self.scroll_page(-1, cx),
             Recenter => self.recenter(cx),
             SetLineIcon(line, col, name) => {
-                let icons = match self.render_redirect {
-                    Some(i) => &mut self.inactive[i].line_icons,
-                    None => &mut self.line_icons,
-                };
-                icons.insert(line, (col, SharedString::from(name)));
+                self.redirect_target()
+                    .line_icons
+                    .insert(line, (col, SharedString::from(name)));
                 cx.notify();
             }
             ClearLineIcons => {
-                match self.render_redirect {
-                    Some(i) => self.inactive[i].line_icons.clear(),
-                    None => self.line_icons.clear(),
-                }
+                self.redirect_target().line_icons.clear();
                 cx.notify();
             }
             SetLineImage {
@@ -256,17 +251,19 @@ impl Editor {
                 max_width,
             } => self.set_line_image(line, path, max_width, cx),
             ClearLineImages => {
-                if !self.line_images.is_empty() {
-                    self.line_images.clear();
-                    self.ensure_cursor_visible();
+                let redirected = self.render_redirect.is_some();
+                let images = self.redirect_target().line_images;
+                if !images.is_empty() {
+                    images.clear();
+                    // Only the active buffer's rows moved under the cursor.
+                    if !redirected {
+                        self.ensure_cursor_visible();
+                    }
                     cx.notify();
                 }
             }
             SetLineIndent { line, cols } => {
-                let indents = match self.render_redirect {
-                    Some(i) => &mut self.inactive[i].overlays.indents,
-                    None => &mut self.overlays.indents,
-                };
+                let indents = &mut self.redirect_target().overlays.indents;
                 if cols == 0 {
                     indents.remove(&line);
                 } else {
@@ -275,33 +272,32 @@ impl Editor {
                 cx.notify();
             }
             ClearLineIndents => {
-                let indents = match self.render_redirect {
-                    Some(i) => &mut self.inactive[i].overlays.indents,
-                    None => &mut self.overlays.indents,
-                };
+                let indents = &mut self.redirect_target().overlays.indents;
                 if !indents.is_empty() {
                     indents.clear();
                     cx.notify();
                 }
             }
             SetLineScale { line, scale } => {
+                let scales = &mut self.redirect_target().overlays.scales;
                 if scale <= 1.0 {
-                    self.overlays.scales.remove(&line);
+                    scales.remove(&line);
                 } else {
-                    self.overlays.scales.insert(line, scale);
+                    scales.insert(line, scale);
                 }
                 cx.notify();
             }
             ClearLineScales => {
-                if !self.overlays.scales.is_empty() {
-                    self.overlays.scales.clear();
+                let scales = &mut self.redirect_target().overlays.scales;
+                if !scales.is_empty() {
+                    scales.clear();
                     cx.notify();
                 }
             }
             ToggleLineNumbers => {
                 // Toggle for the current buffer's major mode, so it mirrors
                 // Emacs's per-mode `display-line-numbers-mode`.
-                let major = self.modes.names().last().map(|s| s.to_string());
+                let major = self.active.modes.names().last().map(|s| s.to_string());
                 let key = match &major {
                     Some(m) => format!("line-numbers:{m}"),
                     None => "line-numbers".to_string(),
@@ -318,7 +314,7 @@ impl Editor {
             ToggleWordWrap => {
                 // Toggle for the current buffer's major mode, mirroring Emacs's
                 // per-mode `visual-line-mode`.
-                let major = self.modes.names().last().map(|s| s.to_string());
+                let major = self.active.modes.names().last().map(|s| s.to_string());
                 let key = match &major {
                     Some(m) => format!("word-wrap:{m}"),
                     None => "word-wrap".to_string(),
@@ -331,7 +327,7 @@ impl Editor {
                 self.toggle_setting(key, on, "Word wrap", cx);
             }
             ToggleGitGutter => {
-                let on = cx.global::<crate::settings::Settings>().git_gutter();
+                let on = cx.global::<crate::settings::Settings>().magit_gutter();
                 self.toggle_setting("magit-gutter", on, "Git gutter", cx);
                 self.refresh_git_gutter(cx);
             }
@@ -390,9 +386,9 @@ impl Editor {
                     new_mode = new_mode.with_language(&mode);
                 }
                 modes.push(new_mode);
-                self.modes = modes;
+                self.active.modes = modes;
                 if let Some(h) = language_highlighter {
-                    self.highlighter = Some(h);
+                    self.active.highlighter = Some(h);
                     self.parse_full();
                 } else if mode == "anvil-repl-mode" {
                     // The ANVIL REPL displays Scheme, so highlight it in place — no
@@ -406,7 +402,7 @@ impl Editor {
                     // `;; =>` scrollback isn't a program). The REPL introspects its
                     // live image instead (completion, doc, apropos — see
                     // steel-anvil).
-                    self.highlighter = Highlighter::scheme();
+                    self.active.highlighter = Highlighter::scheme();
                     self.parse_full();
                 }
                 // Entering a mode runs its hooks (Emacs `run-mode-hooks`): a user's
@@ -414,7 +410,7 @@ impl Editor {
                 // by file detection or `M-x rust-mode`, and `enable-lsp` brings up
                 // the server for the now-active language. Idempotent — re-running
                 // `fundamental`'s hooks is a no-op when nothing changed.
-                self.hooks_ran = false;
+                self.active.hooks_ran = false;
                 self.run_mode_hooks_once(cx);
                 cx.notify();
             }
@@ -433,27 +429,22 @@ impl Editor {
             WatchDirectories(owner, dirs) => {
                 let dirs: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
                 if dirs.is_empty() {
-                    self.fs_watch_owners.remove(&owner);
+                    self.fs.owners.remove(&owner);
                 } else {
-                    self.fs_watch_owners.insert(owner, dirs);
+                    self.fs.owners.insert(owner, dirs);
                 }
                 // Rebuild the flattened membership set, then sync the watcher.
-                self.fs_watch_dirs = self.fs_watch_owners.values().flatten().cloned().collect();
+                self.fs.dirs = self.fs.owners.values().flatten().cloned().collect();
                 self.reconcile_watches(cx);
             }
             WatchTree(owner, dirs) => {
                 let dirs: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
                 if dirs.is_empty() {
-                    self.fs_watch_tree_owners.remove(&owner);
+                    self.fs.tree_owners.remove(&owner);
                 } else {
-                    self.fs_watch_tree_owners.insert(owner, dirs);
+                    self.fs.tree_owners.insert(owner, dirs);
                 }
-                self.fs_watch_trees = self
-                    .fs_watch_tree_owners
-                    .values()
-                    .flatten()
-                    .cloned()
-                    .collect();
+                self.fs.trees = self.fs.tree_owners.values().flatten().cloned().collect();
                 self.reconcile_watches(cx);
             }
             RenderBuffer {
@@ -487,7 +478,7 @@ impl Editor {
             } => self.buffer_highlight_lines(&name, start, end, face, cx),
             BufferClearHighlights { name } => self.buffer_clear_highlights(&name, cx),
             BufferLocalSet { key, value } => {
-                self.locals.insert(key, value);
+                self.active.locals.insert(key, value);
             }
             ReadFileName { prompt, callback } => {
                 let initial = self.default_directory_input();
@@ -709,31 +700,26 @@ impl Editor {
     ) -> Result<(), EditorCommand> {
         use EditorCommand::*;
         match command {
-            OverlayFace { start, end, face } => match self.render_redirect {
-                Some(i) => {
-                    let len = self.inactive[i].buffer.len();
-                    let (start, end) = (start.min(len), end.min(len));
-                    if start < end {
-                        self.inactive[i]
-                            .overlays
-                            .faces
-                            .push((start..end, SharedString::from(face)));
-                        cx.notify();
-                    }
+            OverlayFace { start, end, face } => {
+                let t = self.redirect_target();
+                let len = t.buffer.len();
+                let (start, end) = (start.min(len), end.min(len));
+                if start < end {
+                    t.overlays
+                        .faces
+                        .push((start..end, SharedString::from(face)));
+                    cx.notify();
                 }
-                None => self.overlay_set_face(start, end, face, cx),
-            },
-            OverlayHide { start, end } => match self.render_redirect {
-                Some(i) => {
-                    let len = self.inactive[i].buffer.len();
-                    let (start, end) = (start.min(len), end.min(len));
-                    if start < end {
-                        self.inactive[i].overlays.hidden.push(start..end);
-                        cx.notify();
-                    }
+            }
+            OverlayHide { start, end } => {
+                let t = self.redirect_target();
+                let len = t.buffer.len();
+                let (start, end) = (start.min(len), end.min(len));
+                if start < end {
+                    t.overlays.hidden.push(start..end);
+                    cx.notify();
                 }
-                None => self.overlay_hide(start, end, cx),
-            },
+            }
             FoldLines {
                 start_line,
                 end_line,
@@ -741,34 +727,30 @@ impl Editor {
             UnfoldAll => self.overlay_unfold_all(cx),
             SetFoldMarker { line, open } => self.overlay_set_fold_marker(line, open, cx),
             ClearFoldMarkers => self.overlay_clear_fold_markers(cx),
-            ClearOverlays => match self.render_redirect {
-                Some(i) => {
-                    self.inactive[i].overlays = Overlays::default();
-                    cx.notify();
+            ClearOverlays => {
+                let redirected = self.render_redirect.is_some();
+                *self.redirect_target().overlays = Overlays::default();
+                // Only the active buffer's folds/rows moved under the cursor.
+                if !redirected {
+                    self.ensure_cursor_visible();
                 }
-                None => self.overlay_clear(cx),
-            },
+                cx.notify();
+            }
             ClearOverlayFaces => {
                 // Faces only — NOT hides. Several features (rainbow-delimiters,
                 // LSP highlight) repaint their faces on every edit via this; if
                 // it also cleared hides it would wipe another feature's
                 // concealment (e.g. markdown/org heading markers). Clear hides
                 // with `clear-overlay-hides`.
-                match self.render_redirect {
-                    Some(i) => self.inactive[i].overlays.faces.clear(),
-                    None => self.overlays.faces.clear(),
-                }
+                self.redirect_target().overlays.faces.clear();
                 cx.notify();
             }
             ClearOverlayHides => {
-                match self.render_redirect {
-                    Some(i) => self.inactive[i].overlays.hidden.clear(),
-                    None => self.overlays.hidden.clear(),
-                }
+                self.redirect_target().overlays.hidden.clear();
                 cx.notify();
             }
             ClearLineSuffixes => {
-                self.overlays.suffixes.clear();
+                self.redirect_target().overlays.suffixes.clear();
                 cx.notify();
             }
             PutTextProperty {
@@ -780,7 +762,8 @@ impl Editor {
                 self.put_text_property(start, end, key, value);
             }
             SetLineSuffix { line, text, face } => {
-                self.overlays
+                self.redirect_target()
+                    .overlays
                     .suffixes
                     .insert(line, (text.into(), face.into()));
                 cx.notify();
@@ -815,13 +798,13 @@ impl Editor {
             AnvilInterrupt => self.anvil.interrupt(),
             AnvilReset => self.anvil.reset(),
             AnvilEvalDefun => {
-                let text = self.buffer.full_text();
+                let text = self.active.buffer.full_text();
                 match top_level_form_at(&text, self.point()) {
                     Some(r) => self.anvil.eval(text[r].trim(), "anvil-on-result-echo"),
                     None => self.echo("anvil: no top-level form at point", cx),
                 }
             }
-            AnvilLoadFile => match &self.active_path {
+            AnvilLoadFile => match &self.active.path {
                 Some(path) => {
                     // `{:?}` renders a quoted, escaped Scheme string literal.
                     let form = format!("(load {:?})", path.to_string_lossy());
@@ -830,7 +813,7 @@ impl Editor {
                 None => self.echo("anvil: buffer is not visiting a file", cx),
             },
             AnvilDoc => {
-                let text = self.buffer.full_text();
+                let text = self.active.buffer.full_text();
                 match symbol_at(&text, self.point()) {
                     Some(sym) => self
                         .anvil
@@ -839,7 +822,7 @@ impl Editor {
                 }
             }
             AnvilMacroexpand => {
-                let text = self.buffer.full_text();
+                let text = self.active.buffer.full_text();
                 let form = match self.region() {
                     Some(r) => text.get(r).map(str::to_string),
                     None => top_level_form_at(&text, self.point()).map(|r| text[r].to_string()),
@@ -857,7 +840,7 @@ impl Editor {
                 "anvil-on-describe",
             ),
             AnvilSignature => {
-                let text = self.buffer.full_text();
+                let text = self.active.buffer.full_text();
                 match symbol_at(&text, self.point()) {
                     Some(sym) => self
                         .anvil
@@ -971,15 +954,15 @@ impl Editor {
                 let mut modes = ModeStack::default();
                 modes.push(Mode::new("fundamental"));
                 modes.push(Mode::new("macros-steel").with_language("macros-scheme"));
-                self.modes = modes;
+                self.active.modes = modes;
                 // `macros-scheme` has no grammar of its own; it shares Scheme's,
                 // exactly as `make_document` wires it for auto-detected files.
-                self.highlighter = Highlighter::scheme();
+                self.active.highlighter = Highlighter::scheme();
                 self.parse_full();
                 // Re-run mode hooks so the `fundamental` `enable-lsp` hook brings
                 // up the `macros-scheme` server for the now-active language
                 // (idempotent: `maybe_start_lsp` skips an already-running server).
-                self.hooks_ran = false;
+                self.active.hooks_ran = false;
                 self.run_mode_hooks_once(cx);
                 self.echo("Entered macros-steel mode".to_string(), cx);
                 cx.notify();
@@ -1012,7 +995,7 @@ impl Editor {
                 self.open_minibuffer("Eval: ", MinibufferPurpose::EvalExpression, "", cx);
             }
             EvalBuffer => {
-                let source = self.buffer.full_text();
+                let source = self.active.buffer.full_text();
                 self.eval_interactive(&source, cx);
             }
             EvalLastSexp => {
@@ -1020,11 +1003,11 @@ impl Editor {
                 // top-to-bottom) like Emacs `eval-region`; otherwise fall back to
                 // the single sexp before point (`eval-last-sexp`).
                 if let Some(region) = self.region() {
-                    let source = self.buffer.slice_to_string(region);
+                    let source = self.active.buffer.slice_to_string(region);
                     self.eval_interactive(&source, cx);
                 } else {
                     let point = self.point();
-                    let text = self.buffer.slice_to_string(0..point);
+                    let text = self.active.buffer.slice_to_string(0..point);
                     match last_sexp(&text) {
                         Some(range) => {
                             let source = text[range].to_string();

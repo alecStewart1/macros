@@ -50,46 +50,14 @@ fn manifest_url() -> String {
 /// Stable per-`(os, arch)` key. Doubles as the manifest `downloads` key and the
 /// artifact-name infix (`Macros-<key>-<version>.zip`).
 pub fn platform_key() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "macos-aarch64"
-    }
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        "macos-x86_64"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    {
-        "windows-x86_64"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    {
-        "windows-aarch64"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "linux-x86_64"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        "linux-aarch64"
-    }
-    #[cfg(not(any(
-        all(
-            target_os = "macos",
-            any(target_arch = "aarch64", target_arch = "x86_64")
-        ),
-        all(
-            target_os = "windows",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-    )))]
-    {
-        "unknown"
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "macos-aarch64",
+        ("macos", "x86_64") => "macos-x86_64",
+        ("windows", "x86_64") => "windows-x86_64",
+        ("windows", "aarch64") => "windows-aarch64",
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        _ => "unknown",
     }
 }
 

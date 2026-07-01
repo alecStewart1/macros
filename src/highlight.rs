@@ -60,43 +60,314 @@ pub fn face_name(face: usize) -> &'static str {
     FACE_NAMES.get(face).copied().unwrap_or("variable")
 }
 
-/// Every language id with a bundled grammar in [`grammar`]. The canonical list:
-/// the grammar-load tests iterate it, and Scheme reads it via `(bundled-languages)`
-/// to generate an `<id>-mode` M-x command per language (see language-modes.scm).
-/// Keep in sync with the `grammar` match arms.
-pub const BUNDLED_LANGUAGES: &[&str] = &[
-    "scheme",
-    "rust",
-    "python",
-    "javascript",
-    "json",
-    "c",
-    "cpp",
-    "go",
-    "html",
-    "css",
-    "bash",
-    "typescript",
-    "tsx",
-    "java",
-    "ruby",
-    "lua",
-    "yaml",
-    "toml",
-    "markdown",
-    "zig",
-    "r",
-    "ocaml",
-    "haskell",
-    "scala",
-    "clojure",
-    "sql",
-    "elixir",
-    "latex",
-    "typst",
-    "mermaid",
-    "racket",
+/// Everything bundled for one language, in one place: the grammar, its
+/// highlight query, its optional indent query, the file extensions that map to
+/// it, and the fenced-code-block tags that inject it. All the per-language
+/// lookups ([`BUNDLED_LANGUAGES`], [`grammar`], [`indent_query`],
+/// [`injection_lang_id`], [`language_for_extension`]) derive from this table,
+/// so adding a language is a single entry here (plus its grammar crate in
+/// Cargo.toml).
+struct LangSpec {
+    id: &'static str,
+    language: LanguageFn,
+    highlights: &'static str,
+    /// Structural-indent query (`indents.scm`), or `None` to fall back to
+    /// copy-previous-line indentation (Lisps use a dedicated aligner instead).
+    indent: Option<&'static str>,
+    /// File extensions that open in this language (case-sensitive, no dot).
+    extensions: &'static [&'static str],
+    /// Fenced-block info-string tags (lowercased) that inject this language
+    /// into markdown. Empty for languages that are never injected (markdown
+    /// itself is excluded so a nested ```markdown block can't recurse).
+    injection_tags: &'static [&'static str],
+}
+
+const LANGUAGES: &[LangSpec] = &[
+    LangSpec {
+        id: "scheme",
+        // A Steel-aware highlights query (richer than the crate's stock R7RS
+        // `HIGHLIGHTS_QUERY`, which left most Steel code uncolored).
+        language: tree_sitter_scheme::LANGUAGE,
+        highlights: include_str!("../grammars/queries/scheme.scm"),
+        indent: None,
+        extensions: &["scm", "ss", "sld", "sls", "steel"],
+        injection_tags: &["scheme", "scm", "lisp"],
+    },
+    LangSpec {
+        id: "rust",
+        language: tree_sitter_rust::LANGUAGE,
+        highlights: tree_sitter_rust::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/rust.scm")),
+        extensions: &["rs"],
+        injection_tags: &["rust", "rs"],
+    },
+    LangSpec {
+        id: "python",
+        language: tree_sitter_python::LANGUAGE,
+        highlights: tree_sitter_python::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/python.scm")),
+        extensions: &["py", "pyi"],
+        injection_tags: &["python", "py"],
+    },
+    LangSpec {
+        id: "javascript",
+        language: tree_sitter_javascript::LANGUAGE,
+        highlights: tree_sitter_javascript::HIGHLIGHT_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/javascript.scm")),
+        extensions: &["js", "jsx", "mjs", "cjs"],
+        injection_tags: &["javascript", "js", "jsx", "mjs"],
+    },
+    LangSpec {
+        id: "json",
+        language: tree_sitter_json::LANGUAGE,
+        highlights: tree_sitter_json::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/json.scm")),
+        extensions: &["json"],
+        injection_tags: &["json"],
+    },
+    LangSpec {
+        id: "c",
+        language: tree_sitter_c::LANGUAGE,
+        highlights: tree_sitter_c::HIGHLIGHT_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/c.scm")),
+        extensions: &["c", "h"],
+        injection_tags: &["c", "h"],
+    },
+    LangSpec {
+        id: "cpp",
+        language: tree_sitter_cpp::LANGUAGE,
+        highlights: tree_sitter_cpp::HIGHLIGHT_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/cpp.scm")),
+        extensions: &["cc", "cpp", "cxx", "hpp", "hh", "hxx"],
+        injection_tags: &["cpp", "c++", "cc", "cxx", "hpp"],
+    },
+    LangSpec {
+        id: "go",
+        language: tree_sitter_go::LANGUAGE,
+        highlights: tree_sitter_go::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/go.scm")),
+        extensions: &["go"],
+        injection_tags: &["go"],
+    },
+    LangSpec {
+        id: "html",
+        language: tree_sitter_html::LANGUAGE,
+        highlights: tree_sitter_html::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/html.scm")),
+        extensions: &["html", "htm"],
+        injection_tags: &["html"],
+    },
+    LangSpec {
+        id: "css",
+        language: tree_sitter_css::LANGUAGE,
+        highlights: tree_sitter_css::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/css.scm")),
+        extensions: &["css"],
+        injection_tags: &["css"],
+    },
+    LangSpec {
+        id: "bash",
+        language: tree_sitter_bash::LANGUAGE,
+        highlights: tree_sitter_bash::HIGHLIGHT_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/bash.scm")),
+        extensions: &["sh", "bash", "zsh"],
+        injection_tags: &["bash", "sh", "shell", "zsh", "console"],
+    },
+    LangSpec {
+        id: "typescript",
+        language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+        highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/typescript.scm")),
+        extensions: &["ts"],
+        injection_tags: &["typescript", "ts"],
+    },
+    LangSpec {
+        id: "tsx",
+        language: tree_sitter_typescript::LANGUAGE_TSX,
+        highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/tsx.scm")),
+        extensions: &["tsx"],
+        injection_tags: &["tsx"],
+    },
+    LangSpec {
+        id: "java",
+        language: tree_sitter_java::LANGUAGE,
+        highlights: tree_sitter_java::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/java.scm")),
+        extensions: &["java"],
+        injection_tags: &["java"],
+    },
+    LangSpec {
+        id: "ruby",
+        language: tree_sitter_ruby::LANGUAGE,
+        highlights: tree_sitter_ruby::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/ruby.scm")),
+        extensions: &["rb"],
+        injection_tags: &["ruby", "rb"],
+    },
+    LangSpec {
+        id: "lua",
+        language: tree_sitter_lua::LANGUAGE,
+        highlights: tree_sitter_lua::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/lua.scm")),
+        extensions: &["lua"],
+        injection_tags: &["lua"],
+    },
+    LangSpec {
+        id: "yaml",
+        language: tree_sitter_yaml::LANGUAGE,
+        highlights: tree_sitter_yaml::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/yaml.scm")),
+        extensions: &["yaml", "yml"],
+        injection_tags: &["yaml", "yml"],
+    },
+    LangSpec {
+        id: "toml",
+        language: tree_sitter_toml_ng::LANGUAGE,
+        highlights: tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+        indent: None,
+        extensions: &["toml"],
+        injection_tags: &["toml"],
+    },
+    LangSpec {
+        id: "markdown",
+        // Markdown is a split block/inline grammar; we highlight block structure
+        // (headings, code fences, lists) with the block parser.
+        language: tree_sitter_md::LANGUAGE,
+        highlights: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        indent: None,
+        extensions: &["md", "markdown"],
+        injection_tags: &[],
+    },
+    LangSpec {
+        id: "zig",
+        language: tree_sitter_zig::LANGUAGE,
+        highlights: tree_sitter_zig::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/zig.scm")),
+        extensions: &["zig"],
+        injection_tags: &["zig"],
+    },
+    LangSpec {
+        id: "r",
+        language: tree_sitter_r::LANGUAGE,
+        highlights: tree_sitter_r::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/r.scm")),
+        extensions: &["r", "R"],
+        injection_tags: &["r"],
+    },
+    LangSpec {
+        id: "ocaml",
+        language: tree_sitter_ocaml::LANGUAGE_OCAML,
+        highlights: tree_sitter_ocaml::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/ocaml.scm")),
+        extensions: &["ml", "mli"],
+        injection_tags: &["ocaml", "ml"],
+    },
+    LangSpec {
+        id: "haskell",
+        language: tree_sitter_haskell::LANGUAGE,
+        highlights: tree_sitter_haskell::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/haskell.scm")),
+        extensions: &["hs"],
+        injection_tags: &["haskell", "hs"],
+    },
+    LangSpec {
+        id: "scala",
+        language: tree_sitter_scala::LANGUAGE,
+        highlights: tree_sitter_scala::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/scala.scm")),
+        extensions: &["scala", "sc", "sbt"],
+        injection_tags: &["scala", "sc"],
+    },
+    LangSpec {
+        id: "clojure",
+        language: tree_sitter_clojure_orchard::LANGUAGE,
+        highlights: tree_sitter_clojure_orchard::HIGHLIGHTS_QUERY,
+        indent: None,
+        extensions: &["clj", "cljs", "cljc", "edn"],
+        injection_tags: &["clojure", "clj", "cljs", "cljc", "edn"],
+    },
+    LangSpec {
+        id: "sql",
+        language: tree_sitter_sequel::LANGUAGE,
+        highlights: tree_sitter_sequel::HIGHLIGHTS_QUERY,
+        indent: None,
+        extensions: &["sql"],
+        injection_tags: &["sql"],
+    },
+    LangSpec {
+        id: "elixir",
+        language: tree_sitter_elixir::LANGUAGE,
+        highlights: tree_sitter_elixir::HIGHLIGHTS_QUERY,
+        indent: Some(include_str!("../grammars/queries/indents/elixir.scm")),
+        extensions: &["ex", "exs"],
+        injection_tags: &["elixir", "ex", "exs"],
+    },
+    // LaTeX, Typst, and Mermaid bundle no highlights query with the parser,
+    // so we vendor nvim-treesitter's under `grammars/queries/`. (LaTeX/Typst
+    // parsers come from the `codebook-*` crates; Mermaid from build.rs.)
+    LangSpec {
+        id: "latex",
+        language: codebook_tree_sitter_latex::LANGUAGE,
+        highlights: include_str!("../grammars/queries/latex.scm"),
+        indent: None,
+        extensions: &["tex", "sty", "cls"],
+        injection_tags: &[],
+    },
+    LangSpec {
+        id: "typst",
+        language: codebook_tree_sitter_typst::LANGUAGE,
+        highlights: include_str!("../grammars/queries/typst.scm"),
+        indent: None,
+        extensions: &["typ"],
+        injection_tags: &[],
+    },
+    LangSpec {
+        id: "mermaid",
+        language: mermaid::LANGUAGE,
+        highlights: include_str!("../grammars/queries/mermaid.scm"),
+        indent: None,
+        extensions: &["mmd", "mermaid"],
+        injection_tags: &[],
+    },
+    // Racket has its own grammar (`.rkt`); Steel/Scheme files still use the
+    // `scheme` grammar above. Query mirrors scheme.scm's classic-Lisp style.
+    LangSpec {
+        id: "racket",
+        language: racket::LANGUAGE,
+        highlights: include_str!("../grammars/queries/racket.scm"),
+        indent: None,
+        extensions: &["rkt"],
+        injection_tags: &["racket", "rkt"],
+    },
 ];
+
+/// The ids in [`LANGUAGES`], as a const array so [`BUNDLED_LANGUAGES`] keeps
+/// its `&[&str]` shape without a second hand-maintained list.
+const fn bundled_ids() -> [&'static str; LANGUAGES.len()] {
+    let mut out = [""; LANGUAGES.len()];
+    let mut i = 0;
+    while i < LANGUAGES.len() {
+        out[i] = LANGUAGES[i].id;
+        i += 1;
+    }
+    out
+}
+
+/// Every language id with a bundled grammar — derived from [`LANGUAGES`]. The
+/// grammar-load tests iterate it, and Scheme reads it via `(bundled-languages)`
+/// to generate an `<id>-mode` M-x command per language (see language-modes.scm).
+pub const BUNDLED_LANGUAGES: &[&str] = &bundled_ids();
+
+/// The bundled language claiming file extension `ext` (case-sensitive, no
+/// dot), if any. The extension side of `language_for_path`, which also
+/// consults the runtime-installed grammar registry on a miss.
+pub fn language_for_extension(ext: &str) -> Option<&'static str> {
+    LANGUAGES
+        .iter()
+        .find(|spec| spec.extensions.contains(&ext))
+        .map(|spec| spec.id)
+}
 
 /// A contiguous run of source bytes and the face (if any) to draw it with.
 pub struct HlSpan {
@@ -265,34 +536,10 @@ fn build_injection(language: &Language, src: &str) -> Option<Injection> {
 
 /// The bundled structural-indent query (`indents.scm`) for a language id, or
 /// `None`. Languages without one fall back to copy-previous-line indentation;
-/// Lisps are handled by a dedicated aligner in the editor, not here. Adding a
-/// language's indent query is a single `include_str!` arm.
+/// Lisps are handled by a dedicated aligner in the editor, not here. Derived
+/// from the `indent` column of [`LANGUAGES`].
 fn indent_query(language: &str) -> Option<&'static str> {
-    Some(match language {
-        "rust" => include_str!("../grammars/queries/indents/rust.scm"),
-        "c" => include_str!("../grammars/queries/indents/c.scm"),
-        "cpp" => include_str!("../grammars/queries/indents/cpp.scm"),
-        "go" => include_str!("../grammars/queries/indents/go.scm"),
-        "java" => include_str!("../grammars/queries/indents/java.scm"),
-        "javascript" => include_str!("../grammars/queries/indents/javascript.scm"),
-        "typescript" => include_str!("../grammars/queries/indents/typescript.scm"),
-        "tsx" => include_str!("../grammars/queries/indents/tsx.scm"),
-        "json" => include_str!("../grammars/queries/indents/json.scm"),
-        "css" => include_str!("../grammars/queries/indents/css.scm"),
-        "python" => include_str!("../grammars/queries/indents/python.scm"),
-        "yaml" => include_str!("../grammars/queries/indents/yaml.scm"),
-        "scala" => include_str!("../grammars/queries/indents/scala.scm"),
-        "ruby" => include_str!("../grammars/queries/indents/ruby.scm"),
-        "lua" => include_str!("../grammars/queries/indents/lua.scm"),
-        "zig" => include_str!("../grammars/queries/indents/zig.scm"),
-        "r" => include_str!("../grammars/queries/indents/r.scm"),
-        "ocaml" => include_str!("../grammars/queries/indents/ocaml.scm"),
-        "haskell" => include_str!("../grammars/queries/indents/haskell.scm"),
-        "elixir" => include_str!("../grammars/queries/indents/elixir.scm"),
-        "html" => include_str!("../grammars/queries/indents/html.scm"),
-        "bash" => include_str!("../grammars/queries/indents/bash.scm"),
-        _ => return None,
-    })
+    LANGUAGES.iter().find(|spec| spec.id == language)?.indent
 }
 
 /// Compile an indent query and record the indent kind of each capture, or `None`
@@ -315,161 +562,25 @@ fn build_indent(language: &Language, src: &str) -> Option<IndentQuery> {
 }
 
 /// Map a fenced-block info-string tag (`rust`, `rs`, `py`, `c++`, …) to a
-/// bundled grammar id, or `None` if we don't bundle it. Markdown is excluded so
-/// a nested ```markdown block can't recurse.
+/// bundled grammar id, or `None` if we don't bundle it. Derived from the
+/// `injection_tags` column of [`LANGUAGES`]; markdown lists no tags so a
+/// nested ```markdown block can't recurse.
 fn injection_lang_id(tag: &str) -> Option<&'static str> {
-    Some(match tag.trim().to_ascii_lowercase().as_str() {
-        "rust" | "rs" => "rust",
-        "python" | "py" => "python",
-        "javascript" | "js" | "jsx" | "mjs" => "javascript",
-        "typescript" | "ts" => "typescript",
-        "tsx" => "tsx",
-        "json" => "json",
-        "c" | "h" => "c",
-        "cpp" | "c++" | "cc" | "cxx" | "hpp" => "cpp",
-        "go" => "go",
-        "html" => "html",
-        "css" => "css",
-        "bash" | "sh" | "shell" | "zsh" | "console" => "bash",
-        "java" => "java",
-        "ruby" | "rb" => "ruby",
-        "lua" => "lua",
-        "yaml" | "yml" => "yaml",
-        "toml" => "toml",
-        "scheme" | "scm" | "lisp" => "scheme",
-        "racket" | "rkt" => "racket",
-        "zig" => "zig",
-        "r" => "r",
-        "ocaml" | "ml" => "ocaml",
-        "haskell" | "hs" => "haskell",
-        "scala" | "sc" => "scala",
-        "clojure" | "clj" | "cljs" | "cljc" | "edn" => "clojure",
-        "sql" => "sql",
-        "elixir" | "ex" | "exs" => "elixir",
-        _ => return None,
-    })
+    let tag = tag.trim().to_ascii_lowercase();
+    LANGUAGES
+        .iter()
+        .find(|spec| spec.injection_tags.contains(&tag.as_str()))
+        .map(|spec| spec.id)
 }
 
 /// The bundled `(LanguageFn, highlights-query)` for a language id, if any.
-/// Adding a language is a single entry here plus its grammar crate in Cargo.toml
-/// and an extension mapping in `language_for_path`.
+/// Derived from [`LANGUAGES`] — adding a language is a single entry there plus
+/// its grammar crate in Cargo.toml.
 fn grammar(language: &str) -> Option<(LanguageFn, &'static str)> {
-    let entry = match language {
-        // A Steel-aware highlights query (richer than the crate's stock R7RS
-        // `HIGHLIGHTS_QUERY`, which left most Steel code uncolored).
-        "scheme" => (
-            tree_sitter_scheme::LANGUAGE,
-            include_str!("../grammars/queries/scheme.scm"),
-        ),
-        "rust" => (
-            tree_sitter_rust::LANGUAGE,
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
-        ),
-        "python" => (
-            tree_sitter_python::LANGUAGE,
-            tree_sitter_python::HIGHLIGHTS_QUERY,
-        ),
-        "javascript" => (
-            tree_sitter_javascript::LANGUAGE,
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-        ),
-        "json" => (
-            tree_sitter_json::LANGUAGE,
-            tree_sitter_json::HIGHLIGHTS_QUERY,
-        ),
-        "c" => (tree_sitter_c::LANGUAGE, tree_sitter_c::HIGHLIGHT_QUERY),
-        "cpp" => (tree_sitter_cpp::LANGUAGE, tree_sitter_cpp::HIGHLIGHT_QUERY),
-        "go" => (tree_sitter_go::LANGUAGE, tree_sitter_go::HIGHLIGHTS_QUERY),
-        "html" => (
-            tree_sitter_html::LANGUAGE,
-            tree_sitter_html::HIGHLIGHTS_QUERY,
-        ),
-        "css" => (tree_sitter_css::LANGUAGE, tree_sitter_css::HIGHLIGHTS_QUERY),
-        "bash" => (
-            tree_sitter_bash::LANGUAGE,
-            tree_sitter_bash::HIGHLIGHT_QUERY,
-        ),
-        "typescript" => (
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        ),
-        "tsx" => (
-            tree_sitter_typescript::LANGUAGE_TSX,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        ),
-        "java" => (
-            tree_sitter_java::LANGUAGE,
-            tree_sitter_java::HIGHLIGHTS_QUERY,
-        ),
-        "ruby" => (
-            tree_sitter_ruby::LANGUAGE,
-            tree_sitter_ruby::HIGHLIGHTS_QUERY,
-        ),
-        "lua" => (tree_sitter_lua::LANGUAGE, tree_sitter_lua::HIGHLIGHTS_QUERY),
-        "yaml" => (
-            tree_sitter_yaml::LANGUAGE,
-            tree_sitter_yaml::HIGHLIGHTS_QUERY,
-        ),
-        "toml" => (
-            tree_sitter_toml_ng::LANGUAGE,
-            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-        ),
-        // Markdown is a split block/inline grammar; we highlight block structure
-        // (headings, code fences, lists) with the block parser.
-        "markdown" => (
-            tree_sitter_md::LANGUAGE,
-            tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
-        ),
-        "zig" => (tree_sitter_zig::LANGUAGE, tree_sitter_zig::HIGHLIGHTS_QUERY),
-        "r" => (tree_sitter_r::LANGUAGE, tree_sitter_r::HIGHLIGHTS_QUERY),
-        "ocaml" => (
-            tree_sitter_ocaml::LANGUAGE_OCAML,
-            tree_sitter_ocaml::HIGHLIGHTS_QUERY,
-        ),
-        "haskell" => (
-            tree_sitter_haskell::LANGUAGE,
-            tree_sitter_haskell::HIGHLIGHTS_QUERY,
-        ),
-        "scala" => (
-            tree_sitter_scala::LANGUAGE,
-            tree_sitter_scala::HIGHLIGHTS_QUERY,
-        ),
-        "clojure" => (
-            tree_sitter_clojure_orchard::LANGUAGE,
-            tree_sitter_clojure_orchard::HIGHLIGHTS_QUERY,
-        ),
-        "sql" => (
-            tree_sitter_sequel::LANGUAGE,
-            tree_sitter_sequel::HIGHLIGHTS_QUERY,
-        ),
-        "elixir" => (
-            tree_sitter_elixir::LANGUAGE,
-            tree_sitter_elixir::HIGHLIGHTS_QUERY,
-        ),
-        // LaTeX, Typst, and Mermaid bundle no highlights query with the parser,
-        // so we vendor nvim-treesitter's under `grammars/queries/`. (LaTeX/Typst
-        // parsers come from the `codebook-*` crates; Mermaid from build.rs.)
-        "latex" => (
-            codebook_tree_sitter_latex::LANGUAGE,
-            include_str!("../grammars/queries/latex.scm"),
-        ),
-        "typst" => (
-            codebook_tree_sitter_typst::LANGUAGE,
-            include_str!("../grammars/queries/typst.scm"),
-        ),
-        "mermaid" => (
-            mermaid::LANGUAGE,
-            include_str!("../grammars/queries/mermaid.scm"),
-        ),
-        // Racket has its own grammar (`.rkt`); Steel/Scheme files still use the
-        // `scheme` grammar above. Query mirrors scheme.scm's classic-Lisp style.
-        "racket" => (
-            racket::LANGUAGE,
-            include_str!("../grammars/queries/racket.scm"),
-        ),
-        _ => return None,
-    };
-    Some(entry)
+    LANGUAGES
+        .iter()
+        .find(|spec| spec.id == language)
+        .map(|spec| (spec.language, spec.highlights))
 }
 
 impl Highlighter {
@@ -961,6 +1072,44 @@ mod tests {
                 "indent query for {lang} failed to compile"
             );
         }
+    }
+
+    /// Extension → language mappings derived from the unified table match the
+    /// old hand-maintained list in `language_for_path` (spot checks across the
+    /// tricky cases: multi-extension languages, case sensitivity, ts vs tsx).
+    #[test]
+    fn extensions_map_to_languages() {
+        for (ext, lang) in [
+            ("scm", "scheme"),
+            ("steel", "scheme"),
+            ("rkt", "racket"),
+            ("rs", "rust"),
+            ("pyi", "python"),
+            ("cjs", "javascript"),
+            ("ts", "typescript"),
+            ("tsx", "tsx"),
+            ("h", "c"),
+            ("hxx", "cpp"),
+            ("yml", "yaml"),
+            ("htm", "html"),
+            ("zsh", "bash"),
+            ("markdown", "markdown"),
+            ("R", "r"),
+            ("mli", "ocaml"),
+            ("sbt", "scala"),
+            ("edn", "clojure"),
+            ("exs", "elixir"),
+            ("cls", "latex"),
+            ("typ", "typst"),
+            ("mmd", "mermaid"),
+        ] {
+            assert_eq!(language_for_extension(ext), Some(lang), "extension {ext}");
+        }
+        assert_eq!(language_for_extension("nope"), None);
+        // Injection tags resolve through the same table.
+        assert_eq!(injection_lang_id("C++"), Some("cpp"));
+        assert_eq!(injection_lang_id(" shell "), Some("bash"));
+        assert_eq!(injection_lang_id("markdown"), None, "no recursion");
     }
 
     /// Rust: a brace block indents its body one step and dedents on the closer.

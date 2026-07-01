@@ -440,11 +440,24 @@ mod tests {
     }
 }
 
+/// Serializes tests that mutate process-wide environment variables (e.g.
+/// `XDG_CONFIG_HOME`): `cargo test` runs tests on parallel threads, and a
+/// concurrent test resolving config directories would otherwise observe the
+/// mutated environment mid-flight. Any test that sets/removes such a variable
+/// must hold this for its whole body.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod config_integration {
     use super::*;
     #[test]
     fn user_config_with_include_roundtrip() {
+        // Mutates XDG_CONFIG_HOME for the duration of the test — hold the env
+        // lock so parallel tests can't observe the temporary override. A
+        // poisoned lock (a prior holder panicked) is fine: the env var is
+        // restored below regardless, so just take the guard.
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A temp config dir as XDG_CONFIG_HOME/macros with init.scm that includes
         // a second file — exactly the main.rs flow.
         let root = std::env::temp_dir().join(format!("macros-cfg-{}", std::process::id()));

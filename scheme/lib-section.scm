@@ -1,5 +1,7 @@
-;; section — a generic collapsible-section library, the reusable core extracted
-;; from magit's status buffer. It sits on the same special-buffer primitives
+;; lib-section — a generic collapsible-section library, the reusable core
+;; extracted from magit's status buffer (which builds on it — the "lib-" name
+;; keeps this file sorting BEFORE magit.scm, since scheme/ files evaluate in
+;; sorted filename order and a file may only use earlier definitions). It sits on the same special-buffer primitives
 ;; magit uses (`render-buffer`, `fold-lines`, `overlay-set-face`,
 ;; `clear-overlays`, `buffer-line`), but knows nothing about git: any package can
 ;; build a foldable, navigable, hierarchical read-only buffer on top of it
@@ -75,6 +77,14 @@
 ;; The byte offset at which the NEXT emitted line begins (for computing accents).
 (define (section-point-byte) *section-byte*)
 
+;; The line number the NEXT emitted line will get (for recording headings).
+(define (section-point-line) *section-n*)
+
+;; The accumulated buffer text / per-line faces, in emit order — what a custom
+;; renderer (e.g. magit's quiet refresh) passes to render-buffer itself.
+(define (section-text) (join-lines (reverse *section-lines*)))
+(define (section-line-faces) (reverse *section-faces*))
+
 ;; Open a collapsible section: emit its heading line, then push it on the stack.
 ;; Body lines (and nested sections) emitted until the matching `section-close`
 ;; become its foldable body. `value` (optional) is arbitrary data carried on the
@@ -101,13 +111,20 @@
   (let ((toggled (member id *section-toggled*)))
     (if toggled (not *section-default-collapsed*) *section-default-collapsed*)))
 
+;; Paint the accumulated sub-line accents onto the CURRENT buffer. Shared by
+;; section-apply-overlays and by consumers with their own fold model (magit).
+;; NOTE: like all the build state, accents belong to the LAST build — callers
+;; that re-apply later (fold toggles) assume no other section build ran since.
+(define (section-apply-accents)
+  (for-each (lambda (a) (overlay-set-face (nth a 0) (nth a 1) (nth a 2)))
+            (reverse *section-accents*)))
+
 ;; Re-apply accents + folds to the CURRENT buffer (after a render, or after a
 ;; toggle that didn't rebuild the text). clear-overlays first so stale folds and
-;; accents don't accumulate, mirroring magit-apply-overlays.
+;; accents don't accumulate.
 (define (section-apply-overlays)
   (clear-overlays)
-  (for-each (lambda (a) (overlay-set-face (nth a 0) (nth a 1) (nth a 2)))
-            (reverse *section-accents*))
+  (section-apply-accents)
   (for-each (lambda (sec)
               (when (and (section-folded? (section-id sec))
                          (> (section-body-end sec) (section-body-start sec)))

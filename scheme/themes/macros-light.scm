@@ -47,6 +47,13 @@
 (set-face "lsp-inlay-hint" "#999999")
 (set-face "lsp-code-lens" "#999999")
 
+;; Diagnostics (gutter dots + underlines) — VS Code light severity colors,
+;; darkened for contrast on a white background.
+(set-face "diagnostic-error" "#e51400")
+(set-face "diagnostic-warning" "#bf8803")
+(set-face "diagnostic-info" "#1a85ff")
+(set-face "diagnostic-hint" "#1a85ff")
+
 ;; Semantic-token faces (opt-in via 'semantic-tokens) — mirror the syntax palette,
 ;; with Cursor Light's blue types/namespaces, purple-blue properties, green macros.
 (set-face "lsp-sem-namespace" "#206595")

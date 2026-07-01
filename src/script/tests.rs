@@ -1,4881 +1,12 @@
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, RwLock};
 
-use arc_swap::ArcSwap;
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher};
-use regex::Regex;
+use futures::channel::mpsc::UnboundedReceiver;
 use ropey::Rope;
-use steel::rvals::{IntoSteelVal, SteelVal};
-use steel::steel_vm::engine::Engine;
-use steel::steel_vm::register_fn::RegisterFn;
 
-/// A command requested by a script, applied to the editor by Rust.
-///
-/// Steel runs without direct access to GPUI's `Context`, so scripts never mutate
-/// the editor in place. Instead, registered functions enqueue `EditorCommand`s
-/// that the editor drains and applies after evaluation — the same decoupling
-/// Emacs gets from its command loop. Most commands are nullary; a few carry a
-/// string payload.
-/// Payload for [`EditorCommand::InstallGrammar`], boxed in the variant to keep
-/// `EditorCommand` small. Fields carry the raw Steel-side strings; `symbol` and
-/// `subdir` are `""` for "use the default" (symbol = id, grammar at repo root),
-/// and `extensions` is whitespace-separated.
-#[derive(Debug, Clone)]
-pub struct GrammarInstall {
-    pub id: String,
-    pub repo: String,
-    pub rev: String,
-    pub extensions: String,
-    pub symbol: String,
-    pub subdir: String,
-}
-
-/// Payload for [`EditorCommand::HttpStream`]. Boxed in the enum because it's the
-/// largest variant by far (a `Vec` plus several `String`s); see the variant doc.
-#[derive(Debug, Clone)]
-pub struct HttpStreamArgs {
-    /// Stream id (for `http-stream-cancel`).
-    pub id: u64,
-    /// Request URL.
-    pub url: String,
-    /// Request headers as `(key, value)` pairs.
-    pub headers: Vec<(String, String)>,
-    /// JSON request body.
-    pub body: String,
-    /// Steel fn called with each response line as it arrives.
-    pub on_line: String,
-    /// Steel fn called with the stream id once the body closes.
-    pub on_done: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum EditorCommand {
-    // Motion
-    ForwardChar,
-    BackwardChar,
-    NextLine,
-    PreviousLine,
-    ForwardWord,
-    ForwardWordStart,
-    BackwardWord,
-    BeginningOfLine,
-    EndOfLine,
-    BeginningOfBuffer,
-    EndOfBuffer,
-    // Region / mark
-    SetMark,
-    ExchangePointAndMark,
-    MarkWholeBuffer,
-    ExtendBackwardChar,
-    ExtendForwardChar,
-    // Insertion
-    Insert(String),
-    Newline,
-    OpenLine,
-    IndentForTab,
-    // Deletion / killing
-    DeleteChar,
-    DeleteBackwardChar,
-    TransposeChars,
-    KillLine,
-    KillWord,
-    BackwardKillWord,
-    KillRegion,
-    KillRingSave,
-    Yank,
-    YankPop,
-    /// System-clipboard copy / cut / paste (macOS cmd-c/x/v), kept in sync with
-    /// the kill ring.
-    ClipboardCopy,
-    ClipboardCut,
-    ClipboardPaste,
-    /// Put an arbitrary string on the system clipboard (Emacs `kill-new`).
-    ClipboardSet(String),
-    // Undo
-    Undo,
-    /// Redo the most recently created branch off the current undo-tree node.
-    Redo,
-    /// Dump the undo tree as text to Steel `callback` (one node per line) — the
-    /// vundo visualizer reads this to draw the branch structure.
-    UndoTreeDump(String),
-    // View
-    ScrollUp,
-    ScrollDown,
-    Recenter,
-    // Misc
-    KeyboardQuit,
-    ExecuteExtendedCommand,
-    /// Show the echo-area scrollback (`*Messages*`).
-    ListMessages,
-    /// Show captured language-server stderr (`*lsp-log*`).
-    ListLspLog,
-    /// Force an update check against macros.dev and install a newer release if
-    /// the user confirms (Emacs-style, echo-area driven). See `src/update.rs`.
-    CheckForUpdates,
-    // Steel interaction (steel-mode)
-    EvalBuffer,
-    EvalLastSexp,
-    /// Read a Steel expression in the minibuffer and evaluate it (Emacs `M-:`).
-    EvalExpression,
-    // Buffers / files
-    FindFile,
-    /// Open a file by path (a Helm action / programmatic open).
-    OpenFile(String),
-    SwitchBuffer,
-    /// Switch to an open buffer by name (a Helm action / programmatic switch).
-    SwitchToBufferNamed(String),
-    /// Kill a buffer by name (active or inactive).
-    KillBufferNamed(String),
-    /// Set the active (editable) buffer's major mode by name, so its keymap
-    /// applies (e.g. shell-mode rebinding RET). Does not make the buffer special.
-    SetMajorMode(String),
-    /// Switch the active buffer into the editor-aware `macros-steel` major mode:
-    /// stack it on `fundamental`, attach the `macros-scheme` language (Scheme
-    /// highlighting plus the built-in editor-API server), and re-run mode hooks
-    /// so its LSP comes up. The interactive escape hatch for editing this
-    /// editor's own Scheme outside the auto-detected config paths — unlike
-    /// `set-major-mode`, it re-attaches the language, not just the keymap.
-    EnterMacrosSteel,
-    NextBuffer,
-    PreviousBuffer,
-    SaveBuffer,
-    /// Save every modified file-visiting buffer (Emacs `save-some-buffers`).
-    SaveSomeBuffers,
-    RevertBuffer,
-    ToggleLineNumbers,
-    ToggleScrollBar,
-    ToggleWordWrap,
-    /// Toggle the git-gutter / diff-hl change bars (`magit-gutter` option) and
-    /// recompute the active buffer's marks. Bound to `magit-gutter-mode`.
-    ToggleGitGutter,
-    /// Recompute the active buffer's working-tree-vs-HEAD gutter marks
-    /// (`magit-gutter-refresh`); Scheme wires this to save / find-file hooks.
-    GitGutterRefresh,
-    /// Toggle electric-pair-mode: auto-insert the closing delimiter on a typed
-    /// opener (and wrap an active region). Off by default.
-    ToggleElectricPair,
-    SelectWindow(usize),
-    OpenFileOtherWindow(String),
-    SetLineIcon(usize, usize, String),
-    ClearLineIcons,
-    /// Display a raster image (decoded from `path`) on rows reserved below buffer
-    /// `line` — the Org inline-image primitive.
-    SetLineImage {
-        line: usize,
-        path: String,
-        max_width: usize,
-    },
-    ClearLineImages,
-    /// Virtual left indentation (in columns) for buffer `line` — display-only, the
-    /// Org `org-indent-mode` primitive. The buffer text is untouched.
-    SetLineIndent {
-        line: usize,
-        cols: usize,
-    },
-    ClearLineIndents,
-    /// Whole-line font-size multiplier for buffer `line` (1.0 = unscaled) —
-    /// markdown/org headings render larger. Display-only.
-    SetLineScale {
-        line: usize,
-        scale: f32,
-    },
-    ClearLineScales,
-    KillBuffer,
-    /// Kill the active buffer and close its window (Emacs `kill-buffer-and-window`).
-    KillBufferAndWindow,
-    Quit,
-    // LSP navigation / editing
-    LspDefinition,
-    LspDeclaration,
-    LspTypeDefinition,
-    LspImplementation,
-    LspReferences,
-    LspHover,
-    LspSignatureHelp,
-    LspDocumentSymbols,
-    LspCodeAction,
-    LspFormatBuffer,
-    LspCallHierarchyIncoming,
-    LspCallHierarchyOutgoing,
-    /// Validate + prompt rename (`prepareRename` then `rename`).
-    LspPrepareRename,
-    /// Request + render code lenses (resolving those missing a command).
-    LspCodeLens,
-    /// RET in an `*lsp-xref*` / `*lsp-symbols*` list: visit the row's target.
-    LspXrefVisit,
-    /// RET in `*lsp-actions*`: apply the row's code action.
-    LspApplyCodeAction,
-    /// Rename the symbol at point to the given name (read via `read-string`).
-    LspRename(String),
-    /// `workspace/symbol` for the given query (read via `read-string`).
-    LspWorkspaceSymbol(String),
-    /// Generic LSP bridge: send `method` with params built from `kind`
-    /// ("position"|"document"|"range"|"region"|"positions"|"raw") merged with
-    /// `params` (a JSON object string), delivering the result JSON to Steel fn
-    /// `callback`. This exposes the whole protocol to Scheme.
-    LspRequest {
-        method: String,
-        kind: String,
-        params: String,
-        callback: String,
-    },
-    /// Jump to `uri` at `(line, character)` (a Scheme handler visiting a result).
-    LspGoto {
-        uri: String,
-        line: usize,
-        character: usize,
-    },
-    /// Apply a `WorkspaceEdit` (JSON) across files (rename / code action).
-    LspApplyWorkspaceEdit(String),
-    /// Apply `TextEdit[]` (JSON) to the active buffer (formatting).
-    LspApplyTextEdits(String),
-    /// Push the current location onto the jump-back ring.
-    XrefPushMarker,
-    /// Pop the jump-back ring and return there (Emacs `pop-tag-mark`).
-    XrefPopMarker,
-    /// Enable/disable LSP format-on-save for a language.
-    SetLspFormatOnSave(String, bool),
-    /// Request `textDocument/semanticTokens/full`, decode it, and deliver the
-    /// tokens (one `"line\tcol\tlength\ttype"` record per line) to Steel `callback`.
-    LspSemanticTokens(String),
-    /// Like `LspSemanticTokens` but only the viewport window (`/range`).
-    LspSemanticTokensRange(String),
-    /// Like `LspSemanticTokens` but via `/full/delta` when possible (live).
-    LspSemanticTokensDelta(String),
-    // Tree-sitter (the live parse tree, queried on the UI thread).
-    /// Run tree-sitter query `query` over the active buffer's parse tree and
-    /// deliver the captures to Steel fn `callback` as one
-    /// `"capture\tstart\tend\tkind"` record per line (byte offsets). Empty when
-    /// there's no grammar/tree or the query won't compile. Gives Scheme the whole
-    /// parse tree — find brackets, strings, comments, functions, etc.
-    TreeSitterQuery {
-        query: String,
-        callback: String,
-    },
-    /// Deliver the node chain covering `byte` (innermost first) to Steel fn
-    /// `callback`, one `"kind\tstart\tend"` record per line — "what am I inside?".
-    TreeSitterNodeAt {
-        byte: usize,
-        callback: String,
-    },
-    /// Download, compile, and load a user tree-sitter grammar (see
-    /// [`crate::grammar`]). Runs on the background executor; on success the active
-    /// buffer re-highlights if it visits a matching file. Boxed so its six fields
-    /// don't make this the largest `EditorCommand` variant (which would bloat the
-    /// `Result<(), EditorCommand>` every dispatcher threads — `result_large_err`).
-    InstallGrammar(Box<GrammarInstall>),
-    // LSP / completion popup
-    CompletionAtPoint,
-    CompletionNext,
-    CompletionPrevious,
-    CompletionAccept,
-    CompletionAbort,
-    // Helm (selection framework)
-    /// Open a Helm session over Scheme-provided sources.
-    Helm(Vec<HelmSourceSpec>),
-    /// Like `Helm`, but with an initial input pre-filled (e.g. a directory for
-    /// the file navigator, so top-level fuzzy + TAB-descend work).
-    HelmFrom(String, Vec<HelmSourceSpec>),
-    /// Built-in: Helm over all command names, running the chosen command.
-    HelmMx,
-    HelmNext,
-    HelmPrevious,
-    HelmAccept,
-    HelmAbort,
-    /// Open the action menu for the selected candidate (multi-action sources).
-    HelmActions,
-    /// Toggle the selected candidate's multi-select mark (`C-SPC`).
-    HelmToggleMark,
-    // Helix (selection-first modal editing, scheme/helix.scm)
-    /// Enter Helix modal editing: turn on the shared Normal/Insert state machine
-    /// and route plain keys against the `helix-*` keymaps.
-    HelixMode,
-    /// Leave Helix modal editing (back to plain Emacs keys).
-    HelixDisable,
-    /// Return to Helix Normal from Insert, *keeping* any secondary cursors (so
-    /// `c`/`i` across multiple selections survive Escape, unlike evil's Normal).
-    HelixNormalState,
-    /// Replace the whole selection set with these `(anchor, head)` pairs (first =
-    /// primary). The workhorse Helix selection-first motions drive through this.
-    SetSelections(Vec<(usize, usize)>),
-    // Evil (modal editing)
-    EvilMode,
-    EvilNormalState,
-    EvilInsertState,
-    EvilVisualState,
-    /// Vim line-wise Visual (`V`): the selection always covers whole lines.
-    EvilVisualLineState,
-    /// Block insert/append (`I`/`A` in Visual line): drop a cursor at the start
-    /// (or end) of every selected line and switch to Insert, so one edit
-    /// replicates to all of them.
-    EvilVisualInsert,
-    EvilVisualAppend,
-    /// Vim block-wise Visual (`C-v`): a rectangular column selection between two
-    /// corners; motions move one corner. `I`/`A` insert/append down the block's
-    /// left/right column; `d`/`x` delete and `y` yanks the rectangle.
-    EvilVisualBlockState,
-    EvilBlockInsert,
-    EvilBlockAppend,
-    EvilBlockDelete,
-    EvilBlockYank,
-    EvilDisable,
-    /// Scroll half a page down / up (evil `C-d` / `C-u`).
-    EvilScrollDown,
-    EvilScrollUp,
-    EvilSearchForward,
-    EvilSearchBackward,
-    EvilSearchNext,
-    EvilSearchPrevious,
-    EvilExCommand,
-    /// Vim paste after (`p`) / before (`P`) the cursor, honoring the linewise
-    /// flag set by the most recent yank/delete.
-    EvilPasteAfter,
-    EvilPasteBefore,
-    /// Vim `r`: arm replace-pending so the next printable key overwrites the
-    /// single character under the cursor (cursor stays put, mode stays Normal).
-    EvilReplaceChar,
-    /// Mark the most recent yank/delete as line-wise / character-wise, so the
-    /// next `p`/`P` knows whether to open a new line or insert inline.
-    EvilSetLinewise,
-    EvilSetCharwise,
-    /// Emacs incremental search (`C-s` / `C-r`).
-    IsearchForward,
-    IsearchBackward,
-    // Modes / hooks
-    /// Start the language server for the current buffer (mode-hook friendly).
-    EnableLsp,
-    /// Run a named function when a mode is enabled: `(add-hook "steel" "enable-lsp")`.
-    AddHook(String, String),
-    /// Remove a previously added mode hook.
-    RemoveHook(String, String),
-    /// Register a Scheme completion-at-point function (tried by `M-x
-    /// completion-at-point` before LSP): `(add-completion-at-point-function "f")`.
-    AddCapf(String),
-    /// Replace the set of directories watched on behalf of `owner` with `dirs`
-    /// (`(watch-directories "dired-sidebar" (list ...))`). Owner-namespaced with
-    /// replace semantics so a view re-declares its full watch set each render and
-    /// never has to unwatch individual paths; pass `'()` to drop them all (e.g. on
-    /// quit). A change under any watched dir fires `directory-changed-hook`.
-    WatchDirectories(String, Vec<String>),
-    /// Like [`WatchDirectories`](Self::WatchDirectories) but RECURSIVE: a change
-    /// anywhere in the subtree under a watched root fires `directory-changed-hook`
-    /// with the changed root. For magit watching a whole repo. Replace semantics.
-    WatchTree(String, Vec<String>),
-    /// Configure a language server: `(set-lsp "rust" "rust-analyzer")`.
-    SetLsp(String, String),
-    /// Map a file extension to a server key / config language:
-    /// `(set-extension "rs" "rust")`.
-    SetExtension(String, String),
-    /// Map a file extension to the wire `languageId` sent in `didOpen`:
-    /// `(set-language-id "tsx" "typescriptreact")`. Lets several extensions
-    /// share one server yet announce distinct ids.
-    SetLanguageId(String, String),
-    /// Set a tunable option: `(set-option "tab-width" 4)`. The value may be a
-    /// number, boolean, or string; it is coerced to the option's declared type
-    /// when applied (see [`crate::settings::Settings::set`]).
-    SetOption(String, crate::settings::OptionValue),
-    Message(String),
-    /// Bind a key sequence to a command in a named mode's keymap:
-    /// `(define-key "steel" "ctrl-c ctrl-e" "eval-last-sexp")`.
-    DefineKey(String, String, String),
-    // Theming
-    /// Set a face's color: `(set-face "comment" "#6a9955")`.
-    SetFace(String, String),
-    /// Load a built-in theme by name. Queued by the `load-theme-impl` primitive,
-    /// which the core.scm `load-theme` wrapper calls for `(load-theme 'macros-light)`
-    /// or `(load-theme "macros-light")` (a symbol or string).
-    LoadTheme(String),
-    // Special (read-only, program-generated) buffers — the magit pattern.
-    /// Render `text` into a read-only buffer `name` with major mode `mode` and
-    /// per-line faces `(line, face)`, switching to it (creating it if needed,
-    /// refreshing in place — point preserved — if already shown).
-    RenderBuffer {
-        name: String,
-        mode: String,
-        text: String,
-        line_faces: Vec<(usize, String)>,
-    },
-    /// Like [`RenderBuffer`], but refresh the buffer wherever it already lives
-    /// without switching to it or moving focus — the auto-refresh path for the
-    /// dired-sidebar/dired view when a watched directory changes on disk.
-    RenderBufferQuiet {
-        name: String,
-        mode: String,
-        text: String,
-        line_faces: Vec<(usize, String)>,
-    },
-    /// Move point to the start of (0-based) line `n` in the active buffer.
-    GotoLine(usize),
-    /// Scroll so the cursor sits `n` display-rows below the viewport top — pairs
-    /// with `(window-cursor-row)` to keep a buffer stable across a re-render.
-    ScrollCursorToRow(usize),
-    /// Move point to byte offset `n` (Emacs `goto-char`).
-    GotoChar(usize),
-    /// Read a line in the minibuffer, then call Steel fn `callback` with it
-    /// (Emacs `read-string`, callback-style to fit the async engine). `initial`
-    /// pre-fills the input (empty for none).
-    ReadString {
-        prompt: String,
-        initial: String,
-        callback: String,
-    },
-    /// Append `text` to the end of buffer `name`, creating it if needed and
-    /// switching to it (Emacs `append-to-buffer`; an output-buffer primitive).
-    AppendToBuffer {
-        name: String,
-        text: String,
-    },
-    /// Re-run Org fontification against the buffer `name`, even when it is not the
-    /// active buffer — e.g. agent-shell streaming a reply into a buffer the user
-    /// is viewing in a non-selected pane. The editor publishes a snapshot of that
-    /// buffer and redirects the resulting overlay writes into it, so the existing
-    /// `org--fontify` colorizes it in place without disturbing focus.
-    FontifyOrgBuffer(String),
-    /// Diff two buffers by name (the `similar` crate) and call Steel fn
-    /// `callback` with one "tag\tas\tae\tbs\tbe\tabs\tabe\tbbs\tbbe" record per
-    /// non-equal hunk — line ranges + byte ranges for each side. Powers the
-    /// interactive ediff two-pane merge (cross-buffer, so it can't be done from
-    /// the active-buffer snapshot in Scheme).
-    DiffBuffers {
-        a: String,
-        b: String,
-        callback: String,
-    },
-    /// Replace lines [dst_start,dst_end) of buffer `dst` with lines
-    /// [src_start,src_end) of buffer `src` (ediff "copy this hunk A->B").
-    BufferCopyLines {
-        src: String,
-        src_start: usize,
-        src_end: usize,
-        dst: String,
-        dst_start: usize,
-        dst_end: usize,
-    },
-    /// Paint a face over lines [start,end) of buffer `name`, whether or not it's
-    /// the active buffer (ediff hunk highlight in the non-selected pane).
-    BufferHighlightLines {
-        name: String,
-        start: usize,
-        end: usize,
-        face: String,
-    },
-    /// Clear all face overlays from buffer `name` (active or inactive).
-    BufferClearHighlights {
-        name: String,
-    },
-    /// Expand a yasnippet-style template at point: insert it, drop tab-stop field
-    /// markers ($1/$2/${n:default}/$0), and jump to the first field.
-    SnippetExpand(String),
-    /// Jump to the next / previous snippet field in the active session.
-    SnippetNextField,
-    SnippetPrevField,
-    /// Show avy jump hints: one "byte\tlabel" record per line; the labels paint
-    /// over the buffer at those byte offsets until cleared.
-    AvyShowHints(String),
-    /// Clear all avy jump hints.
-    AvyClearHints,
-    /// multiple-cursors: add a secondary cursor below / above the primary, at the
-    /// next occurrence of the word at point, or clear all secondary cursors.
-    McAddBelow,
-    McAddAbove,
-    McMarkNext,
-    McClear,
-    /// Set the mode-line project register (back-compat sugar for slot "project").
-    SetModelineProject(String),
-    /// Set the mode-line git register (back-compat sugar for slot "git").
-    SetModelineGit(String),
-    /// Write/clear a named mode-line register: `(key, value)`, empty value clears.
-    SetModeLineSlot(String, String),
-    /// Replace the mode-line format with tab-encoded segment tokens (see
-    /// `parse_mode_line_format`).
-    SetModeLineFormat(Vec<String>),
-    // Transient popup (the magit / `transient.el` pattern).
-    /// Open a transient popup: a title plus `(key, label, command)` rows. When
-    /// `sticky`, selecting a row keeps the popup open (the row command re-opens
-    /// to refresh, or calls `transient-quit`) instead of auto-closing.
-    Transient {
-        title: String,
-        columns: Vec<TransientColumn>,
-        sticky: bool,
-    },
-    /// Close any open transient popup.
-    TransientQuit,
-    // Windows (split panes).
-    SplitWindowBelow,
-    SplitWindowRight,
-    /// Split the selected window side by side, the existing pane keeping this
-    /// fraction of the width — a narrow sidebar (e.g. 0.2 for dired-sidebar).
-    SplitWindowRightRatio(f64),
-    OtherWindow,
-    DeleteWindow,
-    DeleteOtherWindows,
-    EnlargeWindow,
-    ShrinkWindow,
-    EnlargeWindowHorizontally,
-    ShrinkWindowHorizontally,
-    // Keyboard macros.
-    StartKbdMacro,
-    EndKbdMacro,
-    CallLastKbdMacro,
-    // Overlays / text properties / folds.
-    /// Layer `face` over the byte range — sub-line highlight (Emacs overlay).
-    OverlayFace {
-        start: usize,
-        end: usize,
-        face: String,
-    },
-    /// Hide a byte range from display without changing buffer text.
-    OverlayHide {
-        start: usize,
-        end: usize,
-    },
-    /// Hide buffer lines `[start_line, end_line)` (folding / invisibility).
-    FoldLines {
-        start_line: usize,
-        end_line: usize,
-    },
-    /// Unfold everything.
-    UnfoldAll,
-    /// Attach a fold chevron to buffer `line`'s gutter. `open` picks the glyph
-    /// (down = expanded, right = collapsed); the click hit-test calls back into
-    /// Scheme's `fold-toggle-at-line`. Policy (which lines, what range) is Scheme.
-    SetFoldMarker {
-        line: usize,
-        open: bool,
-    },
-    /// Remove every fold chevron from the active buffer's gutter.
-    ClearFoldMarkers,
-    /// Remove all overlays/folds/properties from the active buffer.
-    ClearOverlays,
-    /// Remove only the sub-line overlay faces (keeps folds/props/suffixes/hides)
-    /// — for repainting semantic tokens / document highlights without nuking the
-    /// rest, or another feature's concealment.
-    ClearOverlayFaces,
-    /// Remove only the `overlay-hide` concealment ranges (keeps faces/folds) —
-    /// for refreshing markdown/org heading-marker hiding.
-    ClearOverlayHides,
-    /// Remove only the line suffixes (virtual text) — for refreshing inlay hints.
-    ClearLineSuffixes,
-    /// Attach a text property `(key, value)` to a byte range.
-    PutTextProperty {
-        start: usize,
-        end: usize,
-        key: String,
-        value: String,
-    },
-    /// Virtual text appended after `line` (inlay hint / blame / inline note).
-    SetLineSuffix {
-        line: usize,
-        text: String,
-        face: String,
-    },
-    // Async.
-    /// Spawn `program` async under `id`; call Steel fn `on_output` per stdout
-    /// line, and `on_exit` (if non-empty) with the exit code (Emacs `make-process`).
-    MakeProcess {
-        id: u64,
-        program: String,
-        args: Vec<String>,
-        on_output: String,
-        on_exit: Option<String>,
-    },
-    /// Write `text` to process `id`'s stdin (Emacs `process-send-string`).
-    SendProcess {
-        id: u64,
-        text: String,
-    },
-    /// Kill process `id` (Emacs `kill-process`).
-    KillProcess {
-        id: u64,
-    },
-    /// Open a streaming HTTP POST (see [`HttpStreamArgs`]); the transport for
-    /// talking directly to a model provider's SSE endpoint (e.g. Anthropic) from
-    /// Steel — the HTTP analogue of `make-process`. Boxed: its payload is far
-    /// larger than any other variant, and unboxed it would bloat every
-    /// `Result<(), EditorCommand>` (clippy `result_large_err`).
-    HttpStream(Box<HttpStreamArgs>),
-    /// Cancel in-flight HTTP stream `id`: the reader stops forwarding lines and
-    /// drops the connection (the chat client's "cancel turn").
-    HttpStreamCancel {
-        id: u64,
-    },
-    // ANVIL REPL — a second, independent Steel interpreter (see `crate::anvil`).
-    /// Evaluate `source` in the ANVIL REPL engine; deliver the printed result to
-    /// the Scheme callback `on_result` (SLIME's `slime-eval-async`).
-    AnvilEval {
-        source: String,
-        on_result: String,
-    },
-    /// Cancel the ANVIL REPL's current evaluation (SLIME's `C-c C-c`).
-    AnvilInterrupt,
-    /// Rebuild the ANVIL REPL engine — a fresh image (SLIME's restart).
-    AnvilReset,
-    /// Evaluate the top-level form at point in the ANVIL image (SLIME `C-M-x`).
-    /// The editor computes the form's bounds from the buffer and point.
-    AnvilEvalDefun,
-    /// `(load …)` the active buffer's file into the ANVIL image (SLIME `C-c C-l`).
-    AnvilLoadFile,
-    /// Show the ANVIL image's docstring for the symbol at point (SLIME `C-c C-d`).
-    AnvilDoc,
-    /// Macroexpand the region (or the form at point) against the image's macros
-    /// (SLIME `C-c RET`).
-    AnvilMacroexpand,
-    /// List live image bindings whose name contains `pattern` (SLIME `apropos`).
-    AnvilApropos(String),
-    /// Echo the image's one-line signature for the symbol at point — eldoc.
-    AnvilSignature,
-    // Terminal emulator.
-    /// Open a terminal running `program` (login shell if empty) in a new
-    /// `term-mode` buffer named `name`, backed by terminal `id`.
-    MakeTerminal {
-        id: u64,
-        name: String,
-        program: String,
-        args: Vec<String>,
-    },
-    /// Call Steel fn `callback` after `ms` milliseconds (Emacs `run-with-timer`).
-    RunWithTimer {
-        ms: u64,
-        callback: String,
-    },
-    // Programmatic editing (arbitrary ranges in the active buffer).
-    /// Delete bytes `[start, end)`.
-    DeleteRegion {
-        start: usize,
-        end: usize,
-    },
-    /// Kill bytes `[start, end)` into the kill ring (like `kill-region` but on an
-    /// explicit range rather than the active region).
-    KillRegionBetween {
-        start: usize,
-        end: usize,
-    },
-    /// Replace bytes `[start, end)` with `text`.
-    ReplaceRegion {
-        start: usize,
-        end: usize,
-        text: String,
-    },
-    /// Insert `text` at byte `pos`.
-    InsertAt {
-        pos: usize,
-        text: String,
-    },
-    /// Select the byte range `[start, end)` (activates the mark). Lets Scheme
-    /// set an arbitrary region, e.g. expand-region / LSP selection ranges.
-    SetRegion {
-        start: usize,
-        end: usize,
-    },
-    /// Close the current undo group so the next edit starts a new one.
-    UndoBoundary,
-    /// Set a buffer-local variable on the active buffer.
-    BufferLocalSet {
-        key: String,
-        value: String,
-    },
-    // Minibuffer reads that call back into Scheme.
-    /// `completing-read`: prompt with completion, then call `callback`.
-    /// `candidates` is the static list; `dynamic` is a Scheme fn name re-queried
-    /// per keystroke when the caller passed a function. `initial` pre-fills input.
-    CompletingRead {
-        prompt: String,
-        candidates: Vec<String>,
-        dynamic: Option<String>,
-        initial: String,
-        callback: String,
-    },
-    /// `read-file-name`: prompt for a file path, then call `callback`.
-    ReadFileName {
-        prompt: String,
-        callback: String,
-    },
-    /// `y-or-n-p`: yes/no prompt, then call `callback` with "yes"/"no". When
-    /// `sticky`, the prompt can't be aborted (C-g/Escape) and stays until the
-    /// user answers — for prompts that must resolve a pending request.
-    YesOrNo {
-        prompt: String,
-        callback: String,
-        sticky: bool,
-    },
-}
-
-/// One row of a transient popup: a key, its description, and the Steel command
-/// to run when it's pressed.
-#[derive(Debug, Clone)]
-pub struct TransientItem {
-    pub key: String,
-    pub label: String,
-    pub command: String,
-}
-
-/// A column of transient rows, optionally headed by a title. A flat
-/// `(transient title rows)` is one untitled column; the grouped form gives
-/// several titled columns laid out side by side (magit-style).
-#[derive(Debug, Clone)]
-pub struct TransientColumn {
-    pub title: Option<String>,
-    pub rows: Vec<TransientItem>,
-}
-
-/// A Helm source's candidates: a fixed list (each candidate carrying an optional
-/// marginalia-style annotation), or the name of a Steel function re-queried with
-/// the current pattern as it changes (dynamic sources).
-#[derive(Debug, Clone)]
-pub enum HelmCandidates {
-    Static(Vec<(String, Option<String>)>),
-    /// A Scheme fn re-queried per keystroke; its result is then filtered/ranked
-    /// by Rust against the pattern (the fn supplies the pool).
-    Dynamic(String),
-    /// Like [`HelmCandidates::Dynamic`], but the fn's result is shown verbatim —
-    /// Rust does no further filtering. The fn is the sole filter authority, so a
-    /// Helm picker can be driven entirely from Scheme (e.g. via `fuzzy-match`).
-    DynamicRaw(String),
-}
-
-/// A Helm source: a named group of candidates plus one or more actions. Each
-/// action is `(label, function-name)`; the first is the default (RET), the rest
-/// reachable via the TAB action menu. The chosen candidate string is passed to
-/// the action function.
-#[derive(Debug, Clone)]
-pub struct HelmSourceSpec {
-    pub name: String,
-    pub candidates: HelmCandidates,
-    pub actions: Vec<(String, String)>,
-    /// Optional Scheme fn name; given the selected candidate it returns the
-    /// preview as a list of lines, shown in a side pane. `None` = no preview.
-    pub preview: Option<String>,
-}
-
-type Queue = Arc<Mutex<Vec<EditorCommand>>>;
-type BufferNames = Arc<Mutex<Vec<String>>>;
-/// Buffer name → absolute file path, for buffers visiting a file. Lets Scheme
-/// resolve a non-active buffer's path (`buffer-file-name-of`) — the snapshot
-/// bridges only expose the active buffer. Published alongside `BufferNames`.
-type BufferPaths = Arc<Mutex<HashMap<String, String>>>;
-/// A snapshot of the active buffer, published by the editor before it dispatches
-/// a command so the read bridges (`buffer-string`, `point`, `region-text`, …)
-/// see the buffer as of the moment the command was invoked — Emacs's command
-/// semantics. The text is held as a [`Rope`] handle, so publishing is an O(1)
-/// copy-on-write clone rather than a full-buffer copy, and still gives Scheme
-/// the full read surface Emacs Lisp expects.
-#[derive(Default, Clone)]
-pub struct EditorSnapshot {
-    /// Active buffer name.
-    pub name: String,
-    /// Point's line (0-based).
-    pub line: usize,
-    /// Buffer's directory — visited file's parent, else the process cwd
-    /// (Emacs's buffer-local `default-directory`).
-    pub directory: String,
-    /// The visited file's full path, or "" for a buffer with no file (Emacs's
-    /// `buffer-file-name`). Lets Scheme reveal the current file in dired etc.
-    pub path: String,
-    /// Point as a byte offset.
-    pub point: usize,
-    /// The full buffer text. A [`Rope`] handle, not an owned `String`: the editor
-    /// publishes it with an O(1) copy-on-write clone (no per-command full-text
-    /// copy), and the read bridges materialize only the slice they need, outside
-    /// the snapshot lock.
-    pub text: Rope,
-    /// The active region's byte range, if the mark is active.
-    pub region: Option<(usize, usize)>,
-    /// Every selection as an `(anchor, head)` pair — primary first, then any
-    /// secondary (multiple-cursor / Helix) selections. For `(selections)`, which
-    /// scheme/helix.scm reads to move and edit each selection independently.
-    pub selections: Vec<(usize, usize)>,
-    /// Text properties `(start, end, key, value)`, for `get-text-property`.
-    pub props: Vec<(usize, usize, String, String)>,
-    /// Buffer-local variables `(key, value)`, for `buffer-local-get`.
-    pub locals: Vec<(String, String)>,
-    /// Active-buffer LSP diagnostics, one record each as
-    /// `"line\tcol\tseverity\tmessage"` (line/col 0-based), for `(diagnostics)`.
-    pub diagnostics: Vec<String>,
-    /// Pane (window) ids in cycle order, for `(window-list)`.
-    pub windows: Vec<usize>,
-    /// Each pane's `(id, buffer-name)`, for `(get-buffer-window name)` — lets
-    /// Scheme find which window (if any) is already showing a buffer.
-    pub window_buffers: Vec<(usize, String)>,
-    /// The selected pane (window) id, for `(selected-window)`.
-    pub selected_window: usize,
-    /// Whether the active buffer has a ready, opened LSP server, for
-    /// `(lsp-server-ready?)` — lets Scheme guard LSP calls.
-    pub lsp_ready: bool,
-    /// Approximate first/last buffer line currently on screen, for `(visible-lines)`
-    /// — avy scopes its jump hints to what the user can see.
-    pub visible_lines: (usize, usize),
-    /// The cursor's row within the viewport (display rows, folds collapsed), for
-    /// `(window-cursor-row)` — magit captures it before a refresh and restores it
-    /// after so the buffer doesn't visually jump.
-    pub cursor_screen_row: usize,
-    /// Whether evil (modal) editing is currently active — true in any evil state
-    /// (Normal/Insert/Visual/…), false when disabled. For `(evil-enabled?)`, so
-    /// Scheme can branch on the active keybinding style (e.g. open the vim or the
-    /// emacs tutorial to match what the user is using).
-    pub evil_enabled: bool,
-    /// Whether Helix (selection-first) modal editing is active. Distinct from
-    /// `evil_enabled`, which is also true under Helix (the Normal/Insert state
-    /// machine is shared) — `(helix-enabled?)` lets Scheme branch on the style,
-    /// e.g. open the Helix tutorial instead of the Vim one.
-    pub helix_enabled: bool,
-}
-
-/// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the
-/// editor publishes a new snapshot with a single atomic store and the Scheme
-/// read bridges `load()` it without ever taking a lock, so a read bridge and a
-/// publish never block each other (and neither blocks the UI thread).
-type SharedSnapshot = Arc<ArcSwap<EditorSnapshot>>;
-
-/// Markers: byte positions that move as the buffer is edited (Emacs markers).
-/// Shared so `make-marker` can allocate an id and return it synchronously from
-/// the engine thread, while the editor adjusts positions on every edit.
-#[derive(Default)]
-struct MarkerStore {
-    next: u64,
-    positions: HashMap<u64, usize>,
-}
-type Markers = Arc<Mutex<MarkerStore>>;
-
-/// The applied editor options, published by the editor after every option change
-/// so Scheme can read them back via `(get-option "name")`.
-type Options = Arc<Mutex<HashMap<String, crate::settings::OptionValue>>>;
-
-/// A monotonic id source shared among the `make-process` / `make-terminal`
-/// bridges on the engine thread. Each lives in its own editor-side map keyed by
-/// id, so they don't need to share the marker counter (which is for markers
-/// only) — a dedicated atomic keeps the concern separate.
-#[derive(Clone, Default)]
-struct IdGen(Arc<std::sync::atomic::AtomicU64>);
-impl IdGen {
-    fn next(&self) -> u64 {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-    }
-}
-
-/// Scheme-configurable options for the ripgrep-library search primitives
-/// (`walk-files` / `grep-files`). Lives on the engine thread, shared among the
-/// search register_fns. Defaults match ripgrep's sensible behaviour
-/// (gitignore-aware, skip hidden).
-#[derive(Clone)]
-struct SearchConfig {
-    /// Extra exclude globs, e.g. `"target"`, `"*.lock"` (added as `!glob`).
-    excludes: Vec<String>,
-    /// Whitelist globs — if non-empty, only matching files are walked.
-    includes: Vec<String>,
-    hidden: bool,
-    follow_links: bool,
-    respect_gitignore: bool,
-    max_depth: Option<usize>,
-}
-
-impl Default for SearchConfig {
-    fn default() -> Self {
-        Self {
-            excludes: Vec::new(),
-            includes: Vec::new(),
-            hidden: false,
-            follow_links: false,
-            respect_gitignore: true,
-            max_depth: None,
-        }
-    }
-}
-
-/// Build ripgrep's gitignore-aware walker for `dir` under the current config.
-fn build_walk(dir: &str, config: &SearchConfig) -> ignore::Walk {
-    let mut wb = ignore::WalkBuilder::new(dir);
-    wb.hidden(!config.hidden)
-        .git_ignore(config.respect_gitignore)
-        .git_global(config.respect_gitignore)
-        .git_exclude(config.respect_gitignore)
-        .ignore(config.respect_gitignore)
-        .follow_links(config.follow_links)
-        .max_depth(config.max_depth);
-    if !config.includes.is_empty() || !config.excludes.is_empty() {
-        let mut ob = ignore::overrides::OverrideBuilder::new(dir);
-        for inc in &config.includes {
-            let _ = ob.add(inc);
-        }
-        for exc in &config.excludes {
-            let _ = ob.add(&format!("!{exc}"));
-        }
-        if let Ok(ov) = ob.build() {
-            wb.overrides(ov);
-        }
-    }
-    wb.build()
-}
-
-/// One commit's metadata row, shared by `gix-log` and `gix-blame`:
-/// `"<shorthash>\t<author>\t<YYYY-MM-DD>\t<summary>"`. Tab-separated because
-/// author names and commit summaries contain spaces and colons, so the
-/// `path:line:text` colon convention `grep-files` uses wouldn't round-trip. The
-/// date comes from `chrono` (already a dep) so we don't depend on gix-date's
-/// formatter module being public.
-fn gix_commit_row(
-    repo: &gix::Repository,
-    id: &gix::ObjectId,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let commit = repo.find_commit(*id)?;
-    let short = id.to_hex_with_len(8).to_string();
-    let author = commit.author()?;
-    let name = author.name.to_string();
-    let date = chrono::DateTime::from_timestamp(author.seconds(), 0)
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
-        .unwrap_or_default();
-    let summary = commit.message()?.summary().to_string();
-    Ok(format!("{short}\t{name}\t{date}\t{summary}"))
-}
-
-/// `(gix-log dir n)` backend: up to `n` commits reachable from HEAD, newest
-/// first, each a commit row. Errors (not a repo, unborn HEAD) surface to Scheme
-/// as an empty list, the same way `walk-files` yields nothing for a missing dir.
-fn gix_log(dir: &str, max: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let repo = gix::discover(dir)?;
-    let head = repo.head_id()?;
-    let mut rows = Vec::new();
-    for info in repo.rev_walk(Some(head.detach())).all()?.take(max) {
-        rows.push(gix_commit_row(&repo, &info?.id)?);
-    }
-    Ok(rows)
-}
-
-/// `(gix-blame dir file)` backend: one row per line of `file` (absolute or
-/// relative to `dir`) as committed at HEAD, in file order:
-/// `"<1-based-line>\t<sha>\t<author>\t<author-epoch>\t<summary>"` (full 40-hex
-/// SHA, author time as Unix seconds — the fields magit's blame UI needs).
-///
-/// Alignment guard: gix blames HEAD's committed blob, but the buffer shows the
-/// *working-tree* file. The two only line up row-for-row when they're
-/// byte-identical, so when the on-disk file differs from HEAD (uncommitted
-/// edits) — or isn't tracked at HEAD — we return an empty list. magit treats
-/// that as "gix can't" and falls back to `git blame`, which blames the working
-/// tree (and marks uncommitted lines). This is the "gix where possible, git
-/// otherwise" boundary.
-fn gix_blame(dir: &str, file: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    use gix::bstr::BStr;
-    let repo = gix::discover(dir)?;
-    // Resolve `file` (absolute, or relative to `dir`) to a repo-root-relative
-    // path, the way `git blame -C dir -- file` does — callers (e.g. magit) pass
-    // the buffer's path, not a path already relative to the repo root.
-    let abs = {
-        let p = std::path::Path::new(file);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            std::path::Path::new(dir).join(p)
-        }
-    };
-    let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
-    let rel = match repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()) {
-        Some(wd) => abs
-            .strip_prefix(&wd)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| abs.clone()),
-        None => abs.clone(),
-    };
-
-    // Bail to git unless the working-tree file matches HEAD's blob byte-for-byte.
-    let head_tree = repo.head_tree()?;
-    let Some(entry) = head_tree.lookup_entry_by_path(&rel)? else {
-        return Ok(Vec::new()); // not tracked at HEAD → let git handle it
-    };
-    if entry.object()?.data != std::fs::read(&abs)? {
-        return Ok(Vec::new()); // working tree differs from HEAD → fall back to git
-    }
-
-    let rel = rel.to_string_lossy();
-    let head = repo.head_id()?.detach();
-    let opts = gix::repository::blame_file::Options::default();
-    let outcome = repo.blame_file(BStr::new(rel.as_bytes()), head, opts)?;
-
-    // Resolve each commit's "sha\tauthor\tepoch\tsummary" once — adjacent blame
-    // hunks often share one.
-    let mut cache: HashMap<gix::ObjectId, String> = HashMap::new();
-    let mut entries = outcome.entries;
-    entries.sort_by_key(|e| e.start_in_blamed_file);
-    let mut rows = Vec::new();
-    for entry in entries {
-        let meta = match cache.get(&entry.commit_id) {
-            Some(m) => m.clone(),
-            None => {
-                let commit = repo.find_commit(entry.commit_id)?;
-                let author = commit.author()?;
-                let m = format!(
-                    "{}\t{}\t{}\t{}",
-                    entry.commit_id.to_hex(),
-                    author.name,
-                    author.seconds(),
-                    commit.message()?.summary()
-                );
-                cache.insert(entry.commit_id, m.clone());
-                m
-            }
-        };
-        for i in 0..entry.len.get() {
-            // `start_in_blamed_file` is 0-based; editor lines are 1-based.
-            rows.push(format!("{}\t{}", entry.start_in_blamed_file + i + 1, meta));
-        }
-    }
-    Ok(rows)
-}
-
-/// Sorted short ref names for one category — backs `gix-branches` (local
-/// branches), `gix-remote-branches` (`origin/main`…), and `gix-tags`. `kind`
-/// picks the iterator the way `git branch` / `git branch -r` / `git tag` do.
-fn gix_ref_names(dir: &str, kind: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let repo = gix::discover(dir)?;
-    let platform = repo.references()?;
-    let iter = match kind {
-        "remote" => platform.remote_branches()?,
-        "tag" => platform.tags()?,
-        _ => platform.local_branches()?,
-    };
-    let mut names: Vec<String> = iter
-        .filter_map(|r| r.ok())
-        .map(|r| r.name().shorten().to_string())
-        .collect();
-    names.sort();
-    Ok(names)
-}
-
-/// `(gix-remotes dir)` backend: configured remote names (`origin`…), sorted.
-fn gix_remotes(dir: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let repo = gix::discover(dir)?;
-    Ok(repo.remote_names().iter().map(|n| n.to_string()).collect())
-}
-
-/// `(gix-state dir)` backend: `"merge"` while a merge is in progress (MERGE_HEAD
-/// present), `"rebase"` during a rebase (the rebase-merge/rebase-apply state
-/// dirs), else `""`. Replaces magit's `rev-parse --verify MERGE_HEAD/REBASE_HEAD`
-/// probes — git records this state on disk in the git dir, so we read it there.
-fn gix_state(dir: &str) -> String {
-    let Ok(repo) = gix::discover(dir) else {
-        return String::new();
-    };
-    let git_dir = repo.git_dir();
-    if git_dir.join("MERGE_HEAD").exists() {
-        "merge".into()
-    } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-        "rebase".into()
-    } else {
-        String::new()
-    }
-}
-
-/// `(gix-head-message dir full?)` backend: the HEAD commit's summary (`full` =
-/// false → `git log -1 --format=%s`) or full message (`full` = true → `%B`).
-/// Empty string when there are no commits yet.
-fn gix_head_message(dir: &str, full: bool) -> String {
-    let inner = || -> Result<String, Box<dyn std::error::Error>> {
-        let repo = gix::discover(dir)?;
-        let id = repo.head_id()?.detach();
-        let commit = repo.find_commit(id)?;
-        if full {
-            Ok(commit.message_raw()?.to_string())
-        } else {
-            Ok(commit.message()?.summary().to_string())
-        }
-    };
-    inner().unwrap_or_default()
-}
-
-/// `(gix-log-oneline dir n)` backend: up to `n` commits from HEAD, newest first,
-/// each `"<shorthash> <summary>"` — the native form of `git log --oneline -n N`.
-/// 7-char abbreviation matches git's default; magit accents the first token as
-/// the hash and uses it as a `git show` ref.
-fn gix_log_oneline(dir: &str, max: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let repo = gix::discover(dir)?;
-    let head = repo.head_id()?;
-    let mut rows = Vec::new();
-    for info in repo.rev_walk(Some(head.detach())).all()?.take(max) {
-        let id = info?.id;
-        let commit = repo.find_commit(id)?;
-        let summary = commit.message()?.summary().to_string();
-        rows.push(format!("{} {}", id.to_hex_with_len(7), summary));
-    }
-    Ok(rows)
-}
-
-// --- gix diff generation (git-format unified diffs without a subprocess) -----
-// Backs `gix-diff` (index↔worktree) and `gix-diff-cached` (HEAD↔index). The
-// output is `git diff`-format text so magit's `build-diff-map`/`parse-diff`
-// parse it unchanged AND it round-trips through `git apply --cached` (hunk
-// staging reuses the same text) — see the `gix_diff` round-trip test.
-
-/// Split `data` into lines that retain their trailing newline (the final line
-/// may lack one) — the exact tokenization gix-imara-diff uses, so our line
-/// indices line up with the hunk ranges it returns.
-fn diff_lines(data: &[u8]) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    let mut rest = data;
-    while !rest.is_empty() {
-        let n = rest
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(rest.len(), |i| i + 1);
-        let (line, r) = rest.split_at(n);
-        out.push(line);
-        rest = r;
-    }
-    out
-}
-
-/// Emit one hunk line: `prefix` + content, adding git's
-/// `\ No newline at end of file` marker when the source line has no terminator
-/// (imara's printer omits it — the round-trip footgun).
-fn diff_emit_line(out: &mut String, prefix: char, line: &[u8]) {
-    out.push(prefix);
-    out.push_str(&String::from_utf8_lossy(line));
-    if !line.ends_with(b"\n") {
-        out.push('\n');
-        out.push_str("\\ No newline at end of file\n");
-    }
-}
-
-/// A unified `@@` range field: git omits `,1` and writes `start,0` for an empty
-/// side (pure insertion/deletion).
-fn diff_hunk_range(start0: u32, len: u32) -> String {
-    if len == 1 {
-        format!("{}", start0 + 1)
-    } else if len == 0 {
-        format!("{},0", start0)
-    } else {
-        format!("{},{}", start0 + 1, len)
-    }
-}
-
-/// The unified hunks (everything after the file header) for `old` → `new`, or
-/// `None` when identical. Context = 3, hunks within 2*context merged — matching
-/// `git diff` closely enough for both display and `git apply`.
-fn diff_hunks(old: &[u8], new: &[u8]) -> Option<String> {
-    use gix::diff::blob::{Algorithm, Diff, InternedInput};
-    let input = InternedInput::new(old, new);
-    let mut diff = Diff::compute(Algorithm::Histogram, &input);
-    diff.postprocess_lines(&input);
-    let hunks: Vec<gix::diff::blob::Hunk> = diff.hunks().collect();
-    if hunks.is_empty() {
-        return None;
-    }
-    let old_lines = diff_lines(old);
-    let new_lines = diff_lines(new);
-    let ctx = 3u32;
-    let mut out = String::new();
-    let mut i = 0;
-    while i < hunks.len() {
-        // Merge hunks whose gap is within 2*context into one displayed hunk.
-        let mut j = i;
-        while j + 1 < hunks.len()
-            && hunks[j + 1]
-                .before
-                .start
-                .saturating_sub(hunks[j].before.end)
-                <= 2 * ctx
-        {
-            j += 1;
-        }
-        let bs = hunks[i].before.start.saturating_sub(ctx);
-        let be = (hunks[j].before.end + ctx).min(old_lines.len() as u32);
-        let a0 = hunks[i].after.start.saturating_sub(ctx);
-        let ae = (hunks[j].after.end + ctx).min(new_lines.len() as u32);
-        out.push_str(&format!(
-            "@@ -{} +{} @@\n",
-            diff_hunk_range(bs, be - bs),
-            diff_hunk_range(a0, ae - a0)
-        ));
-        let mut bpos = bs;
-        for h in &hunks[i..=j] {
-            for k in bpos..h.before.start {
-                diff_emit_line(&mut out, ' ', old_lines[k as usize]);
-            }
-            for k in h.before.start..h.before.end {
-                diff_emit_line(&mut out, '-', old_lines[k as usize]);
-            }
-            for k in h.after.start..h.after.end {
-                diff_emit_line(&mut out, '+', new_lines[k as usize]);
-            }
-            bpos = h.before.end;
-        }
-        for k in bpos..be {
-            diff_emit_line(&mut out, ' ', old_lines[k as usize]);
-        }
-        i = j + 1;
-    }
-    Some(out)
-}
-
-/// git's octal mode string for a committed-tree entry.
-fn tree_mode_str(mode: gix::objs::tree::EntryMode) -> &'static str {
-    use gix::objs::tree::EntryKind;
-    match mode.kind() {
-        EntryKind::BlobExecutable => "100755",
-        EntryKind::Link => "120000",
-        EntryKind::Commit => "160000",
-        _ => "100644",
-    }
-}
-
-/// git's octal mode string for an index entry.
-fn index_mode_str(mode: gix::index::entry::Mode) -> &'static str {
-    use gix::index::entry::Mode;
-    if mode.contains(Mode::SYMLINK) {
-        "120000"
-    } else if mode.contains(Mode::FILE_EXECUTABLE) {
-        "100755"
-    } else if mode.contains(Mode::COMMIT) {
-        "160000"
-    } else {
-        "100644"
-    }
-}
-
-/// git's binary heuristic: a NUL byte in the first 8000 bytes. Running the line
-/// differ over binary content would dump raw bytes into the diff (garbling the
-/// magit buffer and breaking its file/hunk parsing), so we detect it first.
-fn diff_is_binary(data: &[u8]) -> bool {
-    data.iter().take(8000).any(|&b| b == 0)
-}
-
-/// `diff --git`-format text for one changed file. `old`/`new` are `None` for an
-/// addition/deletion respectively; the `&str` is that side's git mode.
-fn diff_one_file(path: &str, old: Option<(&[u8], &str)>, new: Option<(&[u8], &str)>) -> String {
-    let empty: &[u8] = &[];
-    let oc = old.map_or(empty, |(c, _)| c);
-    let nc = new.map_or(empty, |(c, _)| c);
-
-    // Binary files: emit `Binary files … differ` with no body, exactly like git —
-    // no content, so nothing to garble or to fail to parse.
-    if diff_is_binary(oc) || diff_is_binary(nc) {
-        let mut out = format!("diff --git a/{path} b/{path}\n");
-        match (old, new) {
-            (None, Some((_, mode))) => out.push_str(&format!(
-                "new file mode {mode}\nBinary files /dev/null and b/{path} differ\n"
-            )),
-            (Some((_, mode)), None) => out.push_str(&format!(
-                "deleted file mode {mode}\nBinary files a/{path} and /dev/null differ\n"
-            )),
-            _ => out.push_str(&format!("Binary files a/{path} and b/{path} differ\n")),
-        }
-        return out;
-    }
-
-    let Some(hunks) = diff_hunks(oc, nc) else {
-        return String::new(); // identical → nothing (callers pre-filter, but be safe)
-    };
-    let mut out = format!("diff --git a/{path} b/{path}\n");
-    match (old, new) {
-        (None, Some((_, mode))) => {
-            out.push_str(&format!(
-                "new file mode {mode}\n--- /dev/null\n+++ b/{path}\n"
-            ));
-        }
-        (Some((_, mode)), None) => {
-            out.push_str(&format!(
-                "deleted file mode {mode}\n--- a/{path}\n+++ /dev/null\n"
-            ));
-        }
-        _ => out.push_str(&format!("--- a/{path}\n+++ b/{path}\n")),
-    }
-    out.push_str(&hunks);
-    out
-}
-
-/// A path's blob id + git mode on one side of a diff (a tree or the index).
-type GixSide = (gix::ObjectId, &'static str);
-
-/// Flatten a tree to `path → (blob id, mode)` for every file it contains.
-/// `.files()` records directories (trees) and submodules (commits) too; we keep
-/// only blobs/symlinks, else a "deleted directory" would diff the raw tree
-/// object — bytes that garble the buffer and break magit's parser.
-fn tree_side_map(
-    tree: &gix::Tree<'_>,
-) -> Result<std::collections::BTreeMap<Vec<u8>, GixSide>, Box<dyn std::error::Error>> {
-    Ok(tree
-        .traverse()
-        .breadthfirst
-        .files()?
-        .into_iter()
-        .filter(|e| e.mode.is_blob_or_symlink())
-        .map(|e| (Vec::from(e.filepath), (e.oid, tree_mode_str(e.mode))))
-        .collect())
-}
-
-/// `git diff`-format text between two `path → (id, mode)` sides (tree↔tree or
-/// tree↔index). Shared by `gix-diff-cached` and `gix-show`.
-fn diff_side_maps(
-    repo: &gix::Repository,
-    old: &std::collections::BTreeMap<Vec<u8>, GixSide>,
-    new: &std::collections::BTreeMap<Vec<u8>, GixSide>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let blob = |id: gix::ObjectId| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(repo.find_object(id)?.data.clone())
-    };
-    let mut keys: Vec<&Vec<u8>> = old.keys().chain(new.keys()).collect();
-    keys.sort();
-    keys.dedup();
-    let mut out = String::new();
-    for k in keys {
-        let path = String::from_utf8_lossy(k).into_owned();
-        match (old.get(k), new.get(k)) {
-            (Some((oo, om)), Some((no, nm))) if oo != no => {
-                let (o, n) = (blob(*oo)?, blob(*no)?);
-                out.push_str(&diff_one_file(&path, Some((&o, om)), Some((&n, nm))));
-            }
-            (None, Some((no, nm))) => {
-                let n = blob(*no)?;
-                out.push_str(&diff_one_file(&path, None, Some((&n, nm))));
-            }
-            (Some((oo, om)), None) => {
-                let o = blob(*oo)?;
-                out.push_str(&diff_one_file(&path, Some((&o, om)), None));
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
-/// `(gix-diff dir)` / `(gix-diff-cached dir)` backend. `cached` = false diffs the
-/// index against the working tree (`git diff`); `cached` = true diffs HEAD
-/// against the index (`git diff --cached`). Untracked files are excluded, as git
-/// does. Errors (bare repo, etc.) surface as "" → an empty section in magit.
-fn gix_diff_text(dir: &str, cached: bool) -> Result<String, Box<dyn std::error::Error>> {
-    use std::collections::BTreeMap;
-    let repo = gix::discover(dir)?;
-    let index = repo.open_index()?;
-    let blob = |id: gix::ObjectId| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(repo.find_object(id)?.data.clone())
-    };
-    let mut out = String::new();
-
-    if cached {
-        // HEAD tree vs index. No HEAD yet (unborn) → empty tree, so every staged
-        // path reads as an addition (initial commit).
-        let head = match repo.head_tree() {
-            Ok(t) => tree_side_map(&t)?,
-            Err(_) => BTreeMap::new(),
-        };
-        let mut idx: BTreeMap<Vec<u8>, GixSide> = BTreeMap::new();
-        for e in index.entries() {
-            if e.stage() != gix::index::entry::Stage::Unconflicted {
-                continue;
-            }
-            idx.insert(e.path(&index).to_vec(), (e.id, index_mode_str(e.mode)));
-        }
-        out.push_str(&diff_side_maps(&repo, &head, &idx)?);
-    } else {
-        // index vs working tree.
-        let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
-        for e in index.entries() {
-            if e.stage() != gix::index::entry::Stage::Unconflicted {
-                continue;
-            }
-            let path = String::from_utf8_lossy(e.path(&index)).into_owned();
-            let mode = index_mode_str(e.mode);
-            let file = workdir.join(&path);
-            if !file.exists() {
-                let o = blob(e.id)?;
-                out.push_str(&diff_one_file(&path, Some((&o, mode)), None));
-            } else {
-                let disk = std::fs::read(&file)?;
-                let o = blob(e.id)?;
-                if disk != o {
-                    out.push_str(&diff_one_file(&path, Some((&o, mode)), Some((&disk, mode))));
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// `(gix-show dir rev)` backend: `git show <rev>`-format text — the commit
-/// header (`commit`/`Merge`/`Author`/`Date`, message indented 4 spaces) followed
-/// by the diff against its first parent (or the empty tree for a root commit).
-/// Display-only; magit colorizes it by line prefix.
-fn gix_show(dir: &str, rev: &str) -> Result<String, Box<dyn std::error::Error>> {
-    use gix::bstr::BStr;
-    use std::collections::BTreeMap;
-    let repo = gix::discover(dir)?;
-    let id = repo.rev_parse_single(BStr::new(rev))?.detach();
-    let commit = repo.find_commit(id)?;
-    let parents: Vec<gix::ObjectId> = commit.parent_ids().map(|p| p.detach()).collect();
-
-    let mut out = format!("commit {}\n", id.to_hex());
-    if parents.len() > 1 {
-        let shorts: Vec<String> = parents
-            .iter()
-            .map(|p| p.to_hex_with_len(7).to_string())
-            .collect();
-        out.push_str(&format!("Merge: {}\n", shorts.join(" ")));
-    }
-    let author = commit.author()?;
-    out.push_str(&format!("Author: {} <{}>\n", author.name, author.email));
-    let t = author.time()?;
-    let date = chrono::DateTime::from_timestamp(t.seconds, 0)
-        .and_then(|dt| {
-            chrono::FixedOffset::east_opt(t.offset).map(|off| {
-                dt.with_timezone(&off)
-                    .format("%a %b %e %H:%M:%S %Y %z")
-                    .to_string()
-            })
-        })
-        .unwrap_or_default();
-    out.push_str(&format!("Date:   {date}\n\n"));
-    for line in commit.message_raw()?.to_string().lines() {
-        out.push_str("    ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push('\n');
-
-    // Diff against the first parent (empty tree for a root commit).
-    let new_map = tree_side_map(&commit.tree()?)?;
-    let old_map = match parents.first() {
-        Some(p) => tree_side_map(&repo.find_commit(*p)?.tree()?)?,
-        None => BTreeMap::new(),
-    };
-    out.push_str(&diff_side_maps(&repo, &old_map, &new_map)?);
-    Ok(out)
-}
-
-/// `oid → ["HEAD -> main", "tag: v1", "origin/main"]` for `git log --decorate`.
-/// Tags get a `tag:` prefix; the checked-out branch gets `HEAD ->`. Built from
-/// the ref-name prefix so no Category import is needed.
-fn ref_decorations(
-    repo: &gix::Repository,
-) -> std::collections::HashMap<gix::ObjectId, Vec<String>> {
-    let mut map: std::collections::HashMap<gix::ObjectId, Vec<String>> =
-        std::collections::HashMap::new();
-    let head_branch = repo
-        .head_name()
-        .ok()
-        .flatten()
-        .map(|n| n.shorten().to_string());
-    if let Ok(platform) = repo.references()
-        && let Ok(iter) = platform.all()
-    {
-        for r in iter.filter_map(Result::ok) {
-            let full = r.name().as_bstr().to_string();
-            let short = r.name().shorten().to_string();
-            let deco = if let Some(t) = full.strip_prefix("refs/tags/") {
-                format!("tag: {t}")
-            } else if full.starts_with("refs/heads/") {
-                if head_branch.as_deref() == Some(short.as_str()) {
-                    format!("HEAD -> {short}")
-                } else {
-                    short
-                }
-            } else if full.starts_with("refs/remotes/") {
-                short
-            } else {
-                continue; // HEAD, stash, notes, …
-            };
-            let mut r = r;
-            if let Ok(id) = r.peel_to_id() {
-                map.entry(id.detach()).or_default().push(deco);
-            }
-        }
-    }
-    map
-}
-
-/// `(gix-log-decorated dir all? n)`: up to `n` commits newest-first, each
-/// `"<short> [(<decorations>)] <summary>"` — `git log --oneline --decorate
-/// [--all]`. magit keeps git for the `--graph` variant.
-fn gix_log_decorated(
-    dir: &str,
-    all: bool,
-    max: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    use gix::revision::walk::Sorting;
-    use gix::traverse::commit::simple::CommitTimeOrder;
-    let repo = gix::discover(dir)?;
-    let decos = ref_decorations(&repo);
-    let tips: Vec<gix::ObjectId> = if all {
-        repo.references()?
-            .all()?
-            .filter_map(Result::ok)
-            .filter_map(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
-            .collect()
-    } else {
-        vec![repo.head_id()?.detach()]
-    };
-    if tips.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut rows = Vec::new();
-    for info in repo
-        .rev_walk(tips)
-        .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
-        .all()?
-        .take(max)
-    {
-        let id = info?.id;
-        let summary = repo.find_commit(id)?.message()?.summary().to_string();
-        let deco = decos
-            .get(&id)
-            .map(|v| format!(" ({})", v.join(", ")))
-            .unwrap_or_default();
-        rows.push(format!("{}{} {}", id.to_hex_with_len(7), deco, summary));
-    }
-    Ok(rows)
-}
-
-/// `(gix-log-range dir tip hidden n)`: up to `n` commits reachable from `tip`
-/// but not `hidden`, newest-first, as `"<short> <summary>"` — `git log
-/// --oneline hidden..tip`, used for the unpushed/unpulled sections.
-fn gix_log_range(
-    dir: &str,
-    tip: &str,
-    hidden: &str,
-    max: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    use gix::bstr::BStr;
-    use gix::revision::walk::Sorting;
-    use gix::traverse::commit::simple::CommitTimeOrder;
-    let repo = gix::discover(dir)?;
-    let tip_id = repo.rev_parse_single(BStr::new(tip))?.detach();
-    let hidden_id = repo.rev_parse_single(BStr::new(hidden))?.detach();
-    let mut rows = Vec::new();
-    for info in repo
-        .rev_walk(Some(tip_id))
-        .with_hidden(Some(hidden_id))
-        .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
-        .all()?
-        .take(max)
-    {
-        let id = info?.id;
-        let summary = repo.find_commit(id)?.message()?.summary().to_string();
-        rows.push(format!("{} {}", id.to_hex_with_len(7), summary));
-    }
-    Ok(rows)
-}
-
-/// `(gix-log-file dir file n)`: up to `n` commits that changed `file` (path
-/// relative to the repo root), newest-first, decorated — `git log --oneline
-/// --decorate -n N -- <file>`. A commit "changed" the file when its blob differs
-/// from the first parent's (including add/remove).
-fn gix_log_file(
-    dir: &str,
-    file: &str,
-    max: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    use gix::revision::walk::Sorting;
-    use gix::traverse::commit::simple::CommitTimeOrder;
-    let repo = gix::discover(dir)?;
-    let decos = ref_decorations(&repo);
-    let path = std::path::Path::new(file);
-    let blob_at = |commit: &gix::Commit<'_>| -> Option<gix::ObjectId> {
-        commit
-            .tree()
-            .ok()?
-            .lookup_entry_by_path(path)
-            .ok()?
-            .map(|e| e.id().detach())
-    };
-    let head = repo.head_id()?.detach();
-    let mut rows = Vec::new();
-    for info in repo
-        .rev_walk(Some(head))
-        .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
-        .all()?
-    {
-        if rows.len() >= max {
-            break;
-        }
-        let id = info?.id;
-        let commit = repo.find_commit(id)?;
-        let here = blob_at(&commit);
-        let parent = match commit.parent_ids().next() {
-            Some(p) => blob_at(&repo.find_commit(p.detach())?),
-            None => None,
-        };
-        if here != parent {
-            let summary = commit.message()?.summary().to_string();
-            let deco = decos
-                .get(&id)
-                .map(|v| format!(" ({})", v.join(", ")))
-                .unwrap_or_default();
-            rows.push(format!("{}{} {}", id.to_hex_with_len(7), deco, summary));
-        }
-    }
-    Ok(rows)
-}
-
-/// `(gix-stash-list dir)`: `git stash list`-format lines, newest first
-/// (`"stash@{0}: WIP on main: …"`). Stashes are entries in the `refs/stash`
-/// reflog, whose message is exactly what git prints after the `stash@{N}:` tag.
-fn gix_stash_list(dir: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let repo = gix::discover(dir)?;
-    let reference = match repo.find_reference("refs/stash") {
-        Ok(r) => r,
-        Err(_) => return Ok(Vec::new()), // no stashes
-    };
-    let mut platform = reference.log_iter();
-    let mut msgs: Vec<String> = Vec::new();
-    if let Some(iter) = platform.all()? {
-        for line in iter {
-            msgs.push(line?.message.to_string());
-        }
-    }
-    // The reflog is oldest-first; `git stash list` is newest-first (stash@{0} =
-    // most recent).
-    Ok(msgs
-        .into_iter()
-        .rev()
-        .enumerate()
-        .map(|(i, msg)| format!("stash@{{{i}}}: {msg}"))
-        .collect())
-}
-
-// --- gix status (porcelain v1 without a subprocess) --------------------------
-// Backs `gix-status`, the last hot-path read magit had on `git`. Produces
-// `git status --porcelain --branch --untracked-files=all`-format lines so
-// magit's `magit-porcelain-full` parser is unchanged. Renames are NOT detected
-// (a rename reads as a delete + add, i.e. matches `git status --no-renames`).
-
-/// Count commits reachable from `tip` but not `base` — git's ahead/behind number.
-fn gix_count_excl(repo: &gix::Repository, tip: gix::ObjectId, base: gix::ObjectId) -> usize {
-    repo.rev_walk(Some(tip))
-        .with_hidden(Some(base))
-        .all()
-        .map(|w| w.filter_map(Result::ok).count())
-        .unwrap_or(0)
-}
-
-/// The short name of the checked-out branch for the repo enclosing `dir`, e.g.
-/// "main". Empty when `dir` isn't in a git work tree or HEAD is detached (no
-/// branch). The native form of `git rev-parse --abbrev-ref HEAD`.
-fn gix_branch(dir: &str) -> String {
-    gix::discover(dir)
-        .ok()
-        .and_then(|repo| repo.head_name().ok().flatten())
-        .map(|n| n.shorten().to_string())
-        .unwrap_or_default()
-}
-
-/// The `## …` porcelain branch header: `## branch...upstream [ahead N, behind M]`,
-/// or the `No commits yet` / `HEAD (no branch)` forms magit-parse-branch-line knows.
-fn gix_status_branch_line(repo: &gix::Repository) -> String {
-    use gix::bstr::BStr;
-    let Some(head_name) = repo.head_name().ok().flatten() else {
-        return "## HEAD (no branch)".to_string();
-    };
-    let branch = head_name.shorten().to_string();
-    let head_id = match repo.head_id() {
-        Ok(id) => id.detach(),
-        Err(_) => return format!("## No commits yet on {branch}"),
-    };
-    let upstream = repo.head_ref().ok().flatten().and_then(|r| {
-        r.remote_tracking_ref_name(gix::remote::Direction::Fetch)
-            .and_then(|x| x.ok())
-            .map(|n| n.shorten().to_string())
-    });
-    let Some(up) = upstream else {
-        return format!("## {branch}");
-    };
-    let Some(up_id) = repo
-        .rev_parse_single(BStr::new(up.as_bytes()))
-        .ok()
-        .map(|id| id.detach())
-    else {
-        return format!("## {branch}...{up} [gone]");
-    };
-    let (ahead, behind) = (
-        gix_count_excl(repo, head_id, up_id),
-        gix_count_excl(repo, up_id, head_id),
-    );
-    if ahead == 0 && behind == 0 {
-        return format!("## {branch}...{up}");
-    }
-    let mut ab = Vec::new();
-    if ahead > 0 {
-        ab.push(format!("ahead {ahead}"));
-    }
-    if behind > 0 {
-        ab.push(format!("behind {behind}"));
-    }
-    format!("## {branch}...{up} [{}]", ab.join(", "))
-}
-
-/// One porcelain status row: a `path` with its staged (`x`) and unstaged (`y`)
-/// codes. `x`/`y` are `' '` (unchanged), `M`/`A`/`D`, or `?` (untracked).
-struct StatusEntry {
-    path: String,
-    x: char,
-    y: char,
-}
-
-/// `XY`-classified change rows for `gix-status`, sorted by path. X = index-vs-HEAD
-/// (staged), Y = worktree-vs-index (unstaged), `??` = untracked.
-fn gix_status_entries(
-    repo: &gix::Repository,
-) -> Result<Vec<StatusEntry>, Box<dyn std::error::Error>> {
-    use std::collections::{BTreeMap, HashSet};
-    let index = repo.open_index()?;
-    let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
-
-    // index (stage 0) path→oid, plus every index path for the untracked test.
-    let mut idx: BTreeMap<Vec<u8>, gix::ObjectId> = BTreeMap::new();
-    let mut idx_paths: HashSet<Vec<u8>> = HashSet::new();
-    for e in index.entries() {
-        idx_paths.insert(e.path(&index).to_vec());
-        if e.stage() == gix::index::entry::Stage::Unconflicted {
-            idx.insert(e.path(&index).to_vec(), e.id);
-        }
-    }
-    let head: BTreeMap<Vec<u8>, gix::ObjectId> = match repo.head_tree() {
-        Ok(t) => t
-            .traverse()
-            .breadthfirst
-            .files()?
-            .into_iter()
-            .filter(|e| e.mode.is_blob_or_symlink()) // drop tree/submodule entries
-            .map(|e| (Vec::from(e.filepath), e.oid))
-            .collect(),
-        Err(_) => BTreeMap::new(),
-    };
-
-    let mut codes: BTreeMap<Vec<u8>, [char; 2]> = BTreeMap::new();
-
-    // X — staged (HEAD tree vs index).
-    let mut staged: Vec<&Vec<u8>> = head.keys().chain(idx.keys()).collect();
-    staged.sort();
-    staged.dedup();
-    for k in staged {
-        let x = match (head.get(k), idx.get(k)) {
-            (None, Some(_)) => 'A',
-            (Some(_), None) => 'D',
-            (Some(h), Some(i)) if h != i => 'M',
-            _ => continue,
-        };
-        codes.entry(k.clone()).or_insert([' ', ' '])[0] = x;
-    }
-
-    // Y — unstaged (index vs working tree). Skip reading content when size+mtime
-    // match the index's stat cache, the way git does (so this stays cheap).
-    for e in index.entries() {
-        if e.stage() != gix::index::entry::Stage::Unconflicted {
-            continue;
-        }
-        let rel = e.path(&index).to_vec();
-        let file = workdir.join(String::from_utf8_lossy(&rel).as_ref());
-        let y = match std::fs::metadata(&file) {
-            Err(_) => 'D', // gone from the worktree
-            Ok(meta) => {
-                let mtime_matches = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .is_some_and(|d| {
-                        d.as_secs() as u32 == e.stat.mtime.secs
-                            && d.subsec_nanos() == e.stat.mtime.nsecs
-                    });
-                if meta.len() == e.stat.size as u64 && mtime_matches {
-                    continue; // unchanged per the stat cache
-                }
-                let disk = std::fs::read(&file).unwrap_or_default();
-                if disk == repo.find_object(e.id)?.data.clone() {
-                    continue; // touched but identical content
-                }
-                'M'
-            }
-        };
-        codes.entry(rel).or_insert([' ', ' '])[1] = y;
-    }
-
-    // Untracked — gitignore-aware worktree walk; files absent from the index.
-    let walker = ignore::WalkBuilder::new(&workdir)
-        .hidden(false) // dotfiles are tracked by git
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
-        .build();
-    for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        if path.components().any(|c| c.as_os_str() == ".git") {
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(&workdir) else {
-            continue;
-        };
-        let rel = rel.to_string_lossy().replace('\\', "/").into_bytes();
-        if !idx_paths.contains(&rel) && !head.contains_key(&rel) {
-            codes.insert(rel, ['?', '?']);
-        }
-    }
-
-    Ok(codes
-        .into_iter()
-        .map(|(p, [x, y])| StatusEntry {
-            path: String::from_utf8_lossy(&p).into_owned(),
-            x,
-            y,
-        })
-        .collect())
-}
-
-/// `(gix-status dir)` backend: porcelain v1 lines, header first.
-fn gix_status(dir: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let repo = gix::discover(dir)?;
-    let mut out = vec![gix_status_branch_line(&repo)];
-    for e in gix_status_entries(&repo)? {
-        out.push(format!("{}{} {}", e.x, e.y, e.path));
-    }
-    Ok(out)
-}
-
-/// The outcome of a blocking eval: enqueued commands + the last value.
-/// Only [`ScriptEngine::eval`] (tests / REPL) builds this; startup uses
-/// [`ScriptEngine::eval_collecting`], which keeps commands even on error.
-#[allow(dead_code)]
-pub struct EvalResult {
-    pub commands: Vec<EditorCommand>,
-    pub value: Option<String>,
-}
-
-/// Something the engine thread sends back to the editor's foreground drain task.
-pub enum ScriptOutcome {
-    /// A dispatched eval/action: commands to apply + an optional echo message.
-    Commands {
-        commands: Vec<EditorCommand>,
-        message: Option<String>,
-    },
-    /// Dynamic Helm candidates for `source`, computed for query `query_id`
-    /// (stale results — id mismatch — are discarded by the editor). Each entry is
-    /// a candidate plus an optional marginalia-style annotation.
-    Candidates {
-        source: usize,
-        query_id: u64,
-        candidates: Vec<(String, Option<String>)>,
-    },
-    /// Completion-at-point results from Scheme CAPFs: the byte range to replace
-    /// and the candidate items (label + optional annotation). Empty = no CAPF
-    /// produced anything, so the editor falls back to LSP.
-    Capf {
-        start: usize,
-        end: usize,
-        items: Vec<(String, Option<String>)>,
-    },
-}
-
-struct RawResult {
-    commands: Vec<EditorCommand>,
-    value: Option<String>,
-    error: Option<String>,
-}
-
-/// Where a job's result goes: back to a blocking caller, or to the async drain.
-enum Reply {
-    Sync(Sender<RawResult>),
-    Async,
-}
-
-enum Task {
-    Eval(String),
-    Call(String, Option<String>),
-    /// Compute dynamic Helm candidates: call `function` with the pattern.
-    Candidates {
-        source: usize,
-        query_id: u64,
-        function: String,
-        pattern: String,
-    },
-    /// Run completion-at-point functions in order until one yields candidates.
-    Capf {
-        functions: Vec<String>,
-        prefix: String,
-        start: usize,
-        end: usize,
-    },
-}
-
-struct Job {
-    task: Task,
-    interactive: bool,
-    reply: Reply,
-}
-
-/// A handle to the Steel interpreter, which runs on its OWN thread so a slow or
-/// runaway script can never freeze the UI (the editor's command loop solves
-/// Emacs's "elisp blocks the main loop" problem). The engine is `!Send`, so it
-/// is created on and never leaves that thread — only plain data (`String`,
-/// `EditorCommand`) crosses the channel boundary. The editor talks to it two
-/// ways: **blocking** (startup/config, where command ordering matters, and
-/// tests) and **dispatched** (interactive commands, drained on the foreground).
-pub struct ScriptEngine {
-    jobs: Sender<Job>,
-    command_names: Vec<String>,
-    global_names: Vec<String>,
-    /// Fast path: a nullary command name → its `EditorCommand`, so trivial
-    /// keybindings (motion, etc.) apply synchronously without a thread hop.
-    builtins: HashMap<String, EditorCommand>,
-    buffers: BufferNames,
-    buffer_paths: BufferPaths,
-    point: SharedSnapshot,
-    markers: Markers,
-    options: Options,
-}
-
-impl ScriptEngine {
-    /// Spawn the engine thread; returns the handle and the receiver of async
-    /// outcomes (the editor drains it on a foreground task).
-    pub fn new() -> (Self, UnboundedReceiver<ScriptOutcome>) {
-        let nullary = nullary_commands();
-        let command_names: Vec<String> = nullary.iter().map(|(name, _)| name.to_string()).collect();
-        let mut global_names = command_names.clone();
-        global_names.extend(
-            [
-                "insert",
-                "message",
-                "define-key",
-                "set-face",
-                "load-theme-impl",
-                "theme-names",
-                "set-lsp",
-                "set-extension",
-                "set-language-id",
-                "set-option",
-                "get-option",
-                "option-list",
-                "add-hook",
-                "remove-hook",
-                "helm",
-                "helm-from",
-                "buffer-names",
-                "buffer-file-name-of",
-                "switch-to-buffer",
-                "kill-buffer-named",
-                "set-major-mode",
-                "key-binding",
-                "keys-with-prefix",
-                "command-list",
-                "function-doc",
-                "function-list",
-                "function-source",
-                "index-doc-file",
-                "macros-version",
-                "open-file",
-                "lsp-rename-to",
-                "lsp-workspace-symbol-go",
-                "lsp-request",
-                "lsp-goto",
-                "lsp-apply-workspace-edit",
-                "lsp-apply-text-edits",
-                "open-file-other-window",
-                "select-window",
-                "window-list",
-                "selected-window",
-                "set-line-icon",
-                "clear-line-icons",
-                "set-line-image-impl",
-                "clear-line-images",
-                "set-line-indent",
-                "clear-line-indents",
-                "current-directory",
-                "directory-of",
-                "list-directory",
-                "render-buffer",
-                "call-process",
-                "call-process-full",
-                "getenv",
-                "setenv",
-                "goto-line",
-                "transient",
-                "transient-sticky",
-                "transient-quit",
-                "buffer-line",
-                "current-buffer",
-                "buffer-directory",
-                "buffer-file-name",
-                "point",
-                "point-max",
-                "position->byte",
-                "lsp-server-ready?",
-                "evil-enabled?",
-                "helix-enabled?",
-                "line-bounds",
-                "diagnostics",
-                "regexp-quote",
-                "buffer-string",
-                "buffer-substring",
-                "region-beginning",
-                "region-end",
-                "region-active?",
-                "region-text",
-                "selections",
-                "set-selections",
-                "grapheme-forward",
-                "grapheme-backward",
-                "word-forward",
-                "word-forward-start",
-                "word-backward",
-                "line-start-pos",
-                "line-end-pos",
-                "line-of-pos",
-                "line-start-of-line",
-                "search-forward",
-                "goto-char",
-                "read-string-impl",
-                "append-to-buffer",
-                "fontify-org-buffer",
-                "set-modeline-project",
-                "set-modeline-git",
-                "set-mode-line-slot",
-                "set-mode-line-format",
-                "file-exists?",
-                "file-directory?",
-                "packages-directory",
-                "register-macros-scheme-dir",
-                "parent-directory",
-                "read-file",
-                "write-file",
-                "org-id-new",
-                "current-time",
-                "walk-files",
-                "grep-files",
-                "gix-toplevel",
-                "gix-branch",
-                "gix-log",
-                "gix-blame",
-                "gix-branches",
-                "gix-remote-branches",
-                "gix-tags",
-                "gix-remotes",
-                "gix-state",
-                "gix-head-subject",
-                "gix-head-message",
-                "gix-log-oneline",
-                "gix-diff",
-                "gix-diff-cached",
-                "gix-show",
-                "gix-log-decorated",
-                "gix-log-range",
-                "gix-stash-list",
-                "gix-log-file",
-                "gix-status",
-                "search-exclude",
-                "search-include",
-                "search-reset",
-                "set-search-option",
-                "overlay-set-face",
-                "overlay-hide",
-                "fold-lines",
-                "unfold-all",
-                "set-fold-marker",
-                "clear-fold-markers",
-                "line-count",
-                "line-indentation",
-                "clear-overlays",
-                "put-text-property",
-                "get-text-property",
-                "set-line-suffix",
-                "make-process",
-                "process-send-string",
-                "kill-process",
-                "anvil-eval",
-                "anvil-interrupt",
-                "anvil-reset",
-                "anvil-eval-defun",
-                "anvil-load-file",
-                "anvil-doc",
-                "anvil-macroexpand",
-                "anvil-apropos",
-                "anvil-signature",
-                "run-with-timer",
-                "delete-region",
-                "kill-region-between",
-                "replace-region",
-                "insert-at",
-                "set-region",
-                "set-lsp-format-on-save",
-                "lsp-semantic-tokens",
-                "lsp-semantic-tokens-range",
-                "lsp-semantic-tokens-delta",
-                "tree-sitter-query",
-                "tree-sitter-node-at",
-                "undo-boundary",
-                "string-match",
-                "regexp-captures",
-                "replace-regexp-in-string",
-                "re-search-forward",
-                "buffer-local-set",
-                "buffer-local-get",
-                "completing-read-impl",
-                "read-file-name",
-                "y-or-n-p",
-                "y-or-n-p-sticky",
-                "make-marker",
-                "marker-position",
-                "set-marker",
-                "delete-marker",
-            ]
-            .iter()
-            .map(|s| s.to_string()),
-        );
-        let builtins: HashMap<String, EditorCommand> = nullary
-            .into_iter()
-            .map(|(n, c)| (n.to_string(), c))
-            .collect();
-
-        let buffers: BufferNames = Arc::new(Mutex::new(Vec::new()));
-        let buffer_paths: BufferPaths = Arc::new(Mutex::new(HashMap::new()));
-        let point: SharedSnapshot = Arc::new(ArcSwap::from_pointee(EditorSnapshot::default()));
-        let markers: Markers = Arc::new(Mutex::new(MarkerStore::default()));
-        let options: Options = Arc::new(Mutex::new(HashMap::new()));
-        let (jobs, jobs_rx) = channel::<Job>();
-        let (outcomes, outcomes_rx) = unbounded::<ScriptOutcome>();
-
-        let thread_buffers = buffers.clone();
-        let thread_buffer_paths = buffer_paths.clone();
-        let thread_point = point.clone();
-        let thread_markers = markers.clone();
-        let thread_options = options.clone();
-        std::thread::spawn(move || {
-            engine_thread(
-                jobs_rx,
-                outcomes,
-                thread_buffers,
-                thread_buffer_paths,
-                thread_point,
-                thread_markers,
-                thread_options,
-            )
-        });
-
-        (
-            Self {
-                jobs,
-                command_names,
-                global_names,
-                builtins,
-                buffers,
-                buffer_paths,
-                point,
-                markers,
-                options,
-            },
-            outcomes_rx,
-        )
-    }
-
-    /// Shift markers after an edit replacing `[start, old_end)` with `new_len`
-    /// bytes: markers inside the deleted span collapse to `start`, markers after
-    /// it shift by the length delta.
-    pub fn adjust_markers(&self, start: usize, old_end: usize, new_len: usize) {
-        let delta = new_len as isize - (old_end - start) as isize;
-        let mut store = self.markers.lock().unwrap();
-        for pos in store.positions.values_mut() {
-            if *pos >= old_end {
-                *pos = (*pos as isize + delta).max(0) as usize;
-            } else if *pos > start {
-                *pos = start;
-            }
-        }
-    }
-
-    /// Drop all markers (e.g. on a buffer switch — markers are buffer-positions).
-    pub fn clear_markers(&self) {
-        let mut store = self.markers.lock().unwrap();
-        store.positions.clear();
-    }
-
-    /// Create a marker at `pos`, returning its id. The snippet session uses these
-    /// to track tab-stop fields, which then ride along on `adjust_markers`.
-    pub fn add_marker(&self, pos: usize) -> u64 {
-        let mut store = self.markers.lock().unwrap();
-        let id = store.next;
-        store.next += 1;
-        store.positions.insert(id, pos);
-        id
-    }
-
-    /// Current byte position of marker `id`, if it still exists.
-    pub fn marker_pos(&self, id: u64) -> Option<usize> {
-        self.markers.lock().unwrap().positions.get(&id).copied()
-    }
-
-    /// Remove marker `id` (snippet field cleanup).
-    pub fn remove_marker(&self, id: u64) {
-        self.markers.lock().unwrap().positions.remove(&id);
-    }
-
-    /// The nullary command names, for `M-x` completion.
-    pub fn command_names(&self) -> &[String] {
-        &self.command_names
-    }
-
-    /// Every registered global name, for the built-in Steel LSP.
-    pub fn global_names(&self) -> &[String] {
-        &self.global_names
-    }
-
-    /// Update the buffer list Scheme sees via `(buffer-names)`.
-    pub fn set_buffer_names(&self, names: Vec<String>) {
-        *self.buffers.lock().unwrap() = names;
-    }
-
-    /// Publish the buffer name → file path map Scheme reads via
-    /// `(buffer-file-name-of name)`. Only file-visiting buffers appear.
-    pub fn set_buffer_paths(&self, paths: HashMap<String, String>) {
-        *self.buffer_paths.lock().unwrap() = paths;
-    }
-
-    /// Publish the current editor options so Scheme can read them via
-    /// `(get-option "name")`. Called after any option change.
-    pub fn set_options(&self, options: HashMap<String, crate::settings::OptionValue>) {
-        *self.options.lock().unwrap() = options;
-    }
-
-    /// Publish the active buffer name and point line for `(current-buffer)` /
-    /// `(buffer-line)`. Called just before dispatching so a command reads point
-    /// as it was when invoked.
-    pub fn set_snapshot(&self, snapshot: EditorSnapshot) {
-        self.point.store(Arc::new(snapshot));
-    }
-
-    /// If `expr` is a bare `(name)` naming a nullary builtin, return its command
-    /// so the editor can apply it synchronously (instant motion, etc.) without a
-    /// thread round-trip. Returns `None` for user functions / argument calls,
-    /// which go to the engine thread.
-    /// Recognise one or more bare `(builtin)` forms — `(forward-char)` or a
-    /// sequence like `(set-mark) (move-end-of-line)` — and return their commands
-    /// in order, so a motion/edit keybinding applies synchronously instead of
-    /// paying a thread hop. All-or-nothing: if any form takes an argument, is a
-    /// string, nests, or names a non-builtin, returns `None` and the whole
-    /// expression goes to the engine thread (where its semantics are exact).
-    pub fn builtins_for(&self, expr: &str) -> Option<Vec<EditorCommand>> {
-        let mut out = Vec::new();
-        let mut rest = expr.trim();
-        while !rest.is_empty() {
-            // Each form is `(name)` with no nested parens, so the first `)`
-            // closes it. Anything with a string/arg fails the char check below
-            // and drops the whole expression to the engine.
-            let inner = rest.strip_prefix('(')?;
-            let close = inner.find(')')?;
-            let name = inner[..close].trim();
-            if name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == '(' || c == '"')
-            {
-                return None;
-            }
-            out.push(self.builtins.get(name)?.clone());
-            rest = inner[close + 1..].trim();
-        }
-        (!out.is_empty()).then_some(out)
-    }
-
-    /// Blocking eval — tests and the REPL. Startup config uses
-    /// [`Self::eval_collecting`] (which keeps partial commands on error).
-    #[allow(dead_code)]
-    pub fn eval(&self, source: &str) -> Result<EvalResult, String> {
-        let (tx, rx) = channel();
-        self.jobs
-            .send(Job {
-                task: Task::Eval(source.to_string()),
-                interactive: false,
-                reply: Reply::Sync(tx),
-            })
-            .map_err(|_| "script engine stopped".to_string())?;
-        let raw = rx.recv().map_err(|_| "script engine stopped".to_string())?;
-        match raw.error {
-            Some(error) => Err(error),
-            None => Ok(EvalResult {
-                commands: raw.commands,
-                value: raw.value,
-            }),
-        }
-    }
-
-    /// Like [`Self::eval`] but never throws the commands away on error: returns
-    /// everything queued *before* the failure together with the error message.
-    /// Startup config uses this so one bad form in `init.scm` can't silently drop
-    /// the rest of the file — including the `(evil-mode)` that usually precedes
-    /// it (Emacs `init.el` semantics: apply up to the error, then report it).
-    pub fn eval_collecting(&self, source: &str) -> (Vec<EditorCommand>, Option<String>) {
-        let (tx, rx) = channel();
-        if self
-            .jobs
-            .send(Job {
-                task: Task::Eval(source.to_string()),
-                interactive: false,
-                reply: Reply::Sync(tx),
-            })
-            .is_err()
-        {
-            return (Vec::new(), Some("script engine stopped".to_string()));
-        }
-        match rx.recv() {
-            Ok(raw) => (raw.commands, raw.error),
-            Err(_) => (Vec::new(), Some("script engine stopped".to_string())),
-        }
-    }
-
-    /// Blocking action call — used by tests; the editor uses `dispatch_action`.
-    #[allow(dead_code)]
-    pub fn call_action(&self, name: &str, candidate: Option<&str>) -> Vec<EditorCommand> {
-        let (tx, rx) = channel();
-        if self
-            .jobs
-            .send(Job {
-                task: Task::Call(name.to_string(), candidate.map(str::to_string)),
-                interactive: false,
-                reply: Reply::Sync(tx),
-            })
-            .is_err()
-        {
-            return Vec::new();
-        }
-        rx.recv().map(|raw| raw.commands).unwrap_or_default()
-    }
-
-    /// Async eval — runs on the engine thread; the outcome is delivered to the
-    /// foreground drain task. A slow script never blocks the UI.
-    pub fn dispatch(&self, source: &str, interactive: bool) {
-        let _ = self.jobs.send(Job {
-            task: Task::Eval(source.to_string()),
-            interactive,
-            reply: Reply::Async,
-        });
-    }
-
-    /// Async action call (Helm actions, mode hooks).
-    pub fn dispatch_action(&self, name: &str, candidate: Option<&str>) {
-        let _ = self.jobs.send(Job {
-            task: Task::Call(name.to_string(), candidate.map(str::to_string)),
-            interactive: false,
-            reply: Reply::Async,
-        });
-    }
-
-    /// Compute a dynamic Helm source's candidates on the engine thread; the
-    /// result arrives as `ScriptOutcome::Candidates` for `query_id`.
-    pub fn dispatch_candidates(&self, source: usize, query_id: u64, function: &str, pattern: &str) {
-        let _ = self.jobs.send(Job {
-            task: Task::Candidates {
-                source,
-                query_id,
-                function: function.to_string(),
-                pattern: pattern.to_string(),
-            },
-            interactive: false,
-            reply: Reply::Async,
-        });
-    }
-
-    /// Run the registered completion-at-point functions on the engine thread,
-    /// over the prefix `buffer[start..end]`. The result arrives as
-    /// `ScriptOutcome::Capf`; empty means the editor should fall back to LSP.
-    pub fn dispatch_capf(&self, functions: Vec<String>, prefix: &str, start: usize, end: usize) {
-        let _ = self.jobs.send(Job {
-            task: Task::Capf {
-                functions,
-                prefix: prefix.to_string(),
-                start,
-                end,
-            },
-            interactive: false,
-            reply: Reply::Async,
-        });
-    }
-}
-
-/// The engine thread: owns the `!Send` `Engine` for its whole life, processing
-/// jobs FIFO so results stay ordered.
-fn engine_thread(
-    jobs: Receiver<Job>,
-    outcomes: UnboundedSender<ScriptOutcome>,
-    buffers: BufferNames,
-    buffer_paths: BufferPaths,
-    point: SharedSnapshot,
-    markers: Markers,
-    options: Options,
-) {
-    let queue: Queue = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = build_engine(&queue, &buffers, &buffer_paths, &point, &markers, &options);
-
-    while let Ok(Job {
-        task,
-        interactive,
-        reply,
-    }) = jobs.recv()
-    {
-        let raw = match task {
-            // Dynamic Helm candidates: call the fn, parse a string list, reply
-            // directly on the async channel (no command/value semantics).
-            Task::Candidates {
-                source,
-                query_id,
-                function,
-                pattern,
-            } => {
-                let arg = pattern.into_steelval().unwrap_or(SteelVal::Void);
-                let candidates = engine
-                    .call_function_by_name_with_args(&function, vec![arg])
-                    .ok()
-                    .map(|value| steel_candidate_list(&value))
-                    .unwrap_or_default();
-                let _ = outcomes.unbounded_send(ScriptOutcome::Candidates {
-                    source,
-                    query_id,
-                    candidates,
-                });
-                continue;
-            }
-            // Completion-at-point: call each registered CAPF with the prefix; the
-            // first one returning a non-empty candidate list wins. A CAPF returns
-            // either a flat candidate list, or `(start end (cand …))` to override
-            // the replaced byte range. Reply on the async channel.
-            Task::Capf {
-                functions,
-                prefix,
-                start,
-                end,
-            } => {
-                let mut out_start = start;
-                let mut out_end = end;
-                let mut items: Vec<(String, Option<String>)> = Vec::new();
-                for function in &functions {
-                    let arg = prefix.clone().into_steelval().unwrap_or(SteelVal::Void);
-                    let Ok(value) = engine.call_function_by_name_with_args(function, vec![arg])
-                    else {
-                        continue;
-                    };
-                    let (s, e, parsed) = parse_capf_result(&value, start, end);
-                    if !parsed.is_empty() {
-                        out_start = s;
-                        out_end = e;
-                        items = parsed;
-                        break;
-                    }
-                }
-                let _ = outcomes.unbounded_send(ScriptOutcome::Capf {
-                    start: out_start,
-                    end: out_end,
-                    items,
-                });
-                continue;
-            }
-            Task::Eval(source) => match engine.run(source) {
-                Ok(values) => RawResult {
-                    commands: drain(&queue),
-                    value: values.last().and_then(format_value),
-                    error: None,
-                },
-                Err(error) => RawResult {
-                    commands: drain(&queue),
-                    value: None,
-                    error: Some(steel_error_string(&error)),
-                },
-            },
-            Task::Call(name, arg) => {
-                let args: Vec<SteelVal> = arg
-                    .and_then(|c| c.into_steelval().ok())
-                    .into_iter()
-                    .collect();
-                let error = engine
-                    .call_function_by_name_with_args(&name, args)
-                    .err()
-                    .map(|e| steel_error_string(&e));
-                RawResult {
-                    commands: drain(&queue),
-                    value: None,
-                    error,
-                }
-            }
-        };
-
-        match reply {
-            Reply::Sync(tx) => {
-                let _ = tx.send(raw);
-            }
-            Reply::Async => {
-                let RawResult {
-                    commands,
-                    value,
-                    error,
-                } = raw;
-                let message = if let Some(error) = error {
-                    Some(format!("error: {error}"))
-                } else if interactive {
-                    match value {
-                        Some(v) => Some(format!("=> {v}")),
-                        // A `(message ...)` side-effect already echoed something;
-                        // don't clobber it with a generic "Done".
-                        None if commands
-                            .iter()
-                            .any(|c| matches!(c, EditorCommand::Message(_))) =>
-                        {
-                            None
-                        }
-                        None => Some("Done".to_string()),
-                    }
-                } else {
-                    None
-                };
-                let _ = outcomes.unbounded_send(ScriptOutcome::Commands { commands, message });
-            }
-        }
-    }
-}
-
-fn drain(queue: &Queue) -> Vec<EditorCommand> {
-    queue.lock().unwrap().drain(..).collect()
-}
-
-/// Working-tree-vs-HEAD gutter marks (git-gutter / diff-hl) for `file`, diffing
-/// the supplied `text` — the live buffer rope, so marks update before a save —
-/// against the file's blob as committed at HEAD. Returns `(0-based line, mark)`
-/// for changed lines only; an empty vec when `file` is outside a repo or its
-/// parent can't be resolved.
-///
-/// A file not tracked at HEAD (brand new, or never committed) diffs against an
-/// empty HEAD, so every line reads as `Added` — matching how diff-hl shows a new
-/// file. Binary / non-UTF-8 HEAD blobs likewise fall back to "all added", which
-/// is harmless for the text buffers this runs on.
-pub(crate) fn git_diff_marks(
-    file: &std::path::Path,
-    text: &str,
-) -> Vec<(usize, crate::editor::DiffMark)> {
-    let Some(dir) = file.parent() else {
-        return Vec::new();
-    };
-    let Ok(repo) = gix::discover(dir) else {
-        return Vec::new();
-    };
-    // Resolve `file` to a repo-root-relative path the way `gix_blame` does.
-    let abs = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
-    let Some(wd) = repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()) else {
-        return Vec::new();
-    };
-    let Ok(rel) = abs.strip_prefix(&wd) else {
-        return Vec::new();
-    };
-    // HEAD's blob for this path, or "" when it isn't tracked there (→ all added).
-    let head_text = (|| -> Option<String> {
-        let entry = repo.head_tree().ok()?.lookup_entry_by_path(rel).ok()??;
-        String::from_utf8(entry.object().ok()?.data.clone()).ok()
-    })()
-    .unwrap_or_default();
-
-    diff_line_marks(&head_text, text)
-}
-
-/// The pure core of [`git_diff_marks`]: a line-level diff of `head` → `text`
-/// mapped to gutter marks. Insert → `Added`, Replace → `Modified`, Delete →
-/// a single `Removed` on the line that now sits where the text was removed
-/// (clamped to the last line for an end-of-file deletion). Split out so the
-/// mapping is testable without a git repo.
-fn diff_line_marks(head: &str, text: &str) -> Vec<(usize, crate::editor::DiffMark)> {
-    use crate::editor::DiffMark;
-    let new_total = text.lines().count();
-    let diff = similar::TextDiff::from_lines(head, text);
-    let mut marks = Vec::new();
-    for op in diff.ops() {
-        let (tag, _old, new) = op.as_tag_tuple();
-        match tag {
-            similar::DiffTag::Equal => {}
-            similar::DiffTag::Insert => {
-                marks.extend((new.start..new.end).map(|l| (l, DiffMark::Added)));
-            }
-            similar::DiffTag::Replace => {
-                marks.extend((new.start..new.end).map(|l| (l, DiffMark::Modified)));
-            }
-            similar::DiffTag::Delete => {
-                let line = new.start.min(new_total.saturating_sub(1));
-                marks.push((line, DiffMark::Removed));
-            }
-        }
-    }
-    marks
-}
-
-/// The nullary commands: each Steel name pushes its variant. Shared by engine
-/// registration (on the thread) and the handle's fast-path table.
-fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
-    use EditorCommand::*;
-    vec![
-        ("forward-char", ForwardChar),
-        ("backward-char", BackwardChar),
-        ("next-line", NextLine),
-        ("previous-line", PreviousLine),
-        ("forward-word", ForwardWord),
-        ("forward-word-start", ForwardWordStart),
-        ("backward-word", BackwardWord),
-        ("move-beginning-of-line", BeginningOfLine),
-        ("move-end-of-line", EndOfLine),
-        ("beginning-of-buffer", BeginningOfBuffer),
-        ("end-of-buffer", EndOfBuffer),
-        ("set-mark", SetMark),
-        ("exchange-point-and-mark", ExchangePointAndMark),
-        ("mark-whole-buffer", MarkWholeBuffer),
-        ("newline", Newline),
-        ("open-line", OpenLine),
-        ("indent-for-tab-command", IndentForTab),
-        ("delete-char", DeleteChar),
-        ("delete-backward-char", DeleteBackwardChar),
-        ("transpose-chars", TransposeChars),
-        ("kill-line", KillLine),
-        ("kill-word", KillWord),
-        ("backward-kill-word", BackwardKillWord),
-        ("kill-region", KillRegion),
-        ("kill-ring-save", KillRingSave),
-        ("yank", Yank),
-        ("yank-pop", YankPop),
-        ("clipboard-copy", ClipboardCopy),
-        ("clipboard-cut", ClipboardCut),
-        ("clipboard-paste", ClipboardPaste),
-        ("undo", Undo),
-        ("redo", Redo),
-        ("scroll-up", ScrollUp),
-        ("scroll-down", ScrollDown),
-        ("recenter", Recenter),
-        ("keyboard-quit", KeyboardQuit),
-        ("execute-extended-command", ExecuteExtendedCommand),
-        ("list-messages", ListMessages),
-        ("list-lsp-log", ListLspLog),
-        ("check-for-updates", CheckForUpdates),
-        ("eval-buffer", EvalBuffer),
-        ("eval-last-sexp", EvalLastSexp),
-        ("eval-expression", EvalExpression),
-        ("find-file", FindFile),
-        ("switch-buffer", SwitchBuffer),
-        ("next-buffer", NextBuffer),
-        ("previous-buffer", PreviousBuffer),
-        ("save-buffer", SaveBuffer),
-        ("save-some-buffers", SaveSomeBuffers),
-        ("revert-buffer", RevertBuffer),
-        ("line-numbers-mode", ToggleLineNumbers),
-        ("scroll-bar-mode", ToggleScrollBar),
-        ("word-wrap-mode", ToggleWordWrap),
-        ("magit-gutter-mode", ToggleGitGutter),
-        ("magit-gutter-refresh", GitGutterRefresh),
-        ("electric-pair-mode", ToggleElectricPair),
-        ("snippet-next-field", SnippetNextField),
-        ("snippet-prev-field", SnippetPrevField),
-        ("mc-add-cursor-below", McAddBelow),
-        ("mc-add-cursor-above", McAddAbove),
-        ("mc-mark-next-like-this", McMarkNext),
-        ("mc-clear", McClear),
-        ("kill-buffer", KillBuffer),
-        ("kill-buffer-and-window", KillBufferAndWindow),
-        ("quit", Quit),
-        ("lsp-find-definition", LspDefinition),
-        ("lsp-find-declaration", LspDeclaration),
-        ("lsp-find-type-definition", LspTypeDefinition),
-        ("lsp-find-implementation", LspImplementation),
-        ("lsp-find-references", LspReferences),
-        ("lsp-hover", LspHover),
-        ("lsp-signature-help", LspSignatureHelp),
-        ("lsp-document-symbols", LspDocumentSymbols),
-        ("lsp-code-action", LspCodeAction),
-        ("lsp-format-buffer", LspFormatBuffer),
-        ("lsp-call-hierarchy-incoming", LspCallHierarchyIncoming),
-        ("lsp-call-hierarchy-outgoing", LspCallHierarchyOutgoing),
-        ("lsp-rename", LspPrepareRename),
-        ("lsp-code-lens", LspCodeLens),
-        ("lsp-xref-visit", LspXrefVisit),
-        ("lsp-apply-code-action", LspApplyCodeAction),
-        ("xref-push-marker", XrefPushMarker),
-        ("xref-pop-marker", XrefPopMarker),
-        ("clear-overlay-faces", ClearOverlayFaces),
-        ("clear-overlay-hides", ClearOverlayHides),
-        ("clear-line-suffixes", ClearLineSuffixes),
-        ("completion-at-point", CompletionAtPoint),
-        ("completion-next", CompletionNext),
-        ("completion-previous", CompletionPrevious),
-        ("completion-accept", CompletionAccept),
-        ("completion-abort", CompletionAbort),
-        ("helm-M-x", HelmMx),
-        ("helm-next", HelmNext),
-        ("helm-previous", HelmPrevious),
-        ("helm-accept", HelmAccept),
-        ("helm-abort", HelmAbort),
-        ("helm-actions", HelmActions),
-        ("helm-mark", HelmToggleMark),
-        ("enable-lsp", EnableLsp),
-        ("macros-steel-mode", EnterMacrosSteel),
-        ("helix-mode", HelixMode),
-        ("helix-disable", HelixDisable),
-        ("helix-normal-state", HelixNormalState),
-        ("evil-mode", EvilMode),
-        ("evil-normal-state", EvilNormalState),
-        ("evil-insert-state", EvilInsertState),
-        ("evil-visual-state", EvilVisualState),
-        ("evil-visual-line-state", EvilVisualLineState),
-        ("evil-visual-insert", EvilVisualInsert),
-        ("evil-visual-append", EvilVisualAppend),
-        ("evil-visual-block-state", EvilVisualBlockState),
-        ("evil-block-insert", EvilBlockInsert),
-        ("evil-block-append", EvilBlockAppend),
-        ("evil-block-delete", EvilBlockDelete),
-        ("evil-block-yank", EvilBlockYank),
-        ("evil-disable", EvilDisable),
-        ("evil-scroll-down", EvilScrollDown),
-        ("evil-scroll-up", EvilScrollUp),
-        ("evil-search-forward", EvilSearchForward),
-        ("evil-search-backward", EvilSearchBackward),
-        ("evil-search-next", EvilSearchNext),
-        ("evil-search-previous", EvilSearchPrevious),
-        ("evil-ex-command", EvilExCommand),
-        ("evil-paste-after", EvilPasteAfter),
-        ("evil-paste-before", EvilPasteBefore),
-        ("evil-replace-char", EvilReplaceChar),
-        ("evil-set-linewise", EvilSetLinewise),
-        ("evil-set-charwise", EvilSetCharwise),
-        ("isearch-forward", IsearchForward),
-        ("isearch-backward", IsearchBackward),
-        ("split-window-below", SplitWindowBelow),
-        ("split-window-right", SplitWindowRight),
-        ("other-window", OtherWindow),
-        ("delete-window", DeleteWindow),
-        ("delete-other-windows", DeleteOtherWindows),
-        ("enlarge-window", EnlargeWindow),
-        ("shrink-window", ShrinkWindow),
-        ("enlarge-window-horizontally", EnlargeWindowHorizontally),
-        ("shrink-window-horizontally", ShrinkWindowHorizontally),
-        ("start-kbd-macro", StartKbdMacro),
-        ("end-kbd-macro", EndKbdMacro),
-        ("call-last-kbd-macro", CallLastKbdMacro),
-    ]
-}
-
-/// Build the Steel engine and register every command/bridge function. Runs on
-/// the engine thread (the engine is `!Send`).
-fn build_engine(
-    queue: &Queue,
-    buffers: &BufferNames,
-    buffer_paths: &BufferPaths,
-    point: &SharedSnapshot,
-    markers: &Markers,
-    options: &Options,
-) -> Engine {
-    let mut engine = Engine::new();
-    for (name, command) in nullary_commands() {
-        register_nullary(&mut engine, queue, name, command);
-    }
-
-    // Commands carrying a payload.
-    register_unary(&mut engine, queue, "insert", EditorCommand::Insert);
-    // `message` accepts any value, not just strings: strings render verbatim,
-    // everything else via its Steel display — so (message (+ 1 2)) shows "3"
-    // rather than raising a ConversionError.
-    {
-        let q = queue.clone();
-        engine.register_fn("message", move |arg: SteelVal| {
-            let text = match arg {
-                SteelVal::StringV(s) => s.to_string(),
-                other => other.to_string(),
-            };
-            q.lock().unwrap().push(EditorCommand::Message(text));
-        });
-    }
-    // Shadow of every binding (mode, chord, command), for help/discoverability
-    // read bridges. Written alongside the DefineKey command; lives on the engine
-    // thread with the read fns.
-    let bindings: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
-    {
-        let q = queue.clone();
-        let shadow = bindings.clone();
-        engine.register_fn(
-            "define-key",
-            move |mode: String, chord: String, command: SteelVal| {
-                // The command may be a "name" string OR a 'name symbol (the
-                // canonical config form). Both resolve to the same name; it's
-                // looked up and run by name at keypress time.
-                let command = steel_string(&command).unwrap_or_default();
-                {
-                    let mut s = shadow.lock().unwrap();
-                    // Last definition for a (mode, chord) wins (matches the keymap).
-                    s.retain(|(m, c, _)| !(m == &mode && c == &chord));
-                    s.push((mode.clone(), chord.clone(), command.clone()));
-                }
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::DefineKey(mode, chord, command));
-            },
-        );
-    }
-    {
-        // `(key-binding mode chord)` → the command bound there, or "".
-        let shadow = bindings.clone();
-        engine.register_fn(
-            "key-binding",
-            move |mode: String, chord: String| -> String {
-                shadow
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(m, c, _)| m == &mode && c == &chord)
-                    .map(|(_, _, cmd)| cmd.clone())
-                    .unwrap_or_default()
-            },
-        );
-    }
-    {
-        // `(keys-with-prefix mode prefix)` → "chord\tcommand" lines whose chord
-        // starts with `prefix` (which-key / describe-prefix).
-        let shadow = bindings.clone();
-        engine.register_fn(
-            "keys-with-prefix",
-            move |mode: String, prefix: String| -> Vec<String> {
-                shadow
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|(m, c, _)| m == &mode && c.starts_with(&prefix))
-                    .map(|(_, c, cmd)| format!("{c}\t{cmd}"))
-                    .collect()
-            },
-        );
-    }
-    {
-        // `(command-list)` → all nullary command names (M-x / apropos).
-        let names: Vec<String> = nullary_commands()
-            .iter()
-            .map(|(n, _)| n.to_string())
-            .collect();
-        engine.register_fn("command-list", move || -> Vec<String> { names.clone() });
-    }
-    {
-        // `(bundled-languages)` → every language id with a bundled tree-sitter
-        // grammar. language-modes.scm reads this to generate an `<id>-mode` M-x
-        // command per language (so `M-x scala-mode` switches the buffer's mode).
-        let langs: Vec<String> = crate::highlight::BUNDLED_LANGUAGES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        engine.register_fn("bundled-languages", move || -> Vec<String> {
-            langs.clone()
-        });
-    }
-    {
-        // `(theme-names)` → every bundled theme name (the stem of each
-        // scheme/themes/*.scm). The `load-theme` wrapper in core.scm reads this to
-        // complete theme names — in the M-x prompt and the in-buffer argument CAPF.
-        engine.register_fn("theme-names", || -> Vec<String> {
-            crate::runtime::theme_names()
-        });
-    }
-    {
-        // `(installed-languages)` → ids of grammars downloaded + compiled at
-        // runtime (M-x install-language). grammar.scm reads this alongside
-        // `(bundled-languages)` so installed languages also get `<id>-mode`.
-        engine.register_fn("installed-languages", || -> Vec<String> {
-            crate::grammar::installed_ids()
-        });
-    }
-    {
-        // `(grammar-install id repo rev extensions symbol subdir)` → queue an
-        // async download + compile + load of a tree-sitter grammar. `extensions`
-        // is a whitespace-separated string of bare extensions; `symbol` and
-        // `subdir` are "" for the defaults (parser symbol = id, grammar at repo
-        // root). The Scheme `install-language` wrapper builds these from nicer
-        // args. Returns immediately; progress/result echoes to the minibuffer
-        // (see Editor::install_grammar).
-        let q = queue.clone();
-        engine.register_fn(
-            "grammar-install",
-            move |id: String,
-                  repo: String,
-                  rev: String,
-                  extensions: String,
-                  symbol: String,
-                  subdir: String| {
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::InstallGrammar(Box::new(GrammarInstall {
-                        id,
-                        repo,
-                        rev,
-                        extensions,
-                        symbol,
-                        subdir,
-                    })));
-            },
-        );
-    }
-    {
-        // The doc index: name → (doc, file, line). Steel has no runtime
-        // docstrings, so the `;;` block preceding each top-level define IS its
-        // documentation; file+line let the picker jump to the implementation.
-        // Seeded at startup from the bundled library and grown at runtime as
-        // packages load (`index-doc-file`), so built-ins and dynamically loaded
-        // packages are searched uniformly. Keyed by name → an UPSERT (a
-        // redefinition or a package reload overwrites the entry), so the index
-        // stays flat no matter how often a file is reloaded in a session.
-        //
-        // Powers `(function-doc name)`, `(function-list)`, `(function-source
-        // name)` → describe-function / apropos / helm-apropos.
-        type DocIndex = HashMap<String, (String, String, usize)>;
-        let docs: Arc<RwLock<DocIndex>> = Arc::new(RwLock::new(
-            crate::runtime::builtin_docs()
-                .into_iter()
-                .map(|e| (e.name, (e.doc, e.file, e.line)))
-                .collect(),
-        ));
-
-        // `(function-doc name)` → the doc comment, or "".
-        let d = docs.clone();
-        engine.register_fn("function-doc", move |name: String| -> String {
-            d.read()
-                .unwrap()
-                .get(&name)
-                .map(|(doc, _, _)| doc.clone())
-                .unwrap_or_default()
-        });
-
-        // `(function-list)` → every indexed name, sorted.
-        let d = docs.clone();
-        engine.register_fn("function-list", move || -> Vec<String> {
-            let mut names: Vec<String> = d.read().unwrap().keys().cloned().collect();
-            names.sort();
-            names
-        });
-
-        // `(function-source name)` → `(file line)` (1-based line), or `'()` when
-        // the name is unknown or carries no location. The jump action opens
-        // `file` at `line`, or falls back to the doc when the file is absent.
-        let d = docs.clone();
-        engine.register_fn("function-source", move |name: String| -> Vec<SteelVal> {
-            match d.read().unwrap().get(&name) {
-                Some((_, file, line)) if !file.is_empty() => vec![
-                    SteelVal::StringV(file.clone().into()),
-                    SteelVal::IntV(*line as isize),
-                ],
-                _ => vec![],
-            }
-        });
-
-        // `(index-doc-file path)` → scrape `path` from disk and merge its
-        // documented defines into the index (upsert by name). Called as a package
-        // loads so its commented functions/variables become searchable and
-        // jumpable. Returns the number of defines indexed (0 if unreadable).
-        let d = docs.clone();
-        engine.register_fn("index-doc-file", move |path: String| -> usize {
-            let Ok(src) = std::fs::read_to_string(&path) else {
-                return 0;
-            };
-            let entries = crate::runtime::scrape_docs(&src, &path);
-            let n = entries.len();
-            let mut idx = d.write().unwrap();
-            for e in entries {
-                idx.insert(e.name, (e.doc, e.file, e.line));
-            }
-            n
-        });
-    }
-    {
-        // `(macros-version)` → the editor's package version (from Cargo.toml,
-        // baked in at compile time). Powers the `version` command.
-        engine.register_fn("macros-version", || -> String {
-            env!("CARGO_PKG_VERSION").to_string()
-        });
-    }
-    {
-        // `(diff-strings old new)` → line-level diff ops, one per line as
-        // "tag\told_start\told_end\tnew_start\tnew_end" with 0-based,
-        // end-exclusive LINE indices. tag ∈ equal|delete|insert|replace.
-        // Pure function (no editor state); powers scheme/ediff.scm — Scheme
-        // merges adjacent non-equal ops into navigable hunks.
-        engine.register_fn(
-            "diff-strings",
-            move |old: String, new: String| -> Vec<String> {
-                let diff = similar::TextDiff::from_lines(&old, &new);
-                diff.ops()
-                    .iter()
-                    .map(|op| {
-                        let (tag, old_range, new_range) = op.as_tag_tuple();
-                        let tag = match tag {
-                            similar::DiffTag::Equal => "equal",
-                            similar::DiffTag::Delete => "delete",
-                            similar::DiffTag::Insert => "insert",
-                            similar::DiffTag::Replace => "replace",
-                        };
-                        format!(
-                            "{tag}\t{}\t{}\t{}\t{}",
-                            old_range.start, old_range.end, new_range.start, new_range.end
-                        )
-                    })
-                    .collect()
-            },
-        );
-    }
-    {
-        // `(diff-inline old new)` → word-level refinement between two single
-        // lines, one change per line as "tag\ttext" (tag ∈ equal|delete|insert).
-        // Used to highlight intra-line changes within an ediff hunk.
-        engine.register_fn(
-            "diff-inline",
-            move |old: String, new: String| -> Vec<String> {
-                let diff = similar::TextDiff::from_words(&old, &new);
-                diff.iter_all_changes()
-                    .map(|c| {
-                        let tag = match c.tag() {
-                            similar::ChangeTag::Equal => "equal",
-                            similar::ChangeTag::Delete => "delete",
-                            similar::ChangeTag::Insert => "insert",
-                        };
-                        format!("{tag}\t{}", c.value().replace('\n', " "))
-                    })
-                    .collect()
-            },
-        );
-    }
-    register_binary(&mut engine, queue, "set-face", EditorCommand::SetFace);
-    register_unary(
-        &mut engine,
-        queue,
-        "clipboard-set",
-        EditorCommand::ClipboardSet,
-    );
-    {
-        // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
-        // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
-        // value is stringified, so a bad arg echoes "No theme named …" rather than
-        // failing to type-check. The wrapper adds the no-arg interactive prompt.
-        let q = queue.clone();
-        engine.register_fn("load-theme-impl", move |value: SteelVal| {
-            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
-            q.lock().unwrap().push(EditorCommand::LoadTheme(name));
-        });
-    }
-    register_binary(&mut engine, queue, "set-lsp", EditorCommand::SetLsp);
-    register_binary(
-        &mut engine,
-        queue,
-        "set-extension",
-        EditorCommand::SetExtension,
-    );
-    register_binary(
-        &mut engine,
-        queue,
-        "set-language-id",
-        EditorCommand::SetLanguageId,
-    );
-    {
-        // `set-option` accepts a number, boolean, or string; the value is coerced
-        // to the option's declared type when applied (see `Settings::set`).
-        let q = queue.clone();
-        engine.register_fn("set-option", move |key: String, value: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SetOption(key, option_from_steelval(&value)));
-        });
-    }
-    {
-        // Read-side bridge: Scheme can query the open buffers (for pickers).
-        let shared = buffers.clone();
-        engine.register_fn("buffer-names", move || -> Vec<String> {
-            shared.lock().unwrap().clone()
-        });
-    }
-    {
-        // `(buffer-file-name-of name)` → that buffer's absolute file path, or ""
-        // if the buffer has no file (or doesn't exist). Unlike `buffer-file-name`
-        // (active buffer only), this resolves any open buffer by name.
-        let shared = buffer_paths.clone();
-        engine.register_fn("buffer-file-name-of", move |name: String| -> String {
-            shared
-                .lock()
-                .unwrap()
-                .get(&name)
-                .cloned()
-                .unwrap_or_default()
-        });
-    }
-    {
-        // Read-side bridge: `(get-option "name")` returns the option's current
-        // value as a native bool / number / string, or #f if it isn't set.
-        let opts = options.clone();
-        engine.register_fn("get-option", move |key: String| -> SteelVal {
-            opts.lock()
-                .unwrap()
-                .get(&key)
-                .map_or(SteelVal::BoolV(false), option_to_steelval)
-        });
-    }
-    // `(option-list)` → every option key Rust knows about, so helm-apropos can
-    // surface options ("font" → font-size) next to functions and variables.
-    engine.register_fn("option-list", || -> Vec<String> {
-        crate::settings::KNOWN_OPTIONS
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    });
-    register_unary(
-        &mut engine,
-        queue,
-        "switch-to-buffer",
-        EditorCommand::SwitchToBufferNamed,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "kill-buffer-named",
-        EditorCommand::KillBufferNamed,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "set-major-mode",
-        EditorCommand::SetMajorMode,
-    );
-    register_unary(&mut engine, queue, "open-file", EditorCommand::OpenFile);
-    register_unary(
-        &mut engine,
-        queue,
-        "lsp-rename-to",
-        EditorCommand::LspRename,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "lsp-workspace-symbol-go",
-        EditorCommand::LspWorkspaceSymbol,
-    );
-    {
-        let q = queue.clone();
-        // (lsp-request method kind params callback) — the generic bridge.
-        engine.register_fn(
-            "lsp-request",
-            move |method: String, kind: String, params: String, callback: SteelVal| {
-                // `callback` may be a "name" string or a 'name symbol.
-                let callback = steel_string(&callback).unwrap_or_default();
-                q.lock().unwrap().push(EditorCommand::LspRequest {
-                    method,
-                    kind,
-                    params,
-                    callback,
-                });
-            },
-        );
-    }
-    register_ternary(&mut engine, queue, "lsp-goto", |uri, line, character| {
-        EditorCommand::LspGoto {
-            uri,
-            line,
-            character,
-        }
-    });
-    register_unary(
-        &mut engine,
-        queue,
-        "lsp-apply-workspace-edit",
-        EditorCommand::LspApplyWorkspaceEdit,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "lsp-apply-text-edits",
-        EditorCommand::LspApplyTextEdits,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "open-file-other-window",
-        EditorCommand::OpenFileOtherWindow,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "select-window",
-        EditorCommand::SelectWindow,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "split-window-right-ratio",
-        EditorCommand::SplitWindowRightRatio,
-    );
-    {
-        // `(set-line-icon line col "folder")` attaches a bundled icon (asset
-        // `icons/<name>.svg`) at character column `col` of `line` in the active
-        // buffer; `(clear-line-icons)` removes them all. Used by the file tree.
-        register_ternary(
-            &mut engine,
-            queue,
-            "set-line-icon",
-            EditorCommand::SetLineIcon,
-        );
-        let q = queue.clone();
-        engine.register_fn("clear-line-icons", move || {
-            q.lock().unwrap().push(EditorCommand::ClearLineIcons);
-        });
-    }
-    {
-        // `(set-line-image line "/abs/path.png" [max-width])` displays a decoded
-        // raster image on rows reserved below `line` of the active buffer;
-        // `(clear-line-images)` removes them all. `max-width` (px) caps the
-        // displayed width — 0 uses the default cap. The optional arg is provided
-        // by the `set-line-image` Scheme wrapper (core.scm); this is the impl.
-        // Drives Org's inline-image / LaTeX-preview display and the roam graph.
-        let q = queue.clone();
-        engine.register_fn(
-            "set-line-image-impl",
-            move |line: usize, path: String, max_width: usize| {
-                q.lock().unwrap().push(EditorCommand::SetLineImage {
-                    line,
-                    path,
-                    max_width,
-                });
-            },
-        );
-        let q = queue.clone();
-        engine.register_fn("clear-line-images", move || {
-            q.lock().unwrap().push(EditorCommand::ClearLineImages);
-        });
-        // `(set-line-indent line cols)` gives buffer `line` a virtual left indent
-        // of `cols` columns (display-only); `(clear-line-indents)` removes them
-        // all. Drives Org's org-indent-mode look.
-        let q = queue.clone();
-        engine.register_fn("set-line-indent", move |line: usize, cols: usize| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SetLineIndent { line, cols });
-        });
-        let q = queue.clone();
-        engine.register_fn("clear-line-indents", move || {
-            q.lock().unwrap().push(EditorCommand::ClearLineIndents);
-        });
-        // `(set-line-scale line scale)` renders buffer `line` at `scale`× the
-        // base font size (e.g. a heading); `(clear-line-scales)` resets all.
-        let q = queue.clone();
-        engine.register_fn("set-line-scale", move |line: usize, scale: f64| {
-            q.lock().unwrap().push(EditorCommand::SetLineScale {
-                line,
-                scale: scale as f32,
-            });
-        });
-        let q = queue.clone();
-        engine.register_fn("clear-line-scales", move || {
-            q.lock().unwrap().push(EditorCommand::ClearLineScales);
-        });
-    }
-    {
-        // `(window-list)` → pane ids in cycle order; `(selected-window)` → the
-        // focused pane id. Read bridges over the snapshot.
-        register_snapshot_read(&mut engine, point, "window-list", |s| s.windows.clone());
-        register_snapshot_read(&mut engine, point, "selected-window", |s| s.selected_window);
-        {
-            // `(get-buffer-window name)` → the pane id displaying buffer `name`,
-            // or -1 if it isn't shown in any window (Emacs's `get-buffer-window`).
-            let shared = point.clone();
-            engine.register_fn("get-buffer-window", move |name: String| -> isize {
-                shared
-                    .load()
-                    .window_buffers
-                    .iter()
-                    .find(|(_, b)| *b == name)
-                    .map_or(-1, |(id, _)| *id as isize)
-            });
-        }
-        // `(visible-lines)` → (first-line last-line) currently on screen.
-        register_snapshot_read(&mut engine, point, "visible-lines", |s| {
-            let (a, b) = s.visible_lines;
-            vec![a, b]
-        });
-        register_snapshot_read(&mut engine, point, "window-cursor-row", |s| {
-            s.cursor_screen_row as i64
-        });
-    }
-    // State bridges for dynamic sources (run on the engine thread — blocking
-    // I/O here never touches the UI). All pure value-returning functions.
-    engine.register_fn("current-directory", || -> String {
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
-    engine.register_fn("directory-of", |path: String| -> String {
-        if path.ends_with('/') {
-            return path;
-        }
-        std::path::Path::new(&path)
-            .parent()
-            .map(|d| {
-                let mut s = d.to_string_lossy().into_owned();
-                if !s.ends_with('/') {
-                    s.push('/');
-                }
-                s
-            })
-            .unwrap_or_default()
-    });
-    engine.register_fn("list-directory", |path: String| -> Vec<String> {
-        let mut entries = Vec::new();
-        if let Ok(read) = std::fs::read_dir(&path) {
-            for entry in read.flatten() {
-                let mut full = entry.path().to_string_lossy().into_owned();
-                if entry.path().is_dir() {
-                    full.push('/');
-                }
-                entries.push(full);
-            }
-        }
-        entries.sort();
-        entries
-    });
-    register_binary(&mut engine, queue, "add-hook", EditorCommand::AddHook);
-    register_binary(&mut engine, queue, "remove-hook", EditorCommand::RemoveHook);
-    register_unary(
-        &mut engine,
-        queue,
-        "add-completion-at-point-function",
-        EditorCommand::AddCapf,
-    );
-    {
-        // `(watch-directories owner dirs)` — replace `owner`'s watched dir set so
-        // a change under any of them fires `directory-changed-hook` (dired-sidebar /
-        // dired live-refresh). Replace semantics: pass `'()` to drop them.
-        let q = queue.clone();
-        engine.register_fn("watch-directories", move |owner: String, dirs: SteelVal| {
-            q.lock().unwrap().push(EditorCommand::WatchDirectories(
-                owner,
-                steel_string_list(&dirs),
-            ));
-        });
-    }
-    {
-        // `(watch-tree owner dirs)` — like `watch-directories` but recursive: a
-        // change anywhere under `dirs` fires `directory-changed-hook` with the
-        // watched root (magit watches its repo root). `'()` drops the watch.
-        let q = queue.clone();
-        engine.register_fn("watch-tree", move |owner: String, dirs: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::WatchTree(owner, steel_string_list(&dirs)));
-        });
-    }
-    {
-        // `(helm sources)` where sources is a list of `(name candidates action)`.
-        let q = queue.clone();
-        engine.register_fn("helm", move |sources: SteelVal| {
-            let parsed = steel_list(&sources)
-                .unwrap_or_default()
-                .iter()
-                .filter_map(parse_helm_source)
-                .collect();
-            q.lock().unwrap().push(EditorCommand::Helm(parsed));
-        });
-    }
-    {
-        // `(helm-from initial sources)` — Helm with a pre-filled input.
-        let q = queue.clone();
-        engine.register_fn("helm-from", move |initial: String, sources: SteelVal| {
-            let parsed = steel_list(&sources)
-                .unwrap_or_default()
-                .iter()
-                .filter_map(parse_helm_source)
-                .collect();
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::HelmFrom(initial, parsed));
-        });
-    }
-    // --- Special buffers / transient (the magit primitives) ---------------
-    {
-        // `(render-buffer name mode text faces)` — faces is a list of
-        // `(line-number face-name)`. Replaces/creates a read-only buffer.
-        let q = queue.clone();
-        engine.register_fn(
-            "render-buffer",
-            move |name: String, mode: String, text: String, faces: SteelVal| {
-                let line_faces = parse_line_faces(&faces);
-                q.lock().unwrap().push(EditorCommand::RenderBuffer {
-                    name,
-                    mode,
-                    text,
-                    line_faces,
-                });
-            },
-        );
-    }
-    {
-        // `(render-buffer-quiet name mode text faces)` — like render-buffer but
-        // refresh in place without switching/focusing (sidebar auto-refresh).
-        let q = queue.clone();
-        engine.register_fn(
-            "render-buffer-quiet",
-            move |name: String, mode: String, text: String, faces: SteelVal| {
-                let line_faces = parse_line_faces(&faces);
-                q.lock().unwrap().push(EditorCommand::RenderBufferQuiet {
-                    name,
-                    mode,
-                    text,
-                    line_faces,
-                });
-            },
-        );
-    }
-    register_unary(&mut engine, queue, "goto-line", EditorCommand::GotoLine);
-    register_unary(
-        &mut engine,
-        queue,
-        "scroll-cursor-to-row",
-        EditorCommand::ScrollCursorToRow,
-    );
-    {
-        // `callback` may be a "name" string or a 'name symbol.
-        let q = queue.clone();
-        engine.register_fn(
-            "diff-buffers",
-            move |a: String, b: String, callback: SteelVal| {
-                let callback = steel_string(&callback).unwrap_or_default();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::DiffBuffers { a, b, callback });
-            },
-        );
-    }
-    register_unary(&mut engine, queue, "buffer-clear-highlights", |name| {
-        EditorCommand::BufferClearHighlights { name }
-    });
-    register_unary(
-        &mut engine,
-        queue,
-        "snippet-expand",
-        EditorCommand::SnippetExpand,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "avy-show-hints",
-        EditorCommand::AvyShowHints,
-    );
-    register_nullary(
-        &mut engine,
-        queue,
-        "avy-clear-hints",
-        EditorCommand::AvyClearHints,
-    );
-    {
-        // `(buffer-copy-lines src ss se dst ds de)` — copy a line range between
-        // named buffers (ediff hunk copy). Six args, so registered directly.
-        let q = queue.clone();
-        engine.register_fn(
-            "buffer-copy-lines",
-            move |src: String, ss: usize, se: usize, dst: String, ds: usize, de: usize| {
-                q.lock().unwrap().push(EditorCommand::BufferCopyLines {
-                    src,
-                    src_start: ss,
-                    src_end: se,
-                    dst,
-                    dst_start: ds,
-                    dst_end: de,
-                });
-            },
-        );
-    }
-    {
-        // `(buffer-highlight-lines name start end face)` — paint a face on a line
-        // range of any named buffer (works on the non-selected ediff pane too).
-        let q = queue.clone();
-        engine.register_fn(
-            "buffer-highlight-lines",
-            move |name: String, start: usize, end: usize, face: String| {
-                q.lock().unwrap().push(EditorCommand::BufferHighlightLines {
-                    name,
-                    start,
-                    end,
-                    face,
-                });
-            },
-        );
-    }
-    {
-        // `(transient title rows)` — `rows` is a list of `(key label command)`,
-        // or a list of `(column-title (key label command) …)` for columns.
-        let q = queue.clone();
-        engine.register_fn("transient", move |title: String, rows: SteelVal| {
-            let columns = parse_transient_columns(&rows);
-            q.lock().unwrap().push(EditorCommand::Transient {
-                title,
-                columns,
-                sticky: false,
-            });
-        });
-    }
-    {
-        // Like `transient`, but selecting a row keeps the popup open — the row's
-        // command re-opens it (to refresh state) or calls `transient-quit`. For
-        // menus where you toggle several options before dismissing.
-        let q = queue.clone();
-        engine.register_fn("transient-sticky", move |title: String, rows: SteelVal| {
-            let columns = parse_transient_columns(&rows);
-            q.lock().unwrap().push(EditorCommand::Transient {
-                title,
-                columns,
-                sticky: true,
-            });
-        });
-    }
-    register_nullary(
-        &mut engine,
-        queue,
-        "transient-quit",
-        EditorCommand::TransientQuit,
-    );
-    register_unary(&mut engine, queue, "goto-char", EditorCommand::GotoChar);
-    register_binary(&mut engine, queue, "delete-region", |start, end| {
-        EditorCommand::DeleteRegion { start, end }
-    });
-    register_binary(&mut engine, queue, "kill-region-between", |start, end| {
-        EditorCommand::KillRegionBetween { start, end }
-    });
-    register_binary(&mut engine, queue, "set-region", |start, end| {
-        EditorCommand::SetRegion { start, end }
-    });
-    {
-        // `(set-selections '(a0 h0 a1 h1 …))` — replace the whole selection set
-        // from a flat list of alternating anchor/head byte offsets (the first
-        // pair is the primary). The Scheme reader returns selections in the same
-        // flat shape (see the `selections` read), so a motion is read → map →
-        // set-selections. An odd trailing element is ignored.
-        let q = queue.clone();
-        engine.register_fn("set-selections", move |flat: SteelVal| {
-            let v = steel_usize_list(&flat);
-            let pairs = v.chunks_exact(2).map(|c| (c[0], c[1])).collect();
-            q.lock().unwrap().push(EditorCommand::SetSelections(pairs));
-        });
-    }
-    register_binary(
-        &mut engine,
-        queue,
-        "set-lsp-format-on-save",
-        EditorCommand::SetLspFormatOnSave,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "lsp-semantic-tokens",
-        EditorCommand::LspSemanticTokens,
-    );
-    register_ternary(&mut engine, queue, "replace-region", |start, end, text| {
-        EditorCommand::ReplaceRegion { start, end, text }
-    });
-    register_binary(&mut engine, queue, "insert-at", |pos, text| {
-        EditorCommand::InsertAt { pos, text }
-    });
-    register_unary(
-        &mut engine,
-        queue,
-        "lsp-semantic-tokens-range",
-        EditorCommand::LspSemanticTokensRange,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "lsp-semantic-tokens-delta",
-        EditorCommand::LspSemanticTokensDelta,
-    );
-    {
-        // `callback` may be a "name" string or a 'name symbol.
-        let q = queue.clone();
-        engine.register_fn(
-            "tree-sitter-query",
-            move |query: String, callback: SteelVal| {
-                let callback = steel_string(&callback).unwrap_or_default();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::TreeSitterQuery { query, callback });
-            },
-        );
-    }
-    {
-        // `callback` may be a "name" string or a 'name symbol.
-        let q = queue.clone();
-        engine.register_fn(
-            "tree-sitter-node-at",
-            move |byte: usize, callback: SteelVal| {
-                let callback = steel_string(&callback).unwrap_or_default();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::TreeSitterNodeAt { byte, callback });
-            },
-        );
-    }
-    register_nullary(
-        &mut engine,
-        queue,
-        "undo-boundary",
-        EditorCommand::UndoBoundary,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "undo-tree-dump",
-        EditorCommand::UndoTreeDump,
-    );
-    register_binary(&mut engine, queue, "buffer-local-set", |key, value| {
-        EditorCommand::BufferLocalSet { key, value }
-    });
-    {
-        // Backing primitive for the `completing-read` Scheme wrapper (which makes
-        // `initial` optional). `candidates` may be a static list OR a Scheme fn
-        // name (string/symbol) — re-queried per keystroke with the current input,
-        // the minibuffer equivalent of a dynamic Helm source.
-        let q = queue.clone();
-        engine.register_fn(
-            "completing-read-impl",
-            move |prompt: String, candidates: SteelVal, callback: SteelVal, initial: String| {
-                // `callback` may be a "name" string or a 'name symbol.
-                let callback = steel_string(&callback).unwrap_or_default();
-                let (candidates, dynamic) = match steel_string(&candidates) {
-                    Some(func) => (Vec::new(), Some(func)),
-                    None => (steel_string_list(&candidates), None),
-                };
-                q.lock().unwrap().push(EditorCommand::CompletingRead {
-                    prompt,
-                    candidates,
-                    dynamic,
-                    initial,
-                    callback,
-                });
-            },
-        );
-    }
-    {
-        // `callback` may be a "name" string or a 'name symbol.
-        let q = queue.clone();
-        engine.register_fn(
-            "read-file-name",
-            move |prompt: String, callback: SteelVal| {
-                let callback = steel_string(&callback).unwrap_or_default();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::ReadFileName { prompt, callback });
-            },
-        );
-    }
-    {
-        // `callback` may be a "name" string or a 'name symbol.
-        let q = queue.clone();
-        engine.register_fn("y-or-n-p", move |prompt: String, callback: SteelVal| {
-            let callback = steel_string(&callback).unwrap_or_default();
-            q.lock().unwrap().push(EditorCommand::YesOrNo {
-                prompt,
-                callback,
-                sticky: false,
-            });
-        });
-    }
-    {
-        // Like `y-or-n-p`, but the prompt can't be aborted (C-g/Escape) — it
-        // stays in the echo area until answered. For prompts that must resolve a
-        // pending request, so a dropped read can't strand the requester.
-        let q = queue.clone();
-        engine.register_fn(
-            "y-or-n-p-sticky",
-            move |prompt: String, callback: SteelVal| {
-                let callback = steel_string(&callback).unwrap_or_default();
-                q.lock().unwrap().push(EditorCommand::YesOrNo {
-                    prompt,
-                    callback,
-                    sticky: true,
-                });
-            },
-        );
-    }
-    {
-        // Value of buffer-local `key` on the active buffer, or "".
-        let shared = point.clone();
-        engine.register_fn("buffer-local-get", move |key: String| -> String {
-            let snap = shared.load();
-            snap.locals
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default()
-        });
-    }
-    // Backing primitive for the `read-string` Scheme wrapper (which makes the
-    // initial value optional). Callback is a Steel fn run with the entered text.
-    {
-        let q = queue.clone();
-        engine.register_fn(
-            "read-string-impl",
-            move |prompt: String, callback: SteelVal, initial: String| {
-                // `callback` may be a "name" string or a 'name symbol.
-                let callback = steel_string(&callback).unwrap_or_default();
-                q.lock().unwrap().push(EditorCommand::ReadString {
-                    prompt,
-                    initial,
-                    callback,
-                });
-            },
-        );
-    }
-    register_binary(&mut engine, queue, "append-to-buffer", |name, text| {
-        EditorCommand::AppendToBuffer { name, text }
-    });
-    register_unary(
-        &mut engine,
-        queue,
-        "fontify-org-buffer",
-        EditorCommand::FontifyOrgBuffer,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "set-modeline-project",
-        EditorCommand::SetModelineProject,
-    );
-    register_unary(
-        &mut engine,
-        queue,
-        "set-modeline-git",
-        EditorCommand::SetModelineGit,
-    );
-    // `(set-mode-line-slot key value)` → write/clear a named mode-line register
-    // (empty value clears). The general form behind project/git indicators.
-    register_binary(
-        &mut engine,
-        queue,
-        "set-mode-line-slot",
-        EditorCommand::SetModeLineSlot,
-    );
-    {
-        // `(set-mode-line-format segs)` — replace the mode-line layout. `segs` is
-        // a list of segment tokens (bare strings = literals, or `ml-field`/
-        // `ml-slot`/`ml-text` tab-encoded tokens). Defined from scheme/modeline.scm.
-        let q = queue.clone();
-        engine.register_fn("set-mode-line-format", move |segs: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SetModeLineFormat(steel_string_list(&segs)));
-        });
-    }
-    // --- Overlays / text properties / folds -------------------------------
-    register_ternary(
-        &mut engine,
-        queue,
-        "overlay-set-face",
-        |start, end, face| EditorCommand::OverlayFace { start, end, face },
-    );
-    register_binary(&mut engine, queue, "overlay-hide", |start, end| {
-        EditorCommand::OverlayHide { start, end }
-    });
-    register_binary(&mut engine, queue, "fold-lines", |start_line, end_line| {
-        EditorCommand::FoldLines {
-            start_line,
-            end_line,
-        }
-    });
-    register_nullary(&mut engine, queue, "unfold-all", EditorCommand::UnfoldAll);
-    // `(set-fold-marker line open?)` paints a gutter chevron on `line`; the click
-    // is hit-tested back to `(fold-toggle-at-line line)`. `(clear-fold-markers)`
-    // removes them all (modes re-declare markers on refresh).
-    register_binary(&mut engine, queue, "set-fold-marker", |line, open| {
-        EditorCommand::SetFoldMarker { line, open }
-    });
-    register_nullary(
-        &mut engine,
-        queue,
-        "clear-fold-markers",
-        EditorCommand::ClearFoldMarkers,
-    );
-    register_nullary(
-        &mut engine,
-        queue,
-        "clear-overlays",
-        EditorCommand::ClearOverlays,
-    );
-    {
-        let q = queue.clone();
-        engine.register_fn(
-            "put-text-property",
-            move |start: usize, end: usize, key: String, value: String| {
-                q.lock().unwrap().push(EditorCommand::PutTextProperty {
-                    start,
-                    end,
-                    key,
-                    value,
-                });
-            },
-        );
-    }
-    register_ternary(&mut engine, queue, "set-line-suffix", |line, text, face| {
-        EditorCommand::SetLineSuffix { line, text, face }
-    });
-    {
-        // Value of text property `key` at byte `pos`, or "" — read over the
-        // published snapshot (Scheme writes via put-text-property, reads next cmd).
-        let shared = point.clone();
-        engine.register_fn(
-            "get-text-property",
-            move |pos: usize, key: String| -> String {
-                let snap = shared.load();
-                snap.props
-                    .iter()
-                    .find(|(s, e, k, _)| *k == key && pos >= *s && pos < *e)
-                    .map(|(_, _, _, v)| v.clone())
-                    .unwrap_or_default()
-            },
-        );
-    }
-    // --- File-system primitives (pure, run on the engine thread) ----------
-    engine.register_fn("file-exists?", |path: String| -> bool {
-        std::path::Path::new(&path).exists()
-    });
-    engine.register_fn("file-directory?", |path: String| -> bool {
-        std::path::Path::new(&path).is_dir()
-    });
-    // `(packages-directory)` → where `package-install` clones git packages:
-    // the active config dir's `packages/` subdirectory. Resolved in Rust at call
-    // time (the same config-dir logic that finds init.scm), so Scheme needn't
-    // thread the path through a global.
-    engine.register_fn("packages-directory", || -> String {
-        crate::runtime::config_directory()
-            .join("packages")
-            .to_string_lossy()
-            .into_owned()
-    });
-    // `(register-macros-scheme-dir dir)` → treat `*.scm` under `dir` as editor
-    // extension code (the `macros-steel` mode + editor-aware `macros-scheme` LSP),
-    // even though it's outside the config dir. `package-install-local` calls this
-    // so a local working tree's sources resolve correctly on open.
-    engine.register_fn("register-macros-scheme-dir", |dir: String| {
-        crate::runtime::register_local_scheme_dir(std::path::PathBuf::from(dir));
-    });
-    engine.register_fn("parent-directory", |path: String| -> String {
-        // Parent of a path, trailing slash trimmed first so a directory's own
-        // parent is returned (Emacs `(file-name-directory (directory-file-name …))`).
-        let trimmed = path.trim_end_matches('/');
-        std::path::Path::new(trimmed)
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
-    engine.register_fn("read-file", |path: String| -> String {
-        std::fs::read_to_string(&path).unwrap_or_default()
-    });
-    engine.register_fn("write-file", |path: String, text: String| -> bool {
-        // Create parent directories first (Emacs's `make-directory ... t` before
-        // writing). Without this, the very first write to a fresh config dir like
-        // ~/.config/macros/ fails silently and persistence (recent projects,
-        // recentf, saveplace) never takes hold.
-        if let Some(parent) = std::path::Path::new(&path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::write(&path, text).is_ok()
-    });
-    // --- Identity + time (org-roam node IDs, timestamps) ------------------
-    // `(org-id-new)` → a fresh v4 UUID string (org-roam node IDs).
-    engine.register_fn("org-id-new", || -> String {
-        uuid::Uuid::new_v4().to_string()
-    });
-    // `(current-time fmt)` → local time formatted with a `strftime`-style string
-    // (Emacs `format-time-string`), e.g. `(current-time "%Y%m%d%H%M%S")` for a
-    // node filename, `(current-time "%Y-%m-%d")` for an agenda date. An invalid
-    // format yields "" rather than panicking (write! returns Err, never unwinds).
-    engine.register_fn("current-time", |fmt: String| -> String {
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        let _ = write!(out, "{}", chrono::Local::now().format(&fmt));
-        out
-    });
-    // --- Fast search (ripgrep as a library, Scheme-configurable) ----------
-    // The config lives entirely on this (engine) thread; the register_fns share
-    // it. Users tune it in init.scm: (search-exclude "target"),
-    // (set-search-option "hidden" "true"), etc.
-    {
-        let search: Arc<Mutex<SearchConfig>> = Arc::new(Mutex::new(SearchConfig::default()));
-        {
-            let s = search.clone();
-            engine.register_fn("search-exclude", move |glob: String| {
-                s.lock().unwrap().excludes.push(glob);
-            });
-        }
-        {
-            let s = search.clone();
-            engine.register_fn("search-include", move |glob: String| {
-                s.lock().unwrap().includes.push(glob);
-            });
-        }
-        {
-            let s = search.clone();
-            engine.register_fn("search-reset", move || {
-                *s.lock().unwrap() = SearchConfig::default();
-            });
-        }
-        {
-            let s = search.clone();
-            engine.register_fn("set-search-option", move |key: String, value: SteelVal| {
-                let v = option_from_steelval(&value);
-                let mut c = s.lock().unwrap();
-                match key.as_str() {
-                    "hidden" => c.hidden = v.truthy(),
-                    "follow-symlinks" => c.follow_links = v.truthy(),
-                    "respect-gitignore" => c.respect_gitignore = v.truthy(),
-                    "max-depth" => c.max_depth = v.as_usize(),
-                    _ => {}
-                }
-            });
-        }
-        {
-            // `(walk-files dir)` → file paths under `dir`, gitignore-aware.
-            let s = search.clone();
-            engine.register_fn("walk-files", move |dir: String| -> Vec<String> {
-                let config = s.lock().unwrap().clone();
-                build_walk(&dir, &config)
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-                    .map(|e| e.path().to_string_lossy().into_owned())
-                    .collect()
-            });
-        }
-        {
-            // `(grep-files dir regex)` → `"path:line:text"` matches.
-            let s = search.clone();
-            engine.register_fn(
-                "grep-files",
-                move |dir: String, pattern: String| -> Vec<String> {
-                    let config = s.lock().unwrap().clone();
-                    let Ok(matcher) = grep::regex::RegexMatcher::new(&pattern) else {
-                        return Vec::new();
-                    };
-                    let mut searcher = grep::searcher::SearcherBuilder::new()
-                        .line_number(true)
-                        .build();
-                    let mut results: Vec<String> = Vec::new();
-                    for entry in build_walk(&dir, &config).filter_map(|e| e.ok()) {
-                        if !entry.file_type().is_some_and(|t| t.is_file()) {
-                            continue;
-                        }
-                        let path = entry.path().to_path_buf();
-                        let path_str = path.to_string_lossy().into_owned();
-                        let out = &mut results;
-                        let _ = searcher.search_path(
-                            &matcher,
-                            &path,
-                            grep::searcher::sinks::UTF8(move |lnum, line| {
-                                out.push(format!("{}:{}:{}", path_str, lnum, line.trim_end()));
-                                Ok(true)
-                            }),
-                        );
-                    }
-                    results
-                },
-            );
-        }
-    }
-    // gix bridge: pure-Rust git queries (no `git` subprocess), exposed the same
-    // blocking-on-the-engine-thread way as `walk-files`/`grep-files`. Errors
-    // (not a repo, unborn HEAD, untracked file) collapse to an empty list.
-    {
-        // `(gix-toplevel dir)` → absolute work-tree root for the repo enclosing
-        // `dir`, or "" if `dir` isn't in a git work tree. The native form of
-        // `git rev-parse --show-toplevel` behind magit's `magit-toplevel`.
-        engine.register_fn("gix-toplevel", |dir: String| -> String {
-            gix::discover(&dir)
-                .ok()
-                .and_then(|repo| repo.workdir().map(|p| p.to_string_lossy().into_owned()))
-                .unwrap_or_default()
-        });
-        // `(gix-branch dir)` → short name of the checked-out branch ("main"), or
-        // "" outside a repo / with a detached HEAD. `git rev-parse --abbrev-ref HEAD`.
-        engine.register_fn("gix-branch", |dir: String| -> String { gix_branch(&dir) });
-        // `(gix-log dir n)` → up to `n` recent HEAD commits, newest first, each
-        // "shorthash\tauthor\tYYYY-MM-DD\tsummary".
-        engine.register_fn("gix-log", |dir: String, max: usize| -> Vec<String> {
-            gix_log(&dir, max).unwrap_or_default()
-        });
-        // `(gix-blame dir file)` → one "line\tsha\tauthor\tepoch\tsummary" per
-        // line of `file` (absolute or relative to `dir`) as committed at HEAD —
-        // or an empty list when the file differs from HEAD (caller falls back to
-        // `git blame`; see gix_blame's alignment guard).
-        engine.register_fn("gix-blame", |dir: String, file: String| -> Vec<String> {
-            gix_blame(&dir, &file).unwrap_or_default()
-        });
-        // `(gix-branches dir)` / `(gix-remote-branches dir)` / `(gix-tags dir)`
-        // → sorted short ref names, the native form of `git branch [-r]` / `git tag`.
-        engine.register_fn("gix-branches", |dir: String| -> Vec<String> {
-            gix_ref_names(&dir, "local").unwrap_or_default()
-        });
-        engine.register_fn("gix-remote-branches", |dir: String| -> Vec<String> {
-            gix_ref_names(&dir, "remote").unwrap_or_default()
-        });
-        engine.register_fn("gix-tags", |dir: String| -> Vec<String> {
-            gix_ref_names(&dir, "tag").unwrap_or_default()
-        });
-        // `(gix-remotes dir)` → configured remote names.
-        engine.register_fn("gix-remotes", |dir: String| -> Vec<String> {
-            gix_remotes(&dir).unwrap_or_default()
-        });
-        // `(gix-state dir)` → "merge" / "rebase" / "" (in-progress operation).
-        engine.register_fn("gix-state", |dir: String| -> String { gix_state(&dir) });
-        // `(gix-head-subject dir)` / `(gix-head-message dir)` → HEAD commit %s / %B.
-        engine.register_fn("gix-head-subject", |dir: String| -> String {
-            gix_head_message(&dir, false)
-        });
-        engine.register_fn("gix-head-message", |dir: String| -> String {
-            gix_head_message(&dir, true)
-        });
-        // `(gix-log-oneline dir n)` → up to n "<shorthash> <summary>" lines.
-        engine.register_fn(
-            "gix-log-oneline",
-            |dir: String, max: usize| -> Vec<String> {
-                gix_log_oneline(&dir, max).unwrap_or_default()
-            },
-        );
-        // `(gix-diff dir)` / `(gix-diff-cached dir)` → `git diff` / `git diff
-        // --cached`-format text (unstaged: index↔worktree; staged: HEAD↔index).
-        engine.register_fn("gix-diff", |dir: String| -> String {
-            gix_diff_text(&dir, false).unwrap_or_default()
-        });
-        engine.register_fn("gix-diff-cached", |dir: String| -> String {
-            gix_diff_text(&dir, true).unwrap_or_default()
-        });
-        // `(gix-show dir rev)` → `git show <rev>`-format commit view (header + diff).
-        engine.register_fn("gix-show", |dir: String, rev: String| -> String {
-            gix_show(&dir, &rev).unwrap_or_default()
-        });
-        // `(gix-log-decorated dir all? n)` → `git log --oneline --decorate [--all]`.
-        engine.register_fn(
-            "gix-log-decorated",
-            |dir: String, all: bool, max: usize| -> Vec<String> {
-                gix_log_decorated(&dir, all, max).unwrap_or_default()
-            },
-        );
-        // `(gix-log-range dir tip hidden n)` → `git log --oneline hidden..tip`.
-        engine.register_fn(
-            "gix-log-range",
-            |dir: String, tip: String, hidden: String, max: usize| -> Vec<String> {
-                gix_log_range(&dir, &tip, &hidden, max).unwrap_or_default()
-            },
-        );
-        // `(gix-stash-list dir)` → `git stash list`-format lines (refs/stash reflog).
-        engine.register_fn("gix-stash-list", |dir: String| -> Vec<String> {
-            gix_stash_list(&dir).unwrap_or_default()
-        });
-        // `(gix-log-file dir file n)` → `git log --oneline --decorate -n N -- file`.
-        engine.register_fn(
-            "gix-log-file",
-            |dir: String, file: String, max: usize| -> Vec<String> {
-                gix_log_file(&dir, &file, max).unwrap_or_default()
-            },
-        );
-        // `(gix-status dir)` → `git status --porcelain --branch --untracked-files=all`
-        // lines (header first). Renames read as delete+add (`--no-renames`).
-        engine.register_fn("gix-status", |dir: String| -> Vec<String> {
-            gix_status(&dir).unwrap_or_default()
-        });
-    }
-    // `(call-process program args)` — run a subprocess, return stdout. Blocks on
-    // the engine thread (never the UI), the same model as `list-directory`.
-    engine.register_fn(
-        "call-process",
-        move |program: String, args: SteelVal| -> String {
-            let args = steel_string_list(&args);
-            std::process::Command::new(&program)
-                .args(&args)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        },
-    );
-    // `(call-process-full program args input)` → `(exit-code stdout stderr)`,
-    // writing `input` to stdin (empty = none). Used for `git apply -` (hunk
-    // staging) and to surface git errors (stderr + non-zero code).
-    engine.register_fn(
-        "call-process-full",
-        move |program: String, args: SteelVal, input: String| -> Vec<String> {
-            use std::io::Write;
-            use std::process::Stdio;
-            let args = steel_string_list(&args);
-            let spawn = std::process::Command::new(&program)
-                .args(&args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-            let mut child = match spawn {
-                Ok(c) => c,
-                Err(e) => return vec!["-1".into(), String::new(), e.to_string()],
-            };
-            // Write stdin then close it (drop) so the child sees EOF — otherwise
-            // a filter like `git apply -` blocks waiting for input.
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(input.as_bytes());
-            }
-            match child.wait_with_output() {
-                Ok(o) => vec![
-                    o.status
-                        .code()
-                        .map_or_else(|| "-1".into(), |c| c.to_string()),
-                    String::from_utf8_lossy(&o.stdout).into_owned(),
-                    String::from_utf8_lossy(&o.stderr).into_owned(),
-                ],
-                Err(e) => vec!["-1".into(), String::new(), e.to_string()],
-            }
-        },
-    );
-    // `(getenv name)` → the variable's value, or "" if unset. Reads the same
-    // process environment that all subprocess spawns inherit (see
-    // `import_shell_env`), so config can inspect the resolved PATH.
-    engine.register_fn("getenv", |name: String| -> String {
-        std::env::var(&name).unwrap_or_default()
-    });
-    // `(setenv name value)` → set a process env var, visible to every
-    // subsequently spawned subprocess (LSP servers, call-process, make-process).
-    // Lets a config extend PATH or pin a toolchain, e.g.
-    //   (setenv "PATH" (string-append (getenv "PATH") ":" ...))
-    // Runs on the single engine thread during `init.scm` eval, before any
-    // process is spawned from Scheme, so the mutation is sound.
-    engine.register_fn("setenv", |name: String, value: String| {
-        // SAFETY: the engine is single-threaded and config eval happens at
-        // startup before subprocess threads read the environment.
-        unsafe { std::env::set_var(&name, &value) };
-    });
-    // --- Async (subprocess streaming, timers) -----------------------------
-    // Dedicated id source for processes/terminals. Each lives in its own
-    // editor-side map keyed by id, so it needn't share the marker counter.
-    let async_ids = IdGen::default();
-    {
-        // `(make-process program args on-output on-exit)` → a process id (used by
-        // process-send-string / kill-process). on-exit "" = none; it receives the
-        // exit code as a string.
-        let q = queue.clone();
-        let ids = async_ids.clone();
-        engine.register_fn(
-            "make-process",
-            move |program: String,
-                  args: SteelVal,
-                  on_output: SteelVal,
-                  on_exit: SteelVal|
-                  -> usize {
-                let id = ids.next();
-                let args = steel_string_list(&args);
-                // Callbacks may be "name" strings or 'name symbols.
-                let on_output = steel_string(&on_output).unwrap_or_default();
-                let on_exit = steel_string(&on_exit).unwrap_or_default();
-                let on_exit = if on_exit.is_empty() {
-                    None
-                } else {
-                    Some(on_exit)
-                };
-                q.lock().unwrap().push(EditorCommand::MakeProcess {
-                    id,
-                    program,
-                    args,
-                    on_output,
-                    on_exit,
-                });
-                id as usize
-            },
-        );
-    }
-    register_binary(&mut engine, queue, "process-send-string", |id, text| {
-        EditorCommand::SendProcess { id, text }
-    });
-    register_unary(&mut engine, queue, "kill-process", |id| {
-        EditorCommand::KillProcess { id }
-    });
-    {
-        // `(make-http-stream url headers body on-line on-done)` → a stream id
-        // (used by http-stream-cancel). `headers` is a flat list of alternating
-        // key/value strings: (list "x-api-key" key "anthropic-version" "..."). A
-        // POST with the given JSON `body`; `on-line` is called per response line
-        // (SSE `data:`/`event:` lines arrive verbatim), `on-done` with the id when
-        // the stream closes. Callbacks may be "name" strings or 'name symbols.
-        let q = queue.clone();
-        let ids = async_ids.clone();
-        engine.register_fn(
-            "make-http-stream",
-            move |url: String,
-                  headers: SteelVal,
-                  body: String,
-                  on_line: SteelVal,
-                  on_done: SteelVal|
-                  -> usize {
-                let id = ids.next();
-                let flat = steel_string_list(&headers);
-                let headers = flat
-                    .chunks_exact(2)
-                    .map(|kv| (kv[0].clone(), kv[1].clone()))
-                    .collect();
-                let on_line = steel_string(&on_line).unwrap_or_default();
-                let on_done = steel_string(&on_done).unwrap_or_default();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::HttpStream(Box::new(HttpStreamArgs {
-                        id,
-                        url,
-                        headers,
-                        body,
-                        on_line,
-                        on_done,
-                    })));
-                id as usize
-            },
-        );
-    }
-    register_unary(&mut engine, queue, "http-stream-cancel", |id| {
-        EditorCommand::HttpStreamCancel { id }
-    });
-    // --- ANVIL REPL (a second, independent Steel interpreter) -------------
-    {
-        // `(anvil-eval source on-result)` evaluates `source` in the separate
-        // REPL image; the printed result is delivered to the Scheme function
-        // named `on-result` (in this engine) as a single string argument.
-        let q = queue.clone();
-        engine.register_fn("anvil-eval", move |source: String, on_result: String| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::AnvilEval { source, on_result });
-        });
-    }
-    {
-        // `(anvil-interrupt)` cancels the REPL's current evaluation.
-        let q = queue.clone();
-        engine.register_fn("anvil-interrupt", move || {
-            q.lock().unwrap().push(EditorCommand::AnvilInterrupt);
-        });
-    }
-    {
-        // `(anvil-reset)` rebuilds the REPL image from scratch.
-        let q = queue.clone();
-        engine.register_fn("anvil-reset", move || {
-            q.lock().unwrap().push(EditorCommand::AnvilReset);
-        });
-    }
-    {
-        // SLIME-style interaction commands. The editor computes the buffer
-        // context (the form at point, the symbol at point, the file path) since
-        // that needs the live buffer; the result streams back to the REPL.
-        let q = queue.clone();
-        engine.register_fn("anvil-eval-defun", move || {
-            q.lock().unwrap().push(EditorCommand::AnvilEvalDefun);
-        });
-        let q = queue.clone();
-        engine.register_fn("anvil-load-file", move || {
-            q.lock().unwrap().push(EditorCommand::AnvilLoadFile);
-        });
-        let q = queue.clone();
-        engine.register_fn("anvil-doc", move || {
-            q.lock().unwrap().push(EditorCommand::AnvilDoc);
-        });
-        let q = queue.clone();
-        engine.register_fn("anvil-macroexpand", move || {
-            q.lock().unwrap().push(EditorCommand::AnvilMacroexpand);
-        });
-        let q = queue.clone();
-        engine.register_fn("anvil-apropos", move |pattern: String| {
-            q.lock().unwrap().push(EditorCommand::AnvilApropos(pattern));
-        });
-        let q = queue.clone();
-        engine.register_fn("anvil-signature", move || {
-            q.lock().unwrap().push(EditorCommand::AnvilSignature);
-        });
-    }
-    {
-        // `(make-terminal name program args)` → a terminal id. Empty `program`
-        // runs the user's login shell. The terminal is shown in a `term-mode`
-        // buffer named `name`; switching to that buffer later reuses it.
-        let q = queue.clone();
-        let ids = markers.clone(); // shared monotonic id source
-        engine.register_fn(
-            "make-terminal",
-            move |name: String, program: String, args: SteelVal| -> usize {
-                let id = {
-                    let mut store = ids.lock().unwrap();
-                    store.next += 1;
-                    store.next
-                };
-                q.lock().unwrap().push(EditorCommand::MakeTerminal {
-                    id,
-                    name,
-                    program,
-                    args: steel_string_list(&args),
-                });
-                id as usize
-            },
-        );
-    }
-    register_binary(&mut engine, queue, "run-with-timer", |ms, callback| {
-        EditorCommand::RunWithTimer { ms, callback }
-    });
-    // Read bridges over the editor's published snapshot (see `set_snapshot`).
-    register_snapshot_read(&mut engine, point, "buffer-line", |s| s.line);
-    register_snapshot_read(&mut engine, point, "current-buffer", |s| s.name.clone());
-    // The active buffer's directory — its visited file's parent, or the cwd
-    // for fileless buffers (Emacs's buffer-local `default-directory`).
-    register_snapshot_read(&mut engine, point, "buffer-directory", |s| {
-        s.directory.clone()
-    });
-    // The visited file's full path, or "" for a buffer with no file (Emacs's
-    // `buffer-file-name`).
-    register_snapshot_read(&mut engine, point, "buffer-file-name", |s| s.path.clone());
-    // Point as a byte offset (Emacs `(point)`).
-    register_snapshot_read(&mut engine, point, "point", |s| s.point);
-    {
-        // The whole buffer (Emacs `(buffer-string)`). Clone the cheap rope handle
-        // under the lock, then materialize the String outside it so the snapshot
-        // lock isn't held for a full-buffer copy.
-        let shared = point.clone();
-        engine.register_fn("buffer-string", move || -> String {
-            let rope = shared.load().text.clone();
-            rope.to_string()
-        });
-    }
-    // End of buffer as a byte offset (Emacs `(point-max)`). O(1) on the rope, no
-    // text materialized.
-    register_snapshot_read(&mut engine, point, "point-max", |s| s.text.len_bytes());
-    {
-        // `(position->byte line character)` → byte offset of an LSP position
-        // (0-based line, UTF-16 column) in the active buffer. Lets Scheme LSP
-        // handlers turn server line/col coordinates into the byte offsets the
-        // overlay/fold/goto primitives expect.
-        let shared = point.clone();
-        engine.register_fn(
-            "position->byte",
-            move |line: usize, character: usize| -> usize {
-                let rope = shared.load().text.clone();
-                let (mut cur_line, mut col) = (0usize, 0usize);
-                let mut byte = 0usize;
-                for c in rope.chars() {
-                    if cur_line == line && col >= character {
-                        return byte;
-                    }
-                    if c == '\n' {
-                        if cur_line == line {
-                            return byte;
-                        }
-                        cur_line += 1;
-                        col = 0;
-                    } else {
-                        col += c.len_utf16();
-                    }
-                    byte += c.len_utf8();
-                }
-                rope.len_bytes()
-            },
-        );
-    }
-    // `(lsp-server-ready?)` → #t if the active buffer has a ready LSP server.
-    register_snapshot_read(&mut engine, point, "lsp-server-ready?", |s| s.lsp_ready);
-    // `(evil-enabled?)` → #t when modal (evil) editing is active.
-    register_snapshot_read(&mut engine, point, "evil-enabled?", |s| s.evil_enabled);
-    // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
-    register_snapshot_read(&mut engine, point, "helix-enabled?", |s| s.helix_enabled);
-    // `(diagnostics)` → the active buffer's LSP diagnostics, each a record
-    // "line\tcol\tseverity\tmessage" (line/col 0-based). The library splits it.
-    register_snapshot_read(&mut engine, point, "diagnostics", |s| s.diagnostics.clone());
-    {
-        // `(line-bounds)` → `(start end)` byte offsets of the line at point
-        // (end points at the line's terminating newline, or buffer end).
-        let shared = point.clone();
-        engine.register_fn("line-bounds", move || -> Vec<usize> {
-            let (rope, p) = {
-                let snap = shared.load();
-                let p = snap.point.min(snap.text.len_bytes());
-                (snap.text.clone(), p)
-            };
-            let line = rope.byte_to_line(p);
-            let start = rope.line_to_byte(line);
-            let line_str = rope.line(line).to_string();
-            let end = start + line_str.find('\n').unwrap_or(line_str.len());
-            vec![start, end]
-        });
-    }
-    // `(line-count)` → total buffer lines. O(1) on the rope. Lets Scheme fold
-    // logic walk lines by index without materializing the whole buffer.
-    register_snapshot_read(&mut engine, point, "line-count", |s| s.text.len_lines());
-    {
-        // `(line-indentation line)` → leading-whitespace width (spaces, tabs count
-        // as one column each) of buffer `line`, or -1 for a blank/whitespace-only
-        // line so fold logic can skip blanks. The indentation-based folder builds
-        // fold ranges from this.
-        let shared = point.clone();
-        engine.register_fn("line-indentation", move |line: usize| -> isize {
-            let rope = shared.load().text.clone();
-            if line >= rope.len_lines() {
-                return -1;
-            }
-            let mut indent = 0;
-            for c in rope.line(line).chars() {
-                match c {
-                    ' ' | '\t' => indent += 1,
-                    // End of line (or a blank/whitespace-only line) before any
-                    // content: report -1 so fold logic skips it.
-                    '\n' | '\r' => return -1,
-                    _ => return indent,
-                }
-            }
-            -1
-        });
-    }
-    // Escape a string for literal use in a regexp (Emacs `regexp-quote`).
-    engine.register_fn("regexp-quote", |s: String| -> String { regex::escape(&s) });
-    // `(fuzzy-match pattern candidates)` — rank `candidates` against `pattern`
-    // with the same nucleo matcher Helm uses, best-match first; non-matches are
-    // dropped. An empty pattern returns the list unchanged. Lets a Scheme-driven
-    // Helm filter do compiled-speed scoring instead of reimplementing it.
-    engine.register_fn(
-        "fuzzy-match",
-        |pattern: String, candidates: SteelVal| -> Vec<String> {
-            fuzzy_rank(&pattern, &steel_string_list(&candidates))
-        },
-    );
-    {
-        // Bytes `[a, b)` of the buffer, clamped (Emacs `(buffer-substring a b)`).
-        let shared = point.clone();
-        engine.register_fn("buffer-substring", move |a: usize, b: usize| -> String {
-            let rope = shared.load().text.clone();
-            // Snap to char boundaries so we never slice mid-codepoint.
-            let (start, end) = (snap_byte(&rope, a), snap_byte(&rope, b));
-            if start >= end {
-                return String::new();
-            }
-            rope.byte_slice(start..end).to_string()
-        });
-    }
-    {
-        // The active region's byte range, or (-1, -1) when no region is active.
-        register_snapshot_read(&mut engine, point, "region-beginning", |s| {
-            s.region.map_or(-1, |(a, _)| a as isize)
-        });
-        register_snapshot_read(&mut engine, point, "region-end", |s| {
-            s.region.map_or(-1, |(_, b)| b as isize)
-        });
-        register_snapshot_read(&mut engine, point, "region-active?", |s| s.region.is_some());
-        // `(selections)` → a flat list `(a0 h0 a1 h1 …)` of every selection's
-        // anchor/head byte offsets, primary first (Helix multiple selections).
-        // Flat (not pairs) so it round-trips straight into `(set-selections …)`.
-        register_snapshot_read(&mut engine, point, "selections", |s| {
-            s.selections
-                .iter()
-                .flat_map(|&(a, h)| [a, h])
-                .collect::<Vec<usize>>()
-        });
-        // The selected text, or "" when no region is active (Emacs has no single
-        // primitive for this; it's `(buffer-substring (region-beginning) …)`).
-        let shared = point.clone();
-        engine.register_fn("region-text", move || -> String {
-            let (rope, region) = {
-                let snap = shared.load();
-                (snap.text.clone(), snap.region)
-            };
-            match region {
-                Some((a, b)) if b <= rope.len_bytes() && a < b => rope
-                    .byte_slice(snap_byte(&rope, a)..snap_byte(&rope, b))
-                    .to_string(),
-                _ => String::new(),
-            }
-        });
-    }
-    {
-        // Byte offset of the next occurrence of `needle` at/after point, or -1.
-        let shared = point.clone();
-        engine.register_fn("search-forward", move |needle: String| -> isize {
-            let (rope, p) = {
-                let snap = shared.load();
-                (snap.text.clone(), snap.point)
-            };
-            let from = snap_byte(&rope, p);
-            let tail = rope.byte_slice(from..).to_string();
-            match tail.find(&needle) {
-                Some(off) => (from + off) as isize,
-                None => -1,
-            }
-        });
-    }
-    // --- Markers (positions that move with edits) -------------------------
-    {
-        // `(make-marker pos)` → a marker id (allocated synchronously).
-        let m = markers.clone();
-        engine.register_fn("make-marker", move |pos: usize| -> usize {
-            let mut store = m.lock().unwrap();
-            store.next += 1;
-            let id = store.next;
-            store.positions.insert(id, pos);
-            id as usize
-        });
-    }
-    {
-        // `(marker-position id)` → its current byte position, or -1.
-        let m = markers.clone();
-        engine.register_fn("marker-position", move |id: u64| -> isize {
-            m.lock()
-                .unwrap()
-                .positions
-                .get(&id)
-                .map_or(-1, |p| *p as isize)
-        });
-    }
-    {
-        let m = markers.clone();
-        engine.register_fn("set-marker", move |id: u64, pos: usize| {
-            m.lock().unwrap().positions.insert(id, pos);
-        });
-    }
-    {
-        let m = markers.clone();
-        engine.register_fn("delete-marker", move |id: u64| {
-            m.lock().unwrap().positions.remove(&id);
-        });
-    }
-    // --- Pure position motions (compute, don't move) ----------------------
-    // These resolve a *new byte offset* from a given one against the published
-    // buffer, reusing the editor's grapheme/word/line logic. Plain motions
-    // (`forward-char`, …) move the primary cursor as a side effect; these are
-    // pure, so Helix's selection-first commands can compute a fresh head for
-    // *every* selection and hand the lot back via `(set-selections …)`.
-    macro_rules! register_pos_fn {
-        ($name:literal, $f:expr) => {{
-            let shared = point.clone();
-            engine.register_fn($name, move |pos: usize| -> usize {
-                let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
-                let f: fn(&crate::buffer::Buffer, usize) -> usize = $f;
-                f(&buf, pos.min(buf.len()))
-            });
-        }};
-    }
-    register_pos_fn!("grapheme-forward", |b, p| b.next_grapheme(p));
-    register_pos_fn!("grapheme-backward", |b, p| b.prev_grapheme(p));
-    register_pos_fn!("word-forward", |b, p| b.forward_word(p));
-    register_pos_fn!("word-forward-start", |b, p| b.forward_word_start(p));
-    register_pos_fn!("word-backward", |b, p| b.backward_word(p));
-    register_pos_fn!("line-start-pos", |b, p| b.line_range_at(p).start);
-    register_pos_fn!("line-end-pos", |b, p| b.line_range_at(p).end);
-    register_pos_fn!("line-of-pos", |b, p| b.line_index_at_byte(p));
-    {
-        // `(line-start-of-line n)` → first byte of (0-based) line `n`, clamped.
-        let shared = point.clone();
-        engine.register_fn("line-start-of-line", move |line: usize| -> usize {
-            let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
-            let last = buf.line_count().saturating_sub(1);
-            buf.line_range(line.min(last)).start
-        });
-    }
-    // --- Regexp (over strings, and over the buffer from point) ------------
-    engine.register_fn("string-match", move |pattern: String, s: String| -> isize {
-        Regex::new(&pattern)
-            .ok()
-            .and_then(|re| re.find(&s).map(|m| m.start() as isize))
-            .unwrap_or(-1)
-    });
-    engine.register_fn(
-        "regexp-captures",
-        move |pattern: String, s: String| -> Vec<String> {
-            // Group 0 = whole match, then each capture group (absent group = "").
-            match Regex::new(&pattern).ok().and_then(|re| re.captures(&s)) {
-                Some(caps) => caps
-                    .iter()
-                    .map(|g| g.map(|m| m.as_str().to_string()).unwrap_or_default())
-                    .collect(),
-                None => Vec::new(),
-            }
-        },
-    );
-    engine.register_fn(
-        "replace-regexp-in-string",
-        move |pattern: String, replacement: String, s: String| -> String {
-            // `$1` / `${name}` expansion (regex-crate syntax).
-            match Regex::new(&pattern) {
-                Ok(re) => re.replace_all(&s, replacement.as_str()).into_owned(),
-                Err(_) => s,
-            }
-        },
-    );
-    {
-        // `(re-search-forward pattern)` → `(start end)` of the next match at/after
-        // point, or `()` if none. Scheme drives point/edits from the result.
-        let shared = point.clone();
-        engine.register_fn("re-search-forward", move |pattern: String| -> Vec<usize> {
-            let Ok(re) = Regex::new(&pattern) else {
-                return Vec::new();
-            };
-            let (rope, p) = {
-                let snap = shared.load();
-                (snap.text.clone(), snap.point)
-            };
-            let from = snap_byte(&rope, p);
-            let tail = rope.byte_slice(from..).to_string();
-            match re.find(&tail) {
-                Some(m) => vec![from + m.start(), from + m.end()],
-                None => Vec::new(),
-            }
-        });
-    }
-    engine
-}
-
-/// Parse a list of `(line-number face-name)` pairs for `render-buffer`.
-fn parse_line_faces(value: &SteelVal) -> Vec<(usize, String)> {
-    steel_list(value)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|item| {
-            let pair = steel_list(item)?;
-            let line = match pair.first()? {
-                SteelVal::IntV(n) => (*n).max(0) as usize,
-                _ => return None,
-            };
-            Some((line, steel_string(pair.get(1)?)?))
-        })
-        .collect()
-}
-
-/// Parse a list of `(key label command)` rows for `transient`.
-fn parse_transient_item(item: &SteelVal) -> Option<TransientItem> {
-    let row = steel_list(item)?;
-    Some(TransientItem {
-        key: steel_string(row.first()?)?,
-        label: steel_string(row.get(1)?)?,
-        command: steel_string(row.get(2)?)?,
-    })
-}
-
-/// Parse `transient`'s rows argument into columns. Two accepted shapes:
-///   flat:    `(list (k l c) (k l c) …)`            → one untitled column
-///   grouped: `(list (title (k l c) …) (title …))`  → titled columns
-/// A group is recognised by its second element being a list (a row) rather than
-/// a string (a key), so the two forms are unambiguous.
-fn parse_transient_columns(value: &SteelVal) -> Vec<TransientColumn> {
-    let elements = steel_list(value).unwrap_or_default();
-    let grouped = elements
-        .first()
-        .and_then(steel_list)
-        .and_then(|first| first.get(1).map(|second| steel_list(second).is_some()))
-        .unwrap_or(false);
-    if !grouped {
-        return vec![TransientColumn {
-            title: None,
-            rows: elements.iter().filter_map(parse_transient_item).collect(),
-        }];
-    }
-    elements
-        .iter()
-        .filter_map(|group| {
-            let group = steel_list(group)?;
-            let title = steel_string(group.first()?);
-            let rows = group
-                .iter()
-                .skip(1)
-                .filter_map(parse_transient_item)
-                .collect();
-            Some(TransientColumn { title, rows })
-        })
-        .collect()
-}
-
-fn steel_string(value: &SteelVal) -> Option<String> {
-    match value {
-        SteelVal::StringV(s) => Some(s.to_string()),
-        SteelVal::SymbolV(s) => Some(s.to_string()),
-        _ => None,
-    }
-}
-
-/// Convert a value passed to `(set-option …)` into an untyped [`OptionValue`].
-/// Numbers, booleans, and strings map to the matching variant; anything else is
-/// stringified. The real coercion to the option's declared type happens later in
-/// `Settings::set`.
-fn option_from_steelval(value: &SteelVal) -> crate::settings::OptionValue {
-    use crate::settings::OptionValue;
-    match value {
-        SteelVal::BoolV(b) => OptionValue::Bool(*b),
-        SteelVal::IntV(i) => OptionValue::Int(*i as i64),
-        SteelVal::NumV(f) => OptionValue::Float(*f),
-        SteelVal::StringV(s) => OptionValue::Str(s.to_string()),
-        SteelVal::SymbolV(s) => OptionValue::Str(s.to_string()),
-        other => OptionValue::Str(other.to_string()),
-    }
-}
-
-/// Convert a stored [`OptionValue`] back into a Steel value for `(get-option …)`.
-fn option_to_steelval(v: &crate::settings::OptionValue) -> SteelVal {
-    use crate::settings::OptionValue;
-    match v {
-        OptionValue::Bool(b) => SteelVal::BoolV(*b),
-        OptionValue::Int(i) => SteelVal::IntV(*i as isize),
-        OptionValue::Float(f) => SteelVal::NumV(*f),
-        OptionValue::Str(s) => SteelVal::StringV(s.clone().into()),
-    }
-}
-
-fn steel_list(value: &SteelVal) -> Option<Vec<SteelVal>> {
-    match value {
-        SteelVal::ListV(list) => Some(list.iter().cloned().collect()),
-        _ => None,
-    }
-}
-
-/// Rank `candidates` against `pattern` with nucleo (best first), dropping
-/// non-matches. An empty pattern keeps the list as-is. The matcher matches Helm's
-/// own (`helm_filter`), so a Scheme filter ranks identically to a native source.
-fn fuzzy_rank(pattern: &str, candidates: &[String]) -> Vec<String> {
-    if pattern.is_empty() {
-        return candidates.to_vec();
-    }
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let parsed = Pattern::parse(pattern, CaseMatching::Smart, Normalization::Smart);
-    parsed
-        .match_list(candidates.iter(), &mut matcher)
-        .into_iter()
-        .map(|(c, _score)| c.clone())
-        .collect()
-}
-
-/// A list of strings (anything that isn't a string is dropped).
-fn steel_string_list(value: &SteelVal) -> Vec<String> {
-    steel_list(value)
-        .map(|items| items.iter().filter_map(steel_string).collect())
-        .unwrap_or_default()
-}
-
-/// A list of non-negative integers (anything else dropped). Used by
-/// `(set-selections …)` to read its flat anchor/head offset list.
-fn steel_usize_list(value: &SteelVal) -> Vec<usize> {
-    steel_list(value)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| match v {
-                    SteelVal::IntV(i) if *i >= 0 => Some(*i as usize),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// A list of completion candidates, each either a bare string or a
-/// `(candidate annotation)` pair (the marginalia form). Non-conforming entries
-/// are dropped.
-fn steel_candidate_list(value: &SteelVal) -> Vec<(String, Option<String>)> {
-    steel_list(value)
-        .map(|items| items.iter().filter_map(steel_candidate).collect())
-        .unwrap_or_default()
-}
-
-/// Recognize the `(raw "fn")` source form: a list whose head is the symbol
-/// `raw` and whose second element is a Scheme fn name. Returns that name. Used to
-/// tag a self-filtered dynamic Helm source; anything else parses as static
-/// candidates. The head must be a *symbol* so a candidate list whose first entry
-/// happens to be the string `"raw"` is not misread.
-fn steel_raw_dynamic(value: &SteelVal) -> Option<String> {
-    let items = steel_list(value)?;
-    match items.first()? {
-        SteelVal::SymbolV(s) if s.as_str() == "raw" => steel_string(items.get(1)?),
-        _ => None,
-    }
-}
-
-/// One candidate: a string `"cand"`, or a `(cand)` / `(cand annotation)` list.
-fn steel_candidate(value: &SteelVal) -> Option<(String, Option<String>)> {
-    if let Some(s) = steel_string(value) {
-        return Some((s, None));
-    }
-    let pair = steel_list(value)?;
-    let cand = steel_string(pair.first()?)?;
-    let annotation = pair.get(1).and_then(steel_string);
-    Some((cand, annotation))
-}
-
-/// Parse a CAPF function's return value into `(start, end, items)`. Accepted
-/// shapes: a flat candidate list `((cand …))` (keeping the default range), or
-/// `(start end candidate-list)` to also override the replaced byte range.
-fn parse_capf_result(
-    value: &SteelVal,
-    default_start: usize,
-    default_end: usize,
-) -> (usize, usize, Vec<(String, Option<String>)>) {
-    // `(start end candidate-list)` — integers in the first two slots.
-    if let Some(items) = steel_list(value)
-        && let (Some(SteelVal::IntV(s)), Some(SteelVal::IntV(e)), Some(cands)) =
-            (items.first(), items.get(1), items.get(2))
-    {
-        return (
-            (*s).max(0) as usize,
-            (*e).max(0) as usize,
-            steel_candidate_list(cands),
-        );
-    }
-    // Otherwise treat the whole value as a flat candidate list.
-    (default_start, default_end, steel_candidate_list(value))
-}
-
-/// Parse one `(name candidates actions)` source spec.
-///   * `candidates` — a list (static) or a string/symbol (a dynamic fn name).
-///   * `actions` — a string/symbol (single action) or a list of `(label fn)`.
-fn parse_helm_source(value: &SteelVal) -> Option<HelmSourceSpec> {
-    let items = steel_list(value)?;
-    let name = steel_string(items.first()?)?;
-
-    let candidates = match items.get(1)? {
-        // `(raw "fn")` — a self-filtered dynamic source (leading `raw` symbol);
-        // otherwise a plain list is static candidates.
-        list @ SteelVal::ListV(_) => match steel_raw_dynamic(list) {
-            Some(function) => HelmCandidates::DynamicRaw(function),
-            None => HelmCandidates::Static(steel_candidate_list(list)),
-        },
-        other => HelmCandidates::Dynamic(steel_string(other)?),
-    };
-
-    let actions = match items.get(2)? {
-        SteelVal::ListV(_) => steel_list(items.get(2)?)?
-            .iter()
-            .filter_map(|pair| {
-                let pair = steel_list(pair)?;
-                Some((steel_string(pair.first()?)?, steel_string(pair.get(1)?)?))
-            })
-            .collect(),
-        single => vec![("default".to_string(), steel_string(single)?)],
-    };
-    if actions.is_empty() {
-        return None;
-    }
-
-    // Optional 4th element: a preview fn name.
-    let preview = items.get(3).and_then(steel_string);
-
-    Some(HelmSourceSpec {
-        name,
-        candidates,
-        actions,
-        preview,
-    })
-}
-
-/// Format a Steel value for the echo area, treating void as "no value".
-pub(crate) fn format_value(value: &SteelVal) -> Option<String> {
-    match value {
-        SteelVal::Void => None,
-        other => Some(other.to_string()),
-    }
-}
-
-/// SteelErr's Display is "Error: <Kind>: <message>". Drop the redundant
-/// "Error: " label and the internal "<Kind>: " category token (e.g.
-/// `FreeIdentifier`, `ConversionError`) so callers can apply their own single
-/// "error: " prefix without it stacking up into
-/// "error: Error: FreeIdentifier: ...".
-pub(crate) fn steel_error_string(err: &impl std::fmt::Display) -> String {
-    let s = err.to_string();
-    let s = s.strip_prefix("Error: ").unwrap_or(&s);
-    // The kind is a single token with no spaces; only strip it when it matches
-    // that shape so a real message containing a colon is never truncated.
-    if let Some((kind, rest)) = s.split_once(": ")
-        && !kind.is_empty()
-        && kind.chars().all(|c| c.is_alphanumeric())
-    {
-        return rest.to_string();
-    }
-    s.to_string()
-}
+use super::*;
 
 #[cfg(test)]
-mod tests {
+mod engine_tests {
     use super::*;
 
     #[test]
@@ -5060,10 +191,10 @@ mod tests {
     fn add_hook_accepts_symbol_and_lambda() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
-            .eval(include_str!("../scheme/hooks.scm"))
+            .eval(include_str!("../../scheme/hooks.scm"))
             .expect("hooks.scm");
 
         // A 'symbol resolves to its bare name — same registration a string makes.
@@ -5105,7 +236,7 @@ mod tests {
     fn command_registration_accepts_symbols() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
 
         // register-command with a 'symbol stores the bare name string.
@@ -5191,10 +322,10 @@ mod tests {
     fn evil_bind_command_by_identity() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
-            .eval(include_str!("../scheme/evil.scm"))
+            .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
 
         // Bind by IDENTITY: a bare command procedure (a builtin here), not a
@@ -5244,10 +375,10 @@ mod tests {
     fn evil_ctrl_chords_bound_in_evil_keymap() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         let cmds = engine
-            .eval(include_str!("../scheme/evil.scm"))
+            .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm")
             .commands;
         let bound = |mode: &str, chord: &str, to: &str| {
@@ -5272,10 +403,10 @@ mod tests {
     fn evil_edit_operators_and_motions_bound() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         let cmds = engine
-            .eval(include_str!("../scheme/evil.scm"))
+            .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm")
             .commands;
         let bound = |mode: &str, chord: &str, to: &str| {
@@ -5323,10 +454,10 @@ mod tests {
     fn evil_leader_key_configurable() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
-            .eval(include_str!("../scheme/evil.scm"))
+            .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
 
         // Default leader is SPC: a global leader binding lands under "space …".
@@ -5365,12 +496,12 @@ mod tests {
     fn evil_collection_overlays_special_modes() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         // evil.scm calls `(evil-collection-init)` at load, populating the
         // `evil-normal:<mode>` overlay keymaps for every special mode.
         let cmds = engine
-            .eval(include_str!("../scheme/evil.scm"))
+            .eval(include_str!("../../scheme/evil.scm"))
             .unwrap()
             .commands;
         for (mode, key, cmd) in [
@@ -5429,11 +560,11 @@ mod tests {
     fn tutorial_loads_and_opens() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         // The whole tutorial buffer text must parse as a Steel string literal.
         engine
-            .eval(include_str!("../scheme/tutorial.scm"))
+            .eval(include_str!("../../scheme/tutorial.scm"))
             .expect("tutorial.scm");
         // help-with-tutorial should build the *TUTORIAL* buffer and move point.
         let cmds = engine.eval("(help-with-tutorial)").unwrap().commands;
@@ -5943,82 +1074,29 @@ mod tests {
             Some("#true")
         );
     }
-}
 
-/// Register a Steel function `name` that, when called, enqueues a clone of `cmd`.
-fn register_nullary(engine: &mut Engine, queue: &Queue, name: &'static str, cmd: EditorCommand) {
-    let q = queue.clone();
-    engine.register_fn(name, move || q.lock().unwrap().push(cmd.clone()));
-}
-
-/// Register a one-argument Steel command: `name` enqueues the command built by
-/// `make` from its argument. Collapses the `{ let q = queue.clone(); ... push }`
-/// boilerplate for the many single-payload commands.
-fn register_unary<T>(
-    engine: &mut Engine,
-    queue: &Queue,
-    name: &'static str,
-    make: impl Fn(T) -> EditorCommand + Send + Sync + 'static,
-) where
-    T: steel::rvals::FromSteelVal + 'static,
-{
-    let q = queue.clone();
-    engine.register_fn(name, move |arg: T| q.lock().unwrap().push(make(arg)));
-}
-
-/// Register a two-argument Steel command (see [`register_unary`]).
-fn register_binary<T, U>(
-    engine: &mut Engine,
-    queue: &Queue,
-    name: &'static str,
-    make: impl Fn(T, U) -> EditorCommand + Send + Sync + 'static,
-) where
-    T: steel::rvals::FromSteelVal + 'static,
-    U: steel::rvals::FromSteelVal + 'static,
-{
-    let q = queue.clone();
-    engine.register_fn(name, move |a: T, b: U| q.lock().unwrap().push(make(a, b)));
-}
-
-/// Register a three-argument Steel command (see [`register_unary`]).
-fn register_ternary<T, U, V>(
-    engine: &mut Engine,
-    queue: &Queue,
-    name: &'static str,
-    make: impl Fn(T, U, V) -> EditorCommand + Send + Sync + 'static,
-) where
-    T: steel::rvals::FromSteelVal + 'static,
-    U: steel::rvals::FromSteelVal + 'static,
-    V: steel::rvals::FromSteelVal + 'static,
-{
-    let q = queue.clone();
-    engine.register_fn(name, move |a: T, b: U, c: V| {
-        q.lock().unwrap().push(make(a, b, c))
-    });
-}
-
-/// Register a nullary Steel *read* bridge: `name` returns a value derived from
-/// the editor's published snapshot. Collapses the repeated
-/// `{ let shared = point.clone(); engine.register_fn(name, move || …) }`
-/// boilerplate for the many single-snapshot readers. `get` runs under the
-/// snapshot lock and must produce an owned value (clone out anything borrowed).
-fn register_snapshot_read<T: IntoSteelVal + 'static>(
-    engine: &mut Engine,
-    point: &SharedSnapshot,
-    name: &'static str,
-    get: impl Fn(&EditorSnapshot) -> T + Send + Sync + 'static,
-) {
-    let shared = point.clone();
-    engine.register_fn(name, move || get(&shared.load()));
-}
-
-/// Snap a byte index down to the nearest UTF-8 char boundary in `rope`, clamped
-/// to its length. Slicing a `Rope` panics on a non-boundary index, so the
-/// text-slicing bridges route caller-supplied offsets through this first — the
-/// boundary safety the old `String`-slicing bridges did by hand.
-fn snap_byte(rope: &Rope, byte: usize) -> usize {
-    let byte = byte.min(rope.len_bytes());
-    rope.char_to_byte(rope.byte_to_char(byte))
+    /// `position->byte` maps an LSP (line, UTF-16 column) position to a byte
+    /// offset, clamping a past-the-end column to the line's newline and a
+    /// past-the-end line to the end of the buffer — multibyte-aware on both
+    /// axes (UTF-8 bytes vs UTF-16 columns).
+    #[test]
+    fn position_to_byte_resolves_lsp_positions() {
+        let (engine, _rx) = ScriptEngine::new();
+        // "aé\n𐍈x\n" — é: 2 bytes / 1 UTF-16 unit; 𐍈: 4 bytes / 2 UTF-16 units.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("aé\n𐍈x\n"),
+            ..Default::default()
+        });
+        let eval = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        assert_eq!(eval("(position->byte 0 0)"), "0");
+        assert_eq!(eval("(position->byte 0 1)"), "1");
+        assert_eq!(eval("(position->byte 0 2)"), "3"); // é is 2 bytes wide
+        assert_eq!(eval("(position->byte 0 99)"), "3"); // clamps at the newline
+        assert_eq!(eval("(position->byte 1 0)"), "4");
+        assert_eq!(eval("(position->byte 1 2)"), "8"); // 𐍈: 2 UTF-16 units, 4 bytes
+        assert_eq!(eval("(position->byte 1 3)"), "9");
+        assert_eq!(eval("(position->byte 99 0)"), "10"); // past-the-end line
+    }
 }
 
 #[cfg(test)]
@@ -6746,8 +1824,10 @@ mod magit_tests {
     #[test]
     fn editing_lib_helpers() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
-        engine.eval(include_str!("../scheme/editing.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/editing.scm"))
+            .unwrap();
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
         assert_eq!(v(r#"(car (sort-strings (list "c" "a" "b")))"#), "\"a\"");
         assert_eq!(v(r#"(capitalize-token "hELLO")"#), "\"Hello\"");
@@ -6759,20 +1839,76 @@ mod magit_tests {
         );
     }
 
+    /// Byte-offset splitting stays correct across multibyte text: string-match
+    /// returns BYTE offsets, so the "split at match" loops must take the head
+    /// with the byte-safe `byte-take` (a char-indexed substring corrupts the
+    /// text on any non-ASCII char before the match). Covers the shared core
+    /// helper plus the org consumers: TBLFM substitution, planning-line
+    /// repeater shifts, and noweb expansion.
+    #[test]
+    fn org_byte_safe_split_at_match() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/folding.scm"))
+            .expect("folding.scm");
+        engine
+            .eval(include_str!("../../scheme/org.scm"))
+            .expect("org.scm");
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // The core helper itself: é is 2 bytes, so the first 5 bytes of
+        // "café!" are exactly "café"; over-length takes the whole string.
+        assert_eq!(v(r#"(byte-take "café!" 5)"#), "\"café\"");
+        assert_eq!(v(r#"(byte-take "abc" 99)"#), "\"abc\"");
+        assert_eq!(v(r#"(byte-take "abc" 0)"#), "\"\"");
+
+        // TBLFM field substitution with non-ASCII before the reference: the
+        // prefix must survive byte-for-byte ("é→" is 5 bytes but 2 chars).
+        assert_eq!(
+            v(r#"(org--subst-dollar (list (list "2" "3")) 1 "é→$1*$2")"#),
+            "\"é→(2)*(3)\""
+        );
+        assert_eq!(
+            v(r#"(org--subst-at (list (list "5")) "π=@1$1")"#),
+            "\"π=(5)\""
+        );
+
+        // Repeater shift on a planning line with multibyte text before the
+        // stamp: the prefix is preserved and the stamp advances.
+        assert_eq!(
+            v(r#"(org--shift-planning "  按 SCHEDULED: <2026-06-25 Thu +1d>")"#),
+            "\"  按 SCHEDULED: <2026-06-26 Fri +1d>\""
+        );
+
+        // Noweb expansion in a src block with a multibyte char before the
+        // <<ref>>: the named block's body replaces the ref, prefix intact.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("#+name: blk\n#+begin_src sh\ninner\n#+end_src\n"),
+            ..Default::default()
+        });
+        assert_eq!(
+            v(r#"(org--expand-noweb "café <<blk>> done")"#),
+            "\"café inner done\""
+        );
+    }
+
     /// The Org library loads (top-level set-face/define-key/hooks all resolve)
     /// and its pure parser / exporter / table helpers behave.
     #[test]
     fn org_lib_pure_functions() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         // org.scm registers its chevron handler with the folding registry.
         engine
-            .eval(include_str!("../scheme/folding.scm"))
+            .eval(include_str!("../../scheme/folding.scm"))
             .expect("folding.scm");
         engine
-            .eval(include_str!("../scheme/org.scm"))
+            .eval(include_str!("../../scheme/org.scm"))
             .expect("org.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
@@ -6965,11 +2101,11 @@ mod magit_tests {
         );
 
         // --- Layer 7: dates -------------------------------------------------
-        assert_eq!(v(r"(org--ymd->days 1970 1 1)"), "0");
-        assert_eq!(v(r"(org--days->ymd 0)"), "(1970 1 1)");
+        assert_eq!(v(r"(ymd->days 1970 1 1)"), "0");
+        assert_eq!(v(r"(days->ymd 0)"), "(1970 1 1)");
         assert_eq!(v(r#"(org--dow-name 0)"#), "\"Thu\"");
         assert_eq!(
-            v(r#"(org--days->date-str (org--ymd->days 2026 6 25))"#),
+            v(r#"(org--days->date-str (ymd->days 2026 6 25))"#),
             "\"2026-06-25 Thu\""
         );
         assert_eq!(v(r#"(org--read-date "+1w" 10)"#), "17");
@@ -7064,16 +2200,16 @@ mod magit_tests {
     fn org_roam_extended_helpers() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
-            .eval(include_str!("../scheme/folding.scm"))
+            .eval(include_str!("../../scheme/folding.scm"))
             .expect("folding.scm");
         engine
-            .eval(include_str!("../scheme/org.scm"))
+            .eval(include_str!("../../scheme/org.scm"))
             .expect("org.scm");
         engine
-            .eval(include_str!("../scheme/org-roam.scm"))
+            .eval(include_str!("../../scheme/org-roam.scm"))
             .expect("org-roam.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
@@ -7127,7 +2263,7 @@ mod magit_tests {
     fn folding_indentation_model() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         // Define the line readers as pure Scheme over a fixture *before* loading
         // folding.scm, so its references bind to these rather than the native
@@ -7140,7 +2276,7 @@ mod magit_tests {
             )
             .expect("fixture");
         engine
-            .eval(include_str!("../scheme/folding.scm"))
+            .eval(include_str!("../../scheme/folding.scm"))
             .expect("folding.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
         // Header detection.
@@ -7206,7 +2342,7 @@ mod magit_tests {
     fn set_line_image_optional_width() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         assert!(matches!(
             engine.eval(r#"(set-line-image 1 "/x.png")"#).unwrap().commands.as_slice(),
@@ -7276,14 +2412,14 @@ mod magit_tests {
     fn markdown_lib_heading_helpers() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         // markdown.scm registers its chevron handler with the folding registry.
         engine
-            .eval(include_str!("../scheme/folding.scm"))
+            .eval(include_str!("../../scheme/folding.scm"))
             .expect("folding.scm");
         engine
-            .eval(include_str!("../scheme/markdown.scm"))
+            .eval(include_str!("../../scheme/markdown.scm"))
             .expect("markdown.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
@@ -7354,10 +2490,10 @@ mod magit_tests {
     fn org_roam_lib_pure_functions() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
-            .eval(include_str!("../scheme/org-roam.scm"))
+            .eval(include_str!("../../scheme/org-roam.scm"))
             .expect("org-roam.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
@@ -7431,11 +2567,14 @@ mod magit_tests {
     #[test]
     fn magit_rename_pathspecs() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
         // Rename: both sides, NEW is the on-disk path.
         assert_eq!(
@@ -7463,12 +2602,15 @@ mod magit_tests {
     #[test]
     fn magit_evil_overlay_motions() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
             .unwrap();
         let cmds = engine
-            .eval(include_str!("../scheme/magit.scm"))
+            .eval(include_str!("../../scheme/magit.scm"))
             .unwrap()
             .commands;
         let bound = |mode: &str, key: &str, cmd: &str| {
@@ -7510,11 +2652,14 @@ mod magit_tests {
     #[test]
     fn magit_branch_line_parse() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
         let pipe = |line: &str| format!(r#"(string-join (magit-parse-branch-line "{line}") "|")"#);
         // No upstream.
@@ -7547,11 +2692,14 @@ mod magit_tests {
     #[test]
     fn magit_transients_build() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         // Build transients as if invoked from inside a magit buffer, so the
         // repo-association guard (which refuses fileless buffers like *scratch*)
         // short-circuits and we exercise the transient structure itself.
@@ -7591,11 +2739,14 @@ mod magit_tests {
     #[test]
     fn magit_diff_rendering() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
 
         // Face classification.
         for (line, face) in [
@@ -7616,16 +2767,14 @@ mod magit_tests {
 
         // Accent byte offsets: "Head!" is 5 bytes + newline = 6, so the next
         // line's "+" marker accent is byte [6, 7).
+        engine.eval("(section-begin)").unwrap();
         engine
-            .eval("(set! *magit-lines* '()) (set! *magit-n* 0) (set! *magit-byte* 0) (set! *magit-accents* '())")
-            .unwrap();
-        engine
-            .eval(r#"(magit-emit "Head!" "magit-section-heading" #f #f)"#)
+            .eval(r#"(magit-emit "Head!" "magit-section-heading")"#)
             .unwrap();
         engine.eval(r#"(magit-emit-diff-line "+x")"#).unwrap();
         assert_eq!(
             engine
-                .eval("(nth (car *magit-accents*) 0)")
+                .eval("(nth (car *section-accents*) 0)")
                 .unwrap()
                 .value
                 .as_deref(),
@@ -7633,7 +2782,7 @@ mod magit_tests {
         );
         assert_eq!(
             engine
-                .eval("(nth (car *magit-accents*) 1)")
+                .eval("(nth (car *section-accents*) 1)")
                 .unwrap()
                 .value
                 .as_deref(),
@@ -7641,7 +2790,7 @@ mod magit_tests {
         );
         assert_eq!(
             engine
-                .eval("(nth (car *magit-accents*) 2)")
+                .eval("(nth (car *section-accents*) 2)")
                 .unwrap()
                 .value
                 .as_deref(),
@@ -7666,11 +2815,14 @@ mod magit_tests {
     #[test]
     fn magit_blame_porcelain() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
 
         // Two commits over three lines (lines 1-2 share a commit; line 3 differs),
@@ -7860,7 +3012,7 @@ mod magit_tests {
         let (engine, _rx) = ScriptEngine::new();
         // `completing-read` / `read-string` are now core.scm wrappers (optional
         // initial value) over the Rust `*-impl` primitives.
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         assert!(matches!(
             engine.eval(r#"(completing-read "Pick: " (list "a" "b") "cb")"#).unwrap().commands.as_slice(),
             [EditorCommand::CompletingRead { candidates, callback, .. }]
@@ -7897,8 +3049,8 @@ mod magit_tests {
     #[test]
     fn edit_lib_helpers() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
-        engine.eval(include_str!("../scheme/edit.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/edit.scm")).unwrap();
         // uncomment-line strips the first comment prefix.
         assert_eq!(
             engine
@@ -8080,10 +3232,10 @@ mod magit_tests {
     fn lsp_config_wrapper_registers_languages_and_formatters() {
         let (engine, _rx) = ScriptEngine::new();
         engine
-            .eval(include_str!("../scheme/core.scm"))
+            .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
-            .eval(include_str!("../scheme/lsp.scm"))
+            .eval(include_str!("../../scheme/lsp.scm"))
             .expect("lsp.scm");
 
         // plist + extension helpers.
@@ -8120,7 +3272,7 @@ mod magit_tests {
             .expect("lsp-language");
         assert_eq!(
             engine
-                .eval(r#"(car (lsp--alist-get *lsp-formatters* "rs"))"#)
+                .eval(r#"(car (alist-ref *lsp-formatters* "rs"))"#)
                 .unwrap()
                 .value
                 .as_deref(),
@@ -8140,7 +3292,7 @@ mod magit_tests {
         // …and registers no shell formatter for .go.
         assert_eq!(
             engine
-                .eval(r#"(lsp--alist-get *lsp-formatters* "go")"#)
+                .eval(r#"(alist-ref *lsp-formatters* "go")"#)
                 .unwrap()
                 .value
                 .as_deref(),
@@ -8353,9 +3505,7 @@ mod magit_tests {
         engine
             .eval(
                 r#"(begin
-                     (set! *magit-n* 0) (set! *magit-byte* 0)
-                     (set! *magit-lines* '()) (set! *magit-faces* '())
-                     (set! *magit-accents* '())
+                     (section-begin)
                      (set! *magit-groups* '()) (set! *magit-hunks* '())
                      (magit-emit-hunks-grouped "hdr"
                        (list "@@ -1,2 +1,2 @@ fn a\n ctx\n+a1"
@@ -8372,7 +3522,7 @@ mod magit_tests {
         assert_eq!(v("(grp-body-start (magit-group-at-line 0))"), "1");
         assert_eq!(v("(grp-body-end (magit-group-at-line 0))"), "7");
         assert_eq!(
-            v("(list-ref (reverse *magit-lines*) 0)"),
+            v("(list-ref (reverse *section-lines*) 0)"),
             "\"    fn a  (2 hunks)\""
         );
         // fn b starts where fn a's body ends.
@@ -8423,9 +3573,7 @@ mod magit_tests {
         engine
             .eval(
                 r#"(begin
-                     (set! *magit-n* 0) (set! *magit-byte* 0)
-                     (set! *magit-lines* '()) (set! *magit-accents* '())
-                     (set! *magit-faces* '())
+                     (section-begin)
                      (magit-emit-hunk-body
                        (list "-An Emacs-style, x" "+An Emacs style, x")))"#,
             )
@@ -8433,20 +3581,20 @@ mod magit_tests {
         // The whole modified line sits on the DIM base face (only the change is
         // re-brightened below), so unchanged text recedes.
         assert_eq!(
-            v(r#"(if (member (list 0 "magit-removed-dim") *magit-faces*) "y" "n")"#),
+            v(r#"(if (member (list 0 "magit-removed-dim") *section-faces*) "y" "n")"#),
             "\"y\""
         );
         assert_eq!(
-            v(r#"(if (member (list 1 "magit-added-dim") *magit-faces*) "y" "n")"#),
+            v(r#"(if (member (list 1 "magit-added-dim") *section-faces*) "y" "n")"#),
             "\"y\""
         );
         // The removed "-" and the added " " are each painted on their word face…
         assert_eq!(
-            v(r#"(if (member (list 9 10 "magit-word-removed") *magit-accents*) "y" "n")"#),
+            v(r#"(if (member (list 9 10 "magit-word-removed") *section-accents*) "y" "n")"#),
             "\"y\""
         );
         assert_eq!(
-            v(r#"(if (member (list 28 29 "magit-word-added") *magit-accents*) "y" "n")"#),
+            v(r#"(if (member (list 28 29 "magit-word-added") *section-accents*) "y" "n")"#),
             "\"y\""
         );
 
@@ -8454,8 +3602,7 @@ mod magit_tests {
         engine
             .eval(
                 r#"(begin
-                     (set! *magit-n* 0) (set! *magit-byte* 0)
-                     (set! *magit-lines* '()) (set! *magit-accents* '())
+                     (section-begin)
                      (magit-emit-hunk-body (list "-aaa" "-bbb" "+ccc")))"#,
             )
             .unwrap();
@@ -8464,7 +3611,7 @@ mod magit_tests {
             v(
                 r#"(if (null? (filter (lambda (a) (or (equal? (nth a 2) "magit-word-removed")
                                                     (equal? (nth a 2) "magit-word-added")))
-                                    *magit-accents*)) "y" "n")"#
+                                    *section-accents*)) "y" "n")"#
             ),
             "\"y\""
         );
@@ -8605,11 +3752,14 @@ mod magit_e2e {
         git(&["add", "b.txt"]); // staged add
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
         engine.eval("(magit-render)").unwrap();
 
@@ -8626,7 +3776,7 @@ mod magit_e2e {
         );
         // a.txt (unstaged) has body lines (body-end > body-start) and accents.
         let accents = engine
-            .eval("(length *magit-accents*)")
+            .eval("(length *section-accents*)")
             .unwrap()
             .value
             .unwrap();
@@ -8665,11 +3815,14 @@ mod magit_hunk_e2e {
         std::fs::write(dir.join("f.txt"), "a\nCHANGED\nc\nd\n").unwrap(); // one unstaged hunk
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
         engine.eval("(magit-render)").unwrap();
 
@@ -8752,11 +3905,14 @@ mod magit_hunk_e2e {
         std::fs::write(dir.join("u2.txt"), "2\n").unwrap(); // untracked
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
         engine.eval("(magit-render)").unwrap();
 
@@ -9076,11 +4232,14 @@ mod magit_quiet_refresh {
         git(&["commit", "-qm", "init"]);
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
 
         // Interactive: focus-switching render-buffer.
@@ -9657,11 +4816,14 @@ mod magit_blame_gix {
         git(&["commit", "-qm", "init"]);
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/transient.scm"))
+            .eval(include_str!("../../scheme/lib-section.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/magit.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
         // Clean file → gix path: one record per line, attributed to a real commit.
@@ -9741,13 +4903,13 @@ mod diagnostics_lib {
     #[test]
     fn list_and_navigation_logic() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/diagnostics.scm"))
+            .eval(include_str!("../../scheme/diagnostics.scm"))
             .unwrap();
         // next-error/previous-error are the unified dispatchers in shell.scm; with
         // no compile run, *next-error-source* stays "diagnostics" so they route here.
-        engine.eval(include_str!("../scheme/shell.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
         // Inject diagnostics through the snapshot — the real primitive path.
         engine.set_snapshot(EditorSnapshot {
             line: 0,
@@ -9802,11 +4964,11 @@ mod compile_lib {
 
     fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
         let (engine, rx) = ScriptEngine::new();
-        engine.eval(include_str!("../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
-            .eval(include_str!("../scheme/diagnostics.scm"))
+            .eval(include_str!("../../scheme/diagnostics.scm"))
             .unwrap();
-        engine.eval(include_str!("../scheme/shell.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
         (engine, rx)
     }
 
@@ -9972,7 +5134,7 @@ mod compile_lib {
             .eval(r#"(set! *next-error-source* "compile")"#)
             .unwrap();
         // Two errors; the file must exist for the jump (use this very source file).
-        let here = concat!(env!("CARGO_MANIFEST_DIR"), "/src/script.rs");
+        let here = concat!(env!("CARGO_MANIFEST_DIR"), "/src/script/mod.rs");
         engine
             .eval(&format!(r#"(compile-output "{here}:5:1: error: a")"#))
             .unwrap();

@@ -83,7 +83,7 @@ impl Editor {
 
     pub(super) fn evil_enable(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::Normal;
-        self.mark_active = false;
+        self.active.mark_active = false;
         cx.notify();
     }
 
@@ -92,7 +92,7 @@ impl Editor {
     pub(super) fn helix_enable(&mut self, cx: &mut Context<Self>) {
         self.modal_helix = true;
         self.evil = EvilState::Normal;
-        self.mark_active = false;
+        self.active.mark_active = false;
         // Normal mode shows no banner, so confirm the switch in the echo area.
         self.echo("Helix mode enabled", cx);
         cx.notify();
@@ -115,7 +115,7 @@ impl Editor {
     /// the cursor left (Helix has no Insert-exit nudge).
     pub(super) fn helix_normal_state(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::Normal;
-        self.mark_active = false;
+        self.active.mark_active = false;
         cx.notify();
     }
 
@@ -128,14 +128,14 @@ impl Editor {
             self.mc_clear(cx);
         }
         // Leaving visual/insert clears any selection (vim's Escape behaviour).
-        self.mark_active = false;
+        self.active.mark_active = false;
         // Vim nudges the cursor one column left when leaving Insert (the caret
         // sat *after* the last typed char), but not past the line's start.
         let mut point = self.point();
         if was_insert {
-            let line_start = self.buffer.line_range_at(point).start;
+            let line_start = self.active.buffer.line_range_at(point).start;
             if point > line_start {
-                point = self.buffer.prev_grapheme(point);
+                point = self.active.buffer.prev_grapheme(point);
             }
         }
         self.collapse_to(point);
@@ -144,14 +144,14 @@ impl Editor {
 
     pub(super) fn evil_insert_state(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::Insert;
-        self.mark_active = false;
+        self.active.mark_active = false;
         cx.notify();
     }
 
     pub(super) fn evil_visual_state(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::Visual;
         // Anchor the selection at point; motions extend it (mark is active).
-        self.mark_active = true;
+        self.active.mark_active = true;
         cx.notify();
     }
 
@@ -161,7 +161,7 @@ impl Editor {
     /// time.
     pub(super) fn evil_visual_line_state(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::VisualLine;
-        self.mark_active = true;
+        self.active.mark_active = true;
         cx.notify();
     }
 
@@ -173,14 +173,14 @@ impl Editor {
     /// collapses the cursors back to one.
     pub(super) fn evil_visual_insert(&mut self, at_eol: bool, cx: &mut Context<Self>) {
         let region = self.visual_region();
-        let first = self.buffer.line_index_at_byte(region.start);
+        let first = self.active.buffer.line_index_at_byte(region.start);
         // `region.end` is the start of the line after the last selected line
         // (line-wise); step back one byte to land on the last selected line.
         let last_byte = region.end.saturating_sub(1).max(region.start);
-        let last = self.buffer.line_index_at_byte(last_byte);
+        let last = self.active.buffer.line_index_at_byte(last_byte);
 
         let target = |ed: &Self, line: usize| -> usize {
-            let lr = ed.buffer.line_range(line);
+            let lr = ed.active.buffer.line_range(line);
             if at_eol { lr.end } else { lr.start }
         };
         // Primary cursor on the first line; a secondary cursor on each of the
@@ -201,7 +201,7 @@ impl Editor {
     /// strip (not whole lines).
     pub(super) fn evil_visual_block_state(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::VisualBlock;
-        self.mark_active = true;
+        self.active.mark_active = true;
         cx.notify();
     }
 
@@ -217,8 +217,8 @@ impl Editor {
         let col = if append { right + 1 } else { left };
         let mut positions = Vec::new();
         for row in top..=bottom {
-            let lr = self.buffer.line_range(row);
-            let line = self.buffer.slice_to_string(lr.clone());
+            let lr = self.active.buffer.line_range(row);
+            let line = self.active.buffer.slice_to_string(lr.clone());
             positions.push(lr.start + char_col_byte(&line, col));
         }
         if let Some((&first, rest)) = positions.split_first() {
@@ -239,13 +239,12 @@ impl Editor {
         };
         let killed = self.block_text(top, bottom, left, right);
         self.set_clipboard(&killed, cx);
-        self.kill_ring.push(killed);
-        self.kill_index = self.kill_ring.len() - 1;
+        self.push_kill(killed);
         // Delete bottom-up so earlier edits don't shift later rows' offsets.
         self.begin_undo_group();
         for row in (top..=bottom).rev() {
-            let lr = self.buffer.line_range(row);
-            let line = self.buffer.slice_to_string(lr.clone());
+            let lr = self.active.buffer.line_range(row);
+            let line = self.active.buffer.slice_to_string(lr.clone());
             let s = char_col_byte(&line, left);
             let e = char_col_byte(&line, right + 1);
             if e > s {
@@ -253,8 +252,8 @@ impl Editor {
             }
         }
         self.end_undo_group();
-        let top_line = self.buffer.line_range(top);
-        let line = self.buffer.slice_to_string(top_line.clone());
+        let top_line = self.active.buffer.line_range(top);
+        let line = self.active.buffer.slice_to_string(top_line.clone());
         let cursor = top_line.start + char_col_byte(&line, left);
         self.evil_yank_linewise = false;
         self.collapse_to(cursor);
@@ -269,11 +268,10 @@ impl Editor {
         };
         let text = self.block_text(top, bottom, left, right);
         self.set_clipboard(&text, cx);
-        self.kill_ring.push(text);
-        self.kill_index = self.kill_ring.len() - 1;
+        self.push_kill(text);
         self.evil_yank_linewise = false;
-        let top_line = self.buffer.line_range(top);
-        let line = self.buffer.slice_to_string(top_line.clone());
+        let top_line = self.active.buffer.line_range(top);
+        let line = self.active.buffer.slice_to_string(top_line.clone());
         let cursor = top_line.start + char_col_byte(&line, left);
         self.collapse_to(cursor);
         self.evil_normal_state(cx);
@@ -285,7 +283,10 @@ impl Editor {
     fn block_text(&self, top: usize, bottom: usize, left: usize, right: usize) -> String {
         (top..=bottom)
             .map(|row| {
-                let line = self.buffer.slice_to_string(self.buffer.line_range(row));
+                let line = self
+                    .active
+                    .buffer
+                    .slice_to_string(self.active.buffer.line_range(row));
                 let s = char_col_byte(&line, left);
                 let e = char_col_byte(&line, right + 1).max(s);
                 line[s..e].to_string()
@@ -327,14 +328,17 @@ impl Editor {
     fn evil_paste_charwise(&mut self, text: &str, after: bool, cx: &mut Context<Self>) {
         let p = self.point();
         let at = if after {
-            self.buffer.next_grapheme(p).min(self.buffer.len())
+            self.active
+                .buffer
+                .next_grapheme(p)
+                .min(self.active.buffer.len())
         } else {
             p
         };
         let end = self.edit(at..at, text);
         // Vim leaves the cursor on the last character of the inserted text.
         let cursor = if end > at {
-            self.buffer.prev_grapheme(end)
+            self.active.buffer.prev_grapheme(end)
         } else {
             end
         };
@@ -345,11 +349,11 @@ impl Editor {
     /// Line-wise paste: drop the killed line(s) on a fresh line below (vim `p`)
     /// or above (`P`) the current one, cursor at the first non-blank.
     fn evil_paste_linewise(&mut self, text: &str, after: bool, cx: &mut Context<Self>) {
-        let line = self.buffer.line_range_at(self.point());
+        let line = self.active.buffer.line_range_at(self.point());
         let line_start = if after {
-            if line.end < self.buffer.len() {
+            if line.end < self.active.buffer.len() {
                 // Insert at the start of the following line; `text` ends in '\n'.
-                let at = self.buffer.next_grapheme(line.end);
+                let at = self.active.buffer.next_grapheme(line.end);
                 self.edit(at..at, text);
                 at
             } else {
@@ -358,7 +362,7 @@ impl Editor {
                 let body = text.strip_suffix('\n').unwrap_or(text);
                 let at = line.end;
                 self.edit(at..at, &format!("\n{body}"));
-                self.buffer.next_grapheme(at)
+                self.active.buffer.next_grapheme(at)
             }
         } else {
             let at = line.start;
@@ -373,8 +377,8 @@ impl Editor {
     /// line's end if it's all blank) — where vim parks the cursor after a
     /// line-wise paste or `^`.
     fn first_non_blank(&self, offset: usize) -> usize {
-        let line = self.buffer.line_range_at(offset);
-        let text = self.buffer.slice_to_string(line.clone());
+        let line = self.active.buffer.line_range_at(offset);
+        let text = self.active.buffer.slice_to_string(line.clone());
         match text.find(|c: char| !c.is_whitespace()) {
             Some(i) => line.start + i,
             None => line.start,
@@ -415,7 +419,7 @@ impl Editor {
                 return;
             }
         };
-        let text = self.buffer.full_text();
+        let text = self.active.buffer.full_text();
         let point = self.point();
         let starts: Vec<usize> = regex.find_iter(&text).map(|m| m.start()).collect();
         if starts.is_empty() {
@@ -449,8 +453,12 @@ impl Editor {
             self.ex_substitute(false, rest, cx);
         } else if let Ok(n) = cmd.parse::<usize>() {
             // `:N` — jump to (1-based) line N.
-            let last = self.buffer.line_count().saturating_sub(1);
-            let offset = self.buffer.line_range(n.saturating_sub(1).min(last)).start;
+            let last = self.active.buffer.line_count().saturating_sub(1);
+            let offset = self
+                .active
+                .buffer
+                .line_range(n.saturating_sub(1).min(last))
+                .start;
             self.move_to(offset, cx);
         } else {
             // Split a verb from its optional argument (`:e file`, `:b name`, …).
@@ -464,14 +472,20 @@ impl Editor {
                 "w" | "write" => self.save_buffer(cx),
                 "q" | "quit" => self.quit(cx),
                 "q!" | "quit!" => cx.quit(),
+                // Write-then-quit must save *synchronously*: `save_buffer` spawns
+                // a background write that `cx.quit()` would cancel mid-flight
+                // (see `save_all_modified`'s quit-path contract). A failed write
+                // aborts the quit so the error stays visible and no work is lost.
                 "wq" | "wq!" | "x" | "xit" => {
-                    self.save_buffer(cx);
-                    cx.quit();
+                    if self.save_active_sync(cx) {
+                        cx.quit();
+                    }
                 }
                 "qa" | "qall" | "quitall" | "qa!" | "qall!" => cx.quit(),
                 "wqa" | "wqall" | "xa" | "xall" => {
-                    self.save_buffer(cx);
-                    cx.quit();
+                    if self.save_all_modified(cx) {
+                        cx.quit();
+                    }
                 }
                 // Files.
                 "e!" | "edit!" => self.revert_buffer(cx),
@@ -527,16 +541,16 @@ impl Editor {
         };
 
         if whole_buffer {
-            let text = self.buffer.full_text();
+            let text = self.active.buffer.full_text();
             // split('\n') preserves the line structure (incl. a trailing empty).
             let new: Vec<String> = text.split('\n').map(substitute).collect();
             let new = new.join("\n");
-            let len = self.buffer.len();
+            let len = self.active.buffer.len();
             let cursor = self.edit(0..len, &new);
-            self.collapse_to(cursor.min(self.buffer.len()));
+            self.collapse_to(cursor.min(self.active.buffer.len()));
         } else {
-            let range = self.buffer.line_range_at(self.point());
-            let line = self.buffer.slice_to_string(range.clone());
+            let range = self.active.buffer.line_range_at(self.point());
+            let line = self.active.buffer.slice_to_string(range.clone());
             let new = substitute(&line);
             let cursor = self.edit(range, &new);
             self.collapse_to(cursor);

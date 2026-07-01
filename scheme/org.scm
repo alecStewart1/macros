@@ -119,32 +119,11 @@
 ;; ===========================================================================
 ;; Tiny utilities
 ;; ===========================================================================
-;; UTF-8 byte width of one character (mirrors core's `utf8-length` per char).
-(define (org--char-bytes ch)
-  (let ((cp (char->integer ch)))
-    (cond ((< cp 128) 1) ((< cp 2048) 2) ((< cp 65536) 3) (else 4))))
+;; The generic byte/string helpers (char-bytes, byte-drop, byte-take,
+;; string-trim, string-concat, string-repeat) live in core.scm.
 
-;; Drop the first `n` BYTES of string `s`, returning the remainder. The overlay
-;; APIs are byte-based; this lets the inline scanner advance past a match it
-;; located by byte offset.
-(define (org--byte-drop s n)
-  (if (<= n 0)
-      s
-      (let loop ((chars (string->list s)) (acc 0))
-        (cond ((null? chars) "")
-              ((>= acc n) (list->string chars))
-              (else (loop (cdr chars) (+ acc (org--char-bytes (car chars)))))))))
-
-(define (org--spaces k) (if (<= k 0) "" (string-append " " (org--spaces (- k 1)))))
-(define (org--dashes k) (if (<= k 0) "" (string-append "-" (org--dashes (- k 1)))))
-(define (org--stars n) (if (<= n 0) "" (string-append "*" (org--stars (- n 1)))))
-(define (org--pad s w) (string-append s (org--spaces (- w (utf8-length s)))))
-(define (org--concat lst) (if (null? lst) "" (string-append (car lst) (org--concat (cdr lst)))))
-
-;; Trim leading and trailing spaces/tabs.
-(define (org--trim s)
-  (replace-regexp-in-string "^[ \t]+" ""
-    (replace-regexp-in-string "[ \t]+$" "" s)))
+;; Pad `s` with spaces to `w` BYTE columns (org tables align by byte width).
+(define (org--pad s w) (string-append s (string-repeat " " (- w (utf8-length s)))))
 
 ;; Inclusive sublist `lines[a..b]`, clamped; '() when the range is empty.
 (define (org--slice lines a b)
@@ -191,14 +170,18 @@
 ;; ===========================================================================
 (define (org--lines) (split-many (buffer-string) "\n"))
 
-(define (org--line-text i)
-  (let ((ls (org--lines))) (if (< i (length ls)) (nth ls i) "")))
+;; Lines-list variants: loops should split the buffer ONCE via (org--lines) and
+;; thread the list through these, not call the one-shot helpers per iteration
+;; (each of those re-splits the whole buffer — O(lines^2) in a loop).
+(define (org--line-text-in lines i)
+  (if (< i (length lines)) (nth lines i) ""))
 
-;; Byte offset of the start of line `i`.
-(define (org--line-start i)
-  (let ((ls (org--lines)))
-    (let loop ((k 0) (acc 0))
-      (if (>= k i) acc (loop (+ k 1) (+ acc (utf8-length (nth ls k)) 1))))))
+;; One-shot helpers for single lookups.
+(define (org--line-text i) (org--line-text-in (org--lines) i))
+
+;; Byte offset of the start of line `i` (core's lines-byte-offset over a fresh
+;; split — single lookups only).
+(define (org--line-start i) (lines-byte-offset (org--lines) i))
 
 (define (org--replace-all text) (replace-region 0 (point-max) text))
 
@@ -218,6 +201,15 @@
 ;; ===========================================================================
 ;; Heading-component parsing
 ;; ===========================================================================
+;; The headline tag/priority syntax, shared by every parser and by the
+;; fontifier (which needs the regex itself for byte offsets).
+(define org--tag-chars "[A-Za-z0-9_@#%:]+")
+(define org--tag-re (string-append ":(" org--tag-chars "):[ \t]*$"))          ; capture w/o colons
+(define org--tags-capture-re (string-append "(:" org--tag-chars ":)[ \t]*$")) ; capture with colons
+(define org--tag-strip-re (string-append "[ \t]*:" org--tag-chars ":[ \t]*$"))
+(define org--priority-re "\\[#[A-Z]\\]")
+(define org--priority-capture-re "\\[#([A-Z])\\]")
+
 ;; The first whitespace-delimited token of `s` if it is a known TODO keyword.
 (define (org--leading-keyword s)
   (let ((caps (regexp-captures "^([A-Z]+)([ \t]|$)" s)))
@@ -231,13 +223,36 @@
 (define (org--heading-title rest kw)
   (let* ((s (if kw (replace-regexp-in-string "^[A-Z]+[ \t]+" "" rest) rest))
          (s (replace-regexp-in-string "^\\[#[A-Z]\\][ \t]*" "" s))
-         (s (replace-regexp-in-string "[ \t]*:[A-Za-z0-9_@#%:]+:[ \t]*$" "" s)))
-    (org--trim s)))
+         (s (replace-regexp-in-string org--tag-strip-re "" s)))
+    (string-trim s)))
 
 ;; (stars-string rest) where rest is everything after `* `.
 (define (org--heading-split line)
   (let ((caps (regexp-captures "^(\\*+)[ \t]*(.*)$" line)))
     (if (null? caps) (list "*" "") (list (nth caps 1) (nth caps 2)))))
+
+;; Decompose a headline into its five components, the ONE parser every consumer
+;; shares: (stars kw prio title tags) — stars = the "*"s string; kw = keyword or
+;; #f; prio = the bare priority letter or ""; title = the cleaned title; tags =
+;; the inner tag string ("a:b") or "".
+(define (org--parse-headline line)
+  (let* ((sr (org--heading-split line))
+         (stars (nth sr 0)) (rest (nth sr 1))
+         (kw (org--leading-keyword rest))
+         (prio (let ((c (regexp-captures org--priority-capture-re rest)))
+                 (if (null? c) "" (nth c 1))))
+         (tags (let ((c (regexp-captures org--tag-re rest)))
+                 (if (null? c) "" (nth c 1)))))
+    (list stars kw prio (org--heading-title rest kw) tags)))
+
+;; Reassemble a headline from org--parse-headline components (#f / "" parts are
+;; omitted). The inverse of org--parse-headline for structure edits.
+(define (org--render-headline stars kw prio title tags)
+  (string-append stars " "
+    (if (or (not kw) (equal? kw "")) "" (string-append kw " "))
+    (if (equal? prio "") "" (string-append "[#" prio "] "))
+    title
+    (if (equal? tags "") "" (string-append " :" tags ":"))))
 
 ;; ===========================================================================
 ;; Layer 1a — fontification
@@ -248,7 +263,8 @@
       (equal? (buffer-local-get "org-active") "t")))
 
 (define (org--level-face n)
-  (string-append "org-level-" (number->string (+ 1 (modulo (- n 1) 8)))))
+  (string-append "org-level-"
+                 (number->string (+ 1 (modulo (- n 1) (length *org-level-colors*))))))
 
 ;; Overlay `face` on every match of `pattern` within one line. `lstart` is the
 ;; line's start byte; `string-match` gives the byte offset of a match inside the
@@ -264,7 +280,7 @@
           (when (> wlen 0)
             (overlay-set-face (+ lstart base m) (+ lstart base m wlen) face)
             (let ((consumed (+ m wlen)))
-              (loop (+ base consumed) (org--byte-drop s consumed)))))))))
+              (loop (+ base consumed) (byte-drop s consumed)))))))))
 
 (define (org--fontify-heading lstart line level)
   (let ((lend (+ lstart (utf8-length line))))
@@ -295,10 +311,10 @@
             (else
              (overlay-set-face ks (+ ks (string-length kw)) "org-todo"))))))
     ;; priority cookie [#A]
-    (let ((b (string-match "\\[#[A-Z]\\]" line)))
+    (let ((b (string-match org--priority-re line)))
       (when (>= b 0) (overlay-set-face (+ lstart b) (+ lstart b 4) "org-priority")))
     ;; trailing tags
-    (let ((c (regexp-captures "(:[A-Za-z0-9_@#%:]+:)[ \t]*$" line)))
+    (let ((c (regexp-captures org--tags-capture-re line)))
       (when (not (null? c))
         (let ((tags (nth c 1)))
           (overlay-set-face (- lend (utf8-length tags)) lend "org-tag"))))))
@@ -389,16 +405,13 @@
                 (when (> curlvl 0) (set-line-indent i (* curlvl *org-indent-per-level*)))
                 (loop (cdr lines) (+ i 1) curlvl))))))))
 
-;; Debounced live refresh (the rainbow/LSP pattern): each edit schedules a
-;; timer; only the last to fire repaints.
-(define *org-fontify-pending* 0)
+;; Debounced live refresh (core's make-debounce): each edit schedules a timer;
+;; only the last to fire repaints.
+(define org--fontify-debounce
+  (make-debounce "org-fontify" 200
+                 (lambda () (when (org--active?) (org--fontify)))))
 (define (org--fontify-schedule)
-  (when (org--fontify-ok?)
-    (set! *org-fontify-pending* (+ *org-fontify-pending* 1))
-    (run-with-timer 200 "org--fontify-fire")))
-(define (org--fontify-fire)
-  (when (> *org-fontify-pending* 0) (set! *org-fontify-pending* (- *org-fontify-pending* 1)))
-  (when (and (= *org-fontify-pending* 0) (org--active?)) (org--fontify)))
+  (when (org--fontify-ok?) (org--fontify-debounce)))
 
 ;; ===========================================================================
 ;; Layer 1b — visibility cycling (folding)
@@ -453,6 +466,16 @@
         ((>= (car (car headings)) line) (car headings))
         (else (org--next-heading-from (cdr headings) line))))
 
+;; Last line of the subtree rooted at line `start` (level `lvl`) in a raw
+;; `lines` list — the on-disk twin of org--subtree-end below, shared by refile
+;; and capture, which walk files that aren't the active buffer.
+(define (org--subtree-end-in lines start lvl)
+  (let ((n (length lines)))
+    (let loop ((i (+ start 1)))
+      (cond ((>= i n) (- n 1))
+            ((let ((l (org--heading-level (nth lines i)))) (and l (<= l lvl))) (- i 1))
+            (else (loop (+ i 1)))))))
+
 ;; Last body line of the subtree rooted at headline `H` (level `L`): one line
 ;; before the next headline of level ≤ L, else the last line.
 (define (org--subtree-end H L headings total)
@@ -465,12 +488,9 @@
 ;; state ∈ 'folded | 'children. A heading absent from the list is 'subtree (fully
 ;; shown). This drives the three-state TAB cycle (subtree→folded→children→…).
 (define *org-fold-state* '())
-(define (org--fold-state-get)
-  (let ((e (alist-ref *org-fold-state* (current-buffer)))) (if e e '())))
+(define (org--fold-state-get) (buffer-state-get *org-fold-state* '()))
 (define (org--fold-state-set v)
-  (set! *org-fold-state*
-        (cons (cons (current-buffer) v)
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *org-fold-state*))))
+  (set! *org-fold-state* (buffer-state-set *org-fold-state* v)))
 (define (org--heading-state H)
   (let loop ((ps (org--fold-state-get)))
     (cond ((null? ps) 'subtree)
@@ -583,7 +603,7 @@
 ;; TAB — on a headline, cycle local visibility subtree→folded→children→subtree
 ;; (like Emacs); inside a src block, indent the code; in plain body do nothing
 ;; (Emacs never inserts a tab at point there — it would just shove the line right).
-(define (org-cycle)
+(define-command (org-cycle)
   (let* ((L (buffer-line)) (line (org--line-text L)))
     (cond
       ((org--heading-level line)
@@ -606,12 +626,9 @@
       (else #f))))
 
 (define *org-global-state* '())
-(define (org--global-state)
-  (let ((e (alist-ref *org-global-state* (current-buffer)))) (if e e "showall")))
+(define (org--global-state) (buffer-state-get *org-global-state* "showall"))
 (define (org--set-global-state s)
-  (set! *org-global-state*
-        (cons (cons (current-buffer) s)
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *org-global-state*))))
+  (set! *org-global-state* (buffer-state-set *org-global-state* s)))
 
 ;; Show only top-level headlines (fold every level-1 subtree). Routed through the
 ;; per-heading state so a following local TAB expands one heading and leaves the
@@ -636,7 +653,7 @@
           (loop (cdr hs)))))))
 
 ;; S-TAB — rotate the whole buffer: overview → contents → show-all.
-(define (org-global-cycle)
+(define-command (org-global-cycle)
   (let ((next (cond ((equal? (org--global-state) "showall") "overview")
                     ((equal? (org--global-state) "overview") "contents")
                     (else "showall"))))
@@ -652,19 +669,19 @@
 ;; ===========================================================================
 ;; The headline line at point, or the nearest one above, or #f.
 (define (org--heading-line-at-point)
-  (let ((L (buffer-line)))
-    (if (org--heading-level (org--line-text L))
+  (let ((lines (org--lines)) (L (buffer-line)))
+    (if (org--heading-level (org--line-text-in lines L))
         L
         (let loop ((i (- L 1)))
           (cond ((< i 0) #f)
-                ((org--heading-level (org--line-text i)) i)
+                ((org--heading-level (org--line-text-in lines i)) i)
                 (else (loop (- i 1))))))))
 
 ;; The keyword on the heading at point, or #f (a public accessor, so configs
 ;; need not reach into the org--* internals to read it).
 (define (org-keyword-at-point)
   (let ((H (org--heading-line-at-point)))
-    (if H (org--leading-keyword (nth (org--heading-split (org--line-text H)) 1)) #f)))
+    (if H (nth (org--parse-headline (org--line-text H)) 1) #f)))
 
 ;; The full ordered cycle C-c C-t rotates through: the TODO vocabulary followed
 ;; by the user's custom keywords. Like Emacs `org-todo-keywords`, every keyword
@@ -686,22 +703,13 @@
 ;; Rewrite heading H to carry keyword `kw` ("" clears it), preserving the
 ;; priority cookie and trailing tags. Shared by org-todo and org-set-keyword.
 (define (org--apply-keyword H kw)
-  (let* ((sr (org--heading-split (org--line-text H)))
-         (stars (nth sr 0)) (rest (nth sr 1))
-         (title (org--heading-title rest (org--leading-keyword rest)))
-         (tags (let ((c (regexp-captures "(:[A-Za-z0-9_@#%:]+:)[ \t]*$" rest)))
-                 (if (null? c) "" (nth c 1))))
-         (prio (let ((c (regexp-captures "\\[#[A-Z]\\]" rest))) (if (null? c) "" (car c)))))
+  (let ((h (org--parse-headline (org--line-text H))))
     (org--replace-line H
-      (string-append stars " "
-        (if (equal? kw "") "" (string-append kw " "))
-        (if (equal? prio "") "" (string-append prio " "))
-        title
-        (if (equal? tags "") "" (string-append " " tags))))))
+      (org--render-headline (nth h 0) kw (nth h 2) (nth h 3) (nth h 4)))))
 
 ;; C-c C-t — rotate the headline at point through the full keyword cycle
 ;; (nothing → each TODO/custom keyword → nothing).
-(define (org-todo)
+(define-command (org-todo)
   (let ((H (org--heading-line-at-point)))
     (if (not H)
         (message "Not on a heading")
@@ -722,12 +730,12 @@
         (message "Not on a heading"))))
 
 ;; M-right — demote (one deeper): add a star.
-(define (org-demote)
+(define-command (org-demote)
   (let ((H (org--heading-line-at-point)))
     (when H (org--replace-line H (string-append "*" (org--line-text H))))))
 
 ;; M-left — promote (one shallower): remove a star.
-(define (org-promote)
+(define-command (org-promote)
   (let ((H (org--heading-line-at-point)))
     (when H
       (let ((line (org--line-text H)))
@@ -736,18 +744,18 @@
             (message "Already at top level"))))))
 
 ;; M-RET — insert a sibling headline just after the current subtree.
-(define (org-insert-heading)
+(define-command (org-insert-heading)
   (let* ((H (org--heading-line-at-point))
          (headings (org--headings)) (total (org--total-lines))
          (lvl (if H (nth (org--find-heading headings H) 1) 1))
          (end (if H (org--subtree-end H lvl headings total) (buffer-line)))
          (pos (+ (org--line-start end) (utf8-length (org--line-text end))))
-         (stars (org--stars lvl)))
+         (stars (string-repeat "*" lvl)))
     (insert-at pos (string-append "\n" stars " "))
     (goto-char (+ pos 1 (string-length stars) 1))))
 
 ;; M-down — move the subtree at point below its next sibling.
-(define (org-move-subtree-down)
+(define-command (org-move-subtree-down)
   (let ((H (org--heading-line-at-point)))
     (when H
       (let* ((lines (org--lines)) (headings (org--headings)) (total (length lines))
@@ -776,7 +784,7 @@
 ;; block swap (not goto + move-down): under the snapshot model a queued goto isn't
 ;; visible to reads in the same command, so re-reading point would move the wrong
 ;; subtree the wrong way.
-(define (org-move-subtree-up)
+(define-command (org-move-subtree-up)
   (let ((H (org--heading-line-at-point)))
     (when H
       (let* ((lines (org--lines)) (headings (org--headings)) (total (length lines))
@@ -793,55 +801,42 @@
               (goto-line P))
             (message "No sibling above"))))))
 
-;; C-c C-q — set the headline's tags (colon- or space-separated input).
-(define *org--tag-target* -1)
-(define (org--current-tags H)
-  (let ((c (regexp-captures ":([A-Za-z0-9_@#%:]+):[ \t]*$" (org--line-text H))))
-    (if (null? c) "" (nth c 1))))
-(define (org-set-tags)
+;; C-c C-q — set the headline's tags (colon- or space-separated input). The
+;; heading line is captured in the callback closure (read-string accepts one).
+(define (org--current-tags H) (nth (org--parse-headline (org--line-text H)) 4))
+(define-command (org-set-tags)
   (let ((H (org--heading-line-at-point)))
     (if H
-        (begin (set! *org--tag-target* H)
-               (read-string "Tags: " 'org--set-tags-finish (org--current-tags H)))
+        (read-string "Tags: " (lambda (input) (org--set-tags-apply H input))
+                     (org--current-tags H))
         (message "Not on a heading"))))
 (define (org--normalize-tags s)
   (string-join (filter (lambda (x) (not (equal? x "")))
-                       (split-many (replace-regexp-in-string "[ \t]+" ":" (org--trim s)) ":"))
+                       (split-many (replace-regexp-in-string "[ \t]+" ":" (string-trim s)) ":"))
                ":"))
-(define (org--set-tags-finish input)
-  (let* ((H *org--tag-target*)
-         (line (org--line-text H))
-         (base (replace-regexp-in-string "[ \t]*:[A-Za-z0-9_@#%:]+:[ \t]*$" "" line))
-         (clean (org--trim input)))
+(define (org--set-tags-apply H input)
+  (let* ((line (org--line-text H))
+         (base (replace-regexp-in-string org--tag-strip-re "" line))
+         (clean (string-trim input)))
     (org--replace-line H
       (if (equal? clean "")
           base
           (string-append base " :" (org--normalize-tags clean) ":")))))
 
 ;; C-c , — set or clear the headline's priority cookie.
-(define *org--prio-target* -1)
-(define (org-set-priority)
+(define-command (org-set-priority)
   (let ((H (org--heading-line-at-point)))
     (if H
-        (begin (set! *org--prio-target* H)
-               (read-string "Priority (A-C, blank clears): " 'org--set-priority-finish))
+        (read-string "Priority (A-C, blank clears): "
+                     (lambda (input) (org--set-priority-apply H input)))
         (message "Not on a heading"))))
-(define (org--set-priority-finish input)
-  (let* ((H *org--prio-target*)
-         (line (org--line-text H))
-         (sr (org--heading-split line))
-         (stars (nth sr 0)) (rest (nth sr 1))
-         (kw (org--leading-keyword rest))
-         (title (org--heading-title rest kw))
-         (tags (let ((c (regexp-captures "(:[A-Za-z0-9_@#%:]+:)[ \t]*$" rest)))
-                 (if (null? c) "" (nth c 1))))
-         (p (string-upcase (org--trim input))))
+(define (org--set-priority-apply H input)
+  (let* ((h (org--parse-headline (org--line-text H)))
+         (p (string-upcase (string-trim input))))
     (org--replace-line H
-      (string-append stars " "
-        (if kw (string-append kw " ") "")
-        (if (>= (string-match "^[A-C]$" p) 0) (string-append "[#" p "] ") "")
-        title
-        (if (equal? tags "") "" (string-append " " tags))))))
+      (org--render-headline (nth h 0) (nth h 1)
+                            (if (>= (string-match "^[A-C]$" p) 0) p "")
+                            (nth h 3) (nth h 4)))))
 
 ;; Toggle the checkbox on a `- [ ]` list item at point; #t if it did.
 (define (org-toggle-checkbox)
@@ -867,12 +862,9 @@
 ;;   ("keyword" key value) ("hr")
 ;; Both the HTML exporter and the agenda scanner consume this.
 (define (org--parse-heading line)
-  (let* ((sr (org--heading-split line))
-         (stars (nth sr 0)) (rest (nth sr 1))
-         (kw (org--leading-keyword rest))
-         (prio (let ((c (regexp-captures "\\[#([A-Z])\\]" rest))) (if (null? c) "" (nth c 1))))
-         (tags (let ((c (regexp-captures ":([A-Za-z0-9_@#%:]+):[ \t]*$" rest))) (if (null? c) "" (nth c 1)))))
-    (list "heading" (string-length stars) (or kw "") prio (org--heading-title rest kw) tags)))
+  (let ((h (org--parse-headline line)))
+    (list "heading" (string-length (nth h 0)) (or (nth h 1) "")
+          (nth h 2) (nth h 3) (nth h 4))))
 
 (define (org--parse-keyword line)
   (let ((c (regexp-captures "^[ \t]*#\\+([A-Za-z_]+):[ \t]*(.*)$" line)))
@@ -905,10 +897,10 @@
 
 ;; Split a table line into trimmed cells.
 (define (org--table-cells line)
-  (let* ((t (org--trim line))
+  (let* ((t (string-trim line))
          (t2 (replace-regexp-in-string "\\|[ \t]*$" ""
                (replace-regexp-in-string "^[ \t]*\\|" "" t))))
-    (map org--trim (split-many t2 "|"))))
+    (map string-trim (split-many t2 "|"))))
 
 (define (org--collect-table ls)
   (let loop ((ls ls) (acc '()))
@@ -920,7 +912,7 @@
   (let loop ((ls ls) (acc '()))
     (cond ((null? ls) (cons (reverse acc) '()))
           ((let ((l (car ls)))
-             (or (equal? (org--trim l) "")
+             (or (equal? (string-trim l) "")
                  (org--heading-level l) (org--keyword-line? l) (org--block-begin? l)
                  (org--table-line? l) (org--ulist-line? l) (org--olist-line? l) (org--hr-line? l)))
            (cons (reverse acc) ls))
@@ -932,7 +924,7 @@
         (reverse acc)
         (let ((line (car ls)))
           (cond
-            ((equal? (org--trim line) "") (loop (cdr ls) acc))
+            ((equal? (string-trim line) "") (loop (cdr ls) acc))
             ((org--heading-level line) (loop (cdr ls) (cons (org--parse-heading line) acc)))
             ((org--keyword-line? line) (loop (cdr ls) (cons (org--parse-keyword line) acc)))
             ((>= (string-match "[bB][eE][gG][iI][nN]_[sS][rR][cC]" line) 0)
@@ -982,7 +974,7 @@
 
 (define (org--list->html e tag)
   (string-append "<" tag ">\n"
-    (org--concat (map (lambda (it)
+    (string-concat (map (lambda (it)
                         (string-append "<li>"
                           (if (equal? (car it) "") "" (string-append "[" (car it) "] "))
                           (org--inline->html (cdr it)) "</li>\n"))
@@ -991,11 +983,11 @@
 
 (define (org--table->html e)
   (string-append "<table>\n"
-    (org--concat (map (lambda (row)
+    (string-concat (map (lambda (row)
                         (if (equal? (car row) "sep")
                             ""
                             (string-append "<tr>"
-                              (org--concat (map (lambda (c)
+                              (string-concat (map (lambda (c)
                                                   (string-append "<td>" (org--inline->html c) "</td>"))
                                                 (cdr row)))
                               "</tr>\n")))
@@ -1036,7 +1028,7 @@
     "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>"
     (org--escape-html (org--doc-title ast))
     "</title>\n<style>body{font-family:sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem;line-height:1.5}pre{background:#f4f4f4;padding:.6rem;overflow:auto}code{background:#f4f4f4}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:.2rem .5rem}.todo{color:#c00}.tags{color:#888;font-size:.8em}</style>\n</head>\n<body>\n"
-    (org--concat (map org--block->html ast))
+    (string-concat (map org--block->html ast))
     "</body>\n</html>\n"))
 
 (define (org--html-output-path)
@@ -1045,7 +1037,7 @@
     (path-join (buffer-directory) (string-append stem ".html"))))
 
 ;; C-c C-e h — export the current buffer to a sibling .html file.
-(define (org-export-html)
+(define-command (org-export-html)
   (let ((path (org--html-output-path)))
     (write-file path (org--ast->html (org-parse (buffer-string))))
     (message (string-append "Exported to " path))))
@@ -1084,14 +1076,11 @@
         (reverse acc)
         (let ((line (car ls)))
           (if (org--heading-level line)
-              (let* ((lvl (org--heading-level line))
-                     (sr (org--heading-split line))
-                     (rest (nth sr 1))
-                     (kw (org--leading-keyword rest))
-                     (title (org--heading-title rest kw))
-                     (own (org--split-tag-string
-                           (let ((c (regexp-captures ":([A-Za-z0-9_@#%:]+):[ \t]*$" rest)))
-                             (if (null? c) "" (nth c 1)))))
+              (let* ((h (org--parse-headline line))
+                     (lvl (string-length (nth h 0)))
+                     (kw (nth h 1))
+                     (title (nth h 3))
+                     (own (org--split-tag-string (nth h 4)))
                      (stack2 (filter (lambda (e) (< (car e) lvl)) stack))
                      (tags (org--union (if (null? stack2) '() (cdr (car stack2))) own))
                      (plan (if (null? (cdr ls)) #f (org--planning-info (nth ls 1)))))
@@ -1111,12 +1100,7 @@
 
 ;; Sort by date (undated entries last), lexically — ISO dates order correctly.
 (define (org--entry-key e) (let ((d (nth e 2))) (if (equal? d "") "9999-99-99" d)))
-(define (org--insert-entry x sorted)
-  (cond ((null? sorted) (list x))
-        ((string<? (org--entry-key x) (org--entry-key (car sorted))) (cons x sorted))
-        (else (cons (car sorted) (org--insert-entry x (cdr sorted))))))
-(define (org--sort-entries es)
-  (if (null? es) '() (org--insert-entry (car es) (org--sort-entries (cdr es)))))
+(define (org--sort-entries es) (sort-by org--entry-key string<? es))
 
 ;; line-in-agenda-buffer → (path . src-line), for RET.
 (define *org-agenda-targets* '())
@@ -1140,9 +1124,9 @@
                 (cons (list i (if (org--done-keyword? todo) "org-done" "org-todo")) faces))))))
 
 ;; C-c a — agenda: every dated/TODO headline across the agenda files.
-(define (org-agenda) (org--render-agenda (org--sort-entries (org--all-entries))))
+(define-command (org-agenda) (org--render-agenda (org--sort-entries (org--all-entries))))
 ;; C-c t — just the open TODO items.
-(define (org-todo-list)
+(define-command (org-todo-list)
   (org--render-agenda
    (org--sort-entries (filter (lambda (e) (not (equal? (nth e 4) ""))) (org--all-entries)))))
 
@@ -1162,16 +1146,16 @@
 (define *org-capture-templates* '())
 ;; C-c c — capture. With no templates configured this is the simple "* TODO"
 ;; prompt; configure *org-capture-templates* (see Layer 7f) for the full flow.
-(define (org-capture)
+(define-command (org-capture)
   (if (null? *org-capture-templates*)
       (read-string "Capture (TODO headline): " 'org--capture-finish)
       (org--capture-pick)))
 (define (org--capture-finish text)
-  (when (not (equal? (org--trim text) ""))
+  (when (not (equal? (string-trim text) ""))
     (let* ((path (org--capture-file))
            (existing (if (file-exists? path) (read-file path) ""))
            (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
-      (write-file path (string-append existing sep "* TODO " (org--trim text) "\n"))
+      (write-file path (string-append existing sep "* TODO " (string-trim text) "\n"))
       (message (string-append "Captured to " (basename path))))))
 
 ;; ===========================================================================
@@ -1208,7 +1192,7 @@
 (define (org--data-row cells widths)
   (string-append "| " (string-join (org--pad-cells cells widths) " | ") " |"))
 (define (org--sep-row widths)
-  (string-append "|" (string-join (map (lambda (w) (org--dashes (+ w 2))) widths) "+") "|"))
+  (string-append "|" (string-join (map (lambda (w) (string-repeat "-" (+ w 2))) widths) "+") "|"))
 (define (org--format-table rows)
   (let* ((parsed (map (lambda (l) (cons (org--table-sep? l) (org--table-cells l))) rows))
          (ncols (org--max-cols parsed))
@@ -1216,7 +1200,7 @@
     (map (lambda (p) (if (car p) (org--sep-row widths) (org--data-row (cdr p) widths))) parsed)))
 
 ;; Re-align the table at point (also bound on C-c C-c inside a table).
-(define (org-table-align)
+(define-command (org-table-align)
   (let ((b (org--table-bounds (buffer-line))))
     (if (not b)
         (message "Not in a table")
@@ -1229,7 +1213,7 @@
   (let loop ((chars (string->list line)) (byte 0) (acc '()))
     (cond ((null? chars) (reverse acc))
           ((= (char->integer (car chars)) 124) (loop (cdr chars) (+ byte 1) (cons byte acc)))
-          (else (loop (cdr chars) (+ byte (org--char-bytes (car chars))) acc)))))
+          (else (loop (cdr chars) (+ byte (char-bytes (car chars))) acc)))))
 
 ;; Which cell (0-based) the byte-column `col` falls in, on a table row.
 (define (org--cell-index-at line col)
@@ -1237,7 +1221,7 @@
     (max 0 (- m 1))))
 
 ;; A string of n '|' — i.e. an empty row with n-1 cells (org--format-table pads it).
-(define (org--pipes n) (if (<= n 0) "" (string-append "|" (org--pipes (- n 1)))))
+(define (org--pipes n) (string-repeat "|" n))
 
 ;; Column count of a table slice (its widest data row).
 (define (org--table-ncols slice)
@@ -1296,7 +1280,7 @@
   (string-append "| " (string-join cells " | ") " |"))
 
 ;; TAB — re-align and move to the next cell (creating a new row past the last).
-(define (org-table-next-cell)
+(define-command (org-table-next-cell)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
       (let* ((start (nth b 0)) (end (nth b 1))
@@ -1315,7 +1299,7 @@
                     (org--retab-goto start end formatted2 (- (length formatted2) 1) 0)))))))))
 
 ;; S-TAB — re-align and move to the previous cell.
-(define (org-table-prev-cell)
+(define-command (org-table-prev-cell)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
       (let* ((start (nth b 0)) (end (nth b 1))
@@ -1331,7 +1315,7 @@
                 (org--retab-goto start end (org--format-table slice) prv (- ncols 1)))))))))
 
 ;; RET — re-align and move to the first cell of the next row (creating one).
-(define (org-table-next-row)
+(define-command (org-table-next-row)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
       (let* ((start (nth b 0)) (end (nth b 1))
@@ -1362,8 +1346,8 @@
                                      (org--list-swap (org--cells-pad l ncols) col other))))
                               slice)))
             (org--retab-goto start end (org--format-table swapped) ridx other)))))))
-(define (org-table-move-column-right) (org--table-move-column 1))
-(define (org-table-move-column-left)  (org--table-move-column -1))
+(define-command (org-table-move-column-right) (org--table-move-column 1))
+(define-command (org-table-move-column-left)  (org--table-move-column -1))
 
 ;; Swap the current data row with the next / previous data row; keep point in it.
 (define (org--table-move-row finder)
@@ -1378,11 +1362,11 @@
               (let ((col (org--cell-index-at (org--line-text L) (org--point-col))))
                 (org--retab-goto start end
                   (org--format-table (org--list-swap slice ridx other)) other col)))))))))
-(define (org-table-move-row-down) (org--table-move-row org--next-data-row))
-(define (org-table-move-row-up)   (org--table-move-row org--prev-data-row))
+(define-command (org-table-move-row-down) (org--table-move-row org--next-data-row))
+(define-command (org-table-move-row-up)   (org--table-move-row org--prev-data-row))
 
 ;; Insert / delete a column at point.
-(define (org-table-insert-column)
+(define-command (org-table-insert-column)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
       (let* ((start (nth b 0)) (end (nth b 1))
@@ -1398,7 +1382,7 @@
                                   (org--row-from-cells (append head (list "") tail)))))
                           slice)))
           (org--retab-goto start end (org--format-table grown) ridx col))))))
-(define (org-table-delete-column)
+(define-command (org-table-delete-column)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
       (let* ((start (nth b 0)) (end (nth b 1))
@@ -1420,7 +1404,7 @@
                              (min col (- ncols 2)))))))))
 
 ;; Insert a new empty row below / delete the current row.
-(define (org-table-insert-row)
+(define-command (org-table-insert-row)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
       (let* ((start (nth b 0)) (end (nth b 1))
@@ -1431,7 +1415,7 @@
              (after  (org--slice slice (+ ridx 1) (- (length slice) 1)))
              (rows (append before (list (org--pipes (+ ncols 1))) after)))
         (org--retab-goto start end (org--format-table rows) (+ ridx 1) 0)))))
-(define (org-table-delete-row)
+(define-command (org-table-delete-row)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
       (let* ((start (nth b 0)) (end (nth b 1))
@@ -1471,7 +1455,7 @@
 ;; spans the whole folded subtree, so kill from point through the subtree's end
 ;; (Emacs leaves the empty heading line, like plain kill-line). Everywhere else
 ;; this is the ordinary kill-line (kill to end of line).
-(define (org-kill-line)
+(define-command (org-kill-line)
   (let* ((L (buffer-line)) (line (org--line-text L)) (lvl (org--heading-level line)))
     (if (and lvl (not (eq? (org--heading-state L) 'subtree)))
         (let* ((headings (org--headings)) (total (org--total-lines))
@@ -1516,7 +1500,7 @@
 (define (org--existing-results lines start n)
   (let skip ((i start))
     (cond ((>= i n) #f)
-          ((equal? (org--trim (nth lines i)) "") (skip (+ i 1)))
+          ((equal? (string-trim (nth lines i)) "") (skip (+ i 1)))
           ((>= (string-match "^[ \t]*#\\+[rR][eE][sS][uU][lL][tT][sS]:" (nth lines i)) 0)
            (let body ((j (+ i 1)))
              (cond ((>= j n) (list i (- j 1)))
@@ -1527,7 +1511,7 @@
           (else #f))))
 
 ;; C-c C-c inside a src block — run it, write a #+RESULTS block after it.
-(define (org-babel-execute)
+(define-command (org-babel-execute)
   (let ((L0 (buffer-line))
         (b (org--src-block-bounds (buffer-line))))
     (if (not b)
@@ -1572,20 +1556,14 @@
 ;; show-fn can clear the other — they share the one line-image layer).
 (define *org-images-shown* '())
 (define *org-latex-shown* '())
-(define (org--images-shown?)
-  (if (alist-ref *org-images-shown* (current-buffer)) #t #f))
+(define (org--images-shown?) (if (buffer-state-get *org-images-shown* #f) #t #f))
 (define (org--set-images-shown v)
-  (set! *org-images-shown*
-        (cons (cons (current-buffer) v)
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *org-images-shown*))))
-(define (org--latex-shown?)
-  (if (alist-ref *org-latex-shown* (current-buffer)) #t #f))
+  (set! *org-images-shown* (buffer-state-set *org-images-shown* v)))
+(define (org--latex-shown?) (if (buffer-state-get *org-latex-shown* #f) #t #f))
 (define (org--set-latex-shown v)
-  (set! *org-latex-shown*
-        (cons (cons (current-buffer) v)
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *org-latex-shown*))))
+  (set! *org-latex-shown* (buffer-state-set *org-latex-shown* v)))
 
-(define (org-display-inline-images)
+(define-command (org-display-inline-images)
   (clear-line-images)
   (org--set-latex-shown #f)
   (let loop ((lines (org--lines)) (i 0) (n 0))
@@ -1597,11 +1575,11 @@
               (begin (set-line-image i p) (loop (cdr lines) (+ i 1) (+ n 1)))
               (loop (cdr lines) (+ i 1) n))))))
 
-(define (org-remove-inline-images)
+(define-command (org-remove-inline-images)
   (clear-line-images) (org--set-images-shown #f) (message "Inline images hidden"))
 
 ;; C-c C-x C-v — toggle inline image display.
-(define (org-toggle-inline-images)
+(define-command (org-toggle-inline-images)
   (if (org--images-shown?) (org-remove-inline-images) (org-display-inline-images)))
 
 ;; --- LaTeX preview ----------------------------------------------------------
@@ -1660,7 +1638,7 @@
   (clear-line-images) (org--set-latex-shown #f) (message "LaTeX previews hidden"))
 
 ;; C-c C-x C-l — toggle LaTeX fragment previews.
-(define (org-toggle-latex-preview)
+(define-command (org-toggle-latex-preview)
   (if (org--latex-shown?) (org-remove-latex-previews) (org-show-latex-previews)))
 
 ;; ===========================================================================
@@ -1676,7 +1654,7 @@
           (else (message "C-c C-c: nothing to do here")))))
 
 ;; Flip leading-star hiding for the session and repaint.
-(define (org-toggle-leading-stars)
+(define-command (org-toggle-leading-stars)
   (set! *org-hide-leading-stars* (not *org-hide-leading-stars*))
   (org--fontify)
   (message (if *org-hide-leading-stars*
@@ -1684,7 +1662,7 @@
                "Leading stars shown")))
 
 ;; Flip virtual indentation for the session and repaint.
-(define (org-toggle-indent)
+(define-command (org-toggle-indent)
   (set! *org-indent* (not *org-indent*))
   (org--fontify)
   (message (if *org-indent* "Org indent on" "Org indent off")))
@@ -1693,32 +1671,9 @@
 ;; ===========================================================================
 ;; Layer 7 — calendar / date arithmetic (pure)
 ;; ===========================================================================
-;; Proleptic-Gregorian day count (days since 1970-01-01), via Howard Hinnant's
-;; algorithm. All our dates are positive years, so plain `quotient` suffices.
-;; This is the substrate for scheduling, repeaters, and relative date entry.
-(define (org--ymd->days y m d)
-  (let* ((y2 (if (<= m 2) (- y 1) y))
-         (era (quotient y2 400))
-         (yoe (- y2 (* era 400)))
-         (doy (+ (quotient (+ (* 153 (+ m (if (> m 2) -3 9))) 2) 5) (- d 1)))
-         (doe (+ (* yoe 365) (quotient yoe 4) (- (quotient yoe 100)) doy)))
-    (- (+ (* era 146097) doe) 719468)))
-
-(define (org--days->ymd z0)
-  (let* ((z (+ z0 719468))
-         (era (quotient z 146097))
-         (doe (- z (* era 146097)))
-         (yoe (quotient (+ (- doe (quotient doe 1460))
-                           (quotient doe 36524) (- (quotient doe 146096)))
-                        365))
-         (y (+ yoe (* era 400)))
-         (doy (- doe (+ (* 365 yoe) (quotient yoe 4) (- (quotient yoe 100)))))
-         (mp (quotient (+ (* 5 doy) 2) 153))
-         (d (+ (- doy (quotient (+ (* 153 mp) 2) 5)) 1))
-         (m (+ mp (if (< mp 10) 3 -9))))
-    (list (if (<= m 2) (+ y 1) y) m d)))
-
-(define (org--pad2 n) (if (< n 10) (string-append "0" (number->string n)) (number->string n)))
+;; The Gregorian day-count substrate (ymd->days / days->ymd / pad2) lives in
+;; core.scm; this layer adds the Org-facing date parsing, formatting, and
+;; relative-offset entry for scheduling, repeaters, and clocking.
 (define *org-dow-names* (list "Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat"))
 ;; 1970-01-01 (day 0) is a Thursday (index 4), so (days+4) mod 7 is the weekday.
 (define (org--dow-name days) (nth *org-dow-names* (modulo (+ days 4) 7)))
@@ -1730,11 +1685,11 @@
         (list (string->number (nth c 1)) (string->number (nth c 2)) (string->number (nth c 3))))))
 (define (org--date-str->days s)
   (let ((ymd (org--parse-date s)))
-    (if ymd (org--ymd->days (nth ymd 0) (nth ymd 1) (nth ymd 2)) #f)))
+    (if ymd (ymd->days (nth ymd 0) (nth ymd 1) (nth ymd 2)) #f)))
 (define (org--days->date-str days)
-  (let ((ymd (org--days->ymd days)))
-    (string-append (number->string (nth ymd 0)) "-" (org--pad2 (nth ymd 1)) "-"
-                   (org--pad2 (nth ymd 2)) " " (org--dow-name days))))
+  (let ((ymd (days->ymd days)))
+    (string-append (number->string (nth ymd 0)) "-" (pad2 (nth ymd 1)) "-"
+                   (pad2 (nth ymd 2)) " " (org--dow-name days))))
 (define (org--today-days) (org--date-str->days (current-time "%Y-%m-%d")))
 
 (define (org--leap? y) (and (= 0 (modulo y 4)) (or (not (= 0 (modulo y 100))) (= 0 (modulo y 400)))))
@@ -1759,19 +1714,19 @@
           (cond ((or (equal? unit "") (equal? unit "d")) (+ base num))
                 ((equal? unit "w") (+ base (* 7 num)))
                 ((equal? unit "m")
-                 (let* ((ymd (org--days->ymd base))
+                 (let* ((ymd (days->ymd base))
                         (r (org--add-months (nth ymd 0) (nth ymd 1) (nth ymd 2) num)))
-                   (org--ymd->days (nth r 0) (nth r 1) (nth r 2))))
+                   (ymd->days (nth r 0) (nth r 1) (nth r 2))))
                 ((equal? unit "y")
-                 (let* ((ymd (org--days->ymd base))
+                 (let* ((ymd (days->ymd base))
                         (r (org--add-months (nth ymd 0) (nth ymd 1) (nth ymd 2) (* 12 num))))
-                   (org--ymd->days (nth r 0) (nth r 1) (nth r 2))))
+                   (ymd->days (nth r 0) (nth r 1) (nth r 2))))
                 (else base))))))
 
 ;; Interpret a user date string against `base` (day count): "", ".", "today",
 ;; "tomorrow"/"yesterday", an absolute YYYY-MM-DD, or a relative ±N[dwmy].
 (define (org--read-date input base)
-  (let ((s (org--trim input)))
+  (let ((s (string-trim input)))
     (cond ((or (equal? s "") (equal? s ".") (equal? (string-downcase s) "today")) base)
           ((equal? (string-downcase s) "tomorrow") (+ base 1))
           ((equal? (string-downcase s) "yesterday") (- base 1))
@@ -1807,7 +1762,7 @@
     (if (>= i e) (reverse acc)
         (let ((c (regexp-captures "^[ \t]*:([A-Za-z0-9_@%-]+):[ \t]*(.*)$" (nth lines i))))
           (if (null? c) (loop (+ i 1) acc)
-              (loop (+ i 1) (cons (cons (nth c 1) (org--trim (nth c 2))) acc)))))))
+              (loop (+ i 1) (cons (cons (nth c 1) (string-trim (nth c 2))) acc)))))))
 
 ;; Case-insensitive alist lookup → the (key . value) pair, or #f.
 (define (org--assoc-ci alist key)
@@ -1874,25 +1829,24 @@
         (org--insert-lines-after (org--planning-end H)
                                  (org--render-drawer (list (cons key value)))))))
 
-;; C-c C-x p — set a property interactively.
-(define *org--prop-target* -1)
-(define *org--prop-key* "")
-(define (org-set-property)
+;; C-c C-x p — set a property interactively: prompt for the key, then the value
+;; (prefilled with the current one). Both prompts capture their operands in the
+;; callback closures.
+(define-command (org-set-property)
   (let ((H (org--heading-line-at-point)))
     (if (not H) (message "Not on a heading")
-        (begin (set! *org--prop-target* H)
-               (read-string "Property: " 'org--set-property-key)))))
-(define (org--set-property-key key)
-  (when (not (equal? (org--trim key) ""))
-    (set! *org--prop-key* (org--trim key))
-    (read-string (string-append (org--trim key) ": ") "org--set-property-value"
-                 (or (org--entry-get-local *org--prop-target* (org--trim key)) ""))))
-(define (org--set-property-value val)
-  (org-entry-put *org--prop-target* *org--prop-key* (org--trim val))
-  (message (string-append "Set " *org--prop-key*)))
+        (read-string "Property: "
+          (lambda (key)
+            (when (not (equal? (string-trim key) ""))
+              (let ((k (string-trim key)))
+                (read-string (string-append k ": ")
+                             (lambda (val)
+                               (org-entry-put H k (string-trim val))
+                               (message (string-append "Set " k)))
+                             (or (org--entry-get-local H k) "")))))))))
 
 ;; org-id-get-create — return the heading's :ID:, minting and storing one if absent.
-(define (org-id-get-create)
+(define-command (org-id-get-create)
   (let ((H (org--heading-line-at-point)))
     (if (not H) (begin (message "Not on a heading") #f)
         (let ((existing (org--entry-get-local H "ID")))
@@ -1913,24 +1867,20 @@
     (if (null? c) #f (nth c 1))))
 
 (define (org--render-planning sched dead closed)
-  (org--trim (string-append
+  (string-trim (string-append
               (if closed (string-append "CLOSED: " closed " ") "")
               (if dead (string-append "DEADLINE: " dead " ") "")
               (if sched (string-append "SCHEDULED: " sched " ") ""))))
 
-(define *org--plan-target* -1)
-(define *org--plan-kind* "SCHEDULED")
-(define (org-schedule) (org--plan-read "SCHEDULED"))
-(define (org-deadline) (org--plan-read "DEADLINE"))
+(define-command (org-schedule) (org--plan-read "SCHEDULED"))
+(define-command (org-deadline) (org--plan-read "DEADLINE"))
 (define (org--plan-read kind)
   (let ((H (org--heading-line-at-point)))
     (if (not H) (message "Not on a heading")
-        (begin (set! *org--plan-target* H) (set! *org--plan-kind* kind)
-               (read-string (string-append kind " (date / +Nd / today): ")
-                            "org--plan-finish" "")))))
-(define (org--plan-finish input)
-  (let* ((H *org--plan-target*) (kind *org--plan-kind*)
-         (stamp (string-append "<" (org--days->date-str (org--read-date input (org--today-days))) ">"))
+        (read-string (string-append kind " (date / +Nd / today): ")
+                     (lambda (input) (org--plan-apply H kind input))))))
+(define (org--plan-apply H kind input)
+  (let* ((stamp (string-append "<" (org--days->date-str (org--read-date input (org--today-days))) ">"))
          (pidx (org--planning-line-index H))
          (old (if pidx (org--line-text pidx) ""))
          (sched (if (equal? kind "SCHEDULED") stamp (org--planning-get old "SCHEDULED")))
@@ -1941,9 +1891,9 @@
     (message (string-append kind " set"))))
 
 ;; Insert an active/inactive timestamp at point.
-(define (org-time-stamp)
+(define-command (org-time-stamp)
   (insert (string-append "<" (org--days->date-str (org--today-days)) ">")))
-(define (org-time-stamp-inactive)
+(define-command (org-time-stamp-inactive)
   (insert (string-append "[" (org--days->date-str (org--today-days)) "]")))
 
 ;; --- repeaters --------------------------------------------------------------
@@ -1978,8 +1928,8 @@
       (if (< m 0) (string-append acc s)
           (let* ((c (regexp-captures "<[^>\n]*(\\.\\+|\\+\\+|\\+)[0-9]+[dwmy][^>\n]*>" s))
                  (whole (car c))
-                 (before (substring s 0 m))
-                 (after (org--byte-drop s (+ m (utf8-length whole)))))
+                 (before (byte-take s m))
+                 (after (byte-drop s (+ m (utf8-length whole)))))
             (loop after (string-append acc before (org--shift-stamp whole))))))))
 
 (define (org--repeat-task H)
@@ -1999,7 +1949,7 @@
         (+ (* days 1440)
            (if (null? tc) 0 (+ (* 60 (string->number (nth tc 1))) (string->number (nth tc 2))))))))
 (define (org--fmt-duration mins)
-  (string-append (number->string (quotient mins 60)) ":" (org--pad2 (modulo mins 60))))
+  (string-append (number->string (quotient mins 60)) ":" (pad2 (modulo mins 60))))
 (define (org--now-stamp) (current-time "%Y-%m-%d %a %H:%M"))
 
 ;; Last content line of H's own section (before its first child / next heading).
@@ -2043,7 +1993,7 @@
             (else (loop (+ i 1)))))))
 
 ;; C-c C-x C-i — start a clock on the heading at point.
-(define (org-clock-in)
+(define-command (org-clock-in)
   (let ((H (org--heading-line-at-point)))
     (if (not H) (message "Not on a heading")
         (if (org--open-clock-line) (message "A clock is already running")
@@ -2051,7 +2001,7 @@
                    (message "Clock started"))))))
 
 ;; C-c C-x C-o — stop the running clock, recording the elapsed time.
-(define (org-clock-out)
+(define-command (org-clock-out)
   (let ((i (org--open-clock-line)))
     (if (not i) (message "No running clock")
         (let* ((line (org--line-text i))
@@ -2072,7 +2022,7 @@
           (else (replace-region sb be "")))))
 
 ;; C-c C-x C-x — discard the running clock.
-(define (org-clock-cancel)
+(define-command (org-clock-cancel)
   (let ((i (org--open-clock-line)))
     (if (not i) (message "No running clock")
         (begin (org--delete-lines i i) (message "Clock canceled")))))
@@ -2094,9 +2044,7 @@
         (cons total acc)
         (let* ((line (car ls)) (lvl (org--heading-level line)))
           (if lvl
-              (let* ((rest (nth (org--heading-split line) 1))
-                     (kw (org--leading-keyword rest)))
-                (loop (cdr ls) (org--heading-title rest kw) acc total))
+              (loop (cdr ls) (nth (org--parse-headline line) 3) acc total)
               (let ((m (org--parse-clock-mins line)))
                 (if m (loop (cdr ls) cur (org--acc-add acc cur m) (+ total m))
                     (loop (cdr ls) cur acc total))))))))
@@ -2123,7 +2071,7 @@
             (else (up (- i 1)))))))
 
 ;; C-c C-x C-r — insert or refresh a clock report (dynamic clocktable block).
-(define (org-clock-report)
+(define-command (org-clock-report)
   (let* ((L (buffer-line)) (b (org--clocktable-bounds L))
          (block (append (list "#+BEGIN: clocktable :maxlevel 3")
                         (org--clocktable-lines) (list "#+END:"))))
@@ -2148,7 +2096,7 @@
   (map (lambda (l)
          (let ((lvl (org--heading-level l)))
            (cond ((not lvl) l)
-                 ((> delta 0) (string-append (org--stars delta) l))
+                 ((> delta 0) (string-append (string-repeat "*" delta) l))
                  ((< delta 0) (substring l (min (- 0 delta) (- lvl 1)) (string-length l)))
                  (else l))))
        lines))
@@ -2163,10 +2111,7 @@
 ;; the on-disk file `path`.
 (define (org--insert-into-file path tline tlvl block)
   (let* ((lines (split-many (read-file path) "\n")) (n (length lines))
-         (E (let loop ((i (+ tline 1)))
-              (cond ((>= i n) (- n 1))
-                    ((let ((l (org--heading-level (nth lines i)))) (and l (<= l tlvl))) (- i 1))
-                    (else (loop (+ i 1))))))
+         (E (org--subtree-end-in lines tline tlvl))
          (before (org--slice lines 0 E))
          (after (org--slice lines (+ E 1) (- n 1))))
     (write-file path (join-lines (append before block after)))))
@@ -2194,9 +2139,8 @@
       (if (null? ls) (reverse acc)
           (let ((lvl (org--heading-level (car ls))))
             (if lvl
-                (let* ((rest (nth (org--heading-split (car ls)) 1))
-                       (kw (org--leading-keyword rest))
-                       (cand (string-append (org--heading-title rest kw) "  (" bn ")")))
+                (let ((cand (string-append (nth (org--parse-headline (car ls)) 3)
+                                           "  (" bn ")")))
                   (set! *org-refile-map* (cons (cons cand (list path i lvl)) *org-refile-map*))
                   (loop (cdr ls) (+ i 1) (cons cand acc)))
                 (loop (cdr ls) (+ i 1) acc)))))))
@@ -2206,7 +2150,7 @@
     (if (null? files) acc (loop (cdr files) (append acc (org--refile-file-targets (car files)))))))
 
 ;; C-c C-w — refile the subtree at point under a chosen heading.
-(define (org-refile)
+(define-command (org-refile)
   (let ((H (org--heading-line-at-point)))
     (if (not H) (message "Not on a heading")
         (begin (set! *org--refile-source* H)
@@ -2227,7 +2171,7 @@
 
 ;; C-c C-x C-a — archive the subtree to <file>_archive.
 (define (org--archive-file-path) (string-append (org--current-file-path) "_archive"))
-(define (org-archive-subtree)
+(define-command (org-archive-subtree)
   (let ((H (org--heading-line-at-point)))
     (if (not H) (message "Not on a heading")
         (let* ((block (cdr (org--subtree-text H)))
@@ -2256,9 +2200,6 @@
 ;;                 "* %?\n  %U")))
 ;; (*org-capture-templates* itself is defined back in Layer 4 so org-capture can
 ;; see it.)
-(define *org--capture-tmpl* #f)
-(define *org--capture-expanded* "")
-
 (define (org--capture-template-by-key key)
   (let loop ((es *org-capture-templates*))
     (cond ((null? es) #f) ((equal? (nth (car es) 0) key) (car es)) (else (loop (cdr es))))))
@@ -2281,14 +2222,12 @@
   (let* ((key (car (split-many cand " ")))
          (tmpl (org--capture-template-by-key key)))
     (if (not tmpl) (message "No such template")
-        (begin
-          (set! *org--capture-tmpl* tmpl)
-          (set! *org--capture-expanded* (org--expand-template (nth tmpl 3)))
+        (let ((expanded (org--expand-template (nth tmpl 3))))
           (if (>= (string-match "%\\?" (nth tmpl 3)) 0)
-              (read-string "Capture: " 'org--capture-fill)
-              (org--capture-commit (org--expand-template-final *org--capture-expanded* "")))))))
-(define (org--capture-fill input)
-  (org--capture-commit (org--expand-template-final *org--capture-expanded* input)))
+              (read-string "Capture: "
+                           (lambda (input)
+                             (org--capture-commit tmpl (org--expand-template-final expanded input))))
+              (org--capture-commit tmpl (org--expand-template-final expanded "")))))))
 
 (define (org--capture-append path text)
   (let* ((existing (if (file-exists? path) (read-file path) ""))
@@ -2301,22 +2240,17 @@
                  (cond ((>= i n) #f)
                        ((let ((l (nth lines i)))
                           (and (org--heading-level l)
-                               (equal? (org--heading-title (nth (org--heading-split l) 1)
-                                                           (org--leading-keyword (nth (org--heading-split l) 1)))
-                                       headline))) i)
+                               (equal? (nth (org--parse-headline l) 3) headline))) i)
                        (else (loop (+ i 1)))))))
     (if (not hidx)
         (org--capture-append path text)
         (let* ((hlvl (org--heading-level (nth lines hidx)))
-               (E (let loop ((i (+ hidx 1)))
-                    (cond ((>= i n) (- n 1))
-                          ((let ((l (org--heading-level (nth lines i)))) (and l (<= l hlvl))) (- i 1))
-                          (else (loop (+ i 1))))))
+               (E (org--subtree-end-in lines hidx hlvl))
                (before (org--slice lines 0 E))
                (after (org--slice lines (+ E 1) (- n 1))))
           (write-file path (join-lines (append before (list text) after)))))))
-(define (org--capture-commit text)
-  (let* ((target (nth *org--capture-tmpl* 2))
+(define (org--capture-commit tmpl text)
+  (let* ((target (nth tmpl 2))
          (path (org--resolve-path (nth target 1))))
     (if (equal? (car target) "file+headline")
         (org--capture-under-headline path (nth target 2) text)
@@ -2332,7 +2266,7 @@
   (cond
     ((>= (string-match "\\|" expr) 0)
      (let any ((as (split-many expr "|")))
-       (cond ((null? as) #f) ((org--tag-match (org--trim (car as)) tags) #t) (else (any (cdr as))))))
+       (cond ((null? as) #f) ((org--tag-match (string-trim (car as)) tags) #t) (else (any (cdr as))))))
     (else
      (let all ((ts (filter (lambda (x) (not (equal? x ""))) (split-many expr "+"))))
        (cond ((null? ts) #t)
@@ -2342,11 +2276,11 @@
                      (if (if neg (not present) present) (all (cdr ts)) #f))))))))
 
 ;; C-c \ — show every entry whose (inherited) tags match an expression.
-(define (org-tags-view) (read-string "Match tags (work+urgent, a|b, -done): " 'org--tags-view-finish))
+(define-command (org-tags-view) (read-string "Match tags (work+urgent, a|b, -done): " 'org--tags-view-finish))
 (define (org--tags-view-finish expr)
   (org--render-agenda
    (org--sort-entries
-    (filter (lambda (e) (and (> (length e) 6) (org--tag-match (org--trim expr) (nth e 6))))
+    (filter (lambda (e) (and (> (length e) 6) (org--tag-match (string-trim expr) (nth e 6))))
             (org--all-entries)))))
 
 ;; Custom agenda commands: each is (KEY DESCRIPTION TYPE ARG), TYPE one of
@@ -2355,7 +2289,7 @@
 ;;     (list (list "w" "Waiting" "todo" "WAITING")
 ;;           (list "u" "Urgent"  "tags" "urgent")))
 (define *org-agenda-custom-commands* '())
-(define (org-agenda-dispatch)
+(define-command (org-agenda-dispatch)
   (if (null? *org-agenda-custom-commands*)
       (org-agenda)
       (completing-read "Agenda command: "
@@ -2380,11 +2314,10 @@
 (define *org-stored-links* '())
 ;; C-c l — store a link to the current location (an id: link if the heading has
 ;; an :ID:, else a file: link).
-(define (org-store-link)
+(define-command (org-store-link)
   (let* ((H (org--heading-line-at-point))
          (link (if H
-                   (let* ((rest (nth (org--heading-split (org--line-text H)) 1))
-                          (title (org--heading-title rest (org--leading-keyword rest)))
+                   (let* ((title (nth (org--parse-headline (org--line-text H)) 3))
                           (id (org--entry-get-local H "ID")))
                      (if id (cons (string-append "id:" id) title)
                          (cons (string-append "file:" (org--current-file-path)) title)))
@@ -2393,13 +2326,13 @@
     (message (string-append "Stored link: " (car link)))))
 
 ;; C-c C-l — insert a link, choosing from the stored ring or typing a target.
-(define (org-insert-link)
+(define-command (org-insert-link)
   (if (null? *org-stored-links*)
       (read-string "Link target: " 'org--insert-link-target)
       (completing-read "Link: " (map car *org-stored-links*) 'org--insert-link-chosen)))
 (define (org--insert-link-target target)
-  (when (not (equal? (org--trim target) ""))
-    (insert (string-append "[[" (org--trim target) "]]"))))
+  (when (not (equal? (string-trim target) ""))
+    (insert (string-append "[[" (string-trim target) "]]"))))
 (define (org--insert-link-chosen target)
   (let ((p (let loop ((ls *org-stored-links*))
              (cond ((null? ls) #f) ((equal? (car (car ls)) target) (car ls)) (else (loop (cdr ls)))))))
@@ -2413,9 +2346,9 @@
       (if (< m 0) mx
           (let* ((c (regexp-captures "\\[fn:([0-9]+)\\]" s))
                  (consumed (+ m (utf8-length (car c)))))
-            (loop (org--byte-drop s consumed) (max mx (string->number (nth c 1)))))))))
+            (loop (byte-drop s consumed) (max mx (string->number (nth c 1)))))))))
 ;; C-c C-x f — insert a numbered footnote reference and a definition stub at EOF.
-(define (org-footnote-new)
+(define-command (org-footnote-new)
   (let ((label (string-append "fn:" (number->string (+ 1 (org--max-fn-number))))))
     (insert-at (point-max) (string-append "\n[" label "] "))
     (insert (string-append "[" label "]"))
@@ -2511,7 +2444,7 @@
 (define (org--cell-num grid r c)
   (let* ((row (if (and (>= r 1) (<= r (length grid))) (nth grid (- r 1)) '()))
          (v (if (and (>= c 1) (<= c (length row))) (nth row (- c 1)) ""))
-         (n (string->number (org--trim v))))
+         (n (string->number (string-trim v))))
     (if n n 0)))
 (define (org--subst-at grid expr)
   (let loop ((s expr) (acc ""))
@@ -2519,7 +2452,7 @@
       (if (< m 0) (string-append acc s)
           (let* ((c (regexp-captures "@([0-9]+)\\$([0-9]+)" s))
                  (whole (car c)) (r (string->number (nth c 1))) (col (string->number (nth c 2)))
-                 (before (substring s 0 m)) (after (org--byte-drop s (+ m (utf8-length whole)))))
+                 (before (byte-take s m)) (after (byte-drop s (+ m (utf8-length whole)))))
             (loop after (string-append acc before "(" (org--fmt-num (org--cell-num grid r col)) ")")))))))
 (define (org--subst-dollar grid curr expr)
   (let loop ((s expr) (acc ""))
@@ -2527,7 +2460,7 @@
       (if (< m 0) (string-append acc s)
           (let* ((c (regexp-captures "\\$([0-9]+)" s))
                  (whole (car c)) (col (string->number (nth c 1)))
-                 (before (substring s 0 m)) (after (org--byte-drop s (+ m (utf8-length whole)))))
+                 (before (byte-take s m)) (after (byte-drop s (+ m (utf8-length whole)))))
             (loop after (string-append acc before "(" (org--fmt-num (org--cell-num grid curr col)) ")")))))))
 (define (org--subst-refs expr grid curr) (org--subst-dollar grid curr (org--subst-at grid expr)))
 
@@ -2573,10 +2506,10 @@
     (if (and (< (+ end 1) n) (>= (string-match "^[ \t]*#\\+TBLFM:" (nth lines (+ end 1))) 0)) (+ end 1) #f)))
 (define (org--tblfm-formulas line)
   (let ((c (regexp-captures "#\\+TBLFM:[ \t]*(.*)$" line)))
-    (if (null? c) '() (filter (lambda (x) (not (equal? (org--trim x) ""))) (split-many (nth c 1) "::")))))
+    (if (null? c) '() (filter (lambda (x) (not (equal? (string-trim x) ""))) (split-many (nth c 1) "::")))))
 
 ;; Recompute the table at point from its #+TBLFM: line (or just re-align it).
-(define (org-table-recalculate)
+(define-command (org-table-recalculate)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (if (not b) (message "Not in a table")
         (let* ((start (nth b 0)) (end (nth b 1)) (fl (org--tblfm-after end)))
@@ -2613,7 +2546,6 @@
          (s (replace-regexp-in-string "\\+([^+\n]+)\\+" "~~$1~~" s))
          (s (replace-regexp-in-string "\\[fn:([^]\n]*)\\]" "[^$1]" s)))
     s))
-(define (org--md-hashes n) (if (<= n 0) "" (string-append "#" (org--md-hashes (- n 1)))))
 (define (org--list->md e ordered)
   (let loop ((its (nth e 1)) (i 1) (acc ""))
     (if (null? its) acc
@@ -2624,20 +2556,20 @@
                                (org--inline->md (cdr it)) "\n"))))))
 (define (org--md-row cells ncols)
   (string-append "|"
-    (org--concat (map (lambda (i) (string-append " " (org--inline->md (org--cell cells i)) " |")) (org--range ncols)))
+    (string-concat (map (lambda (i) (string-append " " (org--inline->md (org--cell cells i)) " |")) (org--range ncols)))
     "\n"))
 (define (org--table->md e)
   (let* ((rows (filter (lambda (r) (not (equal? (car r) "sep"))) (nth e 1)))
          (ncols (let loop ((rs rows) (m 1)) (if (null? rs) m (loop (cdr rs) (max m (length (cdr (car rs)))))))))
     (if (null? rows) ""
         (string-append (org--md-row (cdr (car rows)) ncols)
-                       "|" (org--concat (map (lambda (i) " --- |") (org--range ncols))) "\n"
-                       (org--concat (map (lambda (r) (org--md-row (cdr r) ncols)) (cdr rows)))))))
+                       "|" (string-concat (map (lambda (i) " --- |") (org--range ncols))) "\n"
+                       (string-concat (map (lambda (r) (org--md-row (cdr r) ncols)) (cdr rows)))))))
 (define (org--block->md e)
   (let ((type (car e)))
     (cond
       ((equal? type "heading")
-       (string-append (org--md-hashes (min 6 (nth e 1))) " "
+       (string-append (string-repeat "#" (min 6 (nth e 1))) " "
                       (if (equal? (nth e 2) "") "" (string-append (nth e 2) " "))
                       (org--inline->md (nth e 4))
                       (if (equal? (nth e 5) "") "" (string-append "  :" (nth e 5) ":")) "\n\n"))
@@ -2653,7 +2585,7 @@
 (define (org--ast->md ast)
   (let ((title (org--doc-title ast)))
     (string-append (if (equal? title "Untitled") "" (string-append "# " title "\n\n"))
-                   (org--concat (map org--block->md ast)))))
+                   (string-concat (map org--block->md ast)))))
 
 ;; --- LaTeX ------------------------------------------------------------------
 (define (org--escape-latex s)
@@ -2677,13 +2609,13 @@
 (define (org--list->latex e ordered)
   (let ((env (if ordered "enumerate" "itemize")))
     (string-append "\\begin{" env "}\n"
-      (org--concat (map (lambda (it) (string-append "\\item " (org--inline->latex (cdr it)) "\n")) (nth e 1)))
+      (string-concat (map (lambda (it) (string-append "\\item " (org--inline->latex (cdr it)) "\n")) (nth e 1)))
       "\\end{" env "}\n\n")))
 (define (org--table->latex e)
   (let* ((rows (filter (lambda (r) (not (equal? (car r) "sep"))) (nth e 1)))
          (ncols (let loop ((rs rows) (m 1)) (if (null? rs) m (loop (cdr rs) (max m (length (cdr (car rs)))))))))
-    (string-append "\\begin{tabular}{" (org--concat (map (lambda (i) "l") (org--range ncols))) "}\n"
-      (org--concat (map (lambda (r)
+    (string-append "\\begin{tabular}{" (string-concat (map (lambda (i) "l") (org--range ncols))) "}\n"
+      (string-concat (map (lambda (r)
         (string-append (string-join (map (lambda (i) (org--inline->latex (org--cell (cdr r) i))) (org--range ncols)) " & ")
                        " \\\\\n")) rows))
       "\\end{tabular}\n\n")))
@@ -2705,7 +2637,7 @@
   (string-append
    "\\documentclass{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage{hyperref}\n"
    "\\title{" (org--escape-latex (org--doc-title ast)) "}\n\\begin{document}\n\\maketitle\n\n"
-   (org--concat (map org--block->latex ast))
+   (string-concat (map org--block->latex ast))
    "\\end{document}\n"))
 
 ;; --- ASCII ------------------------------------------------------------------
@@ -2718,7 +2650,6 @@
          (s (replace-regexp-in-string "~([^~\n]+)~" "$1" s))
          (s (replace-regexp-in-string "\\+([^+\n]+)\\+" "$1" s)))
     s))
-(define (org--ascii-rule ch n) (if (<= n 0) "" (string-append ch (org--ascii-rule ch (- n 1)))))
 (define (org--list->ascii e ordered)
   (let loop ((its (nth e 1)) (i 1) (acc ""))
     (if (null? its) acc
@@ -2734,7 +2665,7 @@
        (let* ((title (string-append (if (equal? (nth e 2) "") "" (string-append (nth e 2) " "))
                                     (org--inline->ascii (nth e 4))))
               (ch (cond ((= (nth e 1) 1) "=") ((= (nth e 1) 2) "-") (else "~"))))
-         (string-append title "\n" (org--ascii-rule ch (utf8-length title)) "\n\n")))
+         (string-append title "\n" (string-repeat ch (utf8-length title)) "\n\n")))
       ((equal? type "para") (string-append (org--inline->ascii (nth e 1)) "\n\n"))
       ((equal? type "src") (string-append (org--indent-lines (nth e 2) "    ") "\n\n"))
       ((equal? type "example") (string-append (org--indent-lines (nth e 1) "    ") "\n\n"))
@@ -2744,16 +2675,16 @@
       ((equal? type "olist") (string-append (org--list->ascii e #t) "\n"))
       ((equal? type "table") (string-append (join-lines (org--format-table (org--ast-table->rows e))) "\n\n"))
       (else ""))))
-(define (org--ast->ascii ast) (org--concat (map org--block->ascii ast)))
+(define (org--ast->ascii ast) (string-concat (map org--block->ascii ast)))
 
 ;; Export commands (C-c C-e m / l / a).
-(define (org-export-markdown)
+(define-command (org-export-markdown)
   (let ((p (org--output-path ".md")))
     (write-file p (org--ast->md (org-parse (buffer-string)))) (message (string-append "Exported to " p))))
-(define (org-export-latex)
+(define-command (org-export-latex)
   (let ((p (org--output-path ".tex")))
     (write-file p (org--ast->latex (org-parse (buffer-string)))) (message (string-append "Exported to " p))))
-(define (org-export-ascii)
+(define-command (org-export-ascii)
   (let ((p (org--output-path ".txt")))
     (write-file p (org--ast->ascii (org-parse (buffer-string)))) (message (string-append "Exported to " p))))
 
@@ -2777,25 +2708,24 @@
 
 ;; Total clocked minutes in heading H's own section.
 (define (org--heading-clocksum H)
-  (let ((e (org--entry-content-end H)))
+  (let ((lines (org--lines)) (e (org--entry-content-end H)))
     (let loop ((i (+ H 1)) (sum 0))
       (if (> i e) sum
-          (let ((m (org--parse-clock-mins (org--line-text i)))) (loop (+ i 1) (if m (+ sum m) sum)))))))
+          (let ((m (org--parse-clock-mins (org--line-text-in lines i))))
+            (loop (+ i 1) (if m (+ sum m) sum)))))))
 
 (define (org--column-value H name)
-  (let* ((line (org--line-text H)) (rest (nth (org--heading-split line) 1))
-         (kw (org--leading-keyword rest)))
+  (let ((h (org--parse-headline (org--line-text H))))
     (cond
-      ((equal? name "ITEM") (org--heading-title rest kw))
-      ((equal? name "TODO") (or kw ""))
-      ((equal? name "PRIORITY") (let ((c (regexp-captures "\\[#([A-Z])\\]" rest))) (if (null? c) "" (nth c 1))))
-      ((equal? name "TAGS")
-       (let ((c (regexp-captures ":([A-Za-z0-9_@#%:]+):[ \t]*$" rest))) (if (null? c) "" (nth c 1))))
+      ((equal? name "ITEM") (nth h 3))
+      ((equal? name "TODO") (or (nth h 1) ""))
+      ((equal? name "PRIORITY") (nth h 2))
+      ((equal? name "TAGS") (nth h 4))
       ((equal? name "CLOCKSUM") (org--fmt-duration (org--heading-clocksum H)))
       (else (or (org-entry-get-inherited H name) "")))))
 
 ;; M-x org-columns — tabulate every heading's column values in a side buffer.
-(define (org-columns)
+(define-command (org-columns)
   (let* ((names (map cdr (org--parse-columns (org--columns-spec))))
          (header (string-append "| " (string-join names " | ") " |"))
          (rows (map (lambda (h)
@@ -2804,7 +2734,7 @@
                           (string-join
                            (map (lambda (nm)
                                   (let ((v (org--column-value H nm)))
-                                    (if (equal? nm "ITEM") (string-append (org--spaces (* 2 (- lvl 1))) v) v)))
+                                    (if (equal? nm "ITEM") (string-append (string-repeat " " (* 2 (- lvl 1))) v) v)))
                                 names)
                            " | ")
                           " |")))
@@ -2830,7 +2760,7 @@
                         (cond ((>= k n) (join-lines (reverse acc)))
                               ((org--block-end? (nth lines k)) (join-lines (reverse acc)))
                               (else (end (+ k 1) (cons (nth lines k) acc))))))
-                     ((equal? (org--trim (nth lines j)) "") (skip (+ j 1)))
+                     ((equal? (string-trim (nth lines j)) "") (skip (+ j 1)))
                      (else #f))))
             (else (loop (+ i 1)))))))
 ;; Expand <<name>> noweb references in a block body.
@@ -2840,11 +2770,11 @@
       (if (< m 0) (string-append acc s)
           (let* ((c (regexp-captures "<<([A-Za-z0-9_-]+)>>" s))
                  (whole (car c)) (name (nth c 1))
-                 (before (substring s 0 m)) (after (org--byte-drop s (+ m (utf8-length whole)))))
+                 (before (byte-take s m)) (after (byte-drop s (+ m (utf8-length whole)))))
             (loop after (string-append acc before (or (org--named-block-body name) ""))))))))
 
 ;; C-c C-c on an inline `src_lang{code}` runs it and appends {{{results(…)}}}.
-(define (org-babel-execute-inline)
+(define-command (org-babel-execute-inline)
   (let* ((L (buffer-line)) (line (org--line-text L))
          (m (string-match "src_([A-Za-z0-9]+)(\\[[^]]*\\])?\\{([^}]*)\\}" line)))
     (if (< m 0) (message "No inline src at point")
@@ -2860,7 +2790,7 @@
   (let ((c (regexp-captures "^([ \t]*)([-+*]|[0-9]+[.)])[ \t]+" line)))
     (if (null? c) #f c)))
 ;; M-RET on a list item — insert a sibling item below (incrementing an ordinal).
-(define (org-insert-item)
+(define-command (org-insert-item)
   (let* ((L (buffer-line)) (line (org--line-text L)) (c (org--list-line-prefix line)))
     (if (not c) #f
         (let* ((indent (nth c 1)) (bullet (nth c 2))
@@ -2885,7 +2815,7 @@
 ;; Activation
 ;; ===========================================================================
 ;; Turn the active buffer into an Org buffer (M-x org-mode, or auto for .org).
-(define (org-mode)
+(define-command (org-mode)
   (set-major-mode "org-mode")
   (buffer-local-set "org-active" "t")
   (org--fontify)
@@ -2966,72 +2896,9 @@
 (define-key "fundamental" "ctrl-c l" 'org-store-link)
 
 ;; *Org Agenda* buffer.
-(define-key "org-agenda-mode" "enter" 'org-agenda-visit)
+(define-list-mode-keys "org-agenda-mode" 'org-agenda-visit)
 (define-key "org-agenda-mode" "g" 'org-agenda)
-(define-key "org-agenda-mode" "n" 'next-line)
-(define-key "org-agenda-mode" "p" 'previous-line)
-(define-key "org-agenda-mode" "q" 'kill-buffer)
-(set-option "line-numbers:org-agenda-mode" "false")
 
-(register-command 'org-mode)
-(register-command 'org-agenda)
-(register-command 'org-todo-list)
-(register-command 'org-capture)
-(register-command 'org-export-html)
-(register-command 'org-table-align)
-(register-command 'org-kill-line)
-(register-command 'org-table-next-cell)
-(register-command 'org-table-prev-cell)
-(register-command 'org-table-next-row)
-(register-command 'org-table-move-column-right)
-(register-command 'org-table-move-column-left)
-(register-command 'org-table-move-row-down)
-(register-command 'org-table-move-row-up)
-(register-command 'org-table-insert-column)
-(register-command 'org-table-delete-column)
-(register-command 'org-table-insert-row)
-(register-command 'org-table-delete-row)
-(register-command 'org-cycle)
-(register-command 'org-global-cycle)
-(register-command 'org-insert-heading)
-(register-command 'org-todo)
-(register-command 'org-set-tags)
-(register-command 'org-set-priority)
-(register-command 'org-promote)
-(register-command 'org-demote)
-(register-command 'org-move-subtree-up)
-(register-command 'org-move-subtree-down)
-(register-command 'org-babel-execute)
-(register-command 'org-toggle-inline-images)
-(register-command 'org-display-inline-images)
-(register-command 'org-remove-inline-images)
-(register-command 'org-toggle-latex-preview)
-(register-command 'org-toggle-leading-stars)
-(register-command 'org-toggle-indent)
-(register-command 'org-schedule)
-(register-command 'org-deadline)
-(register-command 'org-time-stamp)
-(register-command 'org-time-stamp-inactive)
-(register-command 'org-set-property)
-(register-command 'org-id-get-create)
-(register-command 'org-clock-in)
-(register-command 'org-clock-out)
-(register-command 'org-clock-cancel)
-(register-command 'org-clock-report)
-(register-command 'org-refile)
-(register-command 'org-archive-subtree)
-(register-command 'org-tags-view)
-(register-command 'org-agenda-dispatch)
-(register-command 'org-store-link)
-(register-command 'org-insert-link)
-(register-command 'org-footnote-new)
-(register-command 'org-table-recalculate)
-(register-command 'org-export-markdown)
-(register-command 'org-export-latex)
-(register-command 'org-export-ascii)
-(register-command 'org-columns)
-(register-command 'org-babel-execute-inline)
-(register-command 'org-insert-item)
 
 ;; *Org Columns* buffer.
 (define-key "org-columns-mode" "q" 'kill-buffer)

@@ -29,6 +29,11 @@ impl Editor {
         initial: &str,
         cx: &mut Context<Self>,
     ) {
+        // A non-isearch read replacing an isearch one invalidates the isearch
+        // transient state (it is only meaningful while its own read is up).
+        if !matches!(purpose, MinibufferPurpose::Isearch) {
+            self.isearch = None;
+        }
         self.minibuffer = Some(Minibuffer {
             prompt: prompt.to_string(),
             input: initial.to_string(),
@@ -129,13 +134,15 @@ impl Editor {
     /// The active buffer's directory as a minibuffer-ready prefix (trailing `/`),
     /// for file-name prompts. Falls back to the process cwd.
     pub(super) fn default_directory_input(&self) -> String {
+        // The fallback is the startup cwd (the editor never `chdir`s), avoiding
+        // a `current_dir` syscall — see `process_cwd`'s doc.
         let dir = self
-            .active_path
+            .active
+            .path
             .as_ref()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_default();
+            .unwrap_or_else(|| std::path::PathBuf::from(&self.process_cwd));
         let mut initial = dir.to_string_lossy().into_owned();
         if !initial.ends_with('/') {
             initial.push('/');
@@ -174,7 +181,9 @@ impl Editor {
         if self.is_isearch() {
             // Shorten the string and re-match from the original start so deleting
             // a char backs up to the earlier (shorter) match.
-            self.isearch_from = self.isearch_origin;
+            if let Some(st) = self.isearch.as_mut() {
+                st.from = st.origin;
+            }
             self.isearch_update(cx);
         }
         self.mb_dynamic_requery();
@@ -246,10 +255,9 @@ impl Editor {
             self.resolve_grammar_install_confirm(false, cx);
             return;
         }
-        if isearch {
+        if isearch && let Some(st) = self.isearch.take() {
             self.search_query = None;
-            self.isearch_match = None;
-            self.move_to(self.isearch_origin, cx);
+            self.move_to(st.origin, cx);
         }
         self.echo("Quit", cx);
     }
@@ -441,8 +449,11 @@ impl Editor {
             }
             MinibufferPurpose::QuitSave => match input.as_str() {
                 "yes" | "y" => {
-                    self.save_all_modified(cx);
-                    cx.quit();
+                    // A failed write aborts the quit — the error echo would never
+                    // be seen otherwise, and the unsaved buffer would be lost.
+                    if self.save_all_modified(cx) {
+                        cx.quit();
+                    }
                 }
                 "no" | "n" => cx.quit(),
                 _ => self.echo("Cancelled", cx),
@@ -480,7 +491,8 @@ impl Editor {
                     // RET on an empty isearch with a prior string: adopt it.
                     self.search_query = Some(prev);
                 }
-                self.isearch_match = None;
+                // The read is over; the transient state goes with it.
+                self.isearch = None;
             }
             MinibufferPurpose::ExCommand => self.run_ex_command(&input, cx),
             MinibufferPurpose::EvalExpression => {

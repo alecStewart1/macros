@@ -65,6 +65,11 @@
 
 ;; --- git plumbing -----------------------------------------------------------
 
+;; History depth caps: how many commits the log views fetch, and how many the
+;; unpushed/unpulled sections walk before cutting off.
+(define *magit-log-limit* 200)
+(define *magit-unpushed-limit* 256)
+
 ;; The repo root magit is operating on. Resolved from the buffer you launch from
 ;; (NOT the process cwd) — like Emacs's `magit-toplevel` over `default-directory`.
 (define *magit-dir* ".")
@@ -121,12 +126,10 @@
 
 ;; Pad a label to a fixed column so the file names after it line up.
 (define magit-label-width 11)
-(define (magit-spaces n)
-  (if (<= n 0) "" (string-append " " (magit-spaces (- n 1)))))
 (define (magit-pad s width)
   (let ((len (utf8-length s)))
     (if (>= len width) (string-append s " ")
-        (string-append s (magit-spaces (- width len))))))
+        (string-append s (string-repeat " " (- width len))))))
 
 ;; ONE `gix-status` call (no subprocess) gives the working tree AND the branch
 ;; line: porcelain-v1 entries plus a leading "## <branch>...<upstream> [ahead N,
@@ -270,32 +273,19 @@
 
 ;; --- transient switches (magit-style toggleable flags) ----------------------
 ;; The Rust transient is modal — any row key closes it. A "switch" row exploits
-;; that: it toggles a flag, then re-opens the SAME popup (re-rendered with the
-;; new [x]/[ ] state), so the popup appears to stay open while flags flip. Action
-;; rows read the flags to assemble their git arguments.
-(define *magit-switches* '())  ; (flag . #t/#f), flags namespaced "popup:arg"
-(define (magit-switch-on? flag)
-  (let loop ((s *magit-switches*))
-    (cond ((null? s) #f)
-          ((equal? (car (car s)) flag) (cdr (car s)))
-          (else (loop (cdr s))))))
-(define (magit-switch-toggle! flag)
-  (let ((on (magit-switch-on? flag)))
-    (set! *magit-switches*
-          (cons (cons flag (not on))
-                (filter (lambda (p) (not (equal? (car p) flag))) *magit-switches*)))))
-;; Clear every flag under a popup prefix (e.g. after the action runs).
-(define (magit-switch-clear! prefix)
-  (set! *magit-switches*
-        (filter (lambda (p) (not (starts-with? (car p) prefix))) *magit-switches*)))
+;; that: it toggles a flag (lib-transient's `transient-toggle-arg`), which then
+;; re-opens the SAME popup (re-rendered with the new [x]/[ ] state), so the
+;; popup appears to stay open while flags flip. Flags are namespaced
+;; "popup:arg", so each popup clears just its own with `transient-clear-args`.
+;; Action rows read the flags to assemble their git arguments.
 ;; A switch row's label: "[x] Text" when on, "[ ] Text" when off.
 (define (magit-sw-label text flag)
-  (string-append (if (magit-switch-on? flag) "[x] " "[ ] ") text))
+  (string-append (if (transient-arg-active? flag) "[x] " "[ ] ") text))
 ;; The git args contributed by the enabled flags among `specs` ((flag . arg) …).
 (define (magit-switch-args specs)
   (let loop ((s specs) (acc '()))
     (cond ((null? s) (reverse acc))
-          ((magit-switch-on? (car (car s))) (loop (cdr s) (cons (cdr (car s)) acc)))
+          ((transient-arg-active? (car (car s))) (loop (cdr s) (cons (cdr (car s)) acc)))
           (else (loop (cdr s) acc)))))
 
 ;; --- buffer construction ----------------------------------------------------
@@ -304,11 +294,9 @@
 ;; which the Rust overlay API addresses by byte). Sections record each file's
 ;; heading line and its diff body line range, so TAB can fold a section.
 
-(define *magit-lines* '())     ; rendered text lines (reversed while building)
-(define *magit-faces* '())     ; (line face) — whole-line colors
-(define *magit-n* 0)           ; next line number
-(define *magit-byte* 0)        ; byte offset of the next line
-(define *magit-accents* '())   ; (start end face) — sub-line overlay accents
+;; The line/face/byte/accent accumulation is lib-section's build state
+;; (section-begin / section-line / section-accent / section-point-line /
+;; section-point-byte); magit layers its own navigation tables on top:
 (define *magit-sections* '())  ; (heading-line path type body-start body-end)
 (define *magit-expanded* '())  ; (type . path) keys the user has expanded; every
                                ; other file section is collapsed by default
@@ -333,11 +321,7 @@
 ;; accent overlays, which target the *active* buffer — see magit-maybe-refresh.
 (define *magit-quiet* #f)
 
-(define (magit-emit text face type path)
-  (set! *magit-lines* (cons text *magit-lines*))
-  (when face (set! *magit-faces* (cons (list *magit-n* face) *magit-faces*)))
-  (set! *magit-n* (+ *magit-n* 1))
-  (set! *magit-byte* (+ *magit-byte* (utf8-length text) 1))) ; +1 = the newline
+(define (magit-emit text face) (section-line text face))
 
 ;; Section accessors over (heading-line path type body-start body-end).
 (define (sec-heading s) (nth s 0))
@@ -352,18 +336,16 @@
 ;; Emit a file heading line "  <label>  <path>", coloring the label by its
 ;; status via a sub-line overlay accent (the path keeps the magit-file face).
 ;; An empty label (untracked files) just emits "  <path>".
-(define (magit-emit-file-heading label path type)
-  (let ((byte *magit-byte*))
+(define (magit-emit-file-heading label path)
+  (let ((byte (section-point-byte)))
     (if (equal? label "")
-        (magit-emit (string-append "  " path) "magit-file" type path)
+        (magit-emit (string-append "  " path) "magit-file")
         (begin
           (magit-emit (string-append "  " (magit-pad label magit-label-width) path)
-                      "magit-file" type path)
+                      "magit-file")
           ;; Accent just the label bytes (after the 2-space indent).
-          (set! *magit-accents*
-                (cons (list (+ byte 2) (+ byte 2 (utf8-length label))
-                            (magit-label-face label))
-                      *magit-accents*))))))
+          (section-accent (+ byte 2) (+ byte 2 (utf8-length label))
+                          (magit-label-face label))))))
 
 ;; --- diff rendering ---------------------------------------------------------
 
@@ -386,11 +368,10 @@
 
 ;; Emit one diff line, recording a 1-byte overlay accent on its +/- marker.
 (define (magit-emit-diff-line l)
-  (let ((byte *magit-byte*))
-    (magit-emit l (magit-diff-face l) #f #f)
+  (let ((byte (section-point-byte)))
+    (magit-emit l (magit-diff-face l))
     (when (magit-diff-marker? l)
-      (set! *magit-accents*
-            (cons (list byte (+ byte 1) (magit-diff-marker-face l)) *magit-accents*)))))
+      (section-accent byte (+ byte 1) (magit-diff-marker-face l)))))
 
 ;; --- within-line word diff --------------------------------------------------
 ;; A `-`/`+` line pair usually differs in only part of the line. Highlight just
@@ -432,22 +413,19 @@
 ;; marker is one ASCII byte, so content starts at byte+1; the changed span's
 ;; byte offsets come from utf8-length of the content prefix (UTF-8 safe).
 (define (magit-emit-intra-line l other removed?)
-  (let ((byte *magit-byte*))
+  (let ((byte (section-point-byte)))
     ;; Dim the whole modified line; the marker and changed span are re-brightened
     ;; by the overlays below. (Unpaired add/remove lines never reach here, so
     ;; they keep the medium body face from magit-emit-diff-line.)
-    (magit-emit l (if removed? "magit-removed-dim" "magit-added-dim") #f #f)
-    (set! *magit-accents*
-          (cons (list byte (+ byte 1) (magit-diff-marker-face l)) *magit-accents*))
+    (magit-emit l (if removed? "magit-removed-dim" "magit-added-dim"))
+    (section-accent byte (+ byte 1) (magit-diff-marker-face l))
     (let* ((c1 (substring l 1 (string-length l)))
            (c2 (substring other 1 (string-length other)))
            (span (magit-change-span c1 c2)))
       (when (> (cdr span) (car span))
-        (let ((bs (+ byte 1 (utf8-length (substring c1 0 (car span)))))
-              (be (+ byte 1 (utf8-length (substring c1 0 (cdr span))))))
-          (set! *magit-accents*
-                (cons (list bs be (if removed? "magit-word-removed" "magit-word-added"))
-                      *magit-accents*)))))))
+        (section-accent (+ byte 1 (utf8-length (substring c1 0 (car span))))
+                        (+ byte 1 (utf8-length (substring c1 0 (cdr span))))
+                        (if removed? "magit-word-removed" "magit-word-added"))))))
 
 ;; The maximal leading run of `lines` whose members start with `prefix`, as
 ;; (run . rest).
@@ -593,12 +571,12 @@
 ;; header is emitted plainly; the body goes through the word-diff emitter. Line
 ;; count is unchanged (one emit per line), so hunk/group spans stay correct.
 (define (magit-emit-one-hunk header hunk type path)
-  (let ((hstart *magit-n*)
+  (let ((hstart (section-point-line))
         (lines (split-many hunk "\n")))
     (magit-emit-diff-line (car lines))
     (magit-emit-hunk-body (cdr lines))
     (set! *magit-hunks*
-          (cons (list hstart *magit-n* header hunk type path) *magit-hunks*))))
+          (cons (list hstart (section-point-line) header hunk type path) *magit-hunks*))))
 
 ;; Line view: hunks back to back, exactly as before the structural view existed.
 (define (magit-emit-hunks-flat header hunks type path)
@@ -608,19 +586,19 @@
 (define (magit-emit-group-heading ctx n)
   (magit-emit (string-append "    " (magit-group-display ctx)
                              "  (" (int->string n) (if (= n 1) " hunk)" " hunks)"))
-              "magit-group" #f #f))
+              "magit-group"))
 
 ;; Structural view: a sub-heading per funcname group, its hunks foldable as a
 ;; unit. Records each group's line span in *magit-groups* for fold/stage/nav.
 (define (magit-emit-hunks-grouped header hunks type path)
   (for-each
     (lambda (grp)
-      (let ((ctx (car grp)) (ghunks (cdr grp)) (ghead *magit-n*))
+      (let ((ctx (car grp)) (ghunks (cdr grp)) (ghead (section-point-line)))
         (magit-emit-group-heading ctx (length ghunks))
-        (let ((gbody *magit-n*))
+        (let ((gbody (section-point-line)))
           (for-each (lambda (hunk) (magit-emit-one-hunk header hunk type path)) ghunks)
           (set! *magit-groups*
-                (cons (list ghead gbody *magit-n* type path ctx) *magit-groups*)))))
+                (cons (list ghead gbody (section-point-line) type path ctx) *magit-groups*)))))
     (magit-group-hunks hunks)))
 
 ;; Group accessors over (heading body-start body-end type path context).
@@ -640,26 +618,26 @@
 (define (magit-emit-diff entry type diff-text)
   (let* ((label (car entry))
          (path (cadr entry))
-         (heading *magit-n*)
+         (heading (section-point-line))
          (parsed (parse-diff diff-text))
          (header (car parsed))
          (hunks (cdr parsed)))
-    (magit-emit-file-heading label path type)
-    (let ((body-start *magit-n*))
+    (magit-emit-file-heading label path)
+    (let ((body-start (section-point-line)))
       (if (magit-structural?)
           (magit-emit-hunks-grouped header hunks type path)
           (magit-emit-hunks-flat header hunks type path))
       (set! *magit-sections*
-            (cons (list heading path type body-start *magit-n*) *magit-sections*)))))
+            (cons (list heading path type body-start (section-point-line)) *magit-sections*)))))
 
 ;; `dmap` is the section's bulk-diff map; each file pulls its slice by path.
 (define (magit-emit-diff-section title files type dmap)
   (when (not (null? files))
-    (set! *magit-headings* (cons (cons *magit-n* type) *magit-headings*))
+    (set! *magit-headings* (cons (cons (section-point-line) type) *magit-headings*))
     (magit-emit (string-append title " (" (int->string (length files)) ")")
-                "magit-section-heading" #f #f)
+                "magit-section-heading")
     (for-each (lambda (f) (magit-emit-diff f type (diff-map-get dmap (magit-newpath (cadr f))))) files)
-    (magit-emit "" #f #f #f)))
+    (magit-emit "" #f)))
 
 ;; Untracked files have no index entry, so `git diff` skips them. Diff each one
 ;; against /dev/null (`--no-index`) to render its whole content as added lines —
@@ -678,19 +656,19 @@
 ;; file (`git add` / `git clean`), so `s`/`k` keep using the file-level path.
 (define (magit-emit-file-section title files type)
   (when (not (null? files))
-    (set! *magit-headings* (cons (cons *magit-n* type) *magit-headings*))
+    (set! *magit-headings* (cons (cons (section-point-line) type) *magit-headings*))
     (magit-emit (string-append title " (" (int->string (length files)) ")")
-                "magit-section-heading" #f #f)
+                "magit-section-heading")
     (for-each (lambda (f)
-                (let ((heading *magit-n*))
-                  (magit-emit-file-heading "" f type)
-                  (let ((body-start *magit-n*))
+                (let ((heading (section-point-line)))
+                  (magit-emit-file-heading "" f)
+                  (let ((body-start (section-point-line)))
                     (for-each magit-emit-diff-line (magit-untracked-diff f))
                     (set! *magit-sections*
-                          (cons (list heading f type body-start *magit-n*)
+                          (cons (list heading f type body-start (section-point-line))
                                 *magit-sections*)))))
               files)
-    (magit-emit "" #f #f #f)))
+    (magit-emit "" #f)))
 
 ;; Emit one commit/stash line "  <ref> <subject>", accenting the leading ref
 ;; (short hash or stash ref) and recording (line . ref) so RET can show it.
@@ -699,21 +677,20 @@
   (let* ((parts (split-many line " "))
          (tok (if (null? parts) "" (car parts)))
          (ref (if (ends-with? tok ":") (substring tok 0 (- (string-length tok) 1)) tok))
-         (ln *magit-n*)
-         (byte *magit-byte*))
-    (magit-emit (string-append "  " line) #f #f #f)
+         (ln (section-point-line))
+         (byte (section-point-byte)))
+    (magit-emit (string-append "  " line) #f)
     (when (not (equal? tok ""))
-      (set! *magit-accents*
-            (cons (list (+ byte 2) (+ byte 2 (utf8-length tok)) "magit-hash") *magit-accents*))
+      (section-accent (+ byte 2) (+ byte 2 (utf8-length tok)) "magit-hash")
       (set! *magit-commit-lines* (cons (cons ln ref) *magit-commit-lines*)))))
 
 ;; A titled section of commit/stash lines (no diff bodies, nothing to fold).
 (define (magit-emit-commit-section title lines)
   (when (not (null? lines))
     (magit-emit (string-append title " (" (int->string (length lines)) ")")
-                "magit-section-heading" #f #f)
+                "magit-section-heading")
     (for-each magit-emit-commit lines)
-    (magit-emit "" #f #f #f)))
+    (magit-emit "" #f)))
 
 ;; The commit/stash ref on `line`, or #f.
 (define (magit-commit-at-line line)
@@ -728,14 +705,13 @@
 (define magit-header-width 10)
 (define (magit-emit-header label branch rest)
   (let* ((labelcol (magit-pad label magit-header-width))
-         (byte *magit-byte*)
+         (byte (section-point-byte))
          (bstart (+ byte (utf8-length labelcol)))
          (bend (+ bstart (utf8-length branch))))
-    (magit-emit (string-append labelcol branch rest) "magit-header" #f #f)
-    (set! *magit-accents* (cons (list bstart bend "magit-branch") *magit-accents*))
+    (magit-emit (string-append labelcol branch rest) "magit-header")
+    (section-accent bstart bend "magit-branch")
     (when (> (utf8-length rest) 0)
-      (set! *magit-accents*
-            (cons (list bend (+ bend (utf8-length rest)) "magit-context") *magit-accents*)))))
+      (section-accent bend (+ bend (utf8-length rest)) "magit-context"))))
 
 ;; The section matching both `path` and `type`, or #f. Type-qualified because a
 ;; partially-staged file appears in BOTH Unstaged and Staged — point restore must
@@ -751,8 +727,7 @@
 ;; clear-overlays first so a refresh doesn't stack stale accents/folds.
 (define (magit-apply-overlays)
   (clear-overlays)
-  (for-each (lambda (a) (overlay-set-face (nth a 0) (nth a 1) (nth a 2)))
-            (reverse *magit-accents*))
+  (section-apply-accents)
   ;; Fold every file section the user hasn't explicitly expanded (collapsed by
   ;; default). Sections with no diff body (untracked files) have nothing to fold.
   (for-each (lambda (sec)
@@ -811,11 +786,7 @@
         ;; afterward and the buffer doesn't visually jump (only meaningful when
         ;; *magit* is the focused buffer — the interactive refresh path).
         (row (window-cursor-row)))
-    (set! *magit-lines* '())
-    (set! *magit-faces* '())
-    (set! *magit-n* 0)
-    (set! *magit-byte* 0)
-    (set! *magit-accents* '())
+    (section-begin)
     (set! *magit-sections* '())
     (set! *magit-hunks* '())
     (set! *magit-groups* '())
@@ -843,10 +814,10 @@
         (magit-emit-header "Merge:" up (magit-ab-string ab)))
       (when (magit-merging?)
         (magit-emit "Merging — resolve conflicts, stage, then commit."
-                    "magit-label-deleted" #f #f))
+                    "magit-label-deleted"))
       (when (magit-rebasing?)
-        (magit-emit "Rebase in progress." "magit-label-deleted" #f #f))
-      (magit-emit "" #f #f #f)
+        (magit-emit "Rebase in progress." "magit-label-deleted"))
+      (magit-emit "" #f)
       ;; --- working tree ---
       (magit-emit-file-section "Untracked files" untracked "untracked")
       (magit-emit-diff-section "Unstaged changes" unstaged "unstaged"
@@ -854,8 +825,8 @@
       (magit-emit-diff-section "Staged changes" staged "staged"
                                (if (null? staged) '() (build-diff-map (gix-diff-cached *magit-dir*))))
       (when (and (null? untracked) (null? unstaged) (null? staged))
-        (magit-emit "Nothing to commit, working tree clean." "magit-file" #f #f)
-        (magit-emit "" #f #f #f))
+        (magit-emit "Nothing to commit, working tree clean." "magit-file")
+        (magit-emit "" #f))
       ;; --- stashes + ahead/behind (lazy: 3 git calls only when shown, toggle
       ;;     with H — recent commits below always render) ---
       (if *magit-show-history*
@@ -863,11 +834,11 @@
             (magit-emit-commit-section "Stashes" (gix-stash-list *magit-dir*))
             (when (not (equal? up ""))
               (magit-emit-commit-section (string-append "Unpushed to " up)
-                                         (gix-log-range *magit-dir* "HEAD" up 256))
+                                         (gix-log-range *magit-dir* "HEAD" up *magit-unpushed-limit*))
               (magit-emit-commit-section (string-append "Unpulled from " up)
-                                         (gix-log-range *magit-dir* up "HEAD" 256))))
+                                         (gix-log-range *magit-dir* up "HEAD" *magit-unpushed-limit*))))
           (magit-emit "Press H to show stashes / unpushed / unpulled."
-                      "magit-context" #f #f))
+                      "magit-context"))
       ;; --- recent commits (shown by default, one gix rev-walk) ---
       (magit-emit-commit-section "Recent commits"
                                  (gix-log-oneline *magit-dir* 10)))
@@ -875,12 +846,10 @@
         ;; Background refresh: update in place (works on an inactive pane) and
         ;; skip overlays — they'd paint onto whatever buffer is in front.
         (render-buffer-quiet "*magit*" "magit-status"
-                             (join-lines (reverse *magit-lines*))
-                             (reverse *magit-faces*))
+                             (section-text) (section-line-faces))
         (begin
           (render-buffer "*magit*" "magit-status"
-                         (join-lines (reverse *magit-lines*))
-                         (reverse *magit-faces*))
+                         (section-text) (section-line-faces))
           (magit-apply-overlays)
           (magit-restore-point cap)
           ;; Pin the cursor's line back to the same screen row it was on, so
@@ -909,7 +878,7 @@
 ;; from inside a *magit…* buffer keeps the repo we're already viewing; from any
 ;; other buffer we require a git work-tree and refuse (like projectile) when the
 ;; buffer isn't part of one.
-(define (magit-status)
+(define-command (magit-status)
   (if (starts-with? (current-buffer) "*magit")
       (magit-render)                       ; refresh the repo we're already viewing
       (let ((repo (magit-current-repo)))
@@ -1014,6 +983,30 @@
         #f
         (string-append (nth (car hs) 2) "\n"
                        (string-join (map (lambda (h) (nth h 3)) hs) "\n") "\n"))))
+
+;; --- target resolution for the point-based verbs -----------------------------
+;; What `s` / `u` / `k` should act on when there is no region: the FIRST match
+;; of hunk → function group (structural view, on its sub-heading) → top-level
+;; section header → file, as a tagged list — ('hunk h), ('group g),
+;; ('section type), ('file type path) — or #f. One resolver, one precedence:
+;; a group sub-heading always wins over the header/file fallbacks (it is never
+;; the same line as a top-level header, but a single order keeps the three
+;; verbs from drifting apart again — discard used to check headers first).
+(define (magit-target-at-point)
+  (let* ((line (buffer-line))
+         (h (magit-hunk-at-line line)))
+    (if h
+        (list 'hunk h)
+        (let ((g (and (magit-structural?) (magit-group-on-heading line))))
+          (if g
+              (list 'group g)
+              (let ((ht (magit-heading-type-at-line line)))
+                (if ht
+                    (list 'section ht)
+                    (let ((cur (magit-current)))
+                      (if cur (list 'file (car cur) (cadr cur)) #f)))))))))
+(define (target-tag t) (car t))
+(define (target-arg t) (nth t 1))
 
 ;; --- error surfacing --------------------------------------------------------
 ;; Run git, refresh, echo `msg` on success — or pop the stderr into a buffer.
@@ -1156,21 +1149,21 @@
               (if patch
                   (when (magit-apply-patch-text patch #t #f) (message "Staged region"))
                   (message "Nothing to stage in region")))))
-      (let ((h (magit-hunk-at-line (buffer-line)))
-            (g (and (magit-structural?) (magit-group-on-heading (buffer-line))))
-            (ht (magit-heading-type-at-line (buffer-line))))
+      (let ((t (magit-target-at-point)))
         (cond
-          (h (when (magit-apply-hunk h #t #f) (message "Staged hunk")))
-          (g (let ((patch (magit-group-patch g)))
-               (when (and patch (magit-apply-patch-text patch #t #f))
-                 (message (string-append "Staged " (magit-group-display (grp-context g)))))))
-          ((and ht (or (equal? ht "untracked") (equal? ht "unstaged")))
-           (magit-stage-section ht))
+          ((not t) (message "Nothing to stage here"))
+          ((eq? (target-tag t) 'hunk)
+           (when (magit-apply-hunk (target-arg t) #t #f) (message "Staged hunk")))
+          ((eq? (target-tag t) 'group)
+           (let* ((g (target-arg t)) (patch (magit-group-patch g)))
+             (when (and patch (magit-apply-patch-text patch #t #f))
+               (message (string-append "Staged " (magit-group-display (grp-context g)))))))
+          ((eq? (target-tag t) 'section)
+           (if (member (target-arg t) (list "untracked" "unstaged"))
+               (magit-stage-section (target-arg t))
+               (message "Nothing to stage here")))
           (else
-           (let ((cur (magit-current)))
-             (if cur
-                 (magit-do (list "add" "--" (magit-newpath (cadr cur))) "Staged file")
-                 (message "Nothing to stage here"))))))))
+           (magit-do (list "add" "--" (magit-newpath (nth t 2))) "Staged file"))))))
 
 ;; u: unstage the region (multiple files and/or selected lines), else hunk/file at point.
 (define (magit-unstage)
@@ -1185,21 +1178,22 @@
               (if patch
                   (when (magit-apply-patch-text patch #t #t) (message "Unstaged region"))
                   (message "Nothing to unstage in region")))))
-      (let ((h (magit-hunk-at-line (buffer-line)))
-            (g (and (magit-structural?) (magit-group-on-heading (buffer-line))))
-            (ht (magit-heading-type-at-line (buffer-line))))
+      (let ((t (magit-target-at-point)))
         (cond
-          (h (when (magit-apply-hunk h #t #t) (message "Unstaged hunk")))
-          (g (let ((patch (magit-group-patch g)))
-               (when (and patch (magit-apply-patch-text patch #t #t))
-                 (message (string-append "Unstaged " (magit-group-display (grp-context g)))))))
-          ((and ht (equal? ht "staged")) (magit-unstage-section))
+          ((not t) (message "Nothing to unstage here"))
+          ((eq? (target-tag t) 'hunk)
+           (when (magit-apply-hunk (target-arg t) #t #t) (message "Unstaged hunk")))
+          ((eq? (target-tag t) 'group)
+           (let* ((g (target-arg t)) (patch (magit-group-patch g)))
+             (when (and patch (magit-apply-patch-text patch #t #t))
+               (message (string-append "Unstaged " (magit-group-display (grp-context g)))))))
+          ((eq? (target-tag t) 'section)
+           (if (equal? (target-arg t) "staged")
+               (magit-unstage-section)
+               (message "Nothing to unstage here")))
           (else
-           (let ((cur (magit-current)))
-             (if cur
-                 (magit-do (append (list "reset" "-q" "HEAD" "--") (magit-pathspecs (cadr cur)))
-                           "Unstaged file")
-                 (message "Nothing to unstage here"))))))))
+           (magit-do (append (list "reset" "-q" "HEAD" "--") (magit-pathspecs (nth t 2)))
+                     "Unstaged file"))))))
 
 (define (magit-stage-all)   (magit-do (list "add" "-A") "Staged all changes"))
 (define (magit-unstage-all)
@@ -1243,39 +1237,40 @@
                   (message "Nothing to discard in region")
                   (magit-confirm "Discard region?"
                     (lambda () (when (magit-apply-patch-text patch #f #t) (message "Discarded region"))))))))
-      (let ((h (magit-hunk-at-line (buffer-line)))
-            (g (and (magit-structural?) (magit-group-on-heading (buffer-line))))
-            (ht (magit-heading-type-at-line (buffer-line))))
+      (let ((t (magit-target-at-point)))
         (cond
-          (h (magit-confirm "Discard hunk?"
-               (lambda () (when (magit-apply-hunk h #f #t) (message "Discarded hunk")))))
-          ((and ht (or (equal? ht "untracked") (equal? ht "unstaged")))
-           (magit-discard-section ht))
-          (g (let ((patch (magit-group-patch g)))
-               (when patch
-                 (magit-confirm (string-append "Discard "
-                                               (magit-group-display (grp-context g)) "?")
-                   (lambda () (when (magit-apply-patch-text patch #f #t)
-                                (message "Discarded group")))))))
+          ((not t) (message "Nothing to discard here"))
+          ((eq? (target-tag t) 'hunk)
+           (let ((h (target-arg t)))
+             (magit-confirm "Discard hunk?"
+               (lambda () (when (magit-apply-hunk h #f #t) (message "Discarded hunk"))))))
+          ((eq? (target-tag t) 'group)
+           (let* ((g (target-arg t)) (patch (magit-group-patch g)))
+             (when patch
+               (magit-confirm (string-append "Discard "
+                                             (magit-group-display (grp-context g)) "?")
+                 (lambda () (when (magit-apply-patch-text patch #f #t)
+                              (message "Discarded group")))))))
+          ((eq? (target-tag t) 'section)
+           (if (member (target-arg t) (list "untracked" "unstaged"))
+               (magit-discard-section (target-arg t))
+               (message "Nothing to discard here")))
           (else
-           (let ((cur (magit-current)))
-              (if (not cur)
-                  (message "Nothing to discard here")
-                  (let ((type (car cur)) (path (cadr cur)))
-                    (magit-confirm (string-append "Discard changes to " path "?")
-                      (lambda ()
-                        (if (equal? type "untracked")
-                            (magit-do (list "clean" "-f" "--" (magit-newpath path))
-                                      (string-append "Removed " path))
-                            (magit-do (append (list "checkout" "HEAD" "--") (magit-pathspecs path))
-                                      (string-append "Discarded " path)))))))))))))
+           (let ((type (nth t 1)) (path (nth t 2)))
+             (magit-confirm (string-append "Discard changes to " path "?")
+               (lambda ()
+                 (if (equal? type "untracked")
+                     (magit-do (list "clean" "-f" "--" (magit-newpath path))
+                               (string-append "Removed " path))
+                     (magit-do (append (list "checkout" "HEAD" "--") (magit-pathspecs path))
+                               (string-append "Discarded " path)))))))))))
 
 ;; --- commit (c): an editable *git-commit* buffer ----------------------------
 ;; Switch rows toggle commit flags; action rows read them. "Amend HEAD" reuses
 ;; the last message; --signoff / --no-verify reach the final `git commit`.
-(define (magit-commit-toggle-amend)    (magit-switch-toggle! "commit:amend")    (magit-commit-popup))
-(define (magit-commit-toggle-signoff)  (magit-switch-toggle! "commit:signoff")  (magit-commit-popup))
-(define (magit-commit-toggle-noverify) (magit-switch-toggle! "commit:noverify") (magit-commit-popup))
+(define (magit-commit-toggle-amend)    (transient-toggle-arg "commit:amend" magit-commit-popup))
+(define (magit-commit-toggle-signoff)  (transient-toggle-arg "commit:signoff" magit-commit-popup))
+(define (magit-commit-toggle-noverify) (transient-toggle-arg "commit:noverify" magit-commit-popup))
 (define (magit-commit-popup)
   (transient "Commit"
     (list
@@ -1306,16 +1301,16 @@
   (message "Edit message — C-x k or C-c C-c to commit, C-c C-k to cancel"))
 ;; Save unsaved file buffers first, so the commit captures on-disk content the
 ;; user actually sees — magit's save-some-buffers-before-commit guard.
-(define (magit-do-commit)
+(define-command (magit-do-commit)
   (save-some-buffers)
-  (if (magit-switch-on? "commit:amend")
+  (if (transient-arg-active? "commit:amend")
       (magit-commit-buffer (gix-head-message *magit-dir*) "yes")
       (magit-commit-buffer "" "no")))
-(define (magit-do-reword) (magit-commit-buffer (gix-head-message *magit-dir*) "yes"))
-(define (magit-do-amend)
+(define-command (magit-do-reword) (magit-commit-buffer (gix-head-message *magit-dir*) "yes"))
+(define-command (magit-do-amend)
   (save-some-buffers)
   (magit-do (append (list "commit" "--amend" "--no-edit") (magit-commit-flags)) "Amended HEAD")
-  (magit-switch-clear! "commit:"))
+  (transient-clear-args "commit:"))
 
 (define (magit-commit-confirm)
   (let ((msg (magit-strip-comments (buffer-string)))
@@ -1330,14 +1325,14 @@
                              (magit-commit-flags)
                              (list "-F" file)) "")))
             (kill-buffer-named "*git-commit*")
-            (magit-switch-clear! "commit:")
+            (transient-clear-args "commit:")
             (magit-render)
             (if (equal? (car r) "0")
                 (message (if amend "Amended HEAD" "Committed"))
                 (magit-error (nth r 2))))))))
 (define (magit-commit-cancel)
   (kill-buffer-named "*git-commit*")
-  (magit-switch-clear! "commit:")
+  (transient-clear-args "commit:")
   (magit-render)
   (message "Commit cancelled"))
 
@@ -1363,32 +1358,32 @@
           (list "k" "Delete"            'magit-branch-delete))))
 (define (magit-remote-branches) (gix-remote-branches *magit-dir*))
 ;; Check out a remote branch as a new local tracking branch ("origin/x" → "x").
-(define (magit-checkout-remote)
+(define-command (magit-checkout-remote)
   (helm (list (list "Checkout remote" (magit-remote-branches) 'magit-do-checkout-remote))))
 (define (magit-do-checkout-remote rb)
   (let ((local (car (reverse (split-many rb "/")))))
     (magit-do (list "checkout" "-b" local "--track" rb) (string-append "Checked out " local))))
-(define (magit-branch-set-upstream)
+(define-command (magit-branch-set-upstream)
   (helm (list (list "Set upstream to" (magit-remote-branches) 'magit-do-set-upstream))))
 (define (magit-do-set-upstream u) (magit-do (list "branch" "--set-upstream-to" u) (string-append "Upstream → " u)))
-(define (magit-checkout)
+(define-command (magit-checkout)
   (helm (list (list "Checkout" (magit-branches) 'magit-do-checkout))))
 (define (magit-do-checkout b) (magit-do (list "checkout" b) (string-append "Checked out " b)))
-(define (magit-branch-create) (read-string "Create & checkout branch: " 'magit-do-branch-create))
+(define-command (magit-branch-create) (read-string "Create & checkout branch: " 'magit-do-branch-create))
 (define (magit-do-branch-create name)
   (when (not (equal? (trim-end name) ""))
     (magit-do (list "checkout" "-b" name) (string-append "Created " name))))
-(define (magit-branch-rename) (read-string "Rename current branch to: " 'magit-do-branch-rename))
+(define-command (magit-branch-rename) (read-string "Rename current branch to: " 'magit-do-branch-rename))
 (define (magit-do-branch-rename name)
   (when (not (equal? (trim-end name) ""))
     (magit-do (list "branch" "-m" name) (string-append "Renamed to " name))))
-(define (magit-branch-delete)
+(define-command (magit-branch-delete)
   (helm (list (list "Delete branch" (magit-branches) 'magit-do-branch-delete))))
 (define (magit-do-branch-delete b) (magit-do (list "branch" "-d" b) (string-append "Deleted " b)))
 
 ;; --- push / pull / fetch (P / F / f) ----------------------------------------
-(define (magit-push-toggle-force)    (magit-switch-toggle! "push:force")    (magit-push-popup))
-(define (magit-push-toggle-noverify) (magit-switch-toggle! "push:noverify") (magit-push-popup))
+(define (magit-push-toggle-force)    (transient-toggle-arg "push:force" magit-push-popup))
+(define (magit-push-toggle-noverify) (transient-toggle-arg "push:noverify" magit-push-popup))
 (define (magit-push-flags)
   (magit-switch-args (list (cons "push:force" "--force-with-lease")
                            (cons "push:noverify" "--no-verify"))))
@@ -1407,17 +1402,17 @@
 ;; Push the current branch. With no upstream configured a plain `git push`
 ;; aborts ("has no upstream branch"), so transparently fall back to `-u origin
 ;; HEAD` to create and track it on first push — git's push.autoSetupRemote.
-(define (magit-push)
+(define-command (magit-push)
   (if (equal? (magit-current-upstream) "")
       (magit-run-async (append (list "push" "-u" "origin" "HEAD") (magit-push-flags))
                        "Pushed, upstream set")
       (magit-run-async (append (list "push") (magit-push-flags)) "Pushed"))
-  (magit-switch-clear! "push:"))
-(define (magit-push-upstream)
+  (transient-clear-args "push:"))
+(define-command (magit-push-upstream)
   (magit-run-async (append (list "push" "-u" "origin" "HEAD") (magit-push-flags)) "Pushed, upstream set")
-  (magit-switch-clear! "push:"))
+  (transient-clear-args "push:"))
 
-(define (magit-pull-toggle-rebase) (magit-switch-toggle! "pull:rebase") (magit-pull-popup))
+(define (magit-pull-toggle-rebase) (transient-toggle-arg "pull:rebase" magit-pull-popup))
 (define (magit-pull-popup)
   (transient "Pull"
     (list
@@ -1425,12 +1420,12 @@
             (list "r" (magit-sw-label "Rebase (--rebase)" "pull:rebase") 'magit-pull-toggle-rebase))
       (list "Actions"
             (list "p" "Pull" 'magit-pull)))))
-(define (magit-pull)
+(define-command (magit-pull)
   (magit-run-async (append (list "pull")
                            (magit-switch-args (list (cons "pull:rebase" "--rebase")))) "Pulled")
-  (magit-switch-clear! "pull:"))
+  (transient-clear-args "pull:"))
 
-(define (magit-fetch-toggle-prune) (magit-switch-toggle! "fetch:prune") (magit-fetch-popup))
+(define (magit-fetch-toggle-prune) (transient-toggle-arg "fetch:prune" magit-fetch-popup))
 (define (magit-fetch-flags) (magit-switch-args (list (cons "fetch:prune" "--prune"))))
 (define (magit-fetch-popup)
   (transient "Fetch"
@@ -1440,12 +1435,12 @@
       (list "Actions"
             (list "a" "Fetch all"    'magit-fetch-all)
             (list "o" "Fetch origin" 'magit-fetch-origin)))))
-(define (magit-fetch-all)
+(define-command (magit-fetch-all)
   (magit-run-async (append (list "fetch" "--all") (magit-fetch-flags)) "Fetched all remotes")
-  (magit-switch-clear! "fetch:"))
-(define (magit-fetch-origin)
+  (transient-clear-args "fetch:"))
+(define-command (magit-fetch-origin)
   (magit-run-async (append (list "fetch" "origin") (magit-fetch-flags)) "Fetched origin")
-  (magit-switch-clear! "fetch:"))
+  (transient-clear-args "fetch:"))
 
 ;; --- stash (z) --------------------------------------------------------------
 (define (magit-stash-popup)
@@ -1458,28 +1453,28 @@
           (list "k" "Drop latest"      'magit-stash-drop)
           (list "shift-k" "Drop all"   'magit-stash-drop-all)
           (list "l" "List"             'magit-stash-list))))
-(define (magit-stash-push-msg) (read-string "Stash message: " 'magit-do-stash-msg))
+(define-command (magit-stash-push-msg) (read-string "Stash message: " 'magit-do-stash-msg))
 (define (magit-do-stash-msg m)
   (when (not (equal? (trim-end m) "")) (magit-do (list "stash" "push" "-m" m) "Stashed")))
 (define (magit-stash-refs) (git-lines (list "stash" "list" "--format=%gd")))
-(define (magit-stash-pick)
+(define-command (magit-stash-pick)
   (helm (list (list "Pop stash" (magit-stash-refs) 'magit-do-stash-pop-ref))))
 (define (magit-do-stash-pop-ref r) (magit-do (list "stash" "pop" r) (string-append "Popped " r)))
-(define (magit-stash)       (magit-do (list "stash" "push") "Stashed"))
-(define (magit-stash-pop)   (magit-do (list "stash" "pop") "Popped stash"))
-(define (magit-stash-apply) (magit-do (list "stash" "apply") "Applied stash"))
-(define (magit-stash-drop)
+(define-command (magit-stash)       (magit-do (list "stash" "push") "Stashed"))
+(define-command (magit-stash-pop)   (magit-do (list "stash" "pop") "Popped stash"))
+(define-command (magit-stash-apply) (magit-do (list "stash" "apply") "Applied stash"))
+(define-command (magit-stash-drop)
   (magit-confirm "Drop latest stash?"
     (lambda () (magit-do (list "stash" "drop") "Dropped stash"))))
-(define (magit-stash-drop-all)
+(define-command (magit-stash-drop-all)
   (magit-confirm "Drop all stashes?"
     (lambda () (magit-do (list "stash" "clear") "Dropped all stashes"))))
-(define (magit-stash-list)
+(define-command (magit-stash-list)
   (magit-show-log "*magit-stash*" (string-join (gix-stash-list *magit-dir*) "\n")))
 
 ;; --- log (l) → a read-only *magit-log* buffer -------------------------------
-(define (magit-log-toggle-graph) (magit-switch-toggle! "log:graph") (magit-log-popup))
-(define (magit-log-popup)
+(define (magit-log-toggle-graph) (transient-toggle-arg "log:graph" magit-log-popup))
+(define-command (magit-log-popup)
   (if (not (magit-ensure-dir))  ; reachable via M-x from a file buffer
       (message "Not inside a git repository")
       (transient "Log"
@@ -1493,18 +1488,18 @@
 (define (magit-log-flags) (magit-switch-args (list (cons "log:graph" "--graph"))))
 ;; gix renders the oneline+decorate log (no subprocess); the `--graph` toggle
 ;; falls back to git, whose ASCII commit-graph art gix can't reproduce.
-(define (magit-log-current)
+(define-command (magit-log-current)
   (magit-show-log "*magit-log*"
-                  (if (magit-switch-on? "log:graph")
+                  (if (transient-arg-active? "log:graph")
                       (git (append (list "log" "--oneline" "--decorate" "--graph")
-                                   (list "-n" "200")))
-                      (string-join (gix-log-decorated *magit-dir* #f 200) "\n"))))
-(define (magit-log-all)
+                                   (list "-n" (int->string *magit-log-limit*))))
+                      (string-join (gix-log-decorated *magit-dir* #f *magit-log-limit*) "\n"))))
+(define-command (magit-log-all)
   (magit-show-log "*magit-log*"
-                  (if (magit-switch-on? "log:graph")
+                  (if (transient-arg-active? "log:graph")
                       (git (append (list "log" "--oneline" "--decorate" "--all" "--graph")
-                                   (list "-n" "200")))
-                      (string-join (gix-log-decorated *magit-dir* #t 200) "\n"))))
+                                   (list "-n" (int->string *magit-log-limit*))))
+                      (string-join (gix-log-decorated *magit-dir* #t *magit-log-limit*) "\n"))))
 (define (magit-show-log name text)
   (render-buffer name "magit-log-mode"
                  (if (equal? (trim-end text) "") "No output." (trim-end text)) '()))
@@ -1547,7 +1542,7 @@
     (if cur
         (magit-show-log "*magit-log*"
                         (string-join
-                          (gix-log-file *magit-dir* (magit-newpath (cadr cur)) 200) "\n"))
+                          (gix-log-file *magit-dir* (magit-newpath (cadr cur)) *magit-log-limit*) "\n"))
         (message "No file at point"))))
 
 ;; --- reset (X) --------------------------------------------------------------
@@ -1556,25 +1551,24 @@
     (list (list "m" "Mixed — unstage, keep changes"   'magit-reset-mixed)
           (list "s" "Soft — undo last commit, keep"   'magit-reset-soft)
           (list "h" "Hard — DISCARD working changes"  'magit-reset-hard))))
-(define (magit-reset-mixed) (magit-do (list "reset" "--mixed" "HEAD") "Reset (mixed)"))
-(define (magit-reset-soft)  (magit-do (list "reset" "--soft" "HEAD~1") "Undid last commit (soft)"))
-(define (magit-reset-hard)
+(define-command (magit-reset-mixed) (magit-do (list "reset" "--mixed" "HEAD") "Reset (mixed)"))
+(define-command (magit-reset-soft)  (magit-do (list "reset" "--soft" "HEAD~1") "Undid last commit (soft)"))
+(define-command (magit-reset-hard)
   (magit-confirm "Hard reset to HEAD — discard ALL working changes?"
     (lambda () (magit-do (list "reset" "--hard" "HEAD") "Reset --hard HEAD"))))
 
 ;; --- remote (M) -------------------------------------------------------------
-(define *magit-remote-name* "")
 (define (magit-remote-popup)
   (transient "Remote"
     (list (list "a" "Add"    'magit-remote-add)
           (list "k" "Remove" 'magit-remote-remove))))
-(define (magit-remote-add) (read-string "Remote name: " 'magit-remote-add-name))
-(define (magit-remote-add-name name)
-  (set! *magit-remote-name* name)
-  (read-string "Remote URL: " 'magit-remote-add-url))
-(define (magit-remote-add-url url)
-  (magit-do (list "remote" "add" *magit-remote-name* url) "Remote added"))
-(define (magit-remote-remove)
+;; Two chained prompts; the name rides into the URL prompt's closure.
+(define-command (magit-remote-add)
+  (read-string "Remote name: "
+    (lambda (name)
+      (read-string "Remote URL: "
+        (lambda (url) (magit-do (list "remote" "add" name url) "Remote added"))))))
+(define-command (magit-remote-remove)
   (helm (list (list "Remove remote" (magit-remotes) 'magit-do-remote-remove))))
 (define (magit-do-remote-remove r) (magit-do (list "remote" "remove" r) "Remote removed"))
 
@@ -1583,11 +1577,11 @@
   (transient "Tag"
     (list (list "t" "Create" 'magit-tag-create)
           (list "k" "Delete" 'magit-tag-delete))))
-(define (magit-tag-create) (read-string "Tag name: " 'magit-do-tag-create))
+(define-command (magit-tag-create) (read-string "Tag name: " 'magit-do-tag-create))
 (define (magit-do-tag-create name)
   (when (not (equal? (trim-end name) ""))
     (magit-do (list "tag" name) (string-append "Tagged " name))))
-(define (magit-tag-delete)
+(define-command (magit-tag-delete)
   (helm (list (list "Delete tag" (magit-tags) 'magit-do-tag-delete))))
 (define (magit-do-tag-delete t) (magit-do (list "tag" "-d" t) (string-append "Deleted tag " t)))
 
@@ -1598,13 +1592,13 @@
           (list "o" "Take ours (file at point)"  'magit-take-ours)
           (list "t" "Take theirs (file at point)" 'magit-take-theirs)
           (list "a" "Abort"                      'magit-merge-abort))))
-(define (magit-merge)
+(define-command (magit-merge)
   (helm (list (list "Merge branch" (magit-branches) 'magit-do-merge))))
 (define (magit-do-merge b) (magit-do (list "merge" b) (string-append "Merged " b)))
 (define (magit-merge-abort) (magit-do (list "merge" "--abort") "Merge aborted"))
 
 ;; --- dispatch (?) : the top-level menu --------------------------------------
-(define (magit-dispatch)
+(define-command (magit-dispatch)
   (if (not (magit-ensure-dir))  ; reachable via M-x from a file buffer
       (message "Not inside a git repository")
       ;; Grouped (multi-column) transient: each inner list is a titled column.
@@ -1713,8 +1707,9 @@
 ;; colorization as the status diffs: green/red bodies, accented +/- markers, an
 ;; accented commit hash. Builds local accumulators (NOT the status buffer's
 ;; render globals) so returning to *magit* leaves its navigation state intact.
-(define (magit-show-commit ref)
-  (let* ((raw   (trim-end (gix-show *magit-dir* ref)))
+(define (magit-show-commit ref . rest)
+  (let* ((dir   (if (null? rest) *magit-dir* (car rest)))
+         (raw   (trim-end (gix-show dir ref)))
          (lines (split-many raw "\n")))
     (let loop ((ls lines) (n 0) (byte 0) (in-diff #f) (faces '()) (accents '()))
       (if (null? ls)
@@ -1941,11 +1936,11 @@
     (set! *magit-blame-line-on* #f)
     (set! *magit-blame-line-last* -1)
     (remove-hook "post-command-hook" "magit-blame-line-refresh")))
-(define (magit-blame-toggle)
+(define-command (magit-blame-toggle)
   (if *magit-blame-on*
       (begin (magit-blame-off) (message "Blame off"))
       (begin (magit-blame-off) (magit-blame-annotate))))
-(define (magit-blame-line-toggle)
+(define-command (magit-blame-line-toggle)
   (if *magit-blame-line-on*
       (begin (magit-blame-off) (message "Blame (current line) off"))
       (begin
@@ -1956,20 +1951,16 @@
         (message "Blame (current line) on — follows point"))))
 
 ;; --- at-point actions (work in either mode) ---------------------------------
-(define (magit-blame-show)              ; show the commit that last touched this line
+(define-command (magit-blame-show)              ; show the commit that last touched this line
   (let ((rec (magit-blame-rec-at (+ (buffer-line) 1))))
     (cond ((not rec) (message "No blame for this line"))
           ((magit-blame-uncommitted? rec) (message "Line not committed yet"))
           (else
-           ;; `magit-show-commit` runs `git show` via `*magit-dir*`, which is only
-           ;; set once magit-status has opened. Inline blame can run with no status
-           ;; buffer, so point git at THIS buffer's repo for the call, then restore
-           ;; so a status buffer for another repo keeps its directory.
-           (let ((saved *magit-dir*))
-             (set! *magit-dir* (buffer-directory))
-             (magit-show-commit (magit-blame-rec-sha rec))
-             (set! *magit-dir* saved))))))
-(define (magit-blame-copy)              ; copy the commit hash to the clipboard
+           ;; `*magit-dir*` is only set once magit-status has opened, and inline
+           ;; blame can run with no status buffer — so pass THIS buffer's repo
+           ;; explicitly (a status buffer for another repo keeps its directory).
+           (magit-show-commit (magit-blame-rec-sha rec) (buffer-directory))))))
+(define-command (magit-blame-copy)              ; copy the commit hash to the clipboard
   (let ((rec (magit-blame-rec-at (+ (buffer-line) 1))))
     (cond ((not rec) (message "No blame for this line"))
           ((magit-blame-uncommitted? rec) (message "Line not committed yet"))
@@ -2007,7 +1998,7 @@
 
 ;; v: switch between the line view and the structural (group-by-function) view.
 ;; A full re-render is needed — the two lay the diff out differently.
-(define (magit-toggle-view)
+(define-command (magit-toggle-view)
   (set! *magit-diff-view* (if (magit-structural?) "line" "structural"))
   (magit-refresh)
   (message (if (magit-structural?) "Structural diff view" "Line diff view")))
@@ -2090,12 +2081,12 @@
           (list "c" "Continue"     'magit-rebase-continue)
           (list "s" "Skip"         'magit-rebase-skip)
           (list "a" "Abort"        'magit-rebase-abort))))
-(define (magit-rebase-onto)
+(define-command (magit-rebase-onto)
   (helm (list (list "Rebase onto" (magit-branches) 'magit-do-rebase-onto))))
 (define (magit-do-rebase-onto b) (magit-do (list "rebase" b) (string-append "Rebased onto " b)))
-(define (magit-rebase-continue) (magit-do (list "rebase" "--continue") "Rebase continued"))
-(define (magit-rebase-skip)     (magit-do (list "rebase" "--skip") "Skipped commit"))
-(define (magit-rebase-abort)
+(define-command (magit-rebase-continue) (magit-do (list "rebase" "--continue") "Rebase continued"))
+(define-command (magit-rebase-skip)     (magit-do (list "rebase" "--skip") "Skipped commit"))
+(define-command (magit-rebase-abort)
   (magit-confirm "Abort rebase?" (lambda () (magit-do (list "rebase" "--abort") "Rebase aborted"))))
 
 ;; --- merge-conflict resolution ----------------------------------------------
@@ -2159,50 +2150,38 @@
 (define-key "magit-status" "shift-tab" 'magit-cycle-all)
 (define-key "magit-status" "enter" 'magit-visit-file)
 
-;; Evil-mode overlay (consulted only under evil, before the keymap above, so the
-;; Emacs defaults are untouched). `evil-collection-init` gives every special
-;; buffer `j`/`k` motion, which takes `k` over from discard — so re-expose
-;; discard on `x` here, the magit-specific half of the overlay.
-(define-key "evil-normal:magit-status" "x" 'magit-discard)
-;; Vim top/bottom motion. `g g` makes `g` a prefix, which shadows the single-`g`
-;; refresh from the keymap above — so re-expose refresh on `g r`, matching
-;; evil-collection's magit bindings.
-(define-key "evil-normal:magit-status" "g g" 'evil-goto-first-line)
-(define-key "evil-normal:magit-status" "shift-g" 'evil-goto-last-line)
-(define-key "evil-normal:magit-status" "g r" 'magit-refresh)
-;; Within-line motion. Magit's modal keymap doesn't bind `0` / `^` (only `$`,
-;; which stays `magit-process-buffer`, matching evil-collection), so expose the
-;; vim line-start motions here. evil-collection gives magit these too.
-(define-key "evil-normal:magit-status" "0" 'move-beginning-of-line)
-(define-key "evil-normal:magit-status" "^" 'evil-first-non-blank)
-
-;; Helix overlay (consulted only under helix-mode, before the keymap above). The
-;; same shape as the evil overlay: helix-collection gives magit j/k, which takes
-;; `k` over from discard — so re-expose discard on `x` (free in magit; `X`/shift-x
-;; is reset). `g g` makes `g` a prefix, shadowing single-`g` refresh, so re-expose
-;; refresh on `g r`. The motion helpers are evil.scm's (plain point moves, modal-
-;; agnostic). Everything else — s/u/c/b/P/F/z/l/… — stays as magit bound it.
-(define-key "helix-normal:magit-status" "x" 'magit-discard)
-(define-key "helix-normal:magit-status" "g g" 'evil-goto-first-line)
-(define-key "helix-normal:magit-status" "shift-g" 'evil-goto-last-line)
-(define-key "helix-normal:magit-status" "g r" 'magit-refresh)
-(define-key "helix-normal:magit-status" "0" 'move-beginning-of-line)
-(define-key "helix-normal:magit-status" "^" 'evil-first-non-blank)
+;; Evil + Helix overlays (each consulted only under its own modal mode, before
+;; the keymap above, so the Emacs defaults are untouched). The collection layer
+;; gives every special buffer `j`/`k` motion, which takes `k` over from discard
+;; — so re-expose discard on `x` (free in magit; `X`/shift-x is reset). `g g`
+;; makes `g` a prefix, shadowing the single-`g` refresh, so re-expose refresh on
+;; `g r`, matching evil-collection's magit bindings. Magit's modal keymap
+;; doesn't bind `0` / `^` (only `$`, which stays `magit-process-buffer`), so
+;; expose the vim line-start motions too. The motion helpers are evil.scm's
+;; (plain point moves, modal-agnostic); everything else — s/u/c/b/P/F/z/l/… —
+;; stays as magit bound it.
+(for-each
+ (lambda (prefix)
+   (let ((km (string-append prefix "magit-status")))
+     (define-key km "x" 'magit-discard)
+     (define-key km "g g" 'evil-goto-first-line)
+     (define-key km "shift-g" 'evil-goto-last-line)
+     (define-key km "g r" 'magit-refresh)
+     (define-key km "0" 'move-beginning-of-line)
+     (define-key km "^" 'evil-first-non-blank)))
+ (list "evil-normal:" "helix-normal:"))
 
 ;; Log / commit / stash-list buffers.
-(define-key "magit-log-mode" "enter" 'magit-log-show)
+(define-list-mode-keys "magit-log-mode" 'magit-log-show)
 (define-key "magit-log-mode" "shift-a" 'magit-log-cherry-pick)
 (define-key "magit-log-mode" "v" 'magit-log-revert)
-(define-key "magit-log-mode" "q" 'kill-buffer)
-(define-key "magit-log-mode" "n" 'next-line)
-(define-key "magit-log-mode" "p" 'previous-line)
 
 ;; Launch with C-x g (resolves the repo from the current buffer's directory).
 (define-key "fundamental" "ctrl-x g" 'magit-status)
 
 ;; C-x M: pick a different repo via Helm, then open magit there (e.g. from
 ;; *scratch*, or to jump to another project).
-(define (helm-magit)
+(define-command (helm-magit)
   (helm (list (list "Open git repo in" "find-file-candidates" 'magit-status-in))))
 (define-key "fundamental" "ctrl-x M" 'helm-magit)
 
@@ -2213,60 +2192,10 @@
 (define-key "fundamental" "ctrl-x v y" 'magit-blame-copy)         ; copy hash at point
 
 ;; `magit` is the familiar alias for `magit-status`.
-(define (magit) (magit-status))
+(define-command (magit) (magit-status))
 
-;; Expose magit's entry points to M-x. helm-execute-command only lists
-;; registered commands; the single-key actions stay in-buffer.
-(register-command 'magit-status)
-(register-command 'magit)
-(register-command 'magit-dispatch)
-(register-command 'magit-log-popup)
-(register-command 'helm-magit)
-(register-command 'magit-blame-toggle)
-(register-command 'magit-blame-line-toggle)
-(register-command 'magit-blame-show)
-(register-command 'magit-blame-copy)
-(register-command 'magit-toggle-view)
-
-;; Standalone git operations: these act on the repo (prompting via helm /
-;; read-string where they need a target), so they're meaningful from M-x in any
-;; buffer — no need to enter the status buffer first. Excluded: the section /
-;; file-at-point operations (stage, unstage, discard, blame-file, log-file,
-;; take-ours/theirs) which only make sense on point inside a magit buffer, and
-;; the *-popup / accessor helpers.
-(register-command 'magit-do-commit)
-(register-command 'magit-do-amend)
-(register-command 'magit-do-reword)
-(register-command 'magit-pull)
-(register-command 'magit-push)
-(register-command 'magit-push-upstream)
-(register-command 'magit-fetch-all)
-(register-command 'magit-fetch-origin)
-(register-command 'magit-stash)
-(register-command 'magit-stash-pop)
-(register-command 'magit-stash-apply)
-(register-command 'magit-stash-drop)
-(register-command 'magit-stash-drop-all)
-(register-command 'magit-stash-list)
-(register-command 'magit-stash-pick)
-(register-command 'magit-stash-push-msg)
-(register-command 'magit-checkout)
-(register-command 'magit-checkout-remote)
-(register-command 'magit-branch-create)
-(register-command 'magit-branch-delete)
-(register-command 'magit-branch-rename)
-(register-command 'magit-branch-set-upstream)
-(register-command 'magit-merge)
-(register-command 'magit-rebase-onto)
-(register-command 'magit-rebase-continue)
-(register-command 'magit-rebase-skip)
-(register-command 'magit-rebase-abort)
-(register-command 'magit-reset-soft)
-(register-command 'magit-reset-mixed)
-(register-command 'magit-reset-hard)
-(register-command 'magit-remote-add)
-(register-command 'magit-remote-remove)
-(register-command 'magit-tag-create)
-(register-command 'magit-tag-delete)
-(register-command 'magit-log-all)
-(register-command 'magit-log-current)
+;; M-x exposure: the entry points and standalone git operations above are all
+;; `define-command`s, so they register as they're defined. Deliberately NOT
+;; registered: the section / file-at-point operations (stage, unstage, discard,
+;; blame-file, log-file, take-ours/theirs), which only make sense with point
+;; inside a magit buffer, and the *-popup / accessor helpers.

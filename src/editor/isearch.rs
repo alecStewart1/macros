@@ -9,6 +9,19 @@ use regex::Regex;
 
 use super::*;
 
+/// Incremental-search (`C-s`) transient state, held in [`Editor::isearch`]
+/// only while an `Isearch` minibuffer is open. `forward` is the current
+/// direction (toggled by C-r/C-s), `origin` is where point was when the search
+/// began (restored on C-g), `from` is the offset the current attempt searches
+/// from, and `matched` is the range of the current hit (the base for the next
+/// repeat).
+pub(super) struct IsearchState {
+    pub(super) forward: bool,
+    pub(super) origin: usize,
+    pub(super) from: usize,
+    pub(super) matched: Option<Range<usize>>,
+}
+
 impl Editor {
     /// Byte ranges of the active search query's matches *within `[start, end)`*
     /// (the visible region), in absolute buffer offsets. Empty when no search is
@@ -23,11 +36,11 @@ impl Editor {
         let Ok(regex) = Regex::new(query) else {
             return Vec::new();
         };
-        let end = end.min(self.buffer.len());
+        let end = end.min(self.active.buffer.len());
         let start = start.min(end);
         // `start`/`end` are line boundaries (char-safe); slice only the visible
         // bytes, then map match offsets back to absolute positions.
-        let slice = self.buffer.slice_to_string(start..end);
+        let slice = self.active.buffer.slice_to_string(start..end);
         regex
             .find_iter(&slice)
             .filter(|m| m.end() > m.start()) // skip zero-width matches
@@ -41,10 +54,13 @@ impl Editor {
     /// it live (see `isearch_update`); `C-s`/`C-r` repeat, `RET` finishes leaving
     /// point on the match, and `C-g` aborts back to where the search began.
     pub(super) fn isearch_start(&mut self, forward: bool, cx: &mut Context<Self>) {
-        self.isearch_forward = forward;
-        self.isearch_origin = self.point();
-        self.isearch_from = self.point();
-        self.isearch_match = None;
+        let point = self.point();
+        self.isearch = Some(IsearchState {
+            forward,
+            origin: point,
+            from: point,
+            matched: None,
+        });
         self.search_query = None;
         let prompt = if forward {
             "I-search: "
@@ -60,7 +76,9 @@ impl Editor {
         let Some(query) = self.minibuffer.as_ref().map(|mb| mb.input.clone()) else {
             return;
         };
-        let (forward, from) = (self.isearch_forward, self.isearch_from);
+        let Some((forward, from)) = self.isearch.as_ref().map(|st| (st.forward, st.from)) else {
+            return;
+        };
         self.isearch_run(&query, forward, from, cx);
     }
 
@@ -68,7 +86,10 @@ impl Editor {
     /// search string first recalls the previous one (Emacs `C-s C-s`); otherwise
     /// the search advances past the current match.
     pub(super) fn isearch_repeat(&mut self, forward: bool, cx: &mut Context<Self>) {
-        self.isearch_forward = forward;
+        let Some(st) = self.isearch.as_mut() else {
+            return;
+        };
+        st.forward = forward;
         let empty = self
             .minibuffer
             .as_ref()
@@ -80,20 +101,20 @@ impl Editor {
                 mb.input = prev;
                 mb.cursor = mb.input.len();
             }
-        } else if let Some(m) = self.isearch_match.clone() {
+        } else if let Some(m) = st.matched.clone() {
             // Step off the current match so the next hit is a different one.
-            self.isearch_from = if forward {
+            st.from = if forward {
                 m.start + 1
             } else {
                 m.start.saturating_sub(1)
             };
         }
+        let from = self.isearch.as_ref().map_or(0, |st| st.from);
         let query = self
             .minibuffer
             .as_ref()
             .map(|mb| mb.input.clone())
             .unwrap_or_default();
-        let from = self.isearch_from;
         self.isearch_run(&query, forward, from, cx);
     }
 
@@ -110,7 +131,9 @@ impl Editor {
     ) {
         if query.is_empty() {
             self.search_query = None;
-            self.isearch_match = None;
+            if let Some(st) = self.isearch.as_mut() {
+                st.matched = None;
+            }
             if let Some(mb) = self.minibuffer.as_mut() {
                 mb.message.clear();
             }
@@ -128,7 +151,7 @@ impl Editor {
                 return;
             }
         };
-        let text = self.buffer.full_text();
+        let text = self.active.buffer.full_text();
         let matches: Vec<Range<usize>> = regex
             .find_iter(&text)
             .filter(|m| m.end() > m.start())
@@ -151,14 +174,18 @@ impl Editor {
         match found {
             Some(m) => {
                 let target = if forward { m.end } else { m.start };
-                self.isearch_match = Some(m);
+                if let Some(st) = self.isearch.as_mut() {
+                    st.matched = Some(m);
+                }
                 if let Some(mb) = self.minibuffer.as_mut() {
                     mb.message.clear();
                 }
                 self.move_to(target, cx);
             }
             None => {
-                self.isearch_match = None;
+                if let Some(st) = self.isearch.as_mut() {
+                    st.matched = None;
+                }
                 if let Some(mb) = self.minibuffer.as_mut() {
                     mb.message = " [failing]".into();
                 }

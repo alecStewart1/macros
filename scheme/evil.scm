@@ -410,10 +410,14 @@
 ;; Vim motion shared by every special buffer. Only `j`/`k` by default: single
 ;; `g` is `refresh` in several of these modes, so a `g g` top-motion would
 ;; shadow it — left out deliberately. `n`/`p` keep working from the base keymap.
-(define (evil-collection-bind-mode mode)
-  (let ((km (string-append "evil-normal:" mode)))
+;; Parameterized over the overlay prefix so the helix collection (helix.scm,
+;; which loads after this file) shares the exact same binding set.
+(define (modal-collection-bind-mode prefix mode)
+  (let ((km (string-append prefix mode)))
     (define-key km "j" 'next-line)
     (define-key km "k" 'previous-line)))
+(define (evil-collection-bind-mode mode)
+  (modal-collection-bind-mode "evil-normal:" mode))
 
 ;; Install the overlay across every mode in `*evil-collection-modes*`. Called
 ;; once below as part of loading the evil layer; safe to re-run after extending
@@ -430,8 +434,8 @@
 ;; key (compile's recompile, grep's refresh); jump to the top with `C-u` or `k`.
 ;; Not folded into the shared `evil-collection-bind-mode` because the modal
 ;; buffers (magit/dired) already bind several of these keys (`b`, `l`, `$`, `^`).
-(define (evil-collection-bind-readonly-motion mode)
-  (let ((km (string-append "evil-normal:" mode)))
+(define (modal-collection-bind-readonly-motion prefix mode)
+  (let ((km (string-append prefix mode)))
     (define-key km "h" 'backward-char)
     (define-key km "l" 'forward-char)
     (define-key km "w" 'forward-word-start)
@@ -443,6 +447,8 @@
     (define-key km "shift-g" 'evil-goto-last-line)
     (define-key km "ctrl-d" 'evil-scroll-down)
     (define-key km "ctrl-u" 'evil-scroll-up)))
+(define (evil-collection-bind-readonly-motion mode)
+  (modal-collection-bind-readonly-motion "evil-normal:" mode))
 
 (for-each evil-collection-bind-readonly-motion
           (list "compile-mode" "grep-mode" "occur-mode"))

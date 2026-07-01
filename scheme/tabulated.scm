@@ -45,17 +45,12 @@
 (define (row-cells r) (nth r 1))
 
 ;; --- column formatting ------------------------------------------------------
-(define (tabulated-spaces n)
-  (if (<= n 0) "" (string-append " " (tabulated-spaces (- n 1)))))
-
 ;; Pad/truncate `s` to `width` display columns; #f width leaves it untouched
 ;; (the last, flexible column).
 (define (tabulated-pad s width)
-  (if (not width)
-      s
-      (let ((len (string-length s)))
-        (cond ((> len width) (substring s 0 width))
-              (else (string-append s (tabulated-spaces (- width len))))))))
+  (cond ((not width) s)
+        ((> (string-length s) width) (substring s 0 width))
+        (else (pad-right s width))))
 
 ;; Join one row's cells, each padded to its column width, with a single-space
 ;; gutter between columns.
@@ -70,17 +65,10 @@
                         acc))))))
 
 ;; --- sorting ----------------------------------------------------------------
-(define (tabulated-insert-by-key x sorted key)
-  (cond ((null? sorted) (list x))
-        ((string<? (key x) (key (car sorted))) (cons x sorted))
-        (else (cons (car sorted) (tabulated-insert-by-key x (cdr sorted) key)))))
-(define (tabulated-sort-by-key lst key)
-  (if (null? lst) '()
-      (tabulated-insert-by-key (car lst) (tabulated-sort-by-key (cdr lst) key) key)))
-
 ;; Rows sorted by the `idx`th cell (string compare); reversed when `desc`.
+;; (Keyed sorting itself is core's `sort-by`.)
 (define (tabulated-sort-rows rows idx desc)
-  (let ((sorted (tabulated-sort-by-key rows (lambda (r) (nth (row-cells r) idx)))))
+  (let ((sorted (sort-by (lambda (r) (nth (row-cells r) idx)) string<? rows)))
     (if desc (reverse sorted) sorted)))
 
 ;; --- rendering --------------------------------------------------------------
@@ -158,11 +146,7 @@
       (tabulated-draw buffer))))
 
 ;; Bind the conventional tabulated-list keys into `mode`'s keymap and turn off
-;; line numbers (these are list views, not code).
+;; line numbers (core's define-list-mode-keys), plus S for sorting.
 (define (tabulated-setup-keys mode)
-  (define-key mode "enter" 'tabulated-visit)
-  (define-key mode "s" 'tabulated-sort)
-  (define-key mode "n" 'next-line)
-  (define-key mode "p" 'previous-line)
-  (define-key mode "q" 'kill-buffer)
-  (set-option (string-append "line-numbers:" mode) "false"))
+  (define-list-mode-keys mode 'tabulated-visit)
+  (define-key mode "s" 'tabulated-sort))

@@ -119,13 +119,8 @@
         (message (string-append "No file to open in " (basename root))))))
 
 ;; --- rendering --------------------------------------------------------------
-(define (welcome-spaces n)
-  (if (<= n 0) "" (string-append " " (welcome-spaces (- n 1)))))
-
-;; Pad `s` with spaces to at least `width` columns (left-aligned).
-(define (welcome-pad s width)
-  (let ((len (string-length s)))
-    (if (>= len width) s (string-append s (welcome-spaces (- width len))))))
+;; Pad `s` with spaces to at least `width` columns (core's pad-right).
+(define (welcome-pad s width) (pad-right s width))
 
 ;; Replace a leading $HOME with "~" for compact paths.
 (define (welcome-abbrev path)
@@ -235,12 +230,10 @@
   (kill-buffer)
   (switch-to-buffer "*scratch*"))
 
-(define-key "welcome-mode" "enter"   'welcome-visit)
+(define-list-mode-keys "welcome-mode" 'welcome-visit)
 (define-key "welcome-mode" "mouse-1" 'welcome-visit)
-(define-key "welcome-mode" "n"       'next-line)
-(define-key "welcome-mode" "p"       'previous-line)
 (define-key "welcome-mode" "g"       'welcome-refresh)
-(define-key "welcome-mode" "q"       'welcome-dismiss)
+(define-key "welcome-mode" "q"       'welcome-dismiss)  ; splash q ≠ kill-buffer
 
 ;; Under evil-mode, the collection layer (evil.scm) gives this read-only buffer
 ;; only j/k. Add horizontal motion so the cursor can reach a specific target on a
@@ -262,9 +255,6 @@
 (define-key "helix-normal:welcome-mode" "b" 'backward-word)
 (define-key "helix-normal:welcome-mode" "0" 'move-beginning-of-line)
 (define-key "helix-normal:welcome-mode" "$" 'move-end-of-line)
-
-;; A splash, not code — no line-number gutter.
-(set-option "line-numbers:welcome-mode" "false")
 
 (register-command 'welcome)
 

@@ -47,6 +47,12 @@
 (set-face "lsp-inlay-hint" "#505050")    ; editorInlayHint.foreground
 (set-face "lsp-code-lens" "#505050")     ; editorCodeLens.foreground
 
+;; Diagnostics (gutter dots + underlines) — VS Code dark severity colors.
+(set-face "diagnostic-error" "#f14c4c")
+(set-face "diagnostic-warning" "#cca700")
+(set-face "diagnostic-info" "#3794ff")
+(set-face "diagnostic-hint" "#3794ff")
+
 ;; Semantic-token faces (opt-in via 'semantic-tokens) — mirror the syntax palette,
 ;; with Cursor Dark's distinct blue namespaces and purple properties.
 (set-face "lsp-sem-namespace" "#87c3ff")

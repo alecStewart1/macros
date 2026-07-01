@@ -14,7 +14,11 @@ impl Editor {
     pub(super) fn snippet_expand(&mut self, template: String, cx: &mut Context<Self>) {
         self.snippet_clear();
         let (text, fields) = parse_snippet(&template);
-        let origin = self.selected_range.start.min(self.buffer.len());
+        let origin = self
+            .active
+            .selected_range
+            .start
+            .min(self.active.buffer.len());
         let cursor = self.edit(origin..origin, &text);
         self.snippet_fields = fields
             .iter()
@@ -38,12 +42,12 @@ impl Editor {
         let Some(pos) = self.script.marker_pos(mid) else {
             return;
         };
-        let pos = pos.min(self.buffer.len());
+        let pos = pos.min(self.active.buffer.len());
         if len > 0 {
-            self.selected_range = pos..(pos + len).min(self.buffer.len());
-            self.selection_reversed = false;
-            self.marked_range = None;
-            self.mark_active = true;
+            self.active.selected_range = pos..(pos + len).min(self.active.buffer.len());
+            self.active.selection_reversed = false;
+            self.active.marked_range = None;
+            self.active.mark_active = true;
         } else {
             self.collapse_to(pos);
         }
@@ -115,7 +119,7 @@ impl Editor {
     pub fn extra_cursor_positions(&self) -> Vec<usize> {
         self.extra_cursors
             .iter()
-            .filter_map(|&id| self.script.marker_pos(id))
+            .filter_map(|s| self.script.marker_pos(s.head))
             .collect()
     }
 
@@ -126,7 +130,7 @@ impl Editor {
     /// All cursor byte positions (primary + extras), unique and ascending.
     pub(super) fn all_cursor_positions(&self) -> Vec<usize> {
         let mut v: Vec<usize> = self.extra_cursor_positions();
-        v.push(self.selected_range.start);
+        v.push(self.active.selected_range.start);
         v.sort_unstable();
         v.dedup();
         v
@@ -136,23 +140,23 @@ impl Editor {
     /// existing cursor). Returns whether one was added. The paired anchor marker
     /// sits on the head, so a bare cursor is an empty selection (no highlight).
     pub(super) fn mc_add_cursor_at(&mut self, pos: usize) -> bool {
-        let pos = pos.min(self.buffer.len());
-        if pos == self.selected_range.start || self.extra_cursor_positions().contains(&pos) {
+        let pos = pos.min(self.active.buffer.len());
+        if pos == self.active.selected_range.start || self.extra_cursor_positions().contains(&pos) {
             return false;
         }
-        self.extra_cursors.push(self.script.add_marker(pos));
-        self.extra_anchors.push(self.script.add_marker(pos));
+        self.extra_cursors.push(SelectionMarkers {
+            head: self.script.add_marker(pos),
+            anchor: self.script.add_marker(pos),
+        });
         true
     }
 
     /// Drop the marker pair (head + anchor) backing every secondary selection,
     /// leaving only the primary. Shared by `mc-clear` and `set-selections`.
     pub(super) fn clear_extra_selections(&mut self) {
-        for id in std::mem::take(&mut self.extra_cursors) {
-            self.script.remove_marker(id);
-        }
-        for id in std::mem::take(&mut self.extra_anchors) {
-            self.script.remove_marker(id);
+        for s in std::mem::take(&mut self.extra_cursors) {
+            self.script.remove_marker(s.head);
+            self.script.remove_marker(s.anchor);
         }
     }
 
@@ -166,12 +170,11 @@ impl Editor {
     /// any whose anchor and head coincide (a bare cursor highlights nothing). The
     /// renderer paints one `secondary-region` span per entry.
     pub fn extra_selections(&self) -> Vec<(usize, usize)> {
-        self.extra_anchors
+        self.extra_cursors
             .iter()
-            .zip(&self.extra_cursors)
-            .filter_map(|(&a, &h)| {
-                let a = self.script.marker_pos(a)?;
-                let h = self.script.marker_pos(h)?;
+            .filter_map(|s| {
+                let a = self.script.marker_pos(s.anchor)?;
+                let h = self.script.marker_pos(s.head)?;
                 (a != h).then_some((a.min(h), a.max(h)))
             })
             .collect()
@@ -182,18 +185,21 @@ impl Editor {
     /// `(selections)`; `head` is the moving cursor end, `anchor` the fixed end.
     pub(super) fn all_selections(&self) -> Vec<(usize, usize)> {
         let head = self.cursor_offset();
-        let anchor = if self.mark_active {
-            if self.selection_reversed {
-                self.selected_range.end
+        let anchor = if self.active.mark_active {
+            if self.active.selection_reversed {
+                self.active.selected_range.end
             } else {
-                self.selected_range.start
+                self.active.selected_range.start
             }
         } else {
             head
         };
         let mut sels = vec![(anchor, head)];
-        for (&a, &h) in self.extra_anchors.iter().zip(&self.extra_cursors) {
-            if let (Some(a), Some(h)) = (self.script.marker_pos(a), self.script.marker_pos(h)) {
+        for s in &self.extra_cursors {
+            if let (Some(a), Some(h)) = (
+                self.script.marker_pos(s.anchor),
+                self.script.marker_pos(s.head),
+            ) {
                 sels.push((a, h));
             }
         }
@@ -207,7 +213,7 @@ impl Editor {
     /// scheme/helix.scm drive every Normal-mode move through this.
     pub(super) fn set_selections(&mut self, sels: Vec<(usize, usize)>, cx: &mut Context<Self>) {
         self.clear_extra_selections();
-        let len = self.buffer.len();
+        let len = self.active.buffer.len();
         let clamp = |x: usize| x.min(len);
         let mut it = sels.into_iter();
         let Some((anchor, head)) = it.next() else {
@@ -218,15 +224,17 @@ impl Editor {
         if anchor == head {
             self.collapse_to(head);
         } else {
-            self.selected_range = anchor.min(head)..anchor.max(head);
-            self.selection_reversed = head < anchor;
-            self.marked_range = None;
-            self.mark_active = true;
+            self.active.selected_range = anchor.min(head)..anchor.max(head);
+            self.active.selection_reversed = head < anchor;
+            self.active.marked_range = None;
+            self.active.mark_active = true;
         }
         for (anchor, head) in it {
             let (anchor, head) = (clamp(anchor), clamp(head));
-            self.extra_cursors.push(self.script.add_marker(head));
-            self.extra_anchors.push(self.script.add_marker(anchor));
+            self.extra_cursors.push(SelectionMarkers {
+                head: self.script.add_marker(head),
+                anchor: self.script.add_marker(anchor),
+            });
         }
         self.ensure_cursor_visible();
         cx.notify();
@@ -235,7 +243,7 @@ impl Editor {
     /// Replicate an insertion of `text` at every cursor (primary + extras),
     /// keeping all of them after their inserted text. One undo group.
     pub(super) fn multi_insert(&mut self, text: &str, cx: &mut Context<Self>) {
-        let primary = self.selected_range.start;
+        let primary = self.active.selected_range.start;
         let pm = self.script.add_marker(primary);
         let positions = self.all_cursor_positions();
         self.begin_undo_group();
@@ -253,12 +261,12 @@ impl Editor {
 
     /// Replicate a backspace (delete the grapheme before each cursor).
     pub(super) fn multi_delete_back(&mut self, cx: &mut Context<Self>) {
-        let primary = self.selected_range.start;
+        let primary = self.active.selected_range.start;
         let pm = self.script.add_marker(primary);
         let positions = self.all_cursor_positions();
         self.begin_undo_group();
         for &pos in positions.iter().rev() {
-            let prev = self.buffer.prev_grapheme(pos);
+            let prev = self.active.buffer.prev_grapheme(pos);
             if prev < pos {
                 self.edit(prev..pos, "");
             }
@@ -275,15 +283,15 @@ impl Editor {
     /// Add a cursor on the line above/below the lowest/highest cursor, at the
     /// primary cursor's column (`dir` -1 = above, +1 = below).
     pub(super) fn mc_add_line(&mut self, dir: isize, cx: &mut Context<Self>) {
-        let primary = self.selected_range.start;
-        let line = self.buffer.line_index_at_byte(primary);
-        let col = primary - self.buffer.line_range(line).start;
+        let primary = self.active.selected_range.start;
+        let line = self.active.buffer.line_index_at_byte(primary);
+        let col = primary - self.active.buffer.line_range(line).start;
         let target = line as isize + dir;
-        if target < 0 || target as usize >= self.buffer.line_count() {
+        if target < 0 || target as usize >= self.active.buffer.line_count() {
             self.echo("multiple-cursors: no line there", cx);
             return;
         }
-        let lr = self.buffer.line_range(target as usize);
+        let lr = self.active.buffer.line_range(target as usize);
         let pos = (lr.start + col).min(lr.end);
         if self.mc_add_cursor_at(pos) {
             cx.notify();
@@ -292,11 +300,14 @@ impl Editor {
 
     /// Add a cursor at the next occurrence of the word at point (mc/mark-next).
     pub(super) fn mc_mark_next(&mut self, cx: &mut Context<Self>) {
-        let primary = self.selected_range.start;
+        let primary = self.active.selected_range.start;
         // The word under the primary cursor.
-        let start = self.buffer.backward_word(self.buffer.forward_word(primary));
-        let end = self.buffer.forward_word(start);
-        let word = self.buffer.slice_to_string(start..end);
+        let start = self
+            .active
+            .buffer
+            .backward_word(self.active.buffer.forward_word(primary));
+        let end = self.active.buffer.forward_word(start);
+        let word = self.active.buffer.slice_to_string(start..end);
         if word.trim().is_empty() {
             self.echo("multiple-cursors: no word at point", cx);
             return;
@@ -307,7 +318,7 @@ impl Editor {
             .into_iter()
             .max()
             .unwrap_or(primary);
-        let text = self.buffer.full_text();
+        let text = self.active.buffer.full_text();
         let found = text[from..]
             .find(&word)
             .map(|i| from + i)
