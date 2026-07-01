@@ -1456,6 +1456,7 @@
           (list "shift-p" "Pop a stash…" 'magit-stash-pick)
           (list "a" "Apply latest"     'magit-stash-apply)
           (list "k" "Drop latest"      'magit-stash-drop)
+          (list "shift-k" "Drop all"   'magit-stash-drop-all)
           (list "l" "List"             'magit-stash-list))))
 (define (magit-stash-push-msg) (read-string "Stash message: " 'magit-do-stash-msg))
 (define (magit-do-stash-msg m)
@@ -1470,6 +1471,9 @@
 (define (magit-stash-drop)
   (magit-confirm "Drop latest stash?"
     (lambda () (magit-do (list "stash" "drop") "Dropped stash"))))
+(define (magit-stash-drop-all)
+  (magit-confirm "Drop all stashes?"
+    (lambda () (magit-do (list "stash" "clear") "Dropped all stashes"))))
 (define (magit-stash-list)
   (magit-show-log "*magit-stash*" (string-join (gix-stash-list *magit-dir*) "\n")))
 
@@ -2242,6 +2246,7 @@
 (register-command 'magit-stash-pop)
 (register-command 'magit-stash-apply)
 (register-command 'magit-stash-drop)
+(register-command 'magit-stash-drop-all)
 (register-command 'magit-stash-list)
 (register-command 'magit-stash-pick)
 (register-command 'magit-stash-push-msg)
