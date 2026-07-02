@@ -680,6 +680,9 @@ pub(crate) struct TitlebarDropdownState {
     /// The search-field text; filters the visible rows (case-insensitive
     /// substring). Cleared whenever the menu opens or closes.
     pub(crate) filter: String,
+    /// Caret position in `filter`, as a CHAR index (the filter is a short
+    /// single line, so char-indexed ops are cheap and avoid byte/char mixups).
+    pub(crate) cursor: usize,
     /// Keyboard selection, as an index into the FILTERED row list. `None`
     /// until an arrow key summons it — a freshly opened menu shows no
     /// highlight (the checkmark marks the active item; hover marks the mouse).
@@ -695,6 +698,8 @@ pub struct TitlebarDropdownView {
     pub active: SharedString,
     pub open: bool,
     pub filter: String,
+    /// Caret position in `filter` as a char index, for painting the caret.
+    pub cursor: usize,
     /// Index into `items` of the keyboard-selected row, if arrows summoned one.
     pub selected: Option<usize>,
 }
@@ -3115,6 +3120,22 @@ impl Editor {
             .collect()
     }
 
+    /// Whether the title-bar dropdown menu is currently unfolded (and thus
+    /// modal: editing keys belong to its search field, not the buffer).
+    pub(super) fn titlebar_dropdown_open(&self) -> bool {
+        self.titlebar_dropdown.as_ref().is_some_and(|d| d.open)
+    }
+
+    /// Byte offset of char index `cursor` in `filter` (caret ops are
+    /// char-indexed; `String` mutation wants bytes).
+    fn titlebar_dropdown_byte_at(filter: &str, cursor: usize) -> usize {
+        filter
+            .char_indices()
+            .nth(cursor)
+            .map(|(byte, _)| byte)
+            .unwrap_or(filter.len())
+    }
+
     /// A render snapshot of the title-bar dropdown, if Scheme published one.
     pub fn titlebar_dropdown_view(&self) -> Option<TitlebarDropdownView> {
         self.titlebar_dropdown.as_ref().map(|d| {
@@ -3125,6 +3146,7 @@ impl Editor {
                 active: d.active.clone(),
                 open: d.open,
                 filter: d.filter.clone(),
+                cursor: d.cursor.min(d.filter.chars().count()),
             }
         })
     }
@@ -3136,6 +3158,7 @@ impl Editor {
         if let Some(d) = self.titlebar_dropdown.as_mut() {
             d.open = !d.open;
             d.filter.clear();
+            d.cursor = 0;
             d.selected = None;
             cx.notify();
         }
@@ -3148,6 +3171,7 @@ impl Editor {
         {
             d.open = false;
             d.filter.clear();
+            d.cursor = 0;
             d.selected = None;
             cx.notify();
         }
@@ -3166,6 +3190,7 @@ impl Editor {
         };
         d.open = false;
         d.filter.clear();
+        d.cursor = 0;
         d.selected = None;
         let callback = d.callback.clone();
         cx.notify();
@@ -3173,26 +3198,66 @@ impl Editor {
     }
 
     /// Typed text while the menu is open (routed from the IME, like Helm's
-    /// filter): extend the search field. The keyboard selection resets — the
+    /// filter): insert at the caret. The keyboard selection resets — the
     /// narrowed list has no highlight until arrows summon one (Enter still
     /// picks the top match).
     pub(super) fn titlebar_dropdown_input(&mut self, text: &str, cx: &mut Context<Self>) {
         if let Some(d) = self.titlebar_dropdown.as_mut()
             && d.open
         {
-            d.filter.push_str(text);
+            let at = Self::titlebar_dropdown_byte_at(&d.filter, d.cursor);
+            d.filter.insert_str(at, text);
+            d.cursor += text.chars().count();
             d.selected = None;
             cx.notify();
         }
     }
 
-    /// Backspace in the search field.
+    /// Backspace in the search field: delete the char before the caret.
     pub(super) fn titlebar_dropdown_backspace(&mut self, cx: &mut Context<Self>) {
         if let Some(d) = self.titlebar_dropdown.as_mut()
             && d.open
+            && d.cursor > 0
         {
-            d.filter.pop();
+            d.cursor -= 1;
+            let at = Self::titlebar_dropdown_byte_at(&d.filter, d.cursor);
+            d.filter.remove(at);
             d.selected = None;
+            cx.notify();
+        }
+    }
+
+    /// Forward delete in the search field: delete the char under the caret.
+    pub(super) fn titlebar_dropdown_delete(&mut self, cx: &mut Context<Self>) {
+        if let Some(d) = self.titlebar_dropdown.as_mut()
+            && d.open
+            && d.cursor < d.filter.chars().count()
+        {
+            let at = Self::titlebar_dropdown_byte_at(&d.filter, d.cursor);
+            d.filter.remove(at);
+            d.selected = None;
+            cx.notify();
+        }
+    }
+
+    /// Move the search-field caret by `delta` chars (Left/Right), clamped.
+    pub(super) fn titlebar_dropdown_cursor_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(d) = self.titlebar_dropdown.as_mut()
+            && d.open
+        {
+            let max = d.filter.chars().count();
+            d.cursor = d.cursor.min(max).saturating_add_signed(delta).min(max);
+            cx.notify();
+        }
+    }
+
+    /// Place the search-field caret at char index `pos` (a click on the field,
+    /// or Home/End via 0 / `usize::MAX`), clamped to the text.
+    pub fn titlebar_dropdown_cursor_set(&mut self, pos: usize, cx: &mut Context<Self>) {
+        if let Some(d) = self.titlebar_dropdown.as_mut()
+            && d.open
+        {
+            d.cursor = pos.min(d.filter.chars().count());
             cx.notify();
         }
     }
@@ -4241,7 +4306,7 @@ impl EntityInputHandler for Editor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.titlebar_dropdown.as_ref().is_some_and(|d| d.open) {
+        if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_input(new_text, cx);
             return;
         }

@@ -180,25 +180,35 @@ impl Editor {
     }
 
     /// The title-bar perspectives menu is modal while unfolded: Escape / C-g
-    /// fold it, Enter picks the selected row, arrows (or C-n/C-p) move the
-    /// selection, Backspace edits the search field. Plain printable keys fall
-    /// through to the IME, which routes them into the filter (like Helm); any
-    /// other chord is swallowed so it can't reach the buffer under the menu.
+    /// fold it, and the Emacs chords steer the search field (C-n/C-p move the
+    /// selection, C-b/C-f/C-a/C-e the caret, C-d forward-deletes). Plain
+    /// printable keys fall through to the IME, which routes them into the
+    /// filter (like Helm); any other chord is swallowed so it can't reach the
+    /// buffer under the menu. The OS-special keys (Enter, Backspace, arrows,
+    /// Home/End, Tab) never reach this layer — they're bound as gpui actions,
+    /// which dispatch before raw key-down listeners — so their dropdown
+    /// routing lives in the `act_*` handlers below.
     fn key_titlebar_dropdown(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
-        if !self.titlebar_dropdown.as_ref().is_some_and(|d| d.open) {
+        if !self.titlebar_dropdown_open() {
             return Handled::No;
         }
         let ctrl = ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform;
         if ks.key == "escape" || (ctrl && ks.key == "g") {
             self.titlebar_dropdown_close(cx);
-        } else if ks.key == "enter" {
-            self.titlebar_dropdown_select_current(cx);
-        } else if ks.key == "backspace" {
-            self.titlebar_dropdown_backspace(cx);
-        } else if ks.key == "up" || (ctrl && ks.key == "p") {
+        } else if ctrl && ks.key == "p" {
             self.titlebar_dropdown_move(-1, cx);
-        } else if ks.key == "down" || (ctrl && ks.key == "n") {
+        } else if ctrl && ks.key == "n" {
             self.titlebar_dropdown_move(1, cx);
+        } else if ctrl && ks.key == "b" {
+            self.titlebar_dropdown_cursor_move(-1, cx);
+        } else if ctrl && ks.key == "f" {
+            self.titlebar_dropdown_cursor_move(1, cx);
+        } else if ctrl && ks.key == "a" {
+            self.titlebar_dropdown_cursor_set(0, cx);
+        } else if ctrl && ks.key == "e" {
+            self.titlebar_dropdown_cursor_set(usize::MAX, cx);
+        } else if ctrl && ks.key == "d" {
+            self.titlebar_dropdown_delete(cx);
         } else if !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform {
             return Handled::Yes; // plain text: let the IME route it to the filter
         }
@@ -928,7 +938,9 @@ impl Editor {
     // --- GPUI action handlers (OS-special keys -> commands) ----------------
 
     pub(super) fn act_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        if self.transient.is_some() {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_backspace(cx);
+        } else if self.transient.is_some() {
             // transient is modal; ignore editing keys
         } else if self.helm.is_some() {
             self.helm_backspace(cx);
@@ -948,7 +960,9 @@ impl Editor {
         }
     }
     pub(super) fn act_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        if self.transient.is_some() {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_delete(cx);
+        } else if self.transient.is_some() {
             // transient is modal; ignore editing keys
         } else if self.helm.is_some() {
             // Helm is modal (mirrors act_backspace): its input has no
@@ -967,6 +981,10 @@ impl Editor {
         }
     }
     pub(super) fn act_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_cursor_move(-1, cx);
+            return;
+        }
         self.completion_popup = None; // horizontal motion dismisses the popup
         if self.minibuffer.is_some() {
             self.mb_left(cx);
@@ -977,6 +995,10 @@ impl Editor {
         }
     }
     pub(super) fn act_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_cursor_move(1, cx);
+            return;
+        }
         self.completion_popup = None; // horizontal motion dismisses the popup
         if self.minibuffer.is_some() {
             self.mb_right(cx);
@@ -987,6 +1009,10 @@ impl Editor {
         }
     }
     pub(super) fn act_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_move(-1, cx);
+            return;
+        }
         if self.helm.is_some() {
             self.helm_previous(cx);
             return;
@@ -1003,6 +1029,10 @@ impl Editor {
         }
     }
     pub(super) fn act_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_move(1, cx);
+            return;
+        }
         if self.helm.is_some() {
             self.helm_next(cx);
             return;
@@ -1019,7 +1049,9 @@ impl Editor {
         }
     }
     pub(super) fn act_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        if self.minibuffer.is_some() {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_cursor_set(0, cx);
+        } else if self.minibuffer.is_some() {
             self.mb_move(0, cx);
         } else if self.terminal_action_key("home", cx) {
             // terminal: sent to the shell
@@ -1028,7 +1060,9 @@ impl Editor {
         }
     }
     pub(super) fn act_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(len) = self.minibuffer.as_ref().map(|mb| mb.input.len()) {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_cursor_set(usize::MAX, cx);
+        } else if let Some(len) = self.minibuffer.as_ref().map(|mb| mb.input.len()) {
             self.mb_move(len, cx);
         } else if self.terminal_action_key("end", cx) {
             // terminal: sent to the shell
@@ -1037,6 +1071,10 @@ impl Editor {
         }
     }
     pub(super) fn act_newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_select_current(cx);
+            return;
+        }
         if self.transient.is_some() {
             return; // transient is modal
         }
@@ -1059,6 +1097,9 @@ impl Editor {
         }
     }
     pub(super) fn act_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.titlebar_dropdown_open() {
+            return; // dropdown is modal; TAB has no filter binding
+        }
         if self.transient.is_some() {
             return; // transient is modal
         }
@@ -1085,7 +1126,7 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.minibuffer.is_none() {
+        if self.minibuffer.is_none() && !self.titlebar_dropdown_open() {
             self.apply_command(EditorCommand::ExtendBackwardChar, cx);
         }
     }
@@ -1095,12 +1136,12 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.minibuffer.is_none() {
+        if self.minibuffer.is_none() && !self.titlebar_dropdown_open() {
             self.apply_command(EditorCommand::ExtendForwardChar, cx);
         }
     }
     pub(super) fn act_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        if self.minibuffer.is_none() {
+        if self.minibuffer.is_none() && !self.titlebar_dropdown_open() {
             self.apply_command(EditorCommand::MarkWholeBuffer, cx);
         }
     }

@@ -906,12 +906,12 @@ impl Editor {
                 callback,
             } => {
                 // Re-publishing while the menu is unfolded (a find-file-hook
-                // firing mid-browse) keeps it unfolded — filter and selection
-                // included — rather than snapping shut.
-                let (open, filter, selected) = self
+                // firing mid-browse) keeps it unfolded — filter, caret, and
+                // selection included — rather than snapping shut.
+                let (open, filter, cursor, selected) = self
                     .titlebar_dropdown
                     .as_ref()
-                    .map(|d| (d.open, d.filter.clone(), d.selected))
+                    .map(|d| (d.open, d.filter.clone(), d.cursor, d.selected))
                     .unwrap_or_default();
                 self.titlebar_dropdown = if items.is_empty() {
                     None
@@ -922,6 +922,7 @@ impl Editor {
                         callback,
                         open,
                         filter,
+                        cursor,
                         selected,
                     })
                 };

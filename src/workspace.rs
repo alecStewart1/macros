@@ -715,23 +715,75 @@ impl Workspace {
         hover_bg.a = 0.15;
 
         // The search field: typed keys route here while the menu is open (the
-        // key layer + IME, like Helm's filter). Placeholder when empty.
-        let search: SharedString = if dropdown.filter.is_empty() {
-            "Search projects…".into()
-        } else {
-            dropdown.filter.clone().into()
+        // key layer + IME, like Helm's filter). Rendered like the minibuffer —
+        // the text split at the caret with a thin caret quad between the
+        // halves. Each character is its own child so a click can land the
+        // caret on it; the flex filler after the text catches clicks past the
+        // end. Placeholder (caret first) when empty.
+        // The caret: cursor color softened (a full-strength block reads too
+        // heavy at this size) and blinking in step with the editor cursor.
+        // When blinked off it keeps its 2px slot, just unpainted, so the text
+        // doesn't jiggle.
+        let mut caret_color = colors.cursor_color;
+        caret_color.a *= 0.6;
+        let caret_on = self.editor.read(cx).cursor_blink_visible();
+        let caret = move || {
+            let slot = div().flex_none().w(px(2.)).h(px(14.));
+            if caret_on { slot.bg(caret_color) } else { slot }
         };
-        let search_row = div()
+        let filter_chars: Vec<char> = dropdown.filter.chars().collect();
+        let mut search_row = div()
             .px_3()
             .py(px(6.))
             .border_b_1()
             .border_color(hairline)
-            .text_color(if dropdown.filter.is_empty() {
-                colors.dim
-            } else {
-                foreground
-            })
-            .child(search);
+            .flex()
+            .flex_row()
+            .items_center()
+            .cursor(gpui::CursorStyle::IBeam)
+            .text_color(foreground);
+        if filter_chars.is_empty() {
+            search_row = search_row.child(caret()).child(
+                div()
+                    .text_color(colors.dim)
+                    .child(SharedString::from("Search projects…")),
+            );
+        } else {
+            for (char_index, ch) in filter_chars.iter().enumerate() {
+                if char_index == dropdown.cursor {
+                    search_row = search_row.child(caret());
+                }
+                let label: SharedString = ch.to_string().into();
+                search_row = search_row.child(
+                    div()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, _ev, _window, cx| {
+                                this.editor.update(cx, |editor, cx| {
+                                    editor.titlebar_dropdown_cursor_set(char_index, cx)
+                                });
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .child(label),
+                );
+            }
+            if dropdown.cursor >= filter_chars.len() {
+                search_row = search_row.child(caret());
+            }
+            // Clicks in the blank space right of the text put the caret at the
+            // end (the row itself is taller than this filler; height keeps it
+            // clickable inside the centered flex row).
+            search_row = search_row.child(div().flex_grow().h(px(16.)).on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.editor.update(cx, |editor, cx| {
+                        editor.titlebar_dropdown_cursor_set(usize::MAX, cx)
+                    });
+                    cx.stop_propagation();
+                }),
+            ));
+        }
 
         // Dim section label over the row list, per the reference design.
         let section_label = div()

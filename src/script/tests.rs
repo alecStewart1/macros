@@ -5810,6 +5810,28 @@ mod perspectives_lib {
         );
     }
 
+    /// One qualification level isn't always enough: /x/a/proj and /y/a/proj
+    /// would both label "a/proj", the checkmark would mark both rows, and the
+    /// label→root reverse lookup would open whichever registered first. Labels
+    /// extend segment by segment until unique.
+    #[test]
+    fn perspective_display_qualifies_until_unique() {
+        let (engine, _rx) = engine();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(r#"(perspective-update "/x/a/proj" "/x/a/proj/1.rs")"#)
+            .unwrap();
+        engine
+            .eval(r#"(perspective-update "/y/a/proj" "/y/a/proj/2.rs")"#)
+            .unwrap();
+        assert_eq!(v(r#"(perspective-display "/x/a/proj")"#), "\"x/a/proj\"");
+        assert_eq!(v(r#"(perspective-display "/y/a/proj")"#), "\"y/a/proj\"");
+        assert_eq!(
+            v(r#"(perspective-root-for-name "y/a/proj")"#),
+            "\"/y/a/proj\""
+        );
+    }
+
     /// Syncing pushes the full label list, the current root's label, and the
     /// `perspective-select` callback to the title bar.
     #[test]
@@ -5845,17 +5867,23 @@ mod perspectives_lib {
         }
     }
 
-    /// Selecting a perspective whose resume file vanished falls back to a
-    /// find-file Helm picker in that root instead of opening a dead path
-    /// (after marking the picked perspective current in the title bar).
+    /// Selecting a perspective whose resume file vanished (but whose root
+    /// still exists) falls back to a find-file Helm picker in that root
+    /// instead of opening a dead path (after marking the picked perspective
+    /// current in the title bar).
     #[test]
     fn perspective_select_missing_file_falls_back_to_helm() {
         let (engine, _rx) = engine();
+        let root = std::env::temp_dir().join("macros-persp-test-missing-file");
+        std::fs::create_dir_all(&root).unwrap();
         engine
-            .eval(r#"(perspective-update "/nonexistent-macros-test/proj" "/nonexistent-macros-test/proj/gone.rs")"#)
+            .eval(&format!(
+                r#"(perspective-update "{0}" "{0}/gone.rs")"#,
+                root.display()
+            ))
             .unwrap();
         match engine
-            .eval(r#"(perspective-select "proj")"#)
+            .eval(r#"(perspective-select "macros-persp-test-missing-file")"#)
             .unwrap()
             .commands
             .as_slice()
@@ -5864,11 +5892,43 @@ mod perspectives_lib {
                 EditorCommand::SetTitlebarDropdown { active, .. },
                 EditorCommand::Helm(sources),
             ] => {
-                assert_eq!(active, "proj");
+                assert_eq!(active, "macros-persp-test-missing-file");
                 assert_eq!(sources.len(), 1);
             }
             other => panic!("expected SetTitlebarDropdown + Helm fallback, got {other:?}"),
         }
+    }
+
+    /// Selecting a perspective whose ROOT vanished (project deleted or
+    /// unmounted mid-session — startup only prunes at load) drops it from the
+    /// list and the title bar instead of switching to a dead project over an
+    /// empty picker.
+    #[test]
+    fn perspective_select_vanished_root_removes_perspective() {
+        let (engine, _rx) = engine();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(r#"(perspective-update "/nonexistent-macros-test/gone" "/nonexistent-macros-test/gone/a.rs")"#)
+            .unwrap();
+        engine
+            .eval(r#"(set! *perspective-current* "/nonexistent-macros-test/gone")"#)
+            .unwrap();
+        let outcome = engine.eval(r#"(perspective-select "gone")"#).unwrap();
+        assert_eq!(v("(length *perspectives*)"), "0");
+        assert_eq!(
+            v(r#"(if *perspective-current* "set" "unset")"#),
+            "\"unset\""
+        );
+        // The title bar was re-published without the dead perspective (an
+        // empty item list clears the dropdown entirely).
+        assert!(
+            outcome.commands.iter().any(|c| matches!(
+                c,
+                EditorCommand::SetTitlebarDropdown { items, .. } if items.is_empty()
+            )),
+            "expected an empty SetTitlebarDropdown, got {:?}",
+            outcome.commands
+        );
     }
 
     /// Switching back to a perspective whose resume file is already open gets

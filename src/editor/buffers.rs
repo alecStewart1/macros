@@ -104,6 +104,10 @@ impl Editor {
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
+        // Re-activating an existing buffer never fires `find-file-hook`, so
+        // anything tracking "which buffer is the user in" (the perspectives
+        // title bar) needs its own signal. Free when nothing is registered.
+        self.run_hook("buffer-switch-hook");
         cx.notify();
     }
 
@@ -144,6 +148,7 @@ impl Editor {
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
+        self.run_hook("buffer-switch-hook"); // see `activate`
         let name = self.active.name.clone();
         self.echo(name, cx);
     }
