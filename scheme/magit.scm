@@ -239,24 +239,32 @@
 (define *magit-async-out* "")
 (define *magit-async-done* "")
 (define (magit-run-async args done-msg)
-  (set! *magit-async-out* "")
-  (set! *magit-async-done* done-msg)
-  (message (string-append "git " (string-join args " ") "…"))
-  (make-process "/bin/sh"
-                (list "-c" (string-append "cd " *magit-dir* " && git "
-                                          (string-join args " ") " 2>&1"))
-                'magit-async-output 'magit-async-exit))
+  ;; lib-async's "magit" lane: one network op at a time (a second is refused),
+  ;; C-g-cancellable. `exec` so git replaces the wrapper shell — the cancel
+  ;; then signals git itself rather than an sh that would orphan it.
+  (when (async-lane-run "magit" "/bin/sh"
+                        (list "-c" (string-append "cd " *magit-dir* " && exec git "
+                                                  (string-join args " ") " 2>&1"))
+                        'magit-async-output 'magit-async-exit)
+    (set! *magit-async-out* "")
+    (set! *magit-async-done* done-msg)
+    (message (string-append "git " (string-join args " ") "… (C-g cancels)"))))
 (define (magit-async-output line)
   (set! *magit-async-out* (string-append *magit-async-out* line "\n")))
 (define (magit-async-exit code)
-  (magit-refresh)
-  (if (equal? code "0")
-      (message *magit-async-done*)
-      (begin
-        (render-buffer "*magit-process*" "magit-log-mode"
-                       (if (equal? (trim-end *magit-async-out*) "") "git failed"
-                           (trim-end *magit-async-out*)) '())
-        (message "git failed — see *magit-process*"))))
+  (let ((cancelled (async-lane-finish "magit")))
+    (magit-refresh)
+    (cond (cancelled (message "git cancelled"))
+          ((equal? code "0") (message *magit-async-done*))
+          (else
+            (render-buffer "*magit-process*" "magit-log-mode"
+                           (if (equal? (trim-end *magit-async-out*) "") "git failed"
+                               (trim-end *magit-async-out*)) '())
+            (message "git failed — see *magit-process*")))))
+;; C-g in a magit buffer: kill a live push/pull/fetch (its exit callback then
+;; reports the cancel), otherwise the normal keyboard-quit.
+(define-command (magit-keyboard-quit)
+  (async-lane-quit "magit"))
 
 ;; --- commit-message buffer helpers ------------------------------------------
 (define magit-commit-comment-intro
@@ -2149,6 +2157,8 @@
 (define-key "magit-status" "backtab" 'magit-cycle-all)
 (define-key "magit-status" "shift-tab" 'magit-cycle-all)
 (define-key "magit-status" "enter" 'magit-visit-file)
+;; Shadows fundamental's C-g inside magit so it can cancel a live push/pull.
+(define-key "magit-status" "ctrl-g" 'magit-keyboard-quit)
 
 ;; Evil + Helix overlays (each consulted only under its own modal mode, before
 ;; the keymap above, so the Emacs defaults are untouched). The collection layer
@@ -2168,7 +2178,9 @@
      (define-key km "shift-g" 'evil-goto-last-line)
      (define-key km "g r" 'magit-refresh)
      (define-key km "0" 'move-beginning-of-line)
-     (define-key km "^" 'evil-first-non-blank)))
+     (define-key km "^" 'evil-first-non-blank)
+     ;; Escape = the modal C-g: cancels a live push/pull like C-g does.
+     (define-key km "escape" 'magit-keyboard-quit)))
  (list "evil-normal:" "helix-normal:"))
 
 ;; Log / commit / stash-list buffers.

@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://codeberg.org/macros-app/macros"
@@ -133,10 +133,11 @@ libloading = "0.8"
 # inflate — fast, and no system zlib/C toolchain required.
 gix = { version = "0.85.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "max-performance-safe"] }
 
-# macOS-only: `libc::statfs` to detect a read-only volume (DMG / App
-# Translocation) and `renamex_np` for the atomic in-place bundle swap. Only the
-# self-update path on macOS touches these.
-[target.'cfg(target_os = "macos")'.dependencies]
+# All unix: `libc::kill` for the process-group kill in `kill-process`. On
+# macOS additionally `libc::statfs` to detect a read-only volume (DMG / App
+# Translocation) and `renamex_np` for the atomic in-place bundle swap (the
+# self-update path).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 # Compiles the vendored Mermaid tree-sitter parser (grammars/tree-sitter-mermaid)

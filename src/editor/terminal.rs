@@ -94,12 +94,17 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         // Spawn here (not on the worker) so we can keep the child for stdin/kill.
-        let mut child = match Command::new(&program)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
+        let mut cmd = Command::new(&program);
+        cmd.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped());
+        // Its own process group, so kill_process can take down the whole tree
+        // — a shell-wrapped command (`sh -c "make && …"`) dies with its shell
+        // instead of being orphaned by it.
+        #[cfg(unix)]
         {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
                 self.echo(format!("make-process: {e}"), cx);
@@ -171,6 +176,12 @@ impl Editor {
     /// Kill a live process; its reader thread then reports exit (Emacs `kill-process`).
     pub(super) fn kill_process(&mut self, id: u64) {
         if let Some(handle) = self.processes.get_mut(&id) {
+            // The child got its own process group at spawn — signal the group,
+            // so a wrapper shell's children die too (not just the shell).
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(handle.child.id() as i32), libc::SIGKILL);
+            }
             let _ = handle.child.kill();
         }
     }

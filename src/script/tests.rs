@@ -2574,6 +2574,9 @@ mod magit_tests {
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
             .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
         // Rename: both sides, NEW is the on-disk path.
@@ -2593,6 +2596,140 @@ mod magit_tests {
         assert_eq!(v(r#"(magit-newpath "a/plain.txt")"#), "\"a/plain.txt\"");
     }
 
+    /// C-g (magit-keyboard-quit) kills a live async push/pull via the lib-async
+    /// "magit" lane; with nothing running it falls back to plain keyboard-quit.
+    #[test]
+    fn magit_keyboard_quit_cancels_async_git() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-section.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+
+        // Idle — no live git subprocess: the ordinary quit.
+        assert!(matches!(
+            engine
+                .eval("(magit-keyboard-quit)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::KeyboardQuit]
+        ));
+
+        // A push is in flight (seed the lane as magit-run-async does): C-g
+        // kills that process instead of quitting, and flags the run as
+        // cancelled so the exit callback won't report failure.
+        engine
+            .eval(r#"(async-lane-run "magit" "/bin/sh" (list) 'magit-async-output 'magit-async-exit)"#)
+            .unwrap();
+        assert!(matches!(
+            engine
+                .eval("(magit-keyboard-quit)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::KillProcess { .. }]
+        ));
+        assert_eq!(
+            engine
+                .eval(r#"(if (async-lane-cancelled? "magit") "y" "n")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"y\"")
+        );
+        // The exit callback's async-lane-finish reports the cancel and frees
+        // the lane for the next push.
+        assert_eq!(
+            engine
+                .eval(r#"(if (async-lane-finish "magit") "y" "n")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"y\"")
+        );
+        assert_eq!(
+            engine
+                .eval(r#"(if (async-lane-live? "magit") "y" "n")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"n\"")
+        );
+    }
+
+    /// The lib-async lane lifecycle: run spawns and marks the lane live, a
+    /// second run is refused while live, cancel kills by id, finish frees.
+    #[test]
+    fn async_lane_lifecycle() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
+
+        // Run: enqueues MakeProcess, lane goes live.
+        assert!(matches!(
+            engine
+                .eval(r#"(async-lane-run "t" "/bin/sh" (list) 'out 'exit)"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::MakeProcess { .. }]
+        ));
+        assert_eq!(v(r#"(if (async-lane-live? "t") "y" "n")"#), "\"y\"");
+
+        // A second run on a live lane is refused: a message, no MakeProcess.
+        assert!(matches!(
+            engine
+                .eval(r#"(async-lane-run "t" "/bin/sh" (list) 'out 'exit)"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::Message(_)]
+        ));
+
+        // Cancel kills the recorded process id and marks the lane cancelled.
+        assert!(matches!(
+            engine
+                .eval(r#"(async-lane-cancel "t")"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::KillProcess { .. }]
+        ));
+        assert_eq!(v(r#"(if (async-lane-cancelled? "t") "y" "n")"#), "\"y\"");
+
+        // Finish (the exit callback) reports the cancel and frees the lane.
+        assert_eq!(v(r#"(if (async-lane-finish "t") "y" "n")"#), "\"y\"");
+        assert_eq!(v(r#"(if (async-lane-live? "t") "y" "n")"#), "\"n\"");
+        // A finish after a natural (uncancelled) exit reports #f.
+        engine
+            .eval(r#"(async-lane-run "t" "/bin/sh" (list) 'out 'exit)"#)
+            .unwrap();
+        assert_eq!(v(r#"(if (async-lane-finish "t") "y" "n")"#), "\"n\"");
+
+        // Idle lane: cancel is a no-op #f, and the quit helper falls back to
+        // the ordinary keyboard-quit.
+        assert_eq!(v(r#"(if (async-lane-cancel "t") "y" "n")"#), "\"n\"");
+        assert!(matches!(
+            engine
+                .eval(r#"(async-lane-quit "t")"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::KeyboardQuit]
+        ));
+    }
+
     /// The evil overlay binds vim motions for magit WITHOUT removing magit's
     /// own single-key commands from the base keymap. `g g` / `g r` coexist with
     /// the base `g` = refresh: under evil the dispatch prefers the overlay
@@ -2608,6 +2745,9 @@ mod magit_tests {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         let cmds = engine
             .eval(include_str!("../../scheme/magit.scm"))
@@ -2659,6 +2799,9 @@ mod magit_tests {
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
             .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
         let pipe = |line: &str| format!(r#"(string-join (magit-parse-branch-line "{line}") "|")"#);
@@ -2698,6 +2841,9 @@ mod magit_tests {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         // Build transients as if invoked from inside a magit buffer, so the
@@ -2745,6 +2891,9 @@ mod magit_tests {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
 
@@ -2821,6 +2970,9 @@ mod magit_tests {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
@@ -3759,6 +3911,9 @@ mod magit_e2e {
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
             .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
         engine.eval("(magit-render)").unwrap();
@@ -3821,6 +3976,9 @@ mod magit_hunk_e2e {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
@@ -3911,6 +4069,9 @@ mod magit_hunk_e2e {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
@@ -4238,6 +4399,9 @@ mod magit_quiet_refresh {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
@@ -4823,6 +4987,9 @@ mod magit_blame_gix {
         engine
             .eval(include_str!("../../scheme/lib-transient.scm"))
             .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
@@ -4909,6 +5076,9 @@ mod diagnostics_lib {
             .unwrap();
         // next-error/previous-error are the unified dispatchers in shell.scm; with
         // no compile run, *next-error-source* stays "diagnostics" so they route here.
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
         // Inject diagnostics through the snapshot — the real primitive path.
         engine.set_snapshot(EditorSnapshot {
@@ -4967,6 +5137,9 @@ mod compile_lib {
         engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
             .eval(include_str!("../../scheme/diagnostics.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
         (engine, rx)

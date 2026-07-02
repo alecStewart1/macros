@@ -55,17 +55,21 @@
 
 (define (compile-run cmd)
   (when (not (equal? (trim-end cmd) ""))
-    (set! *compile-dir* (buffer-directory))
-    (set! *compile-last* cmd)
-    (set! *compile-out* '())
-    (set! *compile-errors* '())
-    (set! *compile-line* 2)
-    (set! *compile-idx* -1)
-    (set! *next-error-source* "compile")
-    (compile-display (string-append "$ " cmd "\n\n"))
-    ;; `2>&1`: make-process captures stdout only, but compilers report on stderr.
-    (make-process "/bin/sh" (list "-c" (string-append "cd " *compile-dir* " && " cmd " 2>&1"))
-                  "compile-output" "compile-done")))
+    (let ((dir (buffer-directory)))
+      ;; lib-async's "compile" lane: one build at a time (a second is refused),
+      ;; cancellable via kill-compilation / C-g in *compilation*.
+      ;; `2>&1`: make-process captures stdout only, but compilers report on stderr.
+      (when (async-lane-run "compile" "/bin/sh"
+                            (list "-c" (string-append "cd " dir " && " cmd " 2>&1"))
+                            'compile-output 'compile-done)
+        (set! *compile-dir* dir)
+        (set! *compile-last* cmd)
+        (set! *compile-out* '())
+        (set! *compile-errors* '())
+        (set! *compile-line* 2)
+        (set! *compile-idx* -1)
+        (set! *next-error-source* "compile")
+        (compile-display (string-append "$ " cmd "\n\n"))))))
 
 ;; Stream each line live; record any error with the *compilation* line it sits on.
 (define (compile-output line)
@@ -79,21 +83,35 @@
   (set! *compile-line* (+ *compile-line* 1)))
 
 ;; On exit, re-render the whole buffer with error lines faced + a status footer.
+;; A cancelled run (kill-compilation / C-g) reports as such, not as a failure.
 (define (compile-done code)
-  (let* ((errs (reverse *compile-errors*))
+  (let* ((cancelled (async-lane-finish "compile"))
+         (errs (reverse *compile-errors*))
          (ok (equal? code "0"))
-         (status (if ok "Compilation finished"
-                     (string-append "Compilation exited abnormally with code " code)))
+         (status (cond (cancelled "Compilation cancelled")
+                       (ok "Compilation finished")
+                       (else (string-append "Compilation exited abnormally with code " code))))
          (lines (append (list (string-append "$ " *compile-last*) "")
                         (reverse *compile-out*)
                         (list "" status)))
          (status-line (- (length lines) 1))
-         (faces (cons (list status-line (if ok "compilation-info" "compilation-error"))
+         (faces (cons (list status-line (cond (cancelled "compilation-warning")
+                                              (ok "compilation-info")
+                                              (else "compilation-error")))
                       (map (lambda (e) (list (car e) (nth e 4))) errs))))
     (render-buffer "*compilation*" "compile-mode" (join-lines lines) faces)
-    (message (string-append status " — " (int->string (length errs)) " error(s)"))))
+    (message (if cancelled status
+                 (string-append status " — " (int->string (length errs)) " error(s)")))))
 
 (define (recompile) (when (not (equal? *compile-last* "")) (compile-run *compile-last*)))
+
+;; Stop a running build: M-x kill-compilation from anywhere (Emacs parity), or
+;; C-g inside *compilation* (which stays the ordinary quit when nothing runs).
+(define-command (kill-compilation)
+  (when (not (async-lane-cancel "compile"))
+    (message "No compilation running")))
+(define-command (compile-keyboard-quit)
+  (async-lane-quit "compile"))
 
 ;; --- error navigation (the compile arm of next-error / previous-error) ------
 (define (compile-error-list) (reverse *compile-errors*))
@@ -146,6 +164,11 @@
 (define-key "compile-mode" "q" 'kill-buffer)
 (define-key "compile-mode" "n" 'next-line)
 (define-key "compile-mode" "p" 'previous-line)
+;; Shadows fundamental's C-g inside *compilation* so it can stop a live build;
+;; escape is the modal equivalent under evil/helix.
+(define-key "compile-mode" "ctrl-g" 'compile-keyboard-quit)
+(define-key "evil-normal:compile-mode" "escape" 'compile-keyboard-quit)
+(define-key "helix-normal:compile-mode" "escape" 'compile-keyboard-quit)
 ;; grep-mode buffers (projectile-grep / occur-style) get the same RET jump.
 (define-key "grep-mode" "enter" 'compile-visit)
 
