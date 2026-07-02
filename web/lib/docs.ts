@@ -49,7 +49,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { slug: "lsp", label: "Language servers (LSP)", blurb: "Definitions, references, rename, code actions" },
       { slug: "diagnostics", label: "Diagnostics", blurb: "Flycheck-style errors and navigation" },
-      { slug: "projects", label: "Projects & search", blurb: "Projectile + ripgrep find-file and grep" },
+      { slug: "projects", label: "Projects & search", blurb: "Projectile + ripgrep find-file, grep, and perspectives" },
       { slug: "shell-and-compile", label: "Shell & compile", blurb: "compile, grep, next-error, the shell" },
       { slug: "terminal", label: "Terminal", blurb: "The embedded VT/ANSI terminal" },
     ],

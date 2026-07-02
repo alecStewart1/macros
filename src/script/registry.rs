@@ -447,6 +447,14 @@ pub(crate) fn build_engine(
         );
     }
     register_binary(&mut reg, queue, "set-face", EditorCommand::SetFace);
+    {
+        let q = queue.clone();
+        reg.register_fn("set-face-underline", move |name: String, on: bool| {
+            q.lock()
+                .unwrap()
+                .push(EditorCommand::SetFaceUnderline(name, on));
+        });
+    }
     register_unary(
         &mut reg,
         queue,
@@ -1060,6 +1068,24 @@ pub(crate) fn build_engine(
                 .unwrap()
                 .push(EditorCommand::SetModeLineFormat(steel_string_list(&segs)));
         });
+    }
+    {
+        // `(set-titlebar-dropdown items active callback)` — publish the
+        // title-bar dropdown (the perspectives switcher). `items` is a list of
+        // display labels, `active` the one shown in the bar; clicking an item
+        // calls `(callback label)`. An empty list removes the control. Driven
+        // from scheme/perspectives.scm.
+        let q = queue.clone();
+        reg.register_fn(
+            "set-titlebar-dropdown",
+            move |items: SteelVal, active: String, callback: Callback| {
+                q.lock().unwrap().push(EditorCommand::SetTitlebarDropdown {
+                    items: steel_string_list(&items),
+                    active,
+                    callback: callback.0,
+                });
+            },
+        );
     }
     // --- Overlays / text properties / folds -------------------------------
     register_ternary(&mut reg, queue, "overlay-set-face", |start, end, face| {

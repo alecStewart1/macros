@@ -900,6 +900,33 @@ impl Editor {
                 self.mode_line_format = parse_mode_line_format(tokens);
                 cx.notify();
             }
+            SetTitlebarDropdown {
+                items,
+                active,
+                callback,
+            } => {
+                // Re-publishing while the menu is unfolded (a find-file-hook
+                // firing mid-browse) keeps it unfolded — filter and selection
+                // included — rather than snapping shut.
+                let (open, filter, selected) = self
+                    .titlebar_dropdown
+                    .as_ref()
+                    .map(|d| (d.open, d.filter.clone(), d.selected))
+                    .unwrap_or_default();
+                self.titlebar_dropdown = if items.is_empty() {
+                    None
+                } else {
+                    Some(TitlebarDropdownState {
+                        items: items.into_iter().map(SharedString::from).collect(),
+                        active: active.into(),
+                        callback,
+                        open,
+                        filter,
+                        selected,
+                    })
+                };
+                cx.notify();
+            }
             StartKbdMacro => self.start_kbd_macro(cx),
             EndKbdMacro => self.end_kbd_macro(cx),
             CallLastKbdMacro => self.call_last_kbd_macro(cx),
@@ -1028,6 +1055,10 @@ impl Editor {
                 }
                 None => self.echo(format!("Invalid color: {color}"), cx),
             },
+            SetFaceUnderline(face, on) => {
+                cx.update_global::<Theme, ()>(|theme, _| theme.set_underline(face, on));
+                cx.notify();
+            }
             LoadTheme(name) => match crate::runtime::theme_script(&name) {
                 Some(source) => {
                     // Reset to an empty palette, then apply the theme's set-face

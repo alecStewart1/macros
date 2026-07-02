@@ -1,6 +1,6 @@
 ---
 title: Projects & search
-description: Projectile-style project navigation and ripgrep-backed find-file and grep.
+description: Projectile-style project navigation, ripgrep-backed find-file and grep, and per-project perspectives switched from the title bar.
 ---
 
 # Projects & search
@@ -15,6 +15,7 @@ Macros follows the **projectile.el** pattern: a project is the directory tree ab
 | <kbd>C-c p p</kbd> | `projectile-switch-project` | Switch to another known project |
 | <kbd>C-c p g</kbd> | `projectile-grep` | Live grep across the project (Helm) |
 | <kbd>C-c p G</kbd> | `projectile-grep-buffer` | Grep into a `grep-mode` results buffer |
+| <kbd>C-c p s</kbd> | `perspective-switch` | Switch perspective — reopen a project at its last file (Helm) |
 
 The project root is shown in the mode line.
 
@@ -39,6 +40,30 @@ When you'd rather keep a persistent, walkable result set, `projectile-grep-buffe
 | <kbd>q</kbd> | close |
 
 Those buffer results also feed `next-error` / `previous-error` (<kbd>M-g n</kbd> / <kbd>M-g p</kbd>) — see [Diagnostics](/docs/diagnostics).
+
+## Perspectives
+
+A **perspective** is a per-project context: each project you touch remembers the file you were last visiting, and you can jump between projects — landing exactly where you left off — from a dropdown in the title bar.
+
+Perspectives are created automatically. The first time you visit a file inside a project, that project appears in the title-bar dropdown; every subsequent visit updates its *resume point* (the last file you had open there). There is nothing to configure or declare.
+
+### Switching
+
+Click the project name in the title bar (just right of the traffic lights) to unfold the dropdown, then pick a project. Macros reopens that project's last visited file and the title bar updates to show it as current — a checkmark marks the active perspective in the list. Clicking anywhere outside the menu folds it without switching.
+
+The same list is available from the keyboard as `perspective-switch` (<kbd>C-c p s</kbd>), a [Helm](/docs/helm) source.
+
+If a project's resume file has been deleted since your last visit, switching to it falls back to the project's find-file picker instead of opening a dead path.
+
+### Names and persistence
+
+The dropdown shows each project's directory name. If two projects share a name (say, two checkouts of `proj`), both are qualified with their parent directory — `work/proj` and `scratch/proj`.
+
+Perspectives survive restarts: the list is written through to `~/.config/macros/perspectives` as soon as a project is touched (no clean quit required) and restored at startup, so the dropdown is populated before you open anything. Projects whose roots no longer exist are pruned on load.
+
+### Relationship to projectile
+
+Perspectives sit on top of the same root detection as everything else on this page (`project-root`, walking up to a marker like `.git`). `projectile-switch-project` drops you into a project's find-file picker; the perspective dropdown instead resumes the project where you left it. Use whichever fits — visiting any file through either path keeps both in sync.
 
 ## Tuning the search
 

@@ -142,6 +142,7 @@ impl Editor {
         // argument → Emacs dispatch.
         let layers = [
             Self::key_config_pending,
+            Self::key_titlebar_dropdown,
             Self::key_transient,
             Self::key_helm,
             Self::key_minibuffer,
@@ -176,6 +177,33 @@ impl Editor {
             return Handled::Yes;
         }
         Handled::No
+    }
+
+    /// The title-bar perspectives menu is modal while unfolded: Escape / C-g
+    /// fold it, Enter picks the selected row, arrows (or C-n/C-p) move the
+    /// selection, Backspace edits the search field. Plain printable keys fall
+    /// through to the IME, which routes them into the filter (like Helm); any
+    /// other chord is swallowed so it can't reach the buffer under the menu.
+    fn key_titlebar_dropdown(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
+        if !self.titlebar_dropdown.as_ref().is_some_and(|d| d.open) {
+            return Handled::No;
+        }
+        let ctrl = ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform;
+        if ks.key == "escape" || (ctrl && ks.key == "g") {
+            self.titlebar_dropdown_close(cx);
+        } else if ks.key == "enter" {
+            self.titlebar_dropdown_select_current(cx);
+        } else if ks.key == "backspace" {
+            self.titlebar_dropdown_backspace(cx);
+        } else if ks.key == "up" || (ctrl && ks.key == "p") {
+            self.titlebar_dropdown_move(-1, cx);
+        } else if ks.key == "down" || (ctrl && ks.key == "n") {
+            self.titlebar_dropdown_move(1, cx);
+        } else if !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform {
+            return Handled::Yes; // plain text: let the IME route it to the filter
+        }
+        cx.stop_propagation();
+        Handled::Yes
     }
 
     /// A transient popup is modal: C-g / Escape close it; a row's key runs its

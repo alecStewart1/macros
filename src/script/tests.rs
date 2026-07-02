@@ -5738,3 +5738,177 @@ mod capf_lib {
         assert_eq!(v(r#"(dabbrev-capf "f")"#), "()");
     }
 }
+
+#[cfg(test)]
+mod perspectives_lib {
+    use super::*;
+
+    /// core + helm + a stubbed persistence-dir (pointing nowhere, so
+    /// perspective-load is a no-op and nothing touches the real config), then
+    /// perspectives.scm itself — the same sorted-order prefix the runtime uses.
+    fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
+        let (engine, rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
+        engine
+            .eval(r#"(define (persistence-dir) "/nonexistent-macros-test")"#)
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/perspectives.scm"))
+            .unwrap();
+        (engine, rx)
+    }
+
+    /// First touch creates a perspective, a second touch of the same root only
+    /// updates its resume file (order and length preserved).
+    #[test]
+    fn perspective_update_creates_then_refreshes() {
+        let (engine, _rx) = engine();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(r#"(perspective-update "/w/proj" "/w/proj/a.rs")"#)
+            .unwrap();
+        engine
+            .eval(r#"(perspective-update "/w/other" "/w/other/b.rs")"#)
+            .unwrap();
+        engine
+            .eval(r#"(perspective-update "/w/proj" "/w/proj/c.rs")"#)
+            .unwrap();
+        assert_eq!(v("(length *perspectives*)"), "2");
+        assert_eq!(v("(car (car *perspectives*))"), "\"/w/proj\"");
+        assert_eq!(
+            v(r#"(alist-ref *perspectives* "/w/proj")"#),
+            "\"/w/proj/c.rs\""
+        );
+    }
+
+    /// Labels are bare basenames until two roots collide, then both qualify
+    /// with their parent directory; the reverse lookup honors the same rule.
+    #[test]
+    fn perspective_display_disambiguates_duplicates() {
+        let (engine, _rx) = engine();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(r#"(perspective-update "/a/b/proj" "/a/b/proj/x.rs")"#)
+            .unwrap();
+        assert_eq!(v(r#"(perspective-display "/a/b/proj")"#), "\"proj\"");
+        engine
+            .eval(r#"(perspective-update "/z/other/proj" "/z/other/proj/y.rs")"#)
+            .unwrap();
+        assert_eq!(v(r#"(perspective-display "/a/b/proj")"#), "\"b/proj\"");
+        assert_eq!(
+            v(r#"(perspective-display "/z/other/proj")"#),
+            "\"other/proj\""
+        );
+        assert_eq!(
+            v(r#"(perspective-root-for-name "b/proj")"#),
+            "\"/a/b/proj\""
+        );
+        assert_eq!(
+            v(r#"(if (perspective-root-for-name "nope") "hit" "miss")"#),
+            "\"miss\""
+        );
+    }
+
+    /// Syncing pushes the full label list, the current root's label, and the
+    /// `perspective-select` callback to the title bar.
+    #[test]
+    fn perspective_sync_pushes_titlebar_dropdown() {
+        let (engine, _rx) = engine();
+        engine
+            .eval(r#"(perspective-update "/w/proj" "/w/proj/a.rs")"#)
+            .unwrap();
+        engine
+            .eval(r#"(perspective-update "/w/other" "/w/other/b.rs")"#)
+            .unwrap();
+        engine
+            .eval(r#"(set! *perspective-current* "/w/other")"#)
+            .unwrap();
+        match engine
+            .eval("(perspective-sync-titlebar)")
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [
+                EditorCommand::SetTitlebarDropdown {
+                    items,
+                    active,
+                    callback,
+                },
+            ] => {
+                assert_eq!(items, &["proj", "other"]);
+                assert_eq!(active, "other");
+                assert_eq!(callback, "perspective-select");
+            }
+            other => panic!("expected SetTitlebarDropdown, got {other:?}"),
+        }
+    }
+
+    /// Selecting a perspective whose resume file vanished falls back to a
+    /// find-file Helm picker in that root instead of opening a dead path
+    /// (after marking the picked perspective current in the title bar).
+    #[test]
+    fn perspective_select_missing_file_falls_back_to_helm() {
+        let (engine, _rx) = engine();
+        engine
+            .eval(r#"(perspective-update "/nonexistent-macros-test/proj" "/nonexistent-macros-test/proj/gone.rs")"#)
+            .unwrap();
+        match engine
+            .eval(r#"(perspective-select "proj")"#)
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [
+                EditorCommand::SetTitlebarDropdown { active, .. },
+                EditorCommand::Helm(sources),
+            ] => {
+                assert_eq!(active, "proj");
+                assert_eq!(sources.len(), 1);
+            }
+            other => panic!("expected SetTitlebarDropdown + Helm fallback, got {other:?}"),
+        }
+    }
+
+    /// Switching back to a perspective whose resume file is already open gets
+    /// no find-file-hook (`open-file` only fires it on a fresh visit), so
+    /// perspective-select must push the title-bar update itself. Regression:
+    /// the bar kept showing the previous project when toggling back and forth.
+    #[test]
+    fn perspective_select_syncs_titlebar_before_opening() {
+        let (engine, _rx) = engine();
+        let root = std::env::temp_dir().join("macros-persp-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("resume.rs");
+        std::fs::write(&file, "").unwrap();
+        engine
+            .eval(&format!(
+                r#"(perspective-update "{}" "{}")"#,
+                root.display(),
+                file.display()
+            ))
+            .unwrap();
+        engine
+            .eval(r#"(perspective-update "/nonexistent-macros-test/other" "/nonexistent-macros-test/other/x.rs")"#)
+            .unwrap();
+        engine
+            .eval(r#"(set! *perspective-current* "/nonexistent-macros-test/other")"#)
+            .unwrap();
+        match engine
+            .eval(r#"(perspective-select "macros-persp-test")"#)
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [
+                EditorCommand::SetTitlebarDropdown { active, .. },
+                EditorCommand::OpenFile(path),
+            ] => {
+                assert_eq!(active, "macros-persp-test");
+                assert!(path.ends_with("resume.rs"), "path: {path}");
+            }
+            other => panic!("expected SetTitlebarDropdown + OpenFile, got {other:?}"),
+        }
+    }
+}

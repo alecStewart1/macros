@@ -1809,8 +1809,8 @@ fn line_runs(
     default: Hsla,
     theme: &Theme,
 ) -> Vec<TextRun> {
-    // 1. Base segments `(start, end, color)` from syntax spans, tiling the line.
-    let mut segs: Vec<(usize, usize, Hsla)> = Vec::new();
+    // 1. Base segments `(start, end, color, underline)` from syntax spans.
+    let mut segs: Vec<(usize, usize, Hsla, bool)> = Vec::new();
     let mut covered = line.start;
     for span in spans {
         if span.range.end <= line.start {
@@ -1822,22 +1822,24 @@ fn line_runs(
         let start = span.range.start.max(line.start);
         let end = span.range.end.min(line.end);
         if start > covered {
-            segs.push((covered, start, default));
+            segs.push((covered, start, default, false));
         }
-        let color = span
-            .face
-            .map_or(default, |i| theme.color(face_name(i), default));
-        segs.push((start, end, color));
+        let (color, ul) = span.face.map_or((default, false), |i| {
+            let name = face_name(i);
+            (theme.color(name, default), theme.is_underlined(name))
+        });
+        segs.push((start, end, color, ul));
         covered = end;
     }
     if covered < line.end {
-        segs.push((covered, line.end, default));
+        segs.push((covered, line.end, default, false));
     }
     if segs.is_empty() {
-        segs.push((line.start, line.end, default));
+        segs.push((line.start, line.end, default, false));
     }
 
-    // 2. Overlay faces override their sub-range, splitting base segments.
+    // 2. Overlay faces override their sub-range, splitting base segments. An
+    //    overlay face may also carry underline (e.g. web-reader link markers).
     for (range, face) in overlays {
         let os = range.start.max(line.start);
         let oe = range.end.min(line.end);
@@ -1845,27 +1847,38 @@ fn line_runs(
             continue;
         }
         let color = theme.color(face, default);
+        let ul = theme.is_underlined(face);
         let mut next = Vec::with_capacity(segs.len() + 2);
-        for (s, e, c) in segs.drain(..) {
+        for (s, e, c, u) in segs.drain(..) {
             if e <= os || s >= oe {
-                next.push((s, e, c));
+                next.push((s, e, c, u));
                 continue;
             }
             if s < os {
-                next.push((s, os, c));
+                next.push((s, os, c, u));
             }
-            next.push((s.max(os), e.min(oe), color));
+            next.push((s.max(os), e.min(oe), color, ul));
             if e > oe {
-                next.push((oe, e, c));
+                next.push((oe, e, c, u));
             }
         }
         segs = next;
     }
 
-    // 3. Emit runs (skip any empty segment).
+    // 3. Emit runs (skip any empty segment), underlining where the face asked.
     segs.into_iter()
-        .filter(|(s, e, _)| e > s)
-        .map(|(s, e, color)| plain_run(e - s, font.clone(), color))
+        .filter(|(s, e, _, _)| e > s)
+        .map(|(s, e, color, ul)| {
+            let mut run = plain_run(e - s, font.clone(), color);
+            if ul {
+                run.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                    wavy: false,
+                });
+            }
+            run
+        })
         .collect()
 }
 
@@ -2203,6 +2216,24 @@ mod tests {
         assert_eq!(runs[1].color, red, "overlay colors its sub-range");
         assert_eq!(runs[0].color, default);
         assert_eq!(runs[2].color, default);
+    }
+
+    #[test]
+    fn overlay_face_underlines_when_set() {
+        let mut theme = Theme::default();
+        theme.set("link", rgb(0x4ea1f3).into());
+        theme.set_underline("link", true);
+        let font = font("Lilex");
+        let default: Hsla = rgb(0x000000).into();
+        // One overlay [2,5) with an underlined face; the rest of the line is not.
+        let overlays = vec![(2usize..5usize, SharedString::from("link"))];
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, &theme);
+        assert!(
+            runs[1].underline.is_some(),
+            "underlined face underlines its run"
+        );
+        assert!(runs[0].underline.is_none());
+        assert!(runs[2].underline.is_none());
     }
 
     #[test]

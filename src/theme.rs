@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{Global, Hsla, rgb, rgba};
 
@@ -16,6 +16,10 @@ use gpui::{Global, Hsla, rgb, rgba};
 #[derive(Default)]
 pub struct Theme {
     faces: HashMap<String, Hsla>,
+    /// Face names that should render with an underline. A separate set (rather
+    /// than a per-face attribute struct) keeps `color()` and every caller of it
+    /// unchanged; the paint path additionally consults `is_underlined`.
+    underlined: HashSet<String>,
 }
 
 impl Global for Theme {}
@@ -49,6 +53,22 @@ impl Theme {
     /// Set (or override) a face color — drives `set-face` from Steel.
     pub fn set(&mut self, name: impl Into<String>, color: Hsla) {
         self.faces.insert(name.into(), color);
+    }
+
+    /// Whether text in `name` should be underlined.
+    pub fn is_underlined(&self, name: &str) -> bool {
+        self.underlined.contains(name)
+    }
+
+    /// Turn a face's underline attribute on or off — drives `set-face-underline`
+    /// from Steel. Like colors, this is wiped by `load-theme` (a fresh palette).
+    pub fn set_underline(&mut self, name: impl Into<String>, on: bool) {
+        let name = name.into();
+        if on {
+            self.underlined.insert(name);
+        } else {
+            self.underlined.remove(&name);
+        }
     }
 }
 

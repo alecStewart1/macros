@@ -370,6 +370,8 @@ pub enum EditorCommand {
     // Theming
     /// Set a face's color: `(set-face "comment" "#6a9955")`.
     SetFace(String, String),
+    /// Toggle a face's underline attribute: `(set-face-underline "link" #t)`.
+    SetFaceUnderline(String, bool),
     /// Load a built-in theme by name. Queued by the `load-theme-impl` primitive,
     /// which the core.scm `load-theme` wrapper calls for `(load-theme 'macros-light)`
     /// or `(load-theme "macros-light")` (a symbol or string).
@@ -478,6 +480,14 @@ pub enum EditorCommand {
     /// Replace the mode-line format with tab-encoded segment tokens (see
     /// `parse_mode_line_format`).
     SetModeLineFormat(Vec<String>),
+    /// Publish the title-bar dropdown (the perspectives switcher): the display
+    /// labels, the active one, and the Scheme function a click hands the picked
+    /// label to. An empty `items` removes the control.
+    SetTitlebarDropdown {
+        items: Vec<String>,
+        active: String,
+        callback: String,
+    },
     // Transient popup (the magit / `transient.el` pattern).
     /// Open a transient popup: a title plus `(key, label, command)` rows. When
     /// `sticky`, selecting a row keeps the popup open (the row command re-opens
