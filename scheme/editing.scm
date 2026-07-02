@@ -72,11 +72,134 @@
                         (string-append (buffer-substring cur-s cur-e) "\n"
                                        (buffer-substring prev-s prev-e)))))))
 
+;; --- word case (M-u / M-l / M-c) ----------------------------------------------
+;; Fold from point to the end of the word and move there (Emacs semantics);
+;; with an active region, fold the region instead.
+(define (fold-word folder)
+  (if (region-active?)
+      (let ((s (region-beginning)) (e (region-end)))
+        (when (< s e)
+          (replace-region s e (folder (buffer-substring s e)))))
+      (let* ((p (point)) (e (word-forward p)))
+        (when (> e p)
+          (replace-region p e (folder (buffer-substring p e)))
+          (goto-char e)))))
+(define (upcase-word)     (fold-word string-upcase))
+(define (downcase-word)   (fold-word string-downcase))
+(define (capitalize-word) (fold-word capitalize-token))
+
+;; --- transpose-words (M-t): swap the words around point ----------------------
+(define (transpose-words)
+  (let* ((p (point))
+         (e2 (word-forward p)) (s2 (word-backward e2))
+         (s1 (word-backward s2)) (e1 (word-forward s1)))
+    (when (and (< s1 e1) (< s2 e2) (<= e1 s2) (< s1 s2))
+      (replace-region s1 e2
+                      (string-append (buffer-substring s2 e2)
+                                     (buffer-substring e1 s2)
+                                     (buffer-substring s1 e1)))
+      (goto-char e2))))
+
+;; --- back-to-indentation (M-m): point to the line's first non-blank ----------
+(define (back-to-indentation)
+  (let* ((b (line-bounds)) (s (car b)) (e (cadr b)))
+    (goto-char
+     (let loop ((i s))
+       (if (and (< i e)
+                (let ((c (buffer-substring i (+ i 1))))
+                  (or (equal? c " ") (equal? c "\t"))))
+           (loop (+ i 1))
+           i)))))
+
+;; --- paragraph motion (M-{ / M-}) and mark-paragraph (M-h) -------------------
+;; The boundary positions live in core.scm (paragraph-forward-pos /
+;; paragraph-backward-pos) so the evil `{`/`}` motions share them.
+(define (forward-paragraph)  (goto-char (paragraph-forward-pos (point))))
+(define (backward-paragraph) (goto-char (paragraph-backward-pos (point))))
+(define (mark-paragraph)
+  (let ((b (paragraph-bounds (point))))
+    (when b (set-region (car b) (min (point-max) (+ (cadr b) 1))))))
+
+;; --- just-one-space (M-SPC): collapse whitespace around point to one space ---
+(define (just-one-space)
+  (let* ((mx (point-max))
+         (blank? (lambda (i)
+                   (let ((c (buffer-substring i (+ i 1))))
+                     (or (equal? c " ") (equal? c "\t")))))
+         (s (let loop ((i (point))) (if (and (> i 0) (blank? (- i 1))) (loop (- i 1)) i)))
+         (e (let loop ((i (point))) (if (and (< i mx) (blank? i)) (loop (+ i 1)) i))))
+    (replace-region s e " ")))
+
+;; --- delete-blank-lines (C-x C-o) ---------------------------------------------
+;; On a blank line: collapse the surrounding run of blank lines to one (delete
+;; it entirely if it's already a single blank line). On a non-blank line:
+;; delete any blank lines that follow (Emacs semantics).
+(define (delete-blank-lines)
+  (let* ((mx (point-max))
+         ;; end of the blank run whose first blank line starts at `i` — the
+         ;; offset just past the last blank line's newline.
+         (run-end (lambda (i)
+                    (let loop ((ls i))
+                      (let ((next (+ (line-end-pos ls) 1)))
+                        (cond ((> next mx) mx)
+                              ((and (< next mx) (blank-line-at? next)) (loop next))
+                              (else next)))))))
+    (if (blank-line-at? (point))
+        (let* ((s (let loop ((ls (line-start-pos (point))))
+                    (if (and (> ls 0) (blank-line-at? (- ls 1)))
+                        (loop (line-start-pos (- ls 1)))
+                        ls)))
+               (e (run-end s)))
+          ;; One blank line → remove it; a run → leave a single blank line.
+          (replace-region s e (if (> e (min mx (+ (line-end-pos s) 1))) "\n" "")))
+        (let ((next (+ (line-end-pos (point)) 1)))
+          (when (and (< next mx) (blank-line-at? next))
+            (delete-region next (run-end next)))))))
+
+;; --- fill-paragraph (M-q): re-wrap text to *fill-column* ---------------------
+;; With an active region every paragraph in it is re-wrapped (fill-region);
+;; otherwise the blank-line-delimited paragraph at point is. The wrap engine
+;; (fill-string / fill-text, indentation- and comment-leader-aware) and
+;; *fill-column* live in core.scm so the evil/helix gq operators share them.
+(define (fill-region)
+  (let* ((r (region-or (point) (point)))
+         (s (line-start-pos (car r)))
+         (e (line-end-pos (max (car r) (- (cadr r) 1)))))
+    (when (< s e)
+      (replace-region s e (fill-text (buffer-substring s e) *fill-column*)))))
+(define (fill-paragraph)
+  (if (region-active?)
+      (fill-region)
+      (let ((b (paragraph-bounds (point))))
+        (when b
+          (replace-region (car b) (cadr b)
+                          (fill-string (buffer-substring (car b) (cadr b)) *fill-column*))))))
+
+;; M-x set-fill-column — read a new wrap column. (Emacs's C-x f; that chord is
+;; find-file here, so M-x only.)
+(define (set-fill-column) (read-string "Fill column: " 'set-fill-column-finish))
+(define (set-fill-column-finish s)
+  (let ((n (string->number (trim-end s))))
+    (when (and n (> n 0))
+      (set! *fill-column* n)
+      (message (string-append "Fill column set to " (number->string n))))))
+
 ;; --- keymap + M-x registration ----------------------------------------------
 (define-key "fundamental" "alt-g g" 'goto-line-cmd)
 (define-key "fundamental" "alt-^" 'join-line)
 (define-key "fundamental" "alt-z" 'zap-to-char)
 (define-key "fundamental" "ctrl-x ctrl-t" 'transpose-lines)
+(define-key "fundamental" "alt-q" 'fill-paragraph)
+(define-key "fundamental" "alt-u" 'upcase-word)
+(define-key "fundamental" "alt-l" 'downcase-word)
+(define-key "fundamental" "alt-c" 'capitalize-word)
+(define-key "fundamental" "alt-t" 'transpose-words)
+(define-key "fundamental" "alt-m" 'back-to-indentation)
+(define-key "fundamental" "alt-{" 'backward-paragraph)
+(define-key "fundamental" "alt-}" 'forward-paragraph)
+(define-key "fundamental" "alt-h" 'mark-paragraph)
+(define-key "fundamental" "alt-space" 'just-one-space)
+(define-key "fundamental" "ctrl-x ctrl-o" 'delete-blank-lines)
 
 (register-command 'sort-lines)
 (register-command 'upcase-region)
@@ -86,3 +209,16 @@
 (register-command 'join-line)
 (register-command 'zap-to-char)
 (register-command 'transpose-lines)
+(register-command 'fill-paragraph)
+(register-command 'fill-region)
+(register-command 'set-fill-column)
+(register-command 'upcase-word)
+(register-command 'downcase-word)
+(register-command 'capitalize-word)
+(register-command 'transpose-words)
+(register-command 'back-to-indentation)
+(register-command 'forward-paragraph)
+(register-command 'backward-paragraph)
+(register-command 'mark-paragraph)
+(register-command 'just-one-space)
+(register-command 'delete-blank-lines)

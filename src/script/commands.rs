@@ -323,6 +323,24 @@ pub enum EditorCommand {
     /// Vim `r`: arm replace-pending so the next printable key overwrites the
     /// single character under the cursor (cursor stays put, mode stays Normal).
     EvilReplaceChar,
+    /// Arm a one-keystroke capture: the next printable key is passed to the
+    /// Scheme `callback` as its sole argument; any other chord (Escape, a
+    /// Ctrl/Alt combo) cancels. Backs vim's `f`/`t`/`F`/`T` — and any Scheme
+    /// feature that needs "read one character" — the way `EvilReplaceChar`'s
+    /// hardcoded pending flag backs `r`.
+    ReadChar {
+        prompt: String,
+        callback: String,
+    },
+    /// Extend the selection to byte `pos` — the extend-flavored `goto-char`,
+    /// for visual-mode motion targets computed in Scheme.
+    SelectTo(usize),
+    /// Store a search query + direction without prompting (evil `*`/`#`), so
+    /// `evil-search-next`/`-previous` repeat it like a `/` search.
+    SetSearchQuery {
+        query: String,
+        forward: bool,
+    },
     /// Mark the most recent yank/delete as line-wise / character-wise, so the
     /// next `p`/`P` knows whether to open a new line or insert inline.
     EvilSetLinewise,

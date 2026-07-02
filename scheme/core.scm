@@ -109,6 +109,144 @@
   (replace-regexp-in-string "^[ \t]+" ""
     (replace-regexp-in-string "[ \t]+$" "" s)))
 
+;; Toggle the case of every cased character in `s` (vim `~`); uncased chars
+;; pass through. Char-indexed — safe on multibyte text.
+(define (string-toggle-case s)
+  (string-concat
+   (map (lambda (ch)
+          (let* ((c (list->string (list ch)))
+                 (up (string-upcase c))
+                 (dn (string-downcase c)))
+            (if (equal? c up) dn up)))
+        (string->list s))))
+
+;; --- fill / word wrap ---------------------------------------------------------
+;; Column the fill commands wrap at (Emacs `fill-column`, Vim `textwidth`).
+;; Shared by fill-paragraph (M-q, editing.scm), evil's gq family (evil.scm) and
+;; helix's gq reflow (helix.scm). Change it in init.scm with
+;; (set! *fill-column* 100) or interactively with M-x set-fill-column.
+(define *fill-column* 80)
+
+;; Comment leaders that wrapping continues onto every new line (Vim keeps the
+;; comment leader when formatting; Emacs calls this the fill prefix). Longest
+;; first so ";;" is matched before ";".
+(define *fill-leaders* (list ";;;" ";;" ";" "//" "#" "--" ">"))
+
+;; The comment leader `rest` (a line minus its indentation) starts with, or #f.
+;; The leader must be followed by whitespace or end the line — "# heading" has
+;; a leader, "#hashtag" is just a word.
+(define (fill-leader-of rest)
+  (let loop ((ls *fill-leaders*))
+    (cond ((null? ls) #f)
+          ((and (starts-with? rest (car ls))
+                (let ((r (substring rest (string-length (car ls)) (string-length rest))))
+                  (or (equal? r "") (starts-with? r " ") (starts-with? r "\t"))))
+           (car ls))
+          (else (loop (cdr ls))))))
+
+;; The fill prefix of `line`: its leading whitespace, plus "<leader> " when the
+;; line opens with a comment leader ("  ;; aaa" → "  ;; ", "    aaa" → "    ").
+(define (fill-prefix-of line)
+  (let* ((rest   (trim-start line))
+         (indent (substring line 0 (- (string-length line) (string-length rest))))
+         (leader (fill-leader-of rest)))
+    (if leader (string-append indent leader " ") indent)))
+
+;; `line` with its indentation and comment leader (if any) stripped — the text
+;; that becomes words when a paragraph is re-wrapped.
+(define (fill-strip-leader line)
+  (let* ((rest   (trim-start line))
+         (leader (fill-leader-of rest)))
+    (if leader
+        (trim-start (substring rest (string-length leader) (string-length rest)))
+        rest)))
+
+;; The words of a line: split on runs of spaces/tabs, empties dropped.
+(define (fill-words line)
+  (filter (lambda (w) (not (equal? w "")))
+          (split-many (replace-regexp-in-string "[ \t]+" " " line) " ")))
+
+;; Re-wrap ONE paragraph (no blank lines in `text`) at `width` columns: the
+;; words of every line are pooled and re-flowed greedily, each output line
+;; starting with the FIRST line's fill prefix. A word that alone overflows
+;; `width` gets its own line — never hard-broken. Pure and CHAR-indexed
+;; throughout (columns are chars); callers translate buffer bytes.
+(define (fill-string text width)
+  (let* ((lines  (split-many text "\n"))
+         (prefix (fill-prefix-of (car lines)))
+         (words  (let loop ((ls lines))
+                   (if (null? ls)
+                       '()
+                       (append (fill-words (fill-strip-leader (car ls)))
+                               (loop (cdr ls)))))))
+    (if (null? words)
+        text
+        (let loop ((ws (cdr words))
+                   (cur (string-append prefix (car words)))
+                   (out '()))
+          (cond ((null? ws) (join-lines (reverse (cons cur out))))
+                ((<= (+ (string-length cur) 1 (string-length (car ws))) width)
+                 (loop (cdr ws) (string-append cur " " (car ws)) out))
+                (else (loop (cdr ws) (string-append prefix (car ws)) (cons cur out))))))))
+
+;; Re-wrap every blank-line-separated paragraph in `text`, preserving the blank
+;; lines between them — the workhorse behind fill-region and visual-mode gq.
+(define (fill-text text width)
+  (let ((flush (lambda (para out)
+                 (if (null? para)
+                     out
+                     (cons (fill-string (join-lines (reverse para)) width) out)))))
+    (let loop ((lines (split-many text "\n")) (para '()) (out '()))
+      (cond ((null? lines) (join-lines (reverse (flush para out))))
+            ((equal? (string-trim (car lines)) "")
+             (loop (cdr lines) '() (cons (car lines) (flush para out))))
+            (else (loop (cdr lines) (cons (car lines) para) out))))))
+
+;; --- paragraph bounds (buffer reads) ------------------------------------------
+;; Is the buffer line holding byte `pos` blank (empty or only spaces/tabs)?
+(define (blank-line-at? pos)
+  (equal? (string-trim (buffer-substring (line-start-pos pos) (line-end-pos pos))) ""))
+
+;; (start end) byte offsets of the blank-line-delimited paragraph containing
+;; `pos` — start of its first line to end of its last (before that newline) —
+;; or #f when pos sits on a blank line. Walks by lines via the line-start-pos /
+;; line-end-pos bridges: a line's end is its "\n" (which belongs to that line),
+;; so end±1 crosses into the neighbor.
+(define (paragraph-bounds pos)
+  (if (blank-line-at? pos)
+      #f
+      (list
+       (let loop ((ls (line-start-pos pos)))
+         (if (or (= ls 0) (blank-line-at? (- ls 1)))
+             ls
+             (loop (line-start-pos (- ls 1)))))
+       (let ((mx (point-max)))
+         (let loop ((le (line-end-pos pos)))
+           (if (or (>= (+ le 1) mx) (blank-line-at? (+ le 1)))
+               le
+               (loop (line-end-pos (+ le 1)))))))))
+
+;; The next paragraph boundary after `pos`: the start of the first blank line
+;; past some non-blank text (Emacs M-}, vim `}`), or point-max at the end.
+(define (paragraph-forward-pos pos)
+  (let ((mx (point-max)))
+    (let loop ((p pos) (seen (not (blank-line-at? pos))))
+      (let ((next (+ (line-end-pos p) 1)))
+        (cond ((>= next mx) mx)
+              ((and seen (blank-line-at? next)) next)
+              (else (loop next (or seen (not (blank-line-at? next))))))))))
+
+;; The previous paragraph boundary before `pos`: the start of the first blank
+;; line above some non-blank text (Emacs M-{, vim `{`), or 0 at the top.
+(define (paragraph-backward-pos pos)
+  (let loop ((ls (line-start-pos pos)) (seen (not (blank-line-at? pos))))
+    (if (= ls 0)
+        0
+        (let ((prev (line-start-pos (- ls 1))))
+          (if (and seen (blank-line-at? (- ls 1)))
+              prev
+              (loop prev (or seen (not (blank-line-at? (- ls 1))))))))))
+
 ;; Keyed insertion sort (Steel has no builtin `sort`): order `lst` by `(key x)`
 ;; under `less?`. Stable enough for the small lists Scheme sorts here.
 (define (insert-sorted-by x sorted key less?)

@@ -169,6 +169,10 @@ impl Editor {
                 let offset = n.min(self.active.buffer.len());
                 self.move_to(offset, cx);
             }
+            SelectTo(n) => {
+                let offset = n.min(self.active.buffer.len());
+                self.select_to(offset, cx);
+            }
             SetRegion { start, end } => {
                 let len = self.active.buffer.len();
                 self.active.mark_active = true;
@@ -679,6 +683,25 @@ impl Editor {
                 self.evil_replace_pending = true;
                 self.status = "r-".into();
                 cx.notify();
+            }
+            ReadChar { prompt, callback } => {
+                // Arm the capture; the key dispatcher feeds the next key to it.
+                // If a keyboard macro is recording, drop the just-recorded
+                // arming expr ("(evil-find-char-forward)"): replaying it would
+                // re-arm the capture and hang waiting for a keystroke macro
+                // playback can never provide. key_read_char records the
+                // RESOLVED callback call in its place, so `f o` replays as one
+                // self-contained command.
+                if let Some(events) = self.macro_recording.as_mut() {
+                    events.pop();
+                }
+                self.read_char_pending = Some(callback);
+                self.status = prompt.into();
+                cx.notify();
+            }
+            SetSearchQuery { query, forward } => {
+                self.search_query = Some(query);
+                self.evil_search_forward = forward;
             }
             EvilSetLinewise => self.evil_yank_linewise = true,
             EvilSetCharwise => self.evil_yank_linewise = false,

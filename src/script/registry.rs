@@ -1029,6 +1029,28 @@ pub(crate) fn build_engine(
             callback: callback.0,
         },
     );
+    // `(read-char "prompt" 'callback)` — capture the very next printable
+    // keystroke and call `(callback "<char>")`. Vim's f/t/F/T char-find (and
+    // anything else that reads one char) is built on this; `r` predates it and
+    // keeps its dedicated EvilReplaceChar path.
+    register_binary(
+        &mut reg,
+        queue,
+        "read-char",
+        |prompt, callback: Callback| EditorCommand::ReadChar {
+            prompt,
+            callback: callback.0,
+        },
+    );
+    // `(select-to pos)` — extend the selection to byte `pos` (goto-char
+    // collapses; this is its extend-flavored twin for visual-mode motions).
+    register_unary(&mut reg, queue, "select-to", EditorCommand::SelectTo);
+    // `(set-search-query "regex" forward?)` — store the query + direction the
+    // way `/` and `?` do, without prompting, so evil-search-next/-previous
+    // repeat it (evil `*`/`#`).
+    register_binary(&mut reg, queue, "set-search-query", |query, forward| {
+        EditorCommand::SetSearchQuery { query, forward }
+    });
     register_binary(&mut reg, queue, "append-to-buffer", |name, text| {
         EditorCommand::AppendToBuffer { name, text }
     });

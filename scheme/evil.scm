@@ -140,6 +140,358 @@
             (loop (+ i 1))
             (replace-region e i " "))))))
 
+;; gq / gw — Vim's format operator: re-wrap text at *fill-column* (80 by
+;; default), continuing indentation and comment leaders. The wrap engine
+;; (fill-text) and paragraph-bounds live in core.scm — loaded before this file,
+;; and by the tests too. The evil layer binds concrete chords, so the common
+;; forms are bound below: gqq / gqgq (current line), gqip / gqap (paragraph at
+;; point), gq on a visual selection; gww is gqq with the cursor kept in place.
+;; Snapshot model: read the range, wrap it, issue ONE replace-region.
+(define (evil-fill-range s e keep-point)
+  (when (< s e)
+    (let ((new (fill-text (buffer-substring s e) *fill-column*)))
+      (replace-region s e new)
+      ;; gq leaves the cursor at the start of the formatted text; gw clamps the
+      ;; old point into the new text (Vim restores it exactly).
+      (goto-char (if keep-point (min (point) (+ s (utf8-length new))) s)))))
+(define (evil-fill-line)      (let ((b (line-bounds))) (evil-fill-range (car b) (cadr b) #f)))
+(define (evil-fill-line-keep) (let ((b (line-bounds))) (evil-fill-range (car b) (cadr b) #t)))
+(define (evil-fill-paragraph)
+  (let ((b (paragraph-bounds (point))))
+    (when b (evil-fill-range (car b) (cadr b) #f))))
+;; Visual gq: format the selected lines (the selection is rounded out to whole
+;; lines; region-end is exclusive, so end-1 finds the last selected line).
+(define (evil-visual-fill)
+  (let ((rb (region-beginning)) (re (region-end)))
+    (when (and (>= rb 0) (< rb re))
+      (evil-fill-range (line-start-pos rb) (line-end-pos (max rb (- re 1))) #f)))
+  (evil-normal-state))
+
+;; --- paragraph motions ({ / }) ------------------------------------------------
+;; Boundary positions live in core.scm (shared with Emacs M-{ / M-}). The
+;; visual variants extend via `select-to` (goto-char would collapse).
+(define (evil-forward-paragraph)         (goto-char  (paragraph-forward-pos (point))))
+(define (evil-backward-paragraph)        (goto-char  (paragraph-backward-pos (point))))
+(define (evil-forward-paragraph-visual)  (select-to  (paragraph-forward-pos (point))))
+(define (evil-backward-paragraph-visual) (select-to  (paragraph-backward-pos (point))))
+
+;; --- gJ and line case operators ------------------------------------------------
+;; gJ — join the next line up with NO space inserted (vim gJ): remove just the
+;; newline, keeping the next line's indentation.
+(define (evil-join-line-no-space)
+  (let* ((b (line-bounds)) (e (cadr b)))
+    (when (< e (point-max)) (delete-region e (+ e 1)))))
+;; guu / gUU / g~~ — case-fold the whole current line.
+(define (evil-fold-line folder)
+  (let* ((b (line-bounds)) (s (car b)) (e (cadr b)))
+    (when (< s e) (replace-region s e (folder (buffer-substring s e))))))
+(define (evil-downcase-line)    (evil-fold-line string-downcase))
+(define (evil-upcase-line)      (evil-fold-line string-upcase))
+(define (evil-toggle-case-line) (evil-fold-line string-toggle-case))
+
+;; --- visual p — paste over the selection ---------------------------------------
+;; Replace the selection with the register: delete WITHOUT touching the kill
+;; ring (delete-region, not kill-region), then paste before the collapsed
+;; cursor. (Vim also yanks the replaced text; that nuance is skipped.)
+(define (evil-visual-paste)
+  (let ((rb (region-beginning)) (re (region-end)))
+    (when (and (>= rb 0) (< rb re))
+      (delete-region rb re)
+      (evil-paste-before)))
+  (evil-normal-state))
+
+;; --- q / @@ — keyboard macros ---------------------------------------------------
+;; Vim-style recording on the Emacs kbd-macro engine (C-x ( / C-x ) / C-x e):
+;; one anonymous register, `q` toggles recording, `@@` (or `@q`) replays. The
+;; name contains "kbd-macro" so the key recorder skips the closing toggle
+;; (exprs mentioning kbd-macro are never recorded into the macro itself).
+(define *evil-kbd-macro-recording* #f)
+(define (evil-kbd-macro-toggle)
+  (if *evil-kbd-macro-recording* (end-kbd-macro) (start-kbd-macro))
+  (set! *evil-kbd-macro-recording* (not *evil-kbd-macro-recording*)))
+
+;; --- f / F / t / T char find (+ ; and , repeat) ---------------------------------
+;; Built on the core `read-char` primitive: pressing `f` arms a one-keystroke
+;; capture; the next key arrives in the dispatch callback as a string. The
+;; motion is line-local, vim-style. `;` repeats the last find, `,` reverses it;
+;; the visual variants extend the selection instead of moving.
+(define *evil-find-char* #f)     ; last sought char, for ; and ,
+(define *evil-find-till* #f)     ; t/T (stop short) vs f/F (land on it)
+(define *evil-find-forward* #t)
+
+;; Byte offset the find lands on, scanning the line of `pos`, or #f. `till`
+;; stops one grapheme before (after, when backward) the match. Steps by
+;; GRAPHEMES, not bytes: buffer-substring floors a mid-codepoint offset to the
+;; char's start, so a byte-stepping backward scan could "match" a multibyte
+;; `ch` at a mid-codepoint offset and hand goto-char an unaligned position.
+(define (evil-find-target-at pos ch till forward)
+  (let* ((ls (line-start-pos pos)) (le (line-end-pos pos)) (w (utf8-length ch)))
+    (if forward
+        (let loop ((i (grapheme-forward pos)))
+          (cond ((or (<= i pos) (>= i le)) #f)
+                ((equal? (buffer-substring i (+ i w)) ch)
+                 (if till (grapheme-backward i) i))
+                (else (loop (grapheme-forward i)))))
+        (let loop ((i (grapheme-backward pos)))
+          (cond ((or (>= i pos) (< i ls)) #f)
+                ((equal? (buffer-substring i (+ i w)) ch)
+                 (if till (+ i w) i))
+                ((<= i ls) #f)
+                (else (loop (grapheme-backward i))))))))
+
+(define (evil-find-go tgt extend)
+  (when tgt (if extend (select-to tgt) (goto-char tgt))))
+(define (evil-find-dispatch ch)         ; armed from normal state
+  (set! *evil-find-char* ch)
+  (evil-find-go (evil-find-target-at (point) ch *evil-find-till* *evil-find-forward*) #f))
+(define (evil-find-dispatch-visual ch)  ; armed from visual states — extends
+  (set! *evil-find-char* ch)
+  (evil-find-go (evil-find-target-at (point) ch *evil-find-till* *evil-find-forward*) #t))
+(define (evil-find-arm till forward callback prompt)
+  (set! *evil-find-till* till)
+  (set! *evil-find-forward* forward)
+  (read-char prompt callback))
+(define (evil-find-char-forward)         (evil-find-arm #f #t 'evil-find-dispatch "f-"))
+(define (evil-find-char-backward)        (evil-find-arm #f #f 'evil-find-dispatch "F-"))
+(define (evil-till-char-forward)         (evil-find-arm #t #t 'evil-find-dispatch "t-"))
+(define (evil-till-char-backward)        (evil-find-arm #t #f 'evil-find-dispatch "T-"))
+(define (evil-find-char-forward-visual)  (evil-find-arm #f #t 'evil-find-dispatch-visual "f-"))
+(define (evil-find-char-backward-visual) (evil-find-arm #f #f 'evil-find-dispatch-visual "F-"))
+(define (evil-till-char-forward-visual)  (evil-find-arm #t #t 'evil-find-dispatch-visual "t-"))
+(define (evil-till-char-backward-visual) (evil-find-arm #t #f 'evil-find-dispatch-visual "T-"))
+;; ; and , — repeat in the stored / opposite direction. `,` does not flip the
+;; stored direction (vim: two `,` in a row go the same way, not back and forth).
+(define (evil-find-repeat-dir forward extend)
+  (when *evil-find-char*
+    (evil-find-go (evil-find-target-at (point) *evil-find-char* *evil-find-till* forward)
+                  extend)))
+(define (evil-find-repeat)                (evil-find-repeat-dir *evil-find-forward* #f))
+(define (evil-find-repeat-reverse)        (evil-find-repeat-dir (not *evil-find-forward*) #f))
+(define (evil-find-repeat-visual)         (evil-find-repeat-dir *evil-find-forward* #t))
+(define (evil-find-repeat-reverse-visual) (evil-find-repeat-dir (not *evil-find-forward*) #t))
+
+;; --- * / # — search the word under the cursor -----------------------------------
+;; Builds a whole-word regex from the word at (or after) point, stores it as
+;; the active search via `set-search-query` (so n/N repeat it), and jumps.
+(define (evil-word-char-pos? i)   ; byte at i is a word char [A-Za-z0-9_]
+  ;; Plain codepoint ranges, not a regex: this runs per BYTE in the word scans
+  ;; (`*`, iw/aw), and a regex match per byte is measurably slow on long lines.
+  (let ((c (buffer-substring i (+ i 1))))
+    (and (> (string-length c) 0)
+         (let ((n (char->integer (car (string->list c)))))
+           (or (and (>= n 97) (<= n 122))   ; a-z
+               (and (>= n 65) (<= n 90))    ; A-Z
+               (and (>= n 48) (<= n 57))    ; 0-9
+               (= n 95))))))                ; _
+(define (evil-word-at-point)      ; (start . end) of the word at/after point, or #f
+  (let* ((b (line-bounds)) (ls (car b)) (le (cadr b))
+         (start (let loop ((i (point)))   ; scan right to the next word char
+                  (cond ((>= i le) #f)
+                        ((evil-word-char-pos? i) i)
+                        (else (loop (+ i 1)))))))
+    (and start
+         (let ((s (let loop ((i start))
+                    (if (and (> i ls) (evil-word-char-pos? (- i 1))) (loop (- i 1)) i)))
+               (e (let loop ((i start))
+                    (if (and (< i le) (evil-word-char-pos? i)) (loop (+ i 1)) i))))
+           (cons s e)))))
+(define (evil-search-word forward)
+  (let ((w (evil-word-at-point)))
+    (when w
+      (set-search-query
+       (string-append "\\b" (regexp-quote (buffer-substring (car w) (cdr w))) "\\b")
+       forward)
+      (evil-search-next))))
+(define (evil-search-word-forward)  (evil-search-word #t))
+(define (evil-search-word-backward) (evil-search-word #f))
+
+;; --- % — matching bracket --------------------------------------------------------
+;; Jump between a bracket and its match, nesting-aware. The bracket is the char
+;; under the cursor, or the first one to the right on the current line (vim).
+;; A plain char scan: strings and comments are not understood.
+(define (evil-matchit)
+  (let* ((b (line-bounds)) (le (cadr b)) (mx (point-max))
+         (brackets (list "(" ")" "[" "]" "{" "}"))
+         (start (let loop ((i (point)))
+                  (cond ((>= i le) #f)
+                        ((member (buffer-substring i (+ i 1)) brackets) i)
+                        (else (loop (+ i 1)))))))
+    (when start
+      ;; One buffer read + a local char walk (byte offsets tracked through
+      ;; multibyte chars via char-bytes) — not one buffer-substring FFI call
+      ;; per byte, which is what a naive scan costs on a large file.
+      (let* ((c (buffer-substring start (+ start 1)))
+             (pair (cond ((or (equal? c "(") (equal? c ")")) (cons "(" ")"))
+                         ((or (equal? c "[") (equal? c "]")) (cons "[" "]"))
+                         (else (cons "{" "}"))))
+             (open (car pair)) (close (cdr pair))
+             (tgt (if (equal? c open)
+                      ;; forward to the matching close
+                      (let loop ((chars (cdr (string->list (buffer-substring start mx))))
+                                 (i (+ start 1)) (d 1))
+                        (if (null? chars)
+                            #f
+                            (let ((cs (list->string (list (car chars))))
+                                  (w (char-bytes (car chars))))
+                              (cond ((equal? cs open) (loop (cdr chars) (+ i w) (+ d 1)))
+                                    ((equal? cs close)
+                                     (if (= d 1) i (loop (cdr chars) (+ i w) (- d 1))))
+                                    (else (loop (cdr chars) (+ i w) d))))))
+                      ;; backward to the matching open (reversed walk, offsets
+                      ;; descending: each char occupies [i-w, i))
+                      (let loop ((chars (reverse (string->list (buffer-substring 0 start))))
+                                 (i start) (d 1))
+                        (if (null? chars)
+                            #f
+                            (let* ((cs (list->string (list (car chars))))
+                                   (w (char-bytes (car chars)))
+                                   (j (- i w)))
+                              (cond ((equal? cs close) (loop (cdr chars) j (+ d 1)))
+                                    ((equal? cs open)
+                                     (if (= d 1) j (loop (cdr chars) j (- d 1))))
+                                    (else (loop (cdr chars) j d)))))))))
+        (when tgt (goto-char tgt))))))
+
+;; --- text objects (iw/aw, quotes, pairs, ip/ap) ----------------------------------
+;; `d i w`, `c a (`, `y i "` , visual `i w`, … — each object computes a byte
+;; range from the snapshot; the operator issues the edit. ASCII word class and
+;; plain char scans (escapes/strings are not understood) — the vim 90% case.
+
+;; Blank / word-char byte predicates (word = [A-Za-z0-9_], vim's default-ish
+;; iskeyword). A mid-codepoint byte reads as "" — treated as neither.
+(define (evil-blank-pos? i)
+  (let ((c (buffer-substring i (+ i 1)))) (or (equal? c " ") (equal? c "\t"))))
+
+;; iw/aw — the run of word chars (or of non-blank punctuation) under point;
+;; `a` adds trailing blanks, or leading ones when there are none trailing.
+(define (evil-object-word inner)
+  (let* ((b (line-bounds)) (ls (car b)) (le (cadr b)) (p (point)))
+    (and (< p le)
+         (let* ((pred (cond ((evil-blank-pos? p) evil-blank-pos?)
+                            ((evil-word-char-pos? p) evil-word-char-pos?)
+                            (else (lambda (i) (and (not (evil-blank-pos? i))
+                                                   (not (evil-word-char-pos? i)))))))
+                (s (let loop ((i p)) (if (and (> i ls) (pred (- i 1))) (loop (- i 1)) i)))
+                (e (let loop ((i p)) (if (and (< i le) (pred i)) (loop (+ i 1)) i))))
+           (if inner
+               (cons s e)
+               (let ((e2 (let loop ((i e))
+                           (if (and (< i le) (evil-blank-pos? i)) (loop (+ i 1)) i))))
+                 (if (> e2 e)
+                     (cons s e2)
+                     (cons (let loop ((i s))
+                             (if (and (> i ls) (evil-blank-pos? (- i 1))) (loop (- i 1)) i))
+                           e))))))))
+
+;; i"/a" (and '/`) — the quote pair on the current line containing point, else
+;; the next pair to the right; quotes pair up left to right (escapes ignored).
+(define (evil-object-quote qch inner)
+  (let* ((b (line-bounds)) (ls (car b)) (le (cadr b)) (p (point))
+         (positions (let loop ((i ls) (acc '()))
+                      (cond ((>= i le) (reverse acc))
+                            ((equal? (buffer-substring i (+ i 1)) qch) (loop (+ i 1) (cons i acc)))
+                            (else (loop (+ i 1) acc))))))
+    (let loop ((ps positions))
+      (cond ((or (null? ps) (null? (cdr ps))) #f)
+            ((or (and (<= (car ps) p) (<= p (cadr ps)))  ; contains point,
+                 (> (car ps) p))                          ; or first pair past it
+             (if inner (cons (+ (car ps) 1) (cadr ps)) (cons (car ps) (+ (cadr ps) 1))))
+            (else (loop (cddr ps)))))))
+
+;; i(/a( and friends — the innermost open/close pair containing point,
+;; nesting-aware, scanning the whole buffer once (byte offsets tracked through
+;; multibyte chars via char-bytes).
+(define (evil-object-pair open close inner)
+  (let ((p (point)))
+    (let loop ((chars (string->list (buffer-substring 0 (point-max))))
+               (i 0) (stack '()) (best #f))
+      (if (null? chars)
+          (and best
+               (if inner (cons (+ (car best) 1) (cdr best))
+                   (cons (car best) (+ (cdr best) 1))))
+          (let* ((ch (car chars)) (w (char-bytes ch)) (cs (list->string (list ch))))
+            (cond ((equal? cs open) (loop (cdr chars) (+ i w) (cons i stack) best))
+                  ((equal? cs close)
+                   (if (null? stack)
+                       (loop (cdr chars) (+ i w) stack best)
+                       (let* ((o (car stack))
+                              (hit (and (<= o p) (<= p i)
+                                        (or (not best) (> o (car best))))))
+                         (loop (cdr chars) (+ i w) (cdr stack)
+                               (if hit (cons o i) best)))))
+                  (else (loop (cdr chars) (+ i w) stack best))))))))
+
+;; ip/ap — the paragraph as lines (linewise, incl. trailing newline); `a` also
+;; takes the blank lines after it.
+(define (evil-object-paragraph inner)
+  (let ((b (paragraph-bounds (point))) (mx (point-max)))
+    (and b
+         (let* ((s (car b)) (e (min mx (+ (cadr b) 1))))
+           (if inner
+               (cons s e)
+               (cons s (let loop ((i e))
+                         (cond ((>= i mx) mx)
+                               ((blank-line-at? i) (loop (min mx (+ (line-end-pos i) 1))))
+                               (else i)))))))))
+
+(define (evil-object-range kind obj)
+  (let ((inner (equal? kind "i")))
+    (cond ((equal? obj "word")    (evil-object-word inner))
+          ((equal? obj "para")    (evil-object-paragraph inner))
+          ((equal? obj "dquote")  (evil-object-quote "\"" inner))
+          ((equal? obj "squote")  (evil-object-quote "'" inner))
+          ((equal? obj "btick")   (evil-object-quote "`" inner))
+          ((equal? obj "paren")   (evil-object-pair "(" ")" inner))
+          ((equal? obj "brace")   (evil-object-pair "{" "}" inner))
+          ((equal? obj "bracket") (evil-object-pair "[" "]" inner))
+          ((equal? obj "angle")   (evil-object-pair "<" ">" inner))
+          (else #f))))
+
+;; The operator half: op is "change" / "delete" / "yank" / "select" (visual).
+;; Deletes go through kill-region-between (register + clipboard, like d/x);
+;; yanks select-then-save so the kill ring and OS clipboard both get it.
+(define (evil-object-cmd op kind obj)
+  (let ((r (evil-object-range kind obj)))
+    (when (and r (< (car r) (cdr r)))
+      (let ((s (car r)) (e (cdr r)))
+        (if (equal? obj "para") (evil-set-linewise) (evil-set-charwise))
+        (cond ((equal? op "delete") (kill-region-between s e))
+              ((equal? op "change") (kill-region-between s e) (evil-insert-state))
+              ((equal? op "yank")   (set-region s e) (kill-ring-save) (goto-char s))
+              ((equal? op "select") (set-region s e)))))))
+
+;; Object keys → object names; every (c/d/y) × (i/a) × key chord is generated
+;; below, plus visual-mode `i <key>` / `a <key>` selection. b/B are the vim
+;; aliases for (/{.
+(define *evil-text-objects*
+  (list (cons "w" "word") (cons "p" "para")
+        (cons "\"" "dquote") (cons "'" "squote") (cons "`" "btick")
+        (cons "(" "paren") (cons ")" "paren") (cons "b" "paren")
+        (cons "{" "brace") (cons "}" "brace") (cons "shift-b" "brace")
+        (cons "[" "bracket") (cons "]" "bracket")
+        (cons "<" "angle") (cons ">" "angle")))
+(for-each
+ (lambda (opk)
+   (for-each
+    (lambda (to)
+      (for-each
+       (lambda (kind)
+         (define-key "evil-normal"
+           (string-append (car opk) " " kind " " (car to))
+           (string-append "evil-object-cmd \"" (cdr opk) "\" \"" kind "\" \"" (cdr to) "\"")))
+       (list "i" "a")))
+    *evil-text-objects*))
+ (list (cons "c" "change") (cons "d" "delete") (cons "y" "yank")))
+(for-each
+ (lambda (to)
+   (for-each
+    (lambda (kind)
+      (define-key "evil-visual"
+        (string-append kind " " (car to))
+        (string-append "evil-object-cmd \"select\" \"" kind "\" \"" (cdr to) "\"")))
+    (list "i" "a")))
+ *evil-text-objects*)
+
 ;; Visual-mode change (charwise selection's exact range) and case folding. Case
 ;; ops work the region text directly (builtins only) rather than via editing.scm.
 (define (evil-visual-change) (kill-region) (evil-set-charwise) (evil-insert-state))
@@ -148,8 +500,9 @@
     (when (and (>= s 0) (< s e))
       (replace-region s e (folder (buffer-substring s e)))))
   (evil-normal-state))
-(define (evil-visual-downcase) (evil-visual-fold-case string-downcase)) ; u
-(define (evil-visual-upcase)   (evil-visual-fold-case string-upcase))   ; U
+(define (evil-visual-downcase)    (evil-visual-fold-case string-downcase))    ; u
+(define (evil-visual-upcase)      (evil-visual-fold-case string-upcase))      ; U
+(define (evil-visual-toggle-case) (evil-visual-fold-case string-toggle-case)) ; ~
 ;; Visual-LINE change: drop the whole-line selection, then open a fresh line in
 ;; its place and insert (the selection already spans entire lines).
 (define (evil-visual-line-change) (kill-region) (evil-set-linewise) (evil-open-above))
@@ -170,6 +523,17 @@
 (define-key "evil-normal" "^" 'evil-first-non-blank)     ; ^ — first non-blank
 (define-key "evil-normal" "g g" 'evil-goto-first-line)   ; gg — first line, first non-blank
 (define-key "evil-normal" "shift-g" 'evil-goto-last-line); G  — last line, first non-blank
+(define-key "evil-normal" "{" 'evil-backward-paragraph)  ; { — previous paragraph boundary
+(define-key "evil-normal" "}" 'evil-forward-paragraph)   ; } — next paragraph boundary
+(define-key "evil-normal" "%" 'evil-matchit)             ; % — matching bracket
+(define-key "evil-normal" "f" 'evil-find-char-forward)   ; f<char> — find char on line
+(define-key "evil-normal" "shift-f" 'evil-find-char-backward) ; F<char> — find backward
+(define-key "evil-normal" "t" 'evil-till-char-forward)   ; t<char> — till char
+(define-key "evil-normal" "shift-t" 'evil-till-char-backward) ; T<char>
+(define-key "evil-normal" ";" 'evil-find-repeat)         ; ; — repeat last f/t
+(define-key "evil-normal" "," 'evil-find-repeat-reverse) ; , — repeat, reversed
+(define-key "evil-normal" "*" 'evil-search-word-forward) ; * — search word under cursor
+(define-key "evil-normal" "#" 'evil-search-word-backward); # — same, backward
 ;; enter insert
 (define-key "evil-normal" "i" 'evil-insert-state)
 (define-key "evil-normal" "shift-i" 'evil-insert-line)   ; I
@@ -184,6 +548,20 @@
 (define-key "evil-normal" "shift-s" 'evil-change-line)   ; S — substitute line (= cc)
 (define-key "evil-normal" "~" 'evil-toggle-case)         ; ~ — toggle case of char
 (define-key "evil-normal" "shift-j" 'evil-join-line)     ; J — join next line up
+(define-key "evil-normal" "g shift-j" 'evil-join-line-no-space) ; gJ — join, no space
+(define-key "evil-normal" "g q q" 'evil-fill-line)       ; gqq  — format current line
+(define-key "evil-normal" "g q g q" 'evil-fill-line)     ; gqgq — same, Vim's doubled form
+(define-key "evil-normal" "g q i p" 'evil-fill-paragraph); gqip — format paragraph
+(define-key "evil-normal" "g q a p" 'evil-fill-paragraph); gqap
+(define-key "evil-normal" "g w w" 'evil-fill-line-keep)  ; gww  — format line, keep cursor
+(define-key "evil-normal" "g u u" 'evil-downcase-line)   ; guu — lowercase line
+(define-key "evil-normal" "g shift-u shift-u" 'evil-upcase-line) ; gUU — uppercase line
+(define-key "evil-normal" "g ~ ~" 'evil-toggle-case-line); g~~ — toggle case of line
+(define-key "evil-normal" "g d" 'lsp-find-definition)    ; gd — go to definition (LSP)
+(define-key "evil-normal" "shift-k" 'lsp-hover)          ; K  — doc at point (LSP)
+(define-key "evil-normal" "q" 'evil-kbd-macro-toggle)    ; q — record macro (toggle)
+(define-key "evil-normal" "@ @" 'call-last-kbd-macro)    ; @@ — replay macro
+(define-key "evil-normal" "@ q" 'call-last-kbd-macro)    ; @q — same (one register)
 (define-key "evil-normal" "d d" 'evil-delete-line)       ; dd
 (define-key "evil-normal" "d w" 'evil-delete-word)       ; dw
 (define-key "evil-normal" "d b" 'evil-delete-word-back)  ; db
@@ -195,11 +573,14 @@
 (define-key "evil-normal" "c $" 'evil-change-to-eol)     ; c$
 (define-key "evil-normal" "shift-c" 'evil-change-to-eol) ; C  (= c$)
 (define-key "evil-normal" "y y" 'evil-yank-line)         ; yy  (→ system clipboard)
+(define-key "evil-normal" "shift-y" 'evil-yank-line)     ; Y (= yy)
 (define-key "evil-normal" "y w" 'evil-yank-word)         ; yw
 (define-key "evil-normal" "y $" 'evil-yank-to-eol)       ; y$
 (define-key "evil-normal" "p" 'evil-paste-after)        ; p  (line-wise → below)
 (define-key "evil-normal" "shift-p" 'evil-paste-before) ; P  (line-wise → above)
 (define-key "evil-normal" "u" 'undo)
+(define-key "evil-normal" "ctrl-r" 'redo)               ; C-r — redo (else it falls
+                                                        ; through to isearch-backward)
 (define-key "evil-normal" "v" 'evil-visual-state)
 (define-key "evil-normal" "shift-v" 'evil-visual-line-state) ; V (line-wise visual)
 (define-key "evil-normal" "ctrl-v" 'evil-visual-block-state) ; C-v (block-wise)
@@ -217,6 +598,9 @@
 ;; "helm-M-x").)
 (define-key "evil-normal" "ctrl-d" 'evil-scroll-down)   ; half page down
 (define-key "evil-normal" "ctrl-u" 'evil-scroll-up)     ; half page up
+(define-key "evil-normal" "ctrl-f" 'scroll-up)          ; full page forward
+(define-key "evil-normal" "ctrl-b" 'scroll-down)        ; full page back
+(define-key "evil-normal" "z z" 'recenter)              ; zz — center cursor line
 
 ;; --- insert state -----------------------------------------------------------
 (define-key "evil-insert" "escape" 'evil-normal-state)
@@ -233,14 +617,26 @@
 (define-key "evil-visual" "g g" 'beginning-of-buffer)
 (define-key "evil-visual" "shift-g" 'end-of-buffer)
 (define-key "evil-visual" "e" 'evil-forward-word-end)          ; e — end of word (extends)
+(define-key "evil-visual" "{" 'evil-backward-paragraph-visual) ; { / } — extend by paragraph
+(define-key "evil-visual" "}" 'evil-forward-paragraph-visual)
+(define-key "evil-visual" "f" 'evil-find-char-forward-visual)  ; f/F/t/T — extend to char
+(define-key "evil-visual" "shift-f" 'evil-find-char-backward-visual)
+(define-key "evil-visual" "t" 'evil-till-char-forward-visual)
+(define-key "evil-visual" "shift-t" 'evil-till-char-backward-visual)
+(define-key "evil-visual" ";" 'evil-find-repeat-visual)        ; ; , — repeat f/t (extends)
+(define-key "evil-visual" "," 'evil-find-repeat-reverse-visual)
 (define-key "evil-visual" "d" 'evil-visual-delete)
 (define-key "evil-visual" "x" 'evil-visual-delete)
 (define-key "evil-visual" "y" 'evil-visual-yank)
+(define-key "evil-visual" "p" 'evil-visual-paste)             ; p — paste over selection
 (define-key "evil-visual" "c" 'evil-visual-change)            ; c/s — change selection
 (define-key "evil-visual" "s" 'evil-visual-change)
 (define-key "evil-visual" "o" 'exchange-point-and-mark)       ; o — swap selection ends
 (define-key "evil-visual" "u" 'evil-visual-downcase)          ; u — lowercase selection
 (define-key "evil-visual" "shift-u" 'evil-visual-upcase)      ; U — uppercase selection
+(define-key "evil-visual" "~" 'evil-visual-toggle-case)       ; ~ — toggle case
+(define-key "evil-visual" "g q" 'evil-visual-fill)            ; gq — format selected lines
+(define-key "evil-visual" "g w" 'evil-visual-fill)
 (define-key "evil-visual" "escape" 'evil-normal-state)
 
 ;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
@@ -266,6 +662,12 @@
 (define-key "evil-visual-line" "o" 'exchange-point-and-mark)   ; o — swap selection ends
 (define-key "evil-visual-line" "u" 'evil-visual-downcase)      ; u — lowercase selection
 (define-key "evil-visual-line" "shift-u" 'evil-visual-upcase)  ; U — uppercase selection
+(define-key "evil-visual-line" "~" 'evil-visual-toggle-case)   ; ~ — toggle case
+(define-key "evil-visual-line" "p" 'evil-visual-paste)         ; p — paste over selection
+(define-key "evil-visual-line" "{" 'evil-backward-paragraph-visual) ; { / } — by paragraph
+(define-key "evil-visual-line" "}" 'evil-forward-paragraph-visual)
+(define-key "evil-visual-line" "g q" 'evil-visual-fill)        ; gq — format selected lines
+(define-key "evil-visual-line" "g w" 'evil-visual-fill)
 (define-key "evil-visual-line" "shift-i" 'evil-visual-insert)  ; I — insert at each line start
 (define-key "evil-visual-line" "shift-a" 'evil-visual-append)  ; A — append at each line end
 (define-key "evil-visual-line" "v" 'evil-visual-state)         ; switch to charwise visual

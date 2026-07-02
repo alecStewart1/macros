@@ -448,6 +448,461 @@ mod engine_tests {
         assert!(bound("evil-visual-line", "c", "evil-visual-line-change"));
         assert!(bound("evil-visual-line", "u", "evil-visual-downcase"));
         assert!(bound("evil-visual-line", "shift-u", "evil-visual-upcase"));
+        // gq/gw — the format (fill to *fill-column*) operator family.
+        assert!(bound("evil-normal", "g q q", "evil-fill-line"));
+        assert!(bound("evil-normal", "g q g q", "evil-fill-line"));
+        assert!(bound("evil-normal", "g q i p", "evil-fill-paragraph"));
+        assert!(bound("evil-normal", "g q a p", "evil-fill-paragraph"));
+        assert!(bound("evil-normal", "g w w", "evil-fill-line-keep"));
+        assert!(bound("evil-visual", "g q", "evil-visual-fill"));
+        assert!(bound("evil-visual-line", "g q", "evil-visual-fill"));
+        // C-r must redo — unbound it falls through to Emacs isearch-backward.
+        assert!(bound("evil-normal", "ctrl-r", "redo"));
+        assert!(bound("evil-normal", "shift-y", "evil-yank-line")); // Y = yy
+        // Char find, repeat, word search, paragraph motion, matchit.
+        assert!(bound("evil-normal", "f", "evil-find-char-forward"));
+        assert!(bound("evil-normal", "t", "evil-till-char-forward"));
+        assert!(bound("evil-normal", ";", "evil-find-repeat"));
+        assert!(bound("evil-normal", ",", "evil-find-repeat-reverse"));
+        assert!(bound("evil-normal", "*", "evil-search-word-forward"));
+        assert!(bound("evil-normal", "#", "evil-search-word-backward"));
+        assert!(bound("evil-normal", "{", "evil-backward-paragraph"));
+        assert!(bound("evil-normal", "}", "evil-forward-paragraph"));
+        assert!(bound("evil-normal", "%", "evil-matchit"));
+        // Scroll/recenter, LSP conventions, macros, case/join extras.
+        assert!(bound("evil-normal", "z z", "recenter"));
+        assert!(bound("evil-normal", "ctrl-f", "scroll-up"));
+        assert!(bound("evil-normal", "ctrl-b", "scroll-down"));
+        assert!(bound("evil-normal", "g d", "lsp-find-definition"));
+        assert!(bound("evil-normal", "shift-k", "lsp-hover"));
+        assert!(bound("evil-normal", "q", "evil-kbd-macro-toggle"));
+        assert!(bound("evil-normal", "@ @", "call-last-kbd-macro"));
+        assert!(bound("evil-normal", "g shift-j", "evil-join-line-no-space"));
+        assert!(bound("evil-normal", "g u u", "evil-downcase-line"));
+        // Visual: paste-over, case toggle, extend-flavored find.
+        assert!(bound("evil-visual", "p", "evil-visual-paste"));
+        assert!(bound("evil-visual", "~", "evil-visual-toggle-case"));
+        assert!(bound("evil-visual", "f", "evil-find-char-forward-visual"));
+        assert!(bound("evil-visual-line", "p", "evil-visual-paste"));
+        // Text objects are generated: spot-check the chords and their exprs.
+        assert!(bound(
+            "evil-normal",
+            "d i w",
+            r#"evil-object-cmd "delete" "i" "word""#
+        ));
+        assert!(bound(
+            "evil-normal",
+            "c a (",
+            r#"evil-object-cmd "change" "a" "paren""#
+        ));
+        assert!(bound(
+            "evil-normal",
+            "y i \"",
+            r#"evil-object-cmd "yank" "i" "dquote""#
+        ));
+        assert!(bound(
+            "evil-normal",
+            "d a p",
+            r#"evil-object-cmd "delete" "a" "para""#
+        ));
+        assert!(bound(
+            "evil-visual",
+            "i w",
+            r#"evil-object-cmd "select" "i" "word""#
+        ));
+    }
+
+    /// The pure wrap engine behind M-q and gq: greedy re-flow at a width,
+    /// keeping the first line's indentation and comment leader on every line.
+    #[test]
+    fn fill_string_wraps_indent_and_comment_leaders() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        let check = |src: &str| {
+            let q = format!(r#"(if {src} "y" "n")"#);
+            assert_eq!(
+                engine.eval(&q).unwrap().value.as_deref(),
+                Some("\"y\""),
+                "{src}"
+            );
+        };
+        // Words re-flow greedily at the width; a short paragraph is unchanged.
+        check(r#"(equal? (fill-string "aaa bbb ccc ddd" 7) "aaa bbb\nccc ddd")"#);
+        check(r#"(equal? (fill-string "hello world" 80) "hello world")"#);
+        // The first line's indentation starts every wrapped line.
+        check(r#"(equal? (fill-string "  aaa bbb ccc" 8) "  aaa\n  bbb\n  ccc")"#);
+        // A comment leader continues onto wrapped lines (Vim formatoptions `q`)
+        // and short comment lines join back up under it.
+        check(r#"(equal? (fill-string ";; aaa bbb" 7) ";; aaa\n;; bbb")"#);
+        check(r#"(equal? (fill-string ";; aaa\n;; bbb" 80) ";; aaa bbb")"#);
+        // "#hashtag" is a word, not a leader (a leader needs whitespace after).
+        check(r##"(equal? (fill-string "#tag word" 80) "#tag word")"##);
+        // An over-long word gets its own line — never hard-broken.
+        check(r#"(equal? (fill-string "aaaaaaaaaa bb" 4) "aaaaaaaaaa\nbb")"#);
+        // fill-text wraps each paragraph and keeps the blank separator lines.
+        check(r#"(equal? (fill-text "aaa bbb\n\nccc ddd" 3) "aaa\nbbb\n\nccc\nddd")"#);
+    }
+
+    /// gq end to end under the snapshot model: read the range, wrap it, issue
+    /// one replace-region, then park the cursor at the start.
+    #[test]
+    fn evil_gq_formats_to_fill_column() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+
+        // gqq — a long line re-wraps at *fill-column* (80).
+        let long = "word ".repeat(20).trim_end().to_string(); // 99 chars
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str(&format!("{long}\n")),
+            point: 0,
+            ..Default::default()
+        });
+        let cmds = engine.eval("(evil-fill-line)").unwrap().commands;
+        match cmds.as_slice() {
+            [
+                EditorCommand::ReplaceRegion {
+                    start: 0,
+                    end: 99,
+                    text,
+                },
+                EditorCommand::GotoChar(0),
+            ] => {
+                assert!(text.contains('\n'), "a 99-char line should wrap: {text:?}");
+                assert!(
+                    text.lines().all(|l| l.len() <= 80),
+                    "wrapped past column 80: {text:?}"
+                );
+                assert_eq!(
+                    text.split_whitespace().count(),
+                    20,
+                    "words lost in the wrap: {text:?}"
+                );
+            }
+            other => panic!("expected ReplaceRegion + GotoChar, got {other:?}"),
+        }
+
+        // gqip — the blank-line-delimited paragraph around point re-wraps as
+        // one unit; the paragraph past the blank line is untouched.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("aaa\nbbb\n\nccc\n"),
+            point: 5, // inside "bbb"
+            ..Default::default()
+        });
+        let cmds = engine.eval("(evil-fill-paragraph)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::ReplaceRegion { start: 0, end: 7, text }
+                if text == "aaa bbb")
+            ),
+            "gqip should re-wrap exactly the first paragraph: {cmds:?}"
+        );
+    }
+
+    /// The Emacs word/paragraph editing commands added alongside M-q: word
+    /// case folding, transpose-words, whitespace cleanup — all snapshot-read →
+    /// one replace-region.
+    #[test]
+    fn emacs_word_and_paragraph_commands() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/editing.scm"))
+            .expect("editing.scm");
+        let set = |text: &str, point: usize| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                ..Default::default()
+            });
+        };
+
+        // M-u — upcase from point to end of word, cursor moves past it.
+        set("hello world\n", 0);
+        let cmds = engine.eval("(upcase-word)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::ReplaceRegion { start: 0, end: 5, text }
+                if text == "HELLO")
+            ),
+            "upcase-word should fold the word at point: {cmds:?}"
+        );
+
+        // M-t — swap the words around point ("foo| bar" → "bar foo").
+        set("foo bar\n", 3);
+        let cmds = engine.eval("(transpose-words)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::ReplaceRegion { start: 0, end: 7, text }
+                if text == "bar foo")
+            ),
+            "transpose-words should swap around point: {cmds:?}"
+        );
+
+        // M-SPC — collapse the whitespace run around point to a single space.
+        set("a   b\n", 2);
+        let cmds = engine.eval("(just-one-space)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::ReplaceRegion { start: 1, end: 4, text }
+                if text == " ")
+            ),
+            "just-one-space should collapse the run: {cmds:?}"
+        );
+
+        // M-} — forward to the blank line after the paragraph.
+        set("aaa\nbbb\n\nccc\n", 0);
+        let cmds = engine.eval("(forward-paragraph)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(8))),
+            "forward-paragraph should land on the blank line: {cmds:?}"
+        );
+
+        // C-x C-o — a run of blank lines collapses to one.
+        set("aaa\n\n\n\nbbb\n", 4);
+        let cmds = engine.eval("(delete-blank-lines)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::ReplaceRegion { start: 4, end: 7, text }
+                if text == "\n")
+            ),
+            "delete-blank-lines should leave one blank line: {cmds:?}"
+        );
+    }
+
+    /// f/t char find and * word search: the scanner runs on the snapshot; the
+    /// arming side goes through the `read-char` capture command.
+    #[test]
+    fn evil_find_char_and_search_word() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("hello world\n"),
+            point: 0,
+            ..Default::default()
+        });
+
+        // Arming `f` emits the read-char capture with the dispatch callback.
+        let cmds = engine.eval("(evil-find-char-forward)").unwrap().commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::ReadChar { prompt, callback }
+                if prompt == "f-" && callback == "evil-find-dispatch")),
+            "f should arm a read-char capture: {cmds:?}"
+        );
+
+        // The dispatch itself: f→"o" lands ON the first o; t stops one short;
+        // the visual flavor extends via select-to instead of moving.
+        let cmds = engine.eval(r#"(evil-find-dispatch "o")"#).unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(4))),
+            "f o should land on the o of hello: {cmds:?}"
+        );
+        let cmds = engine
+            .eval(r#"(set! *evil-find-till* #t) (evil-find-dispatch "o")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(3))),
+            "t o should stop before the o: {cmds:?}"
+        );
+        let cmds = engine
+            .eval(r#"(set! *evil-find-till* #f) (evil-find-dispatch-visual "o")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::SelectTo(4))),
+            "visual f o should extend the selection: {cmds:?}"
+        );
+
+        // Backward find with a multibyte target lands on the char's START
+        // byte. (Regression: a byte-stepping scan false-matched at a
+        // mid-codepoint offset — buffer-substring floors to the char start —
+        // handing goto-char an unaligned position.)
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("x€éy\n"),
+            point: 6, // on the y (€ is bytes 1..4, é is 4..6)
+            ..Default::default()
+        });
+        let cmds = engine
+            .eval(r#"(set! *evil-find-forward* #f) (evil-find-dispatch "€")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(1))),
+            "F € must land on the char's first byte, never mid-codepoint: {cmds:?}"
+        );
+        engine.eval("(set! *evil-find-forward* #t)").unwrap();
+
+        // ; repeats with the stored char, , goes the other way.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("ao bo co\n"),
+            point: 4,
+            ..Default::default()
+        });
+        engine.eval(r#"(set! *evil-find-char* "o")"#).unwrap();
+        let cmds = engine.eval("(evil-find-repeat)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(7))),
+            "; should repeat forward to the next o: {cmds:?}"
+        );
+        let cmds = engine.eval("(evil-find-repeat-reverse)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(1))),
+            ", should search backward to the previous o: {cmds:?}"
+        );
+
+        // * — whole-word regex from the word at point, stored + jumped.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("foo bar foo\n"),
+            point: 0,
+            ..Default::default()
+        });
+        let cmds = engine.eval("(evil-search-word-forward)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::SetSearchQuery { query, forward: true }
+                if query == "\\bfoo\\b")
+            ),
+            "* should store a whole-word query: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::EvilSearchNext)),
+            "* should jump to the next match: {cmds:?}"
+        );
+    }
+
+    /// Text objects: word/quote/pair/paragraph ranges and the operator
+    /// plumbing (delete → kill ring, yank → region save, select → set-region).
+    #[test]
+    fn evil_text_objects() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        let set = |text: &str, point: usize| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                ..Default::default()
+            });
+        };
+
+        // diw / daw — the word under point, without / with trailing space.
+        set("foo bar baz\n", 5);
+        let cmds = engine
+            .eval(r#"(evil-object-cmd "delete" "i" "word")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::KillRegionBetween { start: 4, end: 7 })),
+            "diw should kill exactly the word: {cmds:?}"
+        );
+        set("foo bar baz\n", 5);
+        let cmds = engine
+            .eval(r#"(evil-object-cmd "delete" "a" "word")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::KillRegionBetween { start: 4, end: 8 })),
+            "daw should include the trailing space: {cmds:?}"
+        );
+
+        // ci" — inside the quotes; the change enters insert state.
+        set("x \"abc\" y\n", 4);
+        let cmds = engine
+            .eval(r#"(evil-object-cmd "change" "i" "dquote")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::KillRegionBetween { start: 3, end: 6 })),
+            "ci\" should kill between the quotes: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::EvilInsertState)),
+            "change should enter insert state: {cmds:?}"
+        );
+
+        // da( — the innermost paren pair containing point, brackets included.
+        set("f(a(b)c)\n", 4);
+        let cmds = engine
+            .eval(r#"(evil-object-cmd "delete" "a" "paren")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::KillRegionBetween { start: 3, end: 6 })),
+            "da( should take the innermost pair: {cmds:?}"
+        );
+
+        // yiw — select + kill-ring-save (registers AND clipboard), cursor back.
+        set("foo bar baz\n", 5);
+        let cmds = engine
+            .eval(r#"(evil-object-cmd "yank" "i" "word")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::SetRegion { start: 4, end: 7 })),
+            "yiw should mark the word: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::KillRingSave)),
+            "yiw should save via the kill ring: {cmds:?}"
+        );
+
+        // dip — the paragraph's lines, marked line-wise for the next paste.
+        set("aaa\nbbb\n\nccc\n", 5);
+        let cmds = engine
+            .eval(r#"(evil-object-cmd "delete" "i" "para")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::KillRegionBetween { start: 0, end: 8 })),
+            "dip should kill the paragraph's lines: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::EvilSetLinewise)),
+            "dip is line-wise: {cmds:?}"
+        );
+
+        // % — bounce between a bracket and its match, nesting-aware.
+        set("(foo)\n", 0);
+        let cmds = engine.eval("(evil-matchit)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(4))),
+            "% on ( should jump to ): {cmds:?}"
+        );
+        set("(a(b)c)\n", 6);
+        let cmds = engine.eval("(evil-matchit)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(0))),
+            "% on the outer ) should jump to the outer (: {cmds:?}"
+        );
     }
 
     #[test]
@@ -1130,6 +1585,8 @@ mod magit_tests {
             "projectile-switch-project",
             "sort-lines",
             "goto-line-cmd",
+            "fill-paragraph",
+            "set-fill-column",
             "licenses",
         ] {
             let q = format!(r#"(if (member "{cmd}" *interactive-commands*) "y" "n")"#);
@@ -1180,6 +1637,121 @@ mod magit_tests {
         engine.eval("(set! *helix-extend* #t)").unwrap();
         assert_eq!(sels("(helix-char-right)"), vec![(0, 1)]);
         engine.eval("(set! *helix-extend* #f)").unwrap();
+    }
+
+    /// Helix `gq` (`:reflow` on a key): each selection expands to whole lines,
+    /// re-wraps at *fill-column*, and leaves a bare cursor at the block start.
+    #[test]
+    fn helix_reflow_wraps_selected_lines() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        engine.eval("(set! *fill-column* 4)").unwrap();
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("aaa bbb\n"),
+            selections: vec![(0, 0)],
+            ..Default::default()
+        });
+        let cmds = engine.eval("(helix-reflow)").unwrap().commands;
+        match cmds.as_slice() {
+            [
+                EditorCommand::ReplaceRegion {
+                    start: 0,
+                    end: 7,
+                    text,
+                },
+                EditorCommand::SetSelections(sels),
+            ] => {
+                assert_eq!(text, "aaa\nbbb");
+                assert_eq!(sels, &[(0, 0)]);
+            }
+            other => panic!("expected ReplaceRegion + SetSelections, got {other:?}"),
+        }
+    }
+
+    /// The Helix additions: I/A line inserts, select-all, join, case fold, and
+    /// selection-first char find — all through the multi-selection plumbing.
+    #[test]
+    fn helix_line_inserts_join_case_and_find() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        let set = |text: &str, sels: Vec<(usize, usize)>| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                selections: sels,
+                ..Default::default()
+            });
+        };
+
+        // I / A — one cursor per line at first non-blank / line end, then insert.
+        set("  foo\nbar\n", vec![(3, 3), (8, 8)]);
+        let cmds = engine.eval("(helix-insert-line-start)").unwrap().commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::SetSelections(p) if p == &[(2, 2), (6, 6)])),
+            "I should land on each line's first non-blank: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::EvilInsertState)),
+            "I should enter insert: {cmds:?}"
+        );
+        set("  foo\nbar\n", vec![(3, 3), (8, 8)]);
+        let cmds = engine.eval("(helix-append-line-end)").unwrap().commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::SetSelections(p) if p == &[(5, 5), (9, 9)])),
+            "A should land on each line end: {cmds:?}"
+        );
+
+        // % — the whole buffer as one selection.
+        set("hello\n", vec![(0, 0)]);
+        let cmds = engine.eval("(helix-select-all)").unwrap().commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::SetSelections(p) if p == &[(0, 6)])),
+            "% should select the whole buffer: {cmds:?}"
+        );
+
+        // J — a bare cursor joins the next line up (single-line block extends).
+        set("aaa\nbbb\n", vec![(0, 0)]);
+        let cmds = engine.eval("(helix-join-lines)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::ReplaceRegion { start: 0, end: 7, text }
+                if text == "aaa bbb")
+            ),
+            "J should join the two lines: {cmds:?}"
+        );
+
+        // ~ — toggle case of each selection's text.
+        set("aBc\n", vec![(0, 3)]);
+        let cmds = engine.eval("(helix-switch-case)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::ReplaceRegion { start: 0, end: 3, text }
+                if text == "AbC")
+            ),
+            "~ should toggle the selection's case: {cmds:?}"
+        );
+
+        // f — every head selects to the found char on its own line.
+        set("hello world\n", vec![(0, 0)]);
+        engine
+            .eval("(set! *helix-find-till* #f) (set! *helix-find-forward* #t)")
+            .unwrap();
+        let cmds = engine
+            .eval(r#"(helix-find-dispatch "o")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::SetSelections(p) if p == &[(0, 4)])),
+            "f o should select up to the o: {cmds:?}"
+        );
     }
 
     /// Opening the Helix tutorial switches the editor into Helix mode first, so

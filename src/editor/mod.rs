@@ -530,6 +530,10 @@ pub struct Editor {
     /// next printable keystroke overwrite the character under the cursor instead
     /// of being dispatched as a command. Cleared by that keystroke or `Escape`.
     evil_replace_pending: bool,
+    /// A `read-char` capture in flight: the Scheme callback the very next
+    /// printable keystroke is passed to (vim `f`/`t`/`F`/`T` char-find and
+    /// friends). Cleared by that keystroke; any non-text chord cancels.
+    read_char_pending: Option<String>,
     /// True until startup config (bundled scripts + `init.scm`) has been applied.
     /// While set, plain keystrokes are swallowed so they can't self-insert before
     /// `(evil-mode)` runs — the window can be revealed by the load watchdog before
@@ -1199,6 +1203,7 @@ impl Editor {
             helm_action_context: None,
             evil: EvilState::Disabled,
             evil_replace_pending: false,
+            read_char_pending: None,
             config_pending: true,
             search_query: None,
             evil_search_forward: true,

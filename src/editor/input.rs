@@ -149,6 +149,7 @@ impl Editor {
             Self::key_completion_popup,
             Self::key_terminal,
             Self::key_evil_replace,
+            Self::key_read_char,
             Self::key_evil_modal,
             Self::key_evil_insert,
             Self::key_special_chord_overlay,
@@ -366,6 +367,38 @@ impl Editor {
             && !ks.modifiers.platform;
         if is_text && let Some(ch) = ks.key_char.clone() {
             self.evil_replace_char(&ch, cx);
+        }
+        cx.notify();
+        cx.stop_propagation();
+        Handled::Yes
+    }
+
+    /// While a `read-char` capture is armed (vim `f`/`t`/`F`/`T` and friends,
+    /// via the Scheme `read-char` primitive), the very next printable keystroke
+    /// is passed to the armed callback instead of the keymap — same contract as
+    /// `r` above. Any other chord (Escape, a Ctrl/Alt combo, …) cancels the
+    /// capture with no call, matching vim.
+    fn key_read_char(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
+        let Some(callback) = self.read_char_pending.take() else {
+            return Handled::No;
+        };
+        self.status = SharedString::default();
+        let is_text = ks.key_char.is_some()
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform;
+        if is_text && let Some(ch) = ks.key_char.clone() {
+            // A recording macro gets the RESOLVED call — the arming expr was
+            // dropped when ReadChar applied (see the ReadChar dispatch), so
+            // replay runs `(callback "<char>")` directly instead of re-arming
+            // a capture that playback could never satisfy.
+            if let Some(events) = self.macro_recording.as_mut() {
+                let escaped = ch.replace('\\', "\\\\").replace('"', "\\\"");
+                events.push(MacroEvent::Command(format!("({callback} \"{escaped}\")")));
+            }
+            // The engine passes `ch` as the callback's argument verbatim (no
+            // source-string interpolation), so quotes/backslashes are safe.
+            self.script.dispatch_action(&callback, Some(&ch));
         }
         cx.notify();
         cx.stop_propagation();

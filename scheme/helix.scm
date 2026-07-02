@@ -187,10 +187,134 @@
 (define (helix-open-above)
   (helix-keep-primary) (move-beginning-of-line) (open-line) (evil-insert-state))
 
+;; `I` / `A` — collapse each selection to its line's first non-blank / end,
+;; then insert; typed text lands on every line at once (multiple-cursors).
+(define (helix-insert-line-start)
+  (helix-set!
+   (map (lambda (s)
+          (let* ((h (cdr s))
+                 (fnb (evil-skip-blanks-to (line-start-pos h) (line-end-pos h))))
+            (cons fnb fnb)))
+        (helix-selections)))
+  (evil-insert-state))
+(define (helix-append-line-end)
+  (helix-set!
+   (map (lambda (s) (let ((le (line-end-pos (cdr s)))) (cons le le)))
+        (helix-selections)))
+  (evil-insert-state))
+
+;; --- whole-buffer / case / anchor operations ---------------------------------
+;; `%` — one selection spanning the whole buffer (Helix select-all).
+(define (helix-select-all) (helix-set! (list (cons 0 (point-max)))))
+
+;; `~` / `` ` `` / `M-` ` — case-fold every selection in place (a bare cursor
+;; folds the single grapheme under it). Edits run high→low; the selections are
+;; left as they were (case folding is length-preserving for ASCII).
+(define (helix-fold-ranges folder)
+  (let ((desc (helix-sort (helix-ranges-asc) (lambda (x y) (> (car x) (car y))))))
+    (for-each (lambda (r)
+                (replace-region (car r) (cdr r)
+                                (folder (buffer-substring (car r) (cdr r)))))
+              desc)))
+(define (helix-switch-case)  (helix-fold-ranges string-toggle-case))
+(define (helix-to-lowercase) (helix-fold-ranges string-downcase))
+(define (helix-to-uppercase) (helix-fold-ranges string-upcase))
+
+;; `M-;` — flip each selection's anchor and head (Helix flip_selections).
+(define (helix-flip-selections)
+  (helix-set! (map (lambda (s) (cons (cdr s) (car s))) (helix-selections))))
+
+;; --- f / t / F / T char find --------------------------------------------------
+;; Selection-first flavor of the evil char find (evil.scm owns the line-local
+;; scanner and the `read-char` plumbing): every head moves to the target on
+;; its own line, selecting from the old head like the word motions; heads with
+;; no match stay put.
+(define *helix-find-till* #f)
+(define *helix-find-forward* #t)
+(define (helix-find-dispatch ch)
+  (helix-move
+   (lambda (h) (or (evil-find-target-at h ch *helix-find-till* *helix-find-forward*) h))
+   #t))
+(define (helix-find-arm till forward prompt)
+  (set! *helix-find-till* till)
+  (set! *helix-find-forward* forward)
+  (read-char prompt 'helix-find-dispatch))
+(define (helix-find-char-forward)  (helix-find-arm #f #t "f-"))
+(define (helix-find-char-backward) (helix-find-arm #f #f "F-"))
+(define (helix-till-char-forward)  (helix-find-arm #t #t "t-"))
+(define (helix-till-char-backward) (helix-find-arm #t #f "T-"))
+
+;; gs — first non-blank of each head's line (Helix goto_first_nonwhitespace).
+(define (helix-goto-first-nonblank)
+  (helix-move
+   (lambda (h) (evil-skip-blanks-to (line-start-pos h) (line-end-pos h)))
+   #f))
+
 ;; --- goto (g …) ------------------------------------------------------------
 (define (helix-goto-top)    (helix-set! (list (cons 0 0))))
 (define (helix-goto-bottom)
   (let ((mx (point-max))) (helix-set! (list (cons mx mx)))))
+
+;; --- whole-line block edits (gq reflow, J join) --------------------------------
+;; Shared bookkeeping: expand each selection to whole lines (a bare cursor =
+;; its current line), merge overlapping ranges, apply `transform` to each
+;; block's text with edits running high→low (earlier offsets stay valid), and
+;; leave a bare cursor at each block's (shifted) start — helix-delete-core's
+;; pattern, except the shift is each block's new-minus-old BYTE length.
+;; `extend-single` grows a one-line block to include the next line (for J).
+(define (helix-transform-line-blocks transform extend-single)
+  (let* ((mx (point-max))
+         (asc (helix-sort
+               (map (lambda (s)
+                      (let* ((lo (min (car s) (cdr s)))
+                             (hi (max (car s) (cdr s)))
+                             (ls (line-start-pos lo))
+                             (le (line-end-pos (max lo (- hi 1)))))
+                        (if (and extend-single
+                                 (= le (line-end-pos ls))     ; a single line…
+                                 (< (+ le 1) mx))             ; …with one below
+                            (cons ls (line-end-pos (+ le 1)))
+                            (cons ls le))))
+                    (helix-selections))
+               (lambda (x y) (< (car x) (car y)))))
+         (merged (let loop ((rs asc) (acc '()))
+                   (cond ((null? rs) (reverse acc))
+                         ((and (not (null? acc)) (<= (car (car rs)) (cdr (car acc))))
+                          (loop (cdr rs)
+                                (cons (cons (car (car acc))
+                                            (max (cdr (car acc)) (cdr (car rs))))
+                                      (cdr acc))))
+                         (else (loop (cdr rs) (cons (car rs) acc))))))
+         ;; ((range . new-text) …) in ascending order.
+         (blocks (map (lambda (r)
+                        (cons r (transform (buffer-substring (car r) (cdr r)))))
+                      merged)))
+    (when (not (null? blocks))
+      (for-each (lambda (b)
+                  (let ((r (car b))) (replace-region (car r) (cdr r) (cdr b))))
+                (reverse blocks))
+      (helix-set!
+       (let loop ((bs blocks) (delta 0) (acc '()))
+         (if (null? bs)
+             (reverse acc)
+             (let* ((r (car (car bs))) (new (cdr (car bs)))
+                    (s (+ (car r) delta)))
+               (loop (cdr bs)
+                     (+ delta (- (utf8-length new) (- (cdr r) (car r))))
+                     (cons (cons s s) acc)))))))))
+
+;; gq — Helix's `:reflow` on a key (`:` here is the vim ex bridge, which has no
+;; reflow): re-wrap each selection's lines at *fill-column* (fill-text,
+;; core.scm).
+(define (helix-reflow)
+  (helix-transform-line-blocks (lambda (text) (fill-text text *fill-column*)) #f))
+
+;; J — join the selected lines (a bare cursor joins the next line up),
+;; collapsing each newline + following indentation to one space.
+(define (helix-join-lines)
+  (helix-transform-line-blocks
+   (lambda (text) (replace-regexp-in-string "\n[ \t]*" " " text))
+   #t))
 
 ;; =====================================================================
 ;; Keymap — Normal (selection-first). Plain keys are commands here.
@@ -206,10 +330,19 @@
 (define-key "helix-normal" "0" 'helix-goto-line-start)
 (define-key "helix-normal" "$" 'helix-goto-line-end)
 (define-key "helix-normal" "x" 'helix-select-line)
+(define-key "helix-normal" "shift-x" 'helix-select-line)   ; X — extend to line bounds
+(define-key "helix-normal" "%" 'helix-select-all)          ; % — select whole buffer
+(define-key "helix-normal" "f" 'helix-find-char-forward)   ; f/t/F/T — char find (selects)
+(define-key "helix-normal" "shift-f" 'helix-find-char-backward)
+(define-key "helix-normal" "t" 'helix-till-char-forward)
+(define-key "helix-normal" "shift-t" 'helix-till-char-backward)
 (define-key "helix-normal" "g g" 'helix-goto-top)     ; gg — top of file
 (define-key "helix-normal" "g e" 'helix-goto-bottom)  ; ge — bottom of file
 (define-key "helix-normal" "g h" 'helix-goto-line-start)
 (define-key "helix-normal" "g l" 'helix-goto-line-end)
+(define-key "helix-normal" "g s" 'helix-goto-first-nonblank) ; gs — first non-blank
+(define-key "helix-normal" "g w" 'avy-goto-char)      ; gw — jump by char (avy)
+(define-key "helix-normal" "g q" 'helix-reflow)       ; gq — reflow selected lines (:reflow)
 ;; selection management
 (define-key "helix-normal" "v" 'helix-toggle-extend)  ; toggle select/extend
 (define-key "helix-normal" ";" 'helix-collapse)       ; collapse to cursors
@@ -225,9 +358,16 @@
 (define-key "helix-normal" "r" 'evil-replace-char)    ; r<char> — replace
 (define-key "helix-normal" "u" 'undo)
 (define-key "helix-normal" "shift-u" 'redo)           ; U — redo
+(define-key "helix-normal" "shift-j" 'helix-join-lines)   ; J — join selected lines
+(define-key "helix-normal" "~" 'helix-switch-case)        ; ~ — toggle case
+(define-key "helix-normal" "`" 'helix-to-lowercase)       ; ` — lowercase
+(define-key "helix-normal" "alt-`" 'helix-to-uppercase)   ; M-` — uppercase
+(define-key "helix-normal" "alt-;" 'helix-flip-selections); M-; — flip anchor/head
 ;; enter insert
 (define-key "helix-normal" "i" 'helix-insert-before)
 (define-key "helix-normal" "a" 'helix-append-after)
+(define-key "helix-normal" "shift-i" 'helix-insert-line-start) ; I — insert at line start
+(define-key "helix-normal" "shift-a" 'helix-append-line-end)   ; A — append at line end
 (define-key "helix-normal" "o" 'helix-open-below)
 (define-key "helix-normal" "shift-o" 'helix-open-above)
 ;; search & ex
