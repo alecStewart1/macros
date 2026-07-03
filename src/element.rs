@@ -2162,6 +2162,22 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         let focus_handle = self.editor.read(cx).focus_handle.clone();
+
+        // Claim the IME/typed-text input handler for the selected terminal pane,
+        // just like `EditorElement`. Live terminal keys are grabbed in
+        // `on_key_down` (which sends PTY bytes and stops propagation before the
+        // IME), so this only matters when an overlay is open over the terminal —
+        // e.g. helm/minibuffer, which let plain text fall through to the IME.
+        // Without a handler here that text would be dropped, so typing to filter
+        // M-x wouldn't work after the shell exits and the terminal is still shown.
+        if self.editor.read(cx).pane_is_selected(self.pane) {
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.editor.clone()),
+                cx,
+            );
+        }
+
         let line_height = window.line_height();
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(prepaint.background.clone());

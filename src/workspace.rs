@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{App, Context, Entity, SharedString, Window, div, prelude::*, px, relative};
 
 use crate::editor::{Editor, TitlebarDropdownView};
 use crate::theme::Theme;
@@ -224,6 +224,13 @@ impl Workspace {
     /// and prompts to save when buffers are modified (see `Editor::confirm_quit`).
     pub fn confirm_quit(&self, cx: &mut Context<Self>) -> bool {
         self.editor.update(cx, |editor, cx| editor.confirm_quit(cx))
+    }
+
+    /// Whether any of this window's buffers have unsaved changes. Lets the
+    /// window-close handler drop a clean secondary window outright while still
+    /// routing a dirty one through the save prompt.
+    pub fn has_unsaved_buffers(&self, cx: &App) -> bool {
+        self.editor.read(cx).any_modified()
     }
 
     /// The transient popup (magit-style command menu): a titled grid of

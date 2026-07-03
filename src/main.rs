@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, PromptLevel, WindowBounds, WindowOptions, prelude::*, px,
-    size,
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, PromptLevel, WindowBounds, WindowHandle,
+    WindowOptions, actions, prelude::*, px, size,
 };
 
 /// Bundled editor font (SIL OFL — see assets/fonts/Lilex-OFL.txt).
@@ -35,177 +35,256 @@ use editor::{
 };
 use workspace::Workspace;
 
+// App-level actions, driven by the native menu bar / dock menu (and their
+// `cmd-n` / `cmd-q` key equivalents). Distinct from the editor's `actions!`
+// (OS-special keys) — these are handled globally, not per-editor.
+actions!(macros, [NewWindow, Quit]);
+
+/// The native application menu bar. macOS always renders the *first* menu as
+/// the bold "application" menu (its title is replaced by the bundle name), so
+/// its items are the app-level ones; the "File" menu carries `New Window`.
+fn app_menus() -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "Macros".into(),
+            items: vec![MenuItem::action("Quit Macros", Quit)],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![MenuItem::action("New Window", NewWindow)],
+        },
+    ]
+}
+
+/// Open a fresh editor window and drive it through the same hidden-until-themed
+/// reveal dance as the first one. Each window owns an independent Steel engine
+/// (it lives on the `Editor`), so every new window must re-run the startup +
+/// user config to get keymaps, theme, options, and any `(evil-mode)`. Only the
+/// first window runs the launch-time update check (`run_update_check`).
+fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<Workspace> {
+    let bounds = Bounds::centered(None, size(px(900.0), px(640.0)), cx);
+    let window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // The window/title-bar name.
+                // `appears_transparent` hides the system-drawn title bar so
+                // we can paint our own strip in the theme's color (see
+                // `Workspace::render`). The window stays a titled window, so
+                // the top strip is still OS-draggable and the macOS traffic
+                // lights still render in their default position.
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("Macros".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
+                // Open hidden so the runtime + user config (which set the
+                // theme via `load-theme`) run before the window is ever
+                // presented. Otherwise the first frame paints with the dark
+                // bootstrap palette and then visibly "blinks" to the user's
+                // theme. We reveal the window with `activate_window()` once
+                // theming is applied — the same trick Zed uses to avoid a
+                // flash-of-unstyled-window.
+                show: false,
+                ..Default::default()
+            },
+            |_, cx| {
+                let editor = cx.new(editor::Editor::new);
+                cx.new(|cx| Workspace::new(editor, cx))
+            },
+        )
+        .unwrap();
+
+    // The window is opened hidden (`show: false`); it's revealed only once
+    // the embedded runtime + the user's init.scm have applied their theme,
+    // so the user never sees the dark bootstrap palette blink to their
+    // configured theme.
+    //
+    // Reveal is a race between two tasks, guarded so it happens exactly once:
+    //   (a) config finishes evaluating — the normal path, no flash; or
+    //   (b) a watchdog timer elapses — a backstop so a slow/broken init.scm
+    //       (or any error on the setup path) can never leave the window
+    //       hidden forever; we show it even if that means a brief restyle.
+    // Both run as foreground tasks so the run loop stays live between eval
+    // stages. A single eval call that hangs internally (e.g. an infinite
+    // loop in init.scm) still can't be preempted — the watchdog can only
+    // fire at an `.await` point — which is the same way Emacs hangs on a bad
+    // init.el.
+    const WATCHDOG: Duration = Duration::from_millis(1500);
+    let revealed = Arc::new(AtomicBool::new(false));
+
+    window
+        .update(cx, |workspace, window, cx| {
+            workspace.focus_editor(window, cx);
+
+            // The OS title-bar close button: intercept it so unsaved buffers
+            // get the same save/cancel prompt as C-x C-c. With another window
+            // still open, a clean close drops just this window (return true)
+            // rather than quitting the whole app — `confirm_quit` calls
+            // `cx.quit()`, which is only what we want for the last window. A
+            // window with unsaved buffers still falls through to that prompt,
+            // so nothing is discarded silently.
+            let ws = cx.entity();
+            window.on_window_should_close(cx, move |_window, cx| {
+                let others_open = cx.windows().len() > 1;
+                let dirty = ws.read(cx).has_unsaved_buffers(cx);
+                if others_open && !dirty {
+                    return true;
+                }
+                ws.update(cx, |workspace, cx| workspace.confirm_quit(cx))
+            });
+
+            // (b) Backstop: reveal after WATCHDOG regardless of config state.
+            let guard = revealed.clone();
+            cx.spawn_in(window, async move |_workspace, cx| {
+                cx.background_executor().timer(WATCHDOG).await;
+                if !guard.swap(true, Ordering::SeqCst) {
+                    cx.update(|window, _| window.activate_window()).ok();
+                }
+            })
+            .detach();
+
+            // (a) Normal path: evaluate config, then reveal the already-
+            // themed window. The yields between stages keep the run loop
+            // alive so the watchdog above can still fire if a stage drags.
+            let guard = revealed.clone();
+            cx.spawn_in(window, async move |workspace, cx| {
+                // Embedded runtime (keymaps, default theme, options).
+                for source in runtime::startup_scripts() {
+                    workspace.update(cx, |w, cx| w.eval(source, cx)).ok();
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                }
+                // User config (overrides everything; may `(include …)` /
+                // `(package-install …)`).
+                if let Some((dir, source)) = runtime::user_config() {
+                    let prelude = runtime::include_prelude(&dir);
+                    workspace.update(cx, |w, cx| w.eval(&prelude, cx)).ok();
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                    workspace.update(cx, |w, cx| w.eval(&source, cx)).ok();
+                }
+
+                // Config (incl. any `(evil-mode)`) is fully applied: let
+                // plain keystrokes through again. Done before the reveal so
+                // the very first key the user can press is already modal.
+                workspace.update(cx, |w, cx| w.mark_config_loaded(cx)).ok();
+
+                // Theme is applied — reveal the styled window (unless the
+                // watchdog already did).
+                if !guard.swap(true, Ordering::SeqCst) {
+                    cx.update(|window, _| window.activate_window()).ok();
+                }
+
+                // Only now run the initial buffer's mode hooks (steel-mode's
+                // `enable-lsp` → Steel engine / LSP). Deferred past the reveal
+                // so the first frame paints before that work begins.
+                cx.background_executor()
+                    .timer(Duration::from_millis(1))
+                    .await;
+                workspace.update(cx, |w, cx| w.run_startup_hooks(cx)).ok();
+            })
+            .detach();
+
+            // Update lifecycle (relocation prompt / once-a-day check):
+            // see `spawn_update_check`. First window only.
+            if run_update_check {
+                spawn_update_check(window, cx);
+            }
+        })
+        .unwrap();
+
+    window
+}
+
 fn main() {
     // Recover the login shell's PATH before anything else — GUI launches on
     // macOS/Linux don't inherit it, which otherwise hides LSP servers and other
     // tools from every subprocess we spawn. Must run before any threads start.
     runtime::import_shell_env();
 
-    Application::new()
-        .with_assets(assets::Assets)
-        .run(|cx: &mut App| {
-            // gpui ships no usable default font for the text system — fonts must be
-            // loaded explicitly or glyphs won't rasterize. Bundle Lilex (a mono,
-            // ideal for a code editor).
-            cx.text_system()
-                .add_fonts(vec![Cow::Borrowed(LILEX_REGULAR)])
-                .expect("Lilex font should load");
+    let app = Application::new().with_assets(assets::Assets);
 
-            // The color theme lives as a gpui global, but its palette is defined in
-            // Scheme (scheme/themes/*.scm, applied by `(load-theme …)` in init.scm).
-            // Rust installs an empty palette as a bootstrap; faces fall back to
-            // sane defaults for the first frame until the runtime loads.
-            cx.set_global(theme::Theme::default());
+    // Clicking the dock icon (macOS) with every window closed opens a fresh
+    // one; otherwise just bring the app forward. Registered on the builder —
+    // `on_reopen` lives on `Application`, not the in-run `App`.
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            open_workspace_window(cx, false);
+        }
+        cx.activate(true);
+    });
 
-            // Tunable options (font size, tab width, completion style, …) are also a
-            // gpui global; defaults live in Rust, overrides come from Scheme
-            // `(set-option …)` in init.scm.
-            cx.set_global(settings::Settings::default());
+    app.run(|cx: &mut App| {
+        // gpui ships no usable default font for the text system — fonts must be
+        // loaded explicitly or glyphs won't rasterize. Bundle Lilex (a mono,
+        // ideal for a code editor).
+        cx.text_system()
+            .add_fonts(vec![Cow::Borrowed(LILEX_REGULAR)])
+            .expect("Lilex font should load");
 
-            // OS-special keys are captured as GPUI actions and delegated to the
-            // same commands. The `Ctrl-`/`Alt-`/prefix keymap lives in Scheme
-            // (FUNDAMENTAL_KEYMAP) and is dispatched inside the editor.
-            cx.bind_keys([
-                KeyBinding::new("backspace", Backspace, Some("Editor")),
-                KeyBinding::new("delete", Delete, Some("Editor")),
-                KeyBinding::new("left", Left, Some("Editor")),
-                KeyBinding::new("right", Right, Some("Editor")),
-                KeyBinding::new("up", Up, Some("Editor")),
-                KeyBinding::new("down", Down, Some("Editor")),
-                KeyBinding::new("home", Home, Some("Editor")),
-                KeyBinding::new("end", End, Some("Editor")),
-                KeyBinding::new("enter", Newline, Some("Editor")),
-                KeyBinding::new("tab", Tab, Some("Editor")),
-                KeyBinding::new("shift-left", SelectLeft, Some("Editor")),
-                KeyBinding::new("shift-right", SelectRight, Some("Editor")),
-                KeyBinding::new("cmd-a", SelectAll, Some("Editor")),
-            ]);
+        // The color theme lives as a gpui global, but its palette is defined in
+        // Scheme (scheme/themes/*.scm, applied by `(load-theme …)` in init.scm).
+        // Rust installs an empty palette as a bootstrap; faces fall back to
+        // sane defaults for the first frame until the runtime loads.
+        cx.set_global(theme::Theme::default());
 
-            let bounds = Bounds::centered(None, size(px(900.0), px(640.0)), cx);
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        // The window/title-bar name.
-                        // `appears_transparent` hides the system-drawn title bar so
-                        // we can paint our own strip in the theme's color (see
-                        // `Workspace::render`). The window stays a titled window, so
-                        // the top strip is still OS-draggable and the macOS traffic
-                        // lights still render in their default position.
-                        titlebar: Some(gpui::TitlebarOptions {
-                            title: Some("Macros".into()),
-                            appears_transparent: true,
-                            ..Default::default()
-                        }),
-                        // Open hidden so the runtime + user config (which set the
-                        // theme via `load-theme`) run before the window is ever
-                        // presented. Otherwise the first frame paints with the dark
-                        // bootstrap palette and then visibly "blinks" to the user's
-                        // theme. We reveal the window with `activate_window()` once
-                        // theming is applied — the same trick Zed uses to avoid a
-                        // flash-of-unstyled-window.
-                        show: false,
-                        ..Default::default()
-                    },
-                    |_, cx| {
-                        let editor = cx.new(editor::Editor::new);
-                        cx.new(|cx| Workspace::new(editor, cx))
-                    },
-                )
-                .unwrap();
+        // Tunable options (font size, tab width, completion style, …) are also a
+        // gpui global; defaults live in Rust, overrides come from Scheme
+        // `(set-option …)` in init.scm.
+        cx.set_global(settings::Settings::default());
 
-            // The window is opened hidden (`show: false`); it's revealed only once
-            // the embedded runtime + the user's init.scm have applied their theme,
-            // so the user never sees the dark bootstrap palette blink to their
-            // configured theme.
-            //
-            // Reveal is a race between two tasks, guarded so it happens exactly once:
-            //   (a) config finishes evaluating — the normal path, no flash; or
-            //   (b) a watchdog timer elapses — a backstop so a slow/broken init.scm
-            //       (or any error on the setup path) can never leave the window
-            //       hidden forever; we show it even if that means a brief restyle.
-            // Both run as foreground tasks so the run loop stays live between eval
-            // stages. A single eval call that hangs internally (e.g. an infinite
-            // loop in init.scm) still can't be preempted — the watchdog can only
-            // fire at an `.await` point — which is the same way Emacs hangs on a bad
-            // init.el.
-            const WATCHDOG: Duration = Duration::from_millis(1500);
-            let revealed = Arc::new(AtomicBool::new(false));
+        // OS-special keys are captured as GPUI actions and delegated to the
+        // same commands. The `Ctrl-`/`Alt-`/prefix keymap lives in Scheme
+        // (FUNDAMENTAL_KEYMAP) and is dispatched inside the editor.
+        cx.bind_keys([
+            KeyBinding::new("backspace", Backspace, Some("Editor")),
+            KeyBinding::new("delete", Delete, Some("Editor")),
+            KeyBinding::new("left", Left, Some("Editor")),
+            KeyBinding::new("right", Right, Some("Editor")),
+            KeyBinding::new("up", Up, Some("Editor")),
+            KeyBinding::new("down", Down, Some("Editor")),
+            KeyBinding::new("home", Home, Some("Editor")),
+            KeyBinding::new("end", End, Some("Editor")),
+            KeyBinding::new("enter", Newline, Some("Editor")),
+            KeyBinding::new("tab", Tab, Some("Editor")),
+            KeyBinding::new("shift-left", SelectLeft, Some("Editor")),
+            KeyBinding::new("shift-right", SelectRight, Some("Editor")),
+            KeyBinding::new("cmd-a", SelectAll, Some("Editor")),
+            // App-level shortcuts (no context → dispatched regardless of
+            // focus). These also become the key equivalents the menu bar
+            // displays next to `New Window` / `Quit Macros`.
+            KeyBinding::new("cmd-n", NewWindow, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
 
-            window
-                .update(cx, |workspace, window, cx| {
-                    workspace.focus_editor(window, cx);
+        // Native menu bar + dock (macOS; no-ops elsewhere). Both `New Window`
+        // entries dispatch the same `NewWindow` action.
+        cx.set_menus(app_menus());
+        cx.set_dock_menu(vec![MenuItem::action("New Window", NewWindow)]);
 
-                    // The OS title-bar close button: intercept it so unsaved buffers
-                    // get the same save/cancel prompt as C-x C-c. Returning false
-                    // cancels the close; confirming the prompt then quits.
-                    let ws = cx.entity();
-                    window.on_window_should_close(cx, move |_window, cx| {
-                        ws.update(cx, |workspace, cx| workspace.confirm_quit(cx))
-                    });
-
-                    // (b) Backstop: reveal after WATCHDOG regardless of config state.
-                    let guard = revealed.clone();
-                    cx.spawn_in(window, async move |_workspace, cx| {
-                        cx.background_executor().timer(WATCHDOG).await;
-                        if !guard.swap(true, Ordering::SeqCst) {
-                            cx.update(|window, _| window.activate_window()).ok();
-                        }
-                    })
-                    .detach();
-
-                    // (a) Normal path: evaluate config, then reveal the already-
-                    // themed window. The yields between stages keep the run loop
-                    // alive so the watchdog above can still fire if a stage drags.
-                    let guard = revealed.clone();
-                    cx.spawn_in(window, async move |workspace, cx| {
-                        // Embedded runtime (keymaps, default theme, options).
-                        for source in runtime::startup_scripts() {
-                            workspace.update(cx, |w, cx| w.eval(source, cx)).ok();
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1))
-                                .await;
-                        }
-                        // User config (overrides everything; may `(include …)` /
-                        // `(package-install …)`).
-                        if let Some((dir, source)) = runtime::user_config() {
-                            let prelude = runtime::include_prelude(&dir);
-                            workspace.update(cx, |w, cx| w.eval(&prelude, cx)).ok();
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1))
-                                .await;
-                            workspace.update(cx, |w, cx| w.eval(&source, cx)).ok();
-                        }
-
-                        // Config (incl. any `(evil-mode)`) is fully applied: let
-                        // plain keystrokes through again. Done before the reveal so
-                        // the very first key the user can press is already modal.
-                        workspace.update(cx, |w, cx| w.mark_config_loaded(cx)).ok();
-
-                        // Theme is applied — reveal the styled window (unless the
-                        // watchdog already did).
-                        if !guard.swap(true, Ordering::SeqCst) {
-                            cx.update(|window, _| window.activate_window()).ok();
-                        }
-
-                        // Only now run the initial buffer's mode hooks (steel-mode's
-                        // `enable-lsp` → Steel engine / LSP). Deferred past the reveal
-                        // so the first frame paints before that work begins.
-                        cx.background_executor()
-                            .timer(Duration::from_millis(1))
-                            .await;
-                        workspace.update(cx, |w, cx| w.run_startup_hooks(cx)).ok();
-                    })
-                    .detach();
-
-                    // Update lifecycle (relocation prompt / once-a-day check):
-                    // see `spawn_update_check`.
-                    spawn_update_check(window, cx);
-                })
-                .unwrap();
-
-            cx.activate(true);
+        cx.on_action::<NewWindow>(|_, cx| {
+            open_workspace_window(cx, false);
         });
+        cx.on_action::<Quit>(|_, cx| {
+            // Route through the focused window so unsaved buffers still
+            // prompt, matching the title-bar close button and C-x C-c.
+            // No active window → plain quit.
+            if let Some(window) = cx.active_window().and_then(|w| w.downcast::<Workspace>()) {
+                window
+                    .update(cx, |workspace, _window, cx| workspace.confirm_quit(cx))
+                    .ok();
+            } else {
+                cx.quit();
+            }
+        });
+
+        open_workspace_window(cx, true);
+
+        cx.activate(true);
+    });
 }
 
 /// Update lifecycle, spawned once at startup: on macOS, offer to relocate a

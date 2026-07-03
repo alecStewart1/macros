@@ -613,7 +613,7 @@ impl Editor {
         }
     }
 
-    pub(super) fn any_modified(&self) -> bool {
+    pub fn any_modified(&self) -> bool {
         let active_dirty = self.active.modified && !is_special_buffer_name(&self.active.name);
         let inactive_dirty = self
             .inactive
