@@ -58,8 +58,9 @@ function Hero() {
         again on{" "}
         <strong style={{ color: "var(--text)", fontWeight: 600 }}>Steel</strong>,
         a fast embedded Scheme, with a GPU renderer underneath. It is batteries
-        included: Magit, evil-mode, org-mode and roam, helm, transient, and LSP
-        all ship in the box. Every bit of it is Scheme you can read and change.
+        included: Scheme reimplementations of Magit, evil-mode, org-mode and
+        roam, helm, transient, and LSP all ship in the box. Every bit of it is
+        Scheme you can read and change.
       </p>
 
       <div
