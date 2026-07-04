@@ -10,7 +10,6 @@ export default function Home() {
         <Hero />
         <Screenshot />
         <FeatureStrip />
-        <WhyIBuiltThis />
       </main>
       <Footer />
     </>
@@ -192,53 +191,6 @@ function FeatureStrip() {
             </p>
           </div>
         ))}
-      </div>
-    </Section>
-  );
-}
-
-/* ── Why I built this ──────────────────────────────────────────────────── */
-
-function WhyIBuiltThis() {
-  return (
-    <Section eyebrow="Why I built this" title="Going back to where it started">
-      <div
-        style={{
-          marginTop: 28,
-          display: "flex",
-          flexDirection: "column",
-          gap: 18,
-          fontSize: 17,
-          lineHeight: 1.7,
-          color: "var(--text2)",
-        }}
-      >
-        <p style={{ margin: 0 }}>
-          I&apos;ve used Emacs for more than twenty years, it&apos;s oddly
-          addicting. It&apos;s been with me for most of my career, and much of
-          what I enjoy about programming centers on it, the look, the feel, the
-          experience of writing in it. I never would have learned Lisp if it
-          weren&apos;t for Emacs, and learning Lisp shaped my career in ways I
-          couldn&apos;t have predicted. It set me down the path of programming
-          languages, which led to a roughly 10+ year stretch where I wrote
-          compilers and related tooling, a completely different trajectory than
-          the one I had been on.
-        </p>
-        <p style={{ margin: 0 }}>
-          Tinkering in it and trying new packages has always been a joy: getting
-          the one thing just right. Emacs with Magit
-          is the only git porcelain I&apos;ve ever actually missed when working
-          somewhere else. Wiring up keybindings to search and navigate a
-          codebase with Helm sharpened how quickly I could grok an unfamiliar
-          repo. Org mode is the only note-taking habit that ever
-          stuck for me, and using it as a data science notebook with R, instead
-          of the usual tools, was genuinely useful and a lot of fun.
-        </p>
-        <p style={{ margin: 0 }}>
-          Mostly, though, this is fun. The state of Emacs felt stale, and I
-          wanted to tinker again, to go back to where it all started, except
-          this time I write in Scheme.
-        </p>
       </div>
     </Section>
   );
