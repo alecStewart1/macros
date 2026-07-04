@@ -1,0 +1,25 @@
+name: Mirror to Codeberg
+
+# Push-mirrors `main` to the public Codeberg repo. Fires on every push to
+# main — which includes PR merges, since merging a PR pushes to main (there is
+# no distinct "on merge" event; a merge is a push). Direct pushes to main also
+# trigger it, which is the intended behavior for a publish mirror.
+#
+# Requires:
+#   - Secret CODEBERG_TOKEN: a Codeberg access token with write:repository scope.
+#   - `runs-on` label matching a registered runner (ubuntu-latest, per ci.yml).
+on:
+  push:
+    branches: [main]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git push --force \
+            https://oauth2:${{ secrets.CODEBERG_TOKEN }}@codeberg.org/macros-app/macros.git \
+            main
