@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Logo } from "./Logo";
 
-const REPO = "https://codeberg.org/likelihood/macros";
+const REPO = "https://codeberg.org/macros-app/macros";
 
 export function Nav() {
   return (
