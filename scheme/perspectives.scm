@@ -131,7 +131,13 @@
   (let ((root (perspective-root-for-name name)))
     (if root
         (perspective-open root)
-        (message (string-append "No perspective named " name)))))
+        (begin
+          (set! *perspectives*
+                (filter (lambda (pair) (file-exists? (car pair)))
+                        *perspectives*))
+          (perspective-save)
+          (perspective-sync-titlebar)
+          (message (string-append "Removed stale project: " name))))))
 
 ;; Keyboard access to the same list.
 (define-command (perspective-switch)
