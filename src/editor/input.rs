@@ -713,7 +713,6 @@ impl Editor {
                 return;
             }
         }
-        self.is_selecting = true;
         self.active.mark_active = false;
         // In a special (read-only) buffer, a plain left click acts like a key:
         // position the cursor on the clicked line, then resolve a `mouse-1`
@@ -746,6 +745,11 @@ impl Editor {
             }
             return;
         }
+        // Only a click in a normal buffer arms drag-selection. Special buffers
+        // return above; leaving `is_selecting` set there would let the click's
+        // mouse-up jitter extend a selection into whatever pane the `mouse-1`
+        // binding just switched to (e.g. the file dired-sidebar just opened).
+        self.is_selecting = true;
         let offset = self.offset_for_position(event.position);
         if event.modifiers.shift {
             self.select_to(offset, cx);
