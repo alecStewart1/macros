@@ -1153,7 +1153,12 @@ impl Editor {
             // terminal: TAB sent to the shell (completion)
         } else if self.special_key("tab", cx) {
             // read-only buffer: TAB runs its binding (e.g. toggle section)
-        } else if !self.evil_intercepts() && !self.mode_key("tab", cx) {
+        } else if !self.mode_key("tab", cx) && !self.evil_intercepts() {
+            // A mode binding (e.g. org-mode's `org-tab` heading cycle) wins in
+            // every state, including evil Normal/Visual — TAB is a gpui action
+            // key that never reaches the evil keymap, so consult the mode map
+            // here or modal users lose it. The plain indent fallback still only
+            // runs when evil isn't intercepting.
             self.apply_command(EditorCommand::IndentForTab, cx);
         }
     }
