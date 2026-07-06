@@ -500,6 +500,15 @@
   (let ((rest (filter (lambda (p) (not (= (car p) H))) (org--fold-state-get))))
     (org--fold-state-set (if (eq? st 'subtree) rest (cons (cons H st) rest)))))
 
+;; Next local-cycle state for a heading, given its current state and whether it
+;; has sub-headings. A childless heading renders 'children identically to 'folded
+;; (see org--fold-ranges-for), so it skips that no-op step and toggles
+;; folded↔subtree — a collapsed leaf expands in one TAB, not two.
+(define (org--cycle-next state has-kids)
+  (cond ((eq? state 'subtree) 'folded)
+        ((eq? state 'folded) (if has-kids 'children 'subtree))
+        (else 'subtree)))
+
 ;; Smallest heading level among the descendants in subtree (H, E], or #f.
 (define (org--min-child-level headings H E)
   (let loop ((hs headings) (m #f))
@@ -607,9 +616,12 @@
   (let* ((L (buffer-line)) (line (org--line-text L)))
     (cond
       ((org--heading-level line)
-       (let ((next (cond ((eq? (org--heading-state L) 'subtree) 'folded)
-                         ((eq? (org--heading-state L) 'folded) 'children)
-                         (else 'subtree))))
+       (let* ((headings (org--headings))
+              (total (org--total-lines))
+              (lvl (nth (org--find-heading headings L) 1))
+              (E (org--subtree-end L lvl headings total))
+              (has-kids (not (null? (org--direct-children headings L E))))
+              (next (org--cycle-next (org--heading-state L) has-kids)))
          (org--set-heading-state L next)
          (org--reapply-folds)
          (org--refresh-fold-markers)

@@ -2655,6 +2655,15 @@ mod magit_tests {
             "0"
         );
 
+        // Local TAB cycle. A heading with children walks subtree→folded→children→…
+        assert_eq!(v(r"(org--cycle-next (quote subtree) #t)"), "folded");
+        assert_eq!(v(r"(org--cycle-next (quote folded) #t)"), "children");
+        assert_eq!(v(r"(org--cycle-next (quote children) #t)"), "subtree");
+        // A childless heading skips the no-op 'children view: folded→subtree, so a
+        // collapsed leaf expands in a single TAB (the reported two-TAB bug).
+        assert_eq!(v(r"(org--cycle-next (quote folded) #f)"), "subtree");
+        assert_eq!(v(r"(org--cycle-next (quote subtree) #f)"), "folded");
+
         // --- Drawer folding -------------------------------------------------
         // `:end:` is matched case-insensitively and distinct from an opener.
         assert_eq!(v(r#"(if (org--drawer-end-line? ":END:") 1 0)"#), "1");
