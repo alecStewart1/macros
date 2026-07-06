@@ -1955,6 +1955,10 @@ impl Editor {
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let cursor = self.edit(self.active.selected_range.clone(), text);
         self.collapse_to(cursor);
+        // Follow the cursor: plain self-insert, newlines, and tab-indent all route
+        // through here, so without this the viewport won't scroll when typing past
+        // the bottom of the view (the other edit helpers already do this).
+        self.ensure_cursor_visible();
         cx.notify();
     }
 
