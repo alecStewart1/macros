@@ -798,6 +798,29 @@ fn shift_line_map<V>(map: &mut HashMap<usize, V>, start_line: usize, line_delta:
     }
 }
 
+/// Shift folded line ranges to track an edit that added/removed `line_delta`
+/// lines beginning on `start_line`. A line at/before `start_line` is fixed; a
+/// later line moves by `line_delta` (clamped to `start_line`) — the line-space
+/// twin of `adjust_overlays`'s byte shift. Ranges that collapse to empty are
+/// dropped. Without this, editing above a folded subtree (e.g. RET to push an
+/// Org heading down) leaves the fold hiding stale line numbers.
+fn shift_fold_ranges(folds: &mut Vec<Range<usize>>, start_line: usize, line_delta: isize) {
+    if line_delta == 0 {
+        return;
+    }
+    let shift = |l: usize| -> usize {
+        if l <= start_line {
+            l
+        } else {
+            (l as isize + line_delta).max(start_line as isize) as usize
+        }
+    };
+    folds.retain_mut(|r| {
+        *r = shift(r.start)..shift(r.end);
+        r.end > r.start
+    });
+}
+
 /// Merge runs of consecutive [`EditorCommand::Insert`] into a single insert.
 /// Each applied insert triggers a tree-sitter reparse and an LSP incremental
 /// change, so a script inserting one character at a time otherwise pays that
@@ -1836,6 +1859,13 @@ impl Editor {
                 start_line,
                 line_delta,
             );
+            // Folded line ranges shift too, else editing above a folded subtree
+            // (e.g. pressing RET to push an Org heading down) leaves the fold
+            // hiding stale line numbers — the content lands on lines the fold no
+            // longer covers while old lines stay hidden. Nothing reapplies folds
+            // on edit, so without this the mis-hidden content persists until the
+            // next fold cycle.
+            shift_fold_ranges(&mut self.active.overlays.folds, start_line, line_delta);
         }
     }
 
@@ -4490,8 +4520,8 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, char_col_byte, file_completions, is_repeatable, language_for_path,
-        last_sexp, line_span, prefix_arg_value, push_capped, scheme_symbol_token, shift_line_map,
-        symbol_at, top_level_form_at, translate_backrefs,
+        last_sexp, line_span, prefix_arg_value, push_capped, scheme_symbol_token, shift_fold_ranges,
+        shift_line_map, symbol_at, top_level_form_at, translate_backrefs,
     };
 
     #[test]
@@ -4572,6 +4602,41 @@ mod tests {
         shift_line_map(&mut collapse, 0, -4);
         assert_eq!(collapse.get(&0), Some(&10)); // 0 stays
         assert!(!collapse.values().any(|&v| v == 20)); // 3 -> -1 -> dropped
+    }
+
+    #[test]
+    fn shift_fold_ranges_tracks_edits_above_and_within_a_fold() {
+        use std::ops::Range;
+        // A folded Org subtree hiding body lines 1..4 (heading on line 0).
+        let base: Vec<Range<usize>> = vec![1..4];
+        // Press RET above the heading: +1 line at line 0 pushes the fold down.
+        // This is the reported bug — content must stay hidden at its NEW lines.
+        let mut ins = base.clone();
+        shift_fold_ranges(&mut ins, 0, 1);
+        assert_eq!(ins, vec![2..5]);
+        // Edit on the heading line (== fold start - 1) still counts as "before"
+        // the hidden range, so the whole range shifts by the delta.
+        let mut on_heading = base.clone();
+        shift_fold_ranges(&mut on_heading, 0, 2);
+        assert_eq!(on_heading, vec![3..6]);
+        // Delete a line above: the fold moves up to keep covering the body.
+        let mut del = vec![3..6];
+        shift_fold_ranges(&mut del, 0, -1);
+        assert_eq!(del, vec![2..5]);
+        // An edit inside the folded region grows only the end (start is fixed).
+        let mut within = vec![1..4];
+        shift_fold_ranges(&mut within, 2, 1);
+        assert_eq!(within, vec![1..5]);
+        // Deleting through the whole folded body collapses the range (both ends
+        // clamp back to the edit line) so it is dropped rather than left hiding
+        // the wrong lines.
+        let mut collapse = vec![1..4];
+        shift_fold_ranges(&mut collapse, 0, -4);
+        assert!(collapse.is_empty());
+        // A fold entirely below the edit still shifts; delta 0 is a no-op.
+        let mut noop = vec![1..4];
+        shift_fold_ranges(&mut noop, 0, 0);
+        assert_eq!(noop, vec![1..4]);
     }
 
     #[test]
