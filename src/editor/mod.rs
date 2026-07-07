@@ -2025,6 +2025,11 @@ impl Editor {
         }
         let cursor = self.edit(range, "");
         self.collapse_to(cursor);
+        // Follow the cursor: backspace/delete/delete-word/kill all route through
+        // here, so without this the viewport won't scroll to the new point — e.g.
+        // backspacing the last (off-screen) line deletes it but the view stays put,
+        // so it looks like nothing happened.
+        self.ensure_cursor_visible();
         cx.notify();
     }
 

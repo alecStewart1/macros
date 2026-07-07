@@ -149,12 +149,13 @@
 ;; the editor (or re-`load` the entry) to pick up changes — no `package-update`
 ;; round-trip, no stale clone in the packages dir.
 ;;
-;; DIR is an absolute path to the package's working tree (no `~` expansion; use a
-;; full path, or build one with `(path-join (current-directory) "…")`). Accepts
-;; the same 'name / 'entry / 'depends / 'config options as `package-install`;
-;; 'ref is intentionally unsupported — your working tree loads exactly as-is.
+;; DIR is the path to the package's working tree. A leading `~/` is expanded to
+;; $HOME; otherwise pass an absolute path (or build one with
+;; `(path-join (current-directory) "…")`). Accepts the same
+;; 'name / 'entry / 'depends / 'config options as `package-install`; 'ref is
+;; intentionally unsupported — your working tree loads exactly as-is.
 ;;
-;;   (package-install-local "/Users/me/dev/macros-foo"
+;;   (package-install-local "~/dev/macros-foo"
 ;;     'config (lambda () (set-option "foo-mode" "on")))
 
 ;; Files under a locally-developed package are this editor's OWN extension code,
@@ -165,7 +166,8 @@
 ;; is neither — so register each dir with the Rust path check (`is_macros_scheme_path`),
 ;; which `make-document` consults to pick BOTH the mode and the language on open.
 (define (package-install-local dir . opts)
-  (let* ((name    (or (pkg--opt opts 'name) (basename dir)))
+  (let* ((dir     (expand-file-name dir))   ; "~/" -> $HOME so init.scm can use it
+         (name    (or (pkg--opt opts 'name) (basename dir)))
          (entry   (or (pkg--opt opts 'entry) (string-append name ".scm")))
          (deps    (or (pkg--opt opts 'depends) '()))
          (config  (pkg--opt opts 'config))
