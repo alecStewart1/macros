@@ -432,6 +432,28 @@ pub enum EditorCommand {
     SetFaceUnderline(String, bool),
     /// Toggle a face's bold attribute: `(set-face-bold "feeds-unread" #t)`.
     SetFaceBold(String, bool),
+    /// Toggle a face's wavy-underline attribute (spellcheck squiggles):
+    /// `(set-face-wavy "spell-error" #t)`. Wavy implies underline.
+    SetFaceWavy(String, bool),
+    // Native spell checking (macOS NSSpellChecker; no-ops elsewhere). These
+    // run as commands (not read primitives) because each call XPCs to the
+    // AppleSpell service — the handler runs it on a worker thread (blocking
+    // the main thread deadlocks the XPC reply) and delivers the result to
+    // the named Scheme callback asynchronously.
+    /// Spell-check `text`: the callback receives `"start\tend\tword"` rows
+    /// (UTF-8 byte offsets into `text`) joined by newlines, or `""` if clean.
+    SpellCheck {
+        text: String,
+        callback: String,
+    },
+    /// Correction candidates for a misspelled word: the callback receives one
+    /// suggestion per line, or `""` if there are none.
+    SpellSuggest {
+        word: String,
+        callback: String,
+    },
+    /// Add a word to the OS user dictionary (persists across sessions).
+    SpellLearnWord(String),
     /// Load a built-in theme by name. Queued by the `load-theme-impl` primitive,
     /// which the core.scm `load-theme` wrapper calls for `(load-theme 'macros-light)`
     /// or `(load-theme "macros-light")` (a symbol or string).
@@ -610,6 +632,10 @@ pub enum EditorCommand {
     /// — for repainting semantic tokens / document highlights without nuking the
     /// rest, or another feature's concealment.
     ClearOverlayFaces,
+    /// Remove only the sub-line overlay faces whose face name equals the given
+    /// one — lets a feature (e.g. spellcheck squiggles) repaint its own faces
+    /// without wiping co-resident overlays from org/rainbow/LSP.
+    ClearOverlayFacesMatching(String),
     /// Remove only the `overlay-hide` concealment ranges (keeps faces/folds) —
     /// for refreshing markdown/org heading-marker hiding.
     ClearOverlayHides,

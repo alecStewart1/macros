@@ -463,6 +463,30 @@ pub(crate) fn build_engine(
             q.lock().unwrap().push(EditorCommand::SetFaceBold(name, on));
         });
     }
+    {
+        let q = queue.clone();
+        reg.register_fn("set-face-wavy", move |name: String, on: bool| {
+            q.lock().unwrap().push(EditorCommand::SetFaceWavy(name, on));
+        });
+    }
+    // --- Native spell checking (scheme/spell.scm's 'native backend) -------
+    // `(spell-native-available?)` → #t where the OS provides a checker.
+    reg.register_fn("spell-native-available?", crate::spell::available);
+    // `(spell-check-text text callback)` — callback gets "start\tend\tword"
+    // rows (byte offsets into text), newline-joined; "" when nothing is wrong.
+    register_binary(&mut reg, queue, "spell-check-text", |text, callback| {
+        EditorCommand::SpellCheck { text, callback }
+    });
+    // `(spell-suggest word callback)` — callback gets one suggestion per line.
+    register_binary(&mut reg, queue, "spell-suggest", |word, callback| {
+        EditorCommand::SpellSuggest { word, callback }
+    });
+    register_unary(
+        &mut reg,
+        queue,
+        "spell-learn-word",
+        EditorCommand::SpellLearnWord,
+    );
     register_unary(
         &mut reg,
         queue,
@@ -1148,6 +1172,14 @@ pub(crate) fn build_engine(
         queue,
         "clear-overlays",
         EditorCommand::ClearOverlays,
+    );
+    // `(clear-overlay-faces-matching face)` — drop only the overlays painted
+    // with `face`, leaving other features' overlays (org, rainbow, LSP) alone.
+    register_unary(
+        &mut reg,
+        queue,
+        "clear-overlay-faces-matching",
+        EditorCommand::ClearOverlayFacesMatching,
     );
     {
         let q = queue.clone();

@@ -103,3 +103,8 @@
 (set-face "magit-gutter-added" "#6cae3e")    ; git-gutter added bar
 (set-face "magit-gutter-modified" "#c7a23a") ; git-gutter modified bar
 (set-face "magit-gutter-removed" "#c1574b")  ; git-gutter deletion mark
+
+;; spell.scm — misspelled-word squiggle (wavy is an attribute, so it is
+;; re-declared here: load-theme wipes attributes along with colors).
+(set-face "spell-error" "#f14c4c")
+(set-face-wavy "spell-error" #t)

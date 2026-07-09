@@ -1814,9 +1814,13 @@ fn line_runs(
     theme: &Theme,
 ) -> Vec<TextRun> {
     // 1. Base segments `(start, end, color, underline, bold)` from syntax
-    //    spans. `default_bold` styles the face-less base — a whole-line face is
-    //    resolved to `default` by the caller, so its bold flag arrives here.
-    let mut segs: Vec<(usize, usize, Hsla, bool, bool)> = Vec::new();
+    //    spans. The underline slot is `None` or `Some((wavy, color))` — the
+    //    underline carries its own color so a squiggle can be tinted without
+    //    recoloring the text under it. `default_bold` styles the face-less
+    //    base — a whole-line face is resolved to `default` by the caller, so
+    //    its bold flag arrives here.
+    type Seg = (usize, usize, Hsla, Option<(bool, Hsla)>, bool);
+    let mut segs: Vec<Seg> = Vec::new();
     let mut covered = line.start;
     for span in spans {
         if span.range.end <= line.start {
@@ -1828,13 +1832,14 @@ fn line_runs(
         let start = span.range.start.max(line.start);
         let end = span.range.end.min(line.end);
         if start > covered {
-            segs.push((covered, start, default, false, default_bold));
+            segs.push((covered, start, default, None, default_bold));
         }
-        let (color, ul, bold) = span.face.map_or((default, false, default_bold), |i| {
+        let (color, ul, bold) = span.face.map_or((default, None, default_bold), |i| {
             let name = face_name(i);
+            let color = theme.color(name, default);
             (
-                theme.color(name, default),
-                theme.is_underlined(name),
+                color,
+                theme.underline(name).map(|wavy| (wavy, color)),
                 theme.is_bold(name),
             )
         });
@@ -1842,23 +1847,26 @@ fn line_runs(
         covered = end;
     }
     if covered < line.end {
-        segs.push((covered, line.end, default, false, default_bold));
+        segs.push((covered, line.end, default, None, default_bold));
     }
     if segs.is_empty() {
-        segs.push((line.start, line.end, default, false, default_bold));
+        segs.push((line.start, line.end, default, None, default_bold));
     }
 
     // 2. Overlay faces override their sub-range, splitting base segments. An
     //    overlay face may also carry underline (e.g. web-reader link markers)
-    //    or bold.
+    //    or bold. A WAVY overlay face colors only its squiggle (spellcheck
+    //    style: the word keeps the color it already had); a straight-underline
+    //    or plain face recolors the text as before.
     for (range, face) in overlays {
         let os = range.start.max(line.start);
         let oe = range.end.min(line.end);
         if os >= oe {
             continue;
         }
-        let color = theme.color(face, default);
-        let ul = theme.is_underlined(face);
+        let fcolor = theme.color(face, default);
+        let ul = theme.underline(face).map(|wavy| (wavy, fcolor));
+        let wavy_only = matches!(ul, Some((true, _)));
         let bold = theme.is_bold(face);
         let mut next = Vec::with_capacity(segs.len() + 2);
         for (s, e, c, u, b) in segs.drain(..) {
@@ -1869,7 +1877,8 @@ fn line_runs(
             if s < os {
                 next.push((s, os, c, u, b));
             }
-            next.push((s.max(os), e.min(oe), color, ul, bold));
+            let text_color = if wavy_only { c } else { fcolor };
+            next.push((s.max(os), e.min(oe), text_color, ul, bold));
             if e > oe {
                 next.push((oe, e, c, u, b));
             }
@@ -1883,11 +1892,11 @@ fn line_runs(
         .filter(|(s, e, _, _, _)| e > s)
         .map(|(s, e, color, ul, bold)| {
             let mut run = plain_run(e - s, font.clone(), color);
-            if ul {
+            if let Some((wavy, ul_color)) = ul {
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.),
-                    color: Some(color),
-                    wavy: false,
+                    color: Some(ul_color),
+                    wavy,
                 });
             }
             if bold {
@@ -2263,6 +2272,27 @@ mod tests {
         assert!(
             runs[1].underline.is_some(),
             "underlined face underlines its run"
+        );
+        assert!(runs[0].underline.is_none());
+        assert!(runs[2].underline.is_none());
+    }
+
+    #[test]
+    fn wavy_face_colors_only_the_squiggle_not_the_text() {
+        let red: Hsla = rgb(0xff0000).into();
+        let mut theme = Theme::default();
+        theme.set("spell-error", red);
+        theme.set_wavy("spell-error", true);
+        let font = font("Lilex");
+        let default: Hsla = rgb(0x000000).into();
+        let overlays = vec![(2usize..5usize, SharedString::from("spell-error"))];
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
+        let ul = runs[1].underline.as_ref().expect("wavy implies underline");
+        assert!(ul.wavy, "wavy face squiggles its run");
+        assert_eq!(ul.color, Some(red), "the squiggle takes the face color");
+        assert_eq!(
+            runs[1].color, default,
+            "the text keeps its color — only the squiggle is red"
         );
         assert!(runs[0].underline.is_none());
         assert!(runs[2].underline.is_none());

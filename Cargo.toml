@@ -147,6 +147,16 @@ gix = { version = "0.85.0", default-features = false, features = ["blame", "revi
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# macOS-only: NSSpellChecker bindings for the native spellcheck backend
+# (src/spell.rs, driving scheme/spell.scm). All three crates are already in
+# the tree transitively via gpui, so these add no new compilation units —
+# they only surface the AppKit spell-checking API to this crate.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSDictionary", "NSValue", "NSTextCheckingResult", "NSOrthography"] }
+objc2-app-kit = { version = "0.3", features = ["NSSpellChecker", "block2"] }
+block2 = "0.6"
+
 # Compiles the vendored Mermaid tree-sitter parser (grammars/tree-sitter-mermaid)
 # from C at build time. No upstream crate exposes Mermaid against tree-sitter
 # 0.26, so we link `tree_sitter_mermaid()` directly — see build.rs and the

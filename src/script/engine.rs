@@ -341,6 +341,16 @@ impl ScriptEngine {
         });
     }
 
+    /// A cheap `Send + Clone` handle that can deliver `dispatch_action` calls
+    /// from another thread — for work that must leave the UI thread entirely
+    /// (the spell-check worker) yet still hand its result to a named Scheme
+    /// callback.
+    pub fn action_handle(&self) -> ActionHandle {
+        ActionHandle {
+            jobs: self.jobs.clone(),
+        }
+    }
+
     /// Compute a dynamic Helm source's candidates on the engine thread; the
     /// result arrives as `ScriptOutcome::Candidates` for `query_id`.
     pub fn dispatch_candidates(&self, source: usize, query_id: u64, function: &str, pattern: &str) {
@@ -367,6 +377,24 @@ impl ScriptEngine {
                 start,
                 end,
             },
+            interactive: false,
+            reply: Reply::Async,
+        });
+    }
+}
+
+/// A clone of the engine's job sender: delivers async action calls from any
+/// thread. See [`ScriptEngine::action_handle`].
+#[derive(Clone)]
+pub struct ActionHandle {
+    jobs: Sender<Job>,
+}
+
+impl ActionHandle {
+    /// Async action call, identical to [`ScriptEngine::dispatch_action`].
+    pub fn dispatch_action(&self, name: &str, candidate: Option<&str>) {
+        let _ = self.jobs.send(Job {
+            task: Task::Call(name.to_string(), candidate.map(str::to_string)),
             interactive: false,
             reply: Reply::Async,
         });

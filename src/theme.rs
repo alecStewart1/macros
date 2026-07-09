@@ -24,6 +24,10 @@ pub struct Theme {
     /// may appear here without a color entry — `color()` then falls back to the
     /// caller's default, giving "default foreground, bold weight".
     bold: HashSet<String>,
+    /// Face names whose underline renders wavy (spellcheck squiggles), same
+    /// model as `underlined`. A face here underlines even without an
+    /// `underlined` entry — wavy implies underline.
+    wavy: HashSet<String>,
 }
 
 impl Global for Theme {}
@@ -59,11 +63,6 @@ impl Theme {
         self.faces.insert(name.into(), color);
     }
 
-    /// Whether text in `name` should be underlined.
-    pub fn is_underlined(&self, name: &str) -> bool {
-        self.underlined.contains(name)
-    }
-
     /// Turn a face's underline attribute on or off — drives `set-face-underline`
     /// from Steel. Like colors, this is wiped by `load-theme` (a fresh palette).
     pub fn set_underline(&mut self, name: impl Into<String>, on: bool) {
@@ -72,6 +71,30 @@ impl Theme {
             self.underlined.insert(name);
         } else {
             self.underlined.remove(&name);
+        }
+    }
+
+    /// The underline style for `name`: `None` for no underline, `Some(false)`
+    /// for a straight line, `Some(true)` for wavy (squiggle).
+    pub fn underline(&self, name: &str) -> Option<bool> {
+        if self.wavy.contains(name) {
+            Some(true)
+        } else if self.underlined.contains(name) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Turn a face's wavy-underline attribute on or off — drives
+    /// `set-face-wavy` from Steel. Like colors, this is wiped by `load-theme`
+    /// (a fresh palette).
+    pub fn set_wavy(&mut self, name: impl Into<String>, on: bool) {
+        let name = name.into();
+        if on {
+            self.wavy.insert(name);
+        } else {
+            self.wavy.remove(&name);
         }
     }
 

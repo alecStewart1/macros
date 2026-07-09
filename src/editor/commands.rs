@@ -768,6 +768,13 @@ impl Editor {
                 self.redirect_target().overlays.faces.clear();
                 cx.notify();
             }
+            ClearOverlayFacesMatching(face) => {
+                self.redirect_target()
+                    .overlays
+                    .faces
+                    .retain(|(_, f)| f.as_ref() != face);
+                cx.notify();
+            }
             ClearOverlayHides => {
                 self.redirect_target().overlays.hidden.clear();
                 cx.notify();
@@ -1090,6 +1097,31 @@ impl Editor {
                 cx.update_global::<Theme, ()>(|theme, _| theme.set_bold(face, on));
                 cx.notify();
             }
+            SetFaceWavy(face, on) => {
+                cx.update_global::<Theme, ()>(|theme, _| theme.set_wavy(face, on));
+                cx.notify();
+            }
+            // Checking and suggestions use NSSpellChecker's async request
+            // APIs (the sync ones wedge inside a running NSApplication — see
+            // src/spell.rs); learn/ignore are reply-less sends, run on worker
+            // threads so a misbehaving XPC can never stall the UI.
+            SpellCheck { text, callback } => {
+                let handle = self.script.action_handle();
+                crate::spell::request_check(text, move |errors| {
+                    let rows: Vec<String> = errors
+                        .into_iter()
+                        .map(|(s, e, w)| format!("{s}\t{e}\t{w}"))
+                        .collect();
+                    handle.dispatch_action(&callback, Some(&rows.join("\n")));
+                });
+            }
+            SpellSuggest { word, callback } => {
+                let handle = self.script.action_handle();
+                crate::spell::request_suggestions(word, move |suggestions| {
+                    handle.dispatch_action(&callback, Some(&suggestions.join("\n")));
+                });
+            }
+            SpellLearnWord(word) => crate::spell::learn_async(word),
             LoadTheme(name) => match crate::runtime::theme_script(&name) {
                 Some(source) => {
                     // Reset to an empty palette, then apply the theme's set-face

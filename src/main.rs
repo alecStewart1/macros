@@ -11,6 +11,7 @@ mod mode;
 mod runtime;
 mod script;
 mod settings;
+mod spell;
 mod terminal;
 mod theme;
 mod update;
@@ -200,6 +201,29 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
 }
 
 fn main() {
+    // Internal spell-helper mode, run as a child process by src/spell.rs:
+    // `--spell-suggest <word>` prints correction candidates one per line;
+    // `--spell-learn <word>` adds a word to the OS user dictionary. The
+    // synchronous NSSpellChecker calls behind these work in a plain process
+    // but wedge permanently inside the running app (see src/spell.rs), so
+    // the app shells out to itself. Exits before any UI setup.
+    {
+        let mut args = std::env::args().skip(1);
+        match (args.next(), args.next()) {
+            (Some(flag), Some(word)) if flag == "--spell-suggest" => {
+                for s in spell::guesses(&word) {
+                    println!("{s}");
+                }
+                return;
+            }
+            (Some(flag), Some(word)) if flag == "--spell-learn" => {
+                spell::learn(&word);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Recover the login shell's PATH before anything else — GUI launches on
     // macOS/Linux don't inherit it, which otherwise hides LSP servers and other
     // tools from every subprocess we spawn. Must run before any threads start.
