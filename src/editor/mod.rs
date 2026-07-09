@@ -4609,6 +4609,9 @@ mod tests {
     }
 
     #[test]
+    // These fixtures really are one-element vectors OF ranges (fold spans),
+    // which the lint would reject as a probable typo for `(a..b).collect()`.
+    #[allow(clippy::single_range_in_vec_init)]
     fn shift_fold_ranges_tracks_edits_above_and_within_a_fold() {
         use std::ops::Range;
         // A folded Org subtree hiding body lines 1..4 (heading on line 0).
