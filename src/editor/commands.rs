@@ -298,6 +298,34 @@ impl Editor {
                     cx.notify();
                 }
             }
+            GhostShow { text } => {
+                // Anchored to point as of application (commands apply on the
+                // foreground in order, so an edit queued after the show clears
+                // it again — never a stale ghost). An empty string is a clear.
+                self.active.ghost = (!text.is_empty()).then(|| GhostText {
+                    at: self.point(),
+                    text,
+                });
+                // Scroll a multi-line suggestion's reserved rows into view.
+                self.ensure_cursor_visible();
+                cx.notify();
+            }
+            GhostClear => {
+                if self.active.ghost.take().is_some() {
+                    cx.notify();
+                }
+            }
+            GhostAccept => {
+                // Only a *visible* ghost accepts (anchor == point); the text is
+                // inserted as one ordinary edit, so undo treats the acceptance
+                // as a single unit and `edit` clears the ghost itself.
+                if let Some((at, text)) = self.ghost_at().map(|(at, t)| (at, t.to_string())) {
+                    let cursor = self.edit(at..at, &text);
+                    self.collapse_to(cursor);
+                    self.ensure_cursor_visible();
+                    cx.notify();
+                }
+            }
             ToggleLineNumbers => {
                 // Toggle for the current buffer's major mode, so it mirrors
                 // Emacs's per-mode `display-line-numbers-mode`.

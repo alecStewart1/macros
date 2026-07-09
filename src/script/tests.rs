@@ -3240,6 +3240,36 @@ mod magit_tests {
         ));
     }
 
+    /// The ghost-text primitives enqueue the right commands.
+    #[test]
+    fn ghost_text_primitives() {
+        let (engine, _rx) = ScriptEngine::new();
+        assert!(matches!(
+            engine
+                .eval(r#"(ghost-text-show "let x = 1;")"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::GhostShow { text }] if text == "let x = 1;"
+        ));
+        assert!(matches!(
+            engine
+                .eval(r"(ghost-text-clear)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::GhostClear]
+        ));
+        assert!(matches!(
+            engine
+                .eval(r"(ghost-text-accept)")
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::GhostAccept]
+        ));
+    }
+
     /// The markdown library loads and its heading detection (which drives the
     /// marker-hiding and heading-scale fontify pass) is correct.
     #[test]

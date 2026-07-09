@@ -709,6 +709,29 @@ pub(crate) fn build_engine(
             "clear-line-scales",
             EditorCommand::ClearLineScales,
         );
+        // `(ghost-text-show text)` renders `text` as a dim inline suggestion at
+        // point (copilot-style "ghost text"): display-only, occupying no buffer
+        // bytes; a multi-line suggestion pushes the following display lines
+        // down. It is deliberately ephemeral — any edit or cursor motion (or
+        // `(ghost-text-clear)` / C-g) dismisses it, so a completion package
+        // re-shows after each debounced `after-change-functions` fire.
+        // `(ghost-text-accept)` inserts the visible suggestion as one edit;
+        // scheme/ghost.scm binds it to TAB via the `ghost` keymap.
+        register_unary(&mut reg, queue, "ghost-text-show", |text| {
+            EditorCommand::GhostShow { text }
+        });
+        register_nullary(
+            &mut reg,
+            queue,
+            "ghost-text-clear",
+            EditorCommand::GhostClear,
+        );
+        register_nullary(
+            &mut reg,
+            queue,
+            "ghost-text-accept",
+            EditorCommand::GhostAccept,
+        );
     }
     {
         // `(window-list)` → pane ids in cycle order; `(selected-window)` → the

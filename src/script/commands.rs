@@ -209,6 +209,17 @@ pub enum EditorCommand {
         scale: f32,
     },
     ClearLineScales,
+    /// Copilot-style inline suggestion at point (`ghost-text-show`): dim virtual
+    /// text rendered after the cursor, occupying no buffer bytes. Multi-line
+    /// text reserves display rows below point's line. Cleared by any edit;
+    /// hidden whenever point moves off the byte it was shown at.
+    GhostShow {
+        text: String,
+    },
+    GhostClear,
+    /// Insert the visible ghost suggestion at point (one undoable edit) — the
+    /// `ghost` keymap binds TAB to this.
+    GhostAccept,
     KillBuffer,
     /// Kill the active buffer and close its window (Emacs `kill-buffer-and-window`).
     KillBufferAndWindow,

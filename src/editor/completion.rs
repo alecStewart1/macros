@@ -147,6 +147,25 @@ impl Editor {
         true
     }
 
+    /// If a ghost suggestion is visible, run the `ghost`-keymap binding for
+    /// `key` (Scheme binds TAB → `ghost-text-accept`). Returns whether the key
+    /// was handled. Unbound keys fall through, so the ghost never swallows
+    /// ordinary typing; like the completion popup this is consulted from the
+    /// action paths (`act_tab`, `act_newline`), since those are gpui action
+    /// keys that never reach `on_key_down`.
+    pub(super) fn ghost_special_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if self.ghost_at().is_none() {
+            return false;
+        }
+        match self.keymap.resolve_mode("ghost", key).map(str::to_string) {
+            Some(expr) => {
+                self.run_script(&expr, cx);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Whether a language server is ready and tracking the active buffer.
     pub(super) fn has_ready_lsp(&self) -> bool {
         let (Some(language), Some(uri)) = (self.active_language(), self.active_uri()) else {

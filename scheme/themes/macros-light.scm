@@ -12,6 +12,7 @@
 (set-face "mode-line-fg" "#555555")      ; darker foreground
 (set-face "minibuffer-prompt" "#3c7cab") ; link / accent blue
 (set-face "dim" "#999999")               ; line numbers
+(set-face "ghost" "#a3a9b5")             ; inline suggestion (ghost text): lighter than comments, cool tint
 ;; Window title bar — defaults to the window background; override for contrast.
 (set-face "title-bar-bg" "#fcfcfc")
 (set-face "title-bar-fg" "#999999")

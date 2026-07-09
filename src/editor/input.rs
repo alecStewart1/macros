@@ -1128,6 +1128,9 @@ impl Editor {
             // terminal: RET sent to the shell (carriage return)
         } else if self.special_key("enter", cx) {
             // read-only buffer: RET runs its binding (e.g. visit/expand)
+        } else if self.ghost_special_key("enter", cx) {
+            // a `ghost`-keymap RET binding (some setups accept on RET) —
+            // unbound falls through to the normal newline below
         } else if !self.evil_intercepts() && !self.mode_key("enter", cx) {
             // a mode may rebind RET (comint send-input); else insert a newline
             self.apply_command(EditorCommand::Newline, cx);
@@ -1153,6 +1156,12 @@ impl Editor {
             // terminal: TAB sent to the shell (completion)
         } else if self.special_key("tab", cx) {
             // read-only buffer: TAB runs its binding (e.g. toggle section)
+        } else if self.ghost_special_key("tab", cx) {
+            // A visible ghost suggestion claims TAB (after the popup — the more
+            // explicit UI — and the modal surfaces above, so a suggestion left
+            // showing behind an open minibuffer can't steal its completion):
+            // scheme/ghost.scm binds it to ghost-text-accept. Before the mode
+            // map, so e.g. org-tab doesn't shadow an accept.
         } else if !self.mode_key("tab", cx) && !self.evil_intercepts() {
             // A mode binding (e.g. org-mode's `org-tab` heading cycle) wins in
             // every state, including evil Normal/Visual — TAB is a gpui action

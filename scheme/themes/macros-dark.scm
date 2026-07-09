@@ -12,6 +12,7 @@
 (set-face "mode-line-fg" "#cccccc")      ; statusBar.foreground (full opacity for legibility)
 (set-face "minibuffer-prompt" "#87c3ff")
 (set-face "dim" "#505050")               ; editorLineNumber.foreground
+(set-face "ghost" "#5f6672")             ; inline suggestion (ghost text): dimmer than comments, cool tint
 ;; Window title bar — defaults to the window background; override for contrast.
 (set-face "title-bar-bg" "#141414")      ; titleBar.activeBackground
 (set-face "title-bar-fg" "#cccccc82")    ; titleBar.activeForeground

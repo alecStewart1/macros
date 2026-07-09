@@ -13,6 +13,11 @@ impl Editor {
             self.echo("No further undo information", cx);
             return;
         };
+        // Undo mutates the buffer directly (below), bypassing `edit()` — so the
+        // ghost suggestion must be dropped here too, or a stale one could
+        // re-anchor over rewritten content when a later move/redo puts point
+        // back on its byte.
+        self.active.ghost = None;
         // Invert the current node's edit group (last edit undone first):
         // restore `removed` over the inserted span.
         let group = self.active.undo_tree[node].edit.clone();
@@ -46,6 +51,7 @@ impl Editor {
             self.echo("No further redo information", cx);
             return;
         };
+        self.active.ghost = None; // direct buffer mutation, like undo() above
         // Re-apply the child's edit group forward: `inserted` over the removed span.
         let group = self.active.undo_tree[child].edit.clone();
         let mut cursor = 0;

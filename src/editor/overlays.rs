@@ -82,7 +82,8 @@ impl Editor {
                 .filter(|i| !self.is_line_invisible(*i))
                 .count()
         };
-        text + self.image_rows_total() + self.scale_rows_total()
+        let ghost = self.ghost_rows().map_or(0, |(_, rows)| rows);
+        text + self.image_rows_total() + self.scale_rows_total() + ghost
     }
 
     /// Screen row a buffer line maps to once folds are collapsed and inline
@@ -93,7 +94,47 @@ impl Editor {
         } else {
             (0..line).filter(|i| !self.is_line_invisible(*i)).count()
         };
-        text + self.image_rows_before(line) + self.scale_rows_before(line)
+        let ghost = match self.ghost_rows() {
+            Some((g, rows)) if g < line => rows,
+            _ => 0,
+        };
+        text + self.image_rows_before(line) + self.scale_rows_before(line) + ghost
+    }
+
+    // --- Ghost text (copilot-style inline suggestion) ----------------------
+    /// The visible ghost suggestion, if any: `(anchor byte, text)`. Validated
+    /// at read time — it only counts as visible while point still sits on the
+    /// byte it was shown at, so any cursor motion hides it without needing a
+    /// hook on every movement path (edits clear it eagerly in `edit`; undo
+    /// and redo, which bypass `edit`, clear it themselves). Hidden while a
+    /// region is active, so a suggestion can neither render into a selection
+    /// highlight nor be accepted beside text an insert would normally replace.
+    pub fn ghost_at(&self) -> Option<(usize, &str)> {
+        if !self.active.selected_range.is_empty() {
+            return None;
+        }
+        self.active
+            .ghost
+            .as_ref()
+            .filter(|g| g.at == self.cursor_offset())
+            .map(|g| (g.at, g.text.as_str()))
+    }
+
+    /// The visible ghost's `(anchor line, reserved tail rows)` — one row per
+    /// `\n` in the suggestion — when it contributes to row accounting. `None`
+    /// for a single-line ghost, or when the anchor line is folded away (the
+    /// `is_line_invisible` guard image/scale rows also apply, so rows are
+    /// never counted for a line the row loop skips). The single source for
+    /// `display_line_count` / `display_row_of_line` / `ensure_cursor_visible`
+    /// and the element's row loop, so count and paint can't disagree.
+    pub fn ghost_rows(&self) -> Option<(usize, usize)> {
+        let (at, text) = self.ghost_at()?;
+        let tail = text.matches('\n').count();
+        if tail == 0 {
+            return None;
+        }
+        let line = self.active.buffer.line_index_at_byte(at);
+        (!self.is_line_invisible(line)).then_some((line, tail))
     }
 
     /// Virtual left indentation (in columns) for buffer `line`, 0 if none.

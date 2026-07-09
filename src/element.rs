@@ -46,6 +46,15 @@ fn plain_run(len: usize, font: Font, color: Hsla) -> TextRun {
     }
 }
 
+/// The run for ghost (inline-suggestion) text: dim + italic. One constructor
+/// so the spliced first line and the painted continuation lines can't drift
+/// in style.
+fn ghost_run(len: usize, font: &Font, color: Hsla) -> TextRun {
+    let mut run = plain_run(len, font.clone(), color);
+    run.font.style = FontStyle::Italic;
+    run
+}
+
 /// Diagnostic colors, resolved from the theme once per prepaint. The faces are
 /// `diagnostic-error` / `diagnostic-warning` / `diagnostic-info` /
 /// `diagnostic-hint` (set by every bundled theme), with the previous fixed
@@ -107,18 +116,41 @@ pub struct LineLayout {
     /// Vertical offset from `top` at which the glyphs are painted, to center a
     /// scaled heading in its taller reserved block. Zero for ordinary lines.
     pub content_dy: Pixels,
+    /// Ghost text spliced *into* the display text (the inverse of `holes`):
+    /// `(display index it was inserted at, its byte length)`. The insertion
+    /// point is where point sits, so the cursor renders before the ghost.
+    pub ghost: Option<(usize, usize)>,
 }
 
 impl LineLayout {
     /// Buffer offset (relative to the line start) → index into the display text.
     pub fn to_display(&self, rel: usize) -> usize {
-        to_display(rel, &self.holes)
+        ghost_to_display(to_display(rel, &self.holes), self.ghost)
     }
     /// Index into the display text → buffer offset (relative to the line start).
     // Named to pair with `to_display`, not a `From`-style constructor.
     #[allow(clippy::wrong_self_convention)]
     pub fn from_display(&self, disp: usize) -> usize {
-        from_display(disp, &self.holes)
+        from_display(ghost_from_display(disp, self.ghost), &self.holes)
+    }
+}
+
+/// Shift a display index past ghost text inserted at `(at, len)`. An index at
+/// exactly `at` does NOT shift — that's point itself, which renders before the
+/// ghost; everything after it moves right by the ghost's length.
+fn ghost_to_display(disp: usize, ghost: Option<(usize, usize)>) -> usize {
+    match ghost {
+        Some((at, len)) if disp > at => disp + len,
+        _ => disp,
+    }
+}
+
+/// Inverse of [`ghost_to_display`]: an index inside the ghost text collapses to
+/// its insertion point (a click on the suggestion lands at point).
+fn ghost_from_display(disp: usize, ghost: Option<(usize, usize)>) -> usize {
+    match ghost {
+        Some((at, len)) if disp > at => disp.saturating_sub(len).max(at),
+        _ => disp,
     }
 }
 
@@ -194,6 +226,37 @@ fn punch_runs(runs: Vec<TextRun>, holes: &[(usize, usize)]) -> Vec<TextRun> {
             r.len -= overlap;
             out.push(r);
         }
+    }
+    out
+}
+
+/// Splice a run for ghost text into the display-text `runs` at display index
+/// `at` (the inverse of `punch_runs`): the run covering `at` is split, and the
+/// ghost's own run inserted between the halves. Runs must already cover the
+/// ghost-less display text (holes punched).
+fn inject_ghost_run(runs: Vec<TextRun>, at: usize, ghost_run: TextRun) -> Vec<TextRun> {
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    let mut pos = 0;
+    let mut inserted = false;
+    for mut r in runs {
+        let start = pos;
+        pos += r.len;
+        if !inserted && at <= start {
+            out.push(ghost_run.clone());
+            inserted = true;
+        }
+        if !inserted && at < pos {
+            let mut head = r.clone();
+            head.len = at - start;
+            r.len -= head.len;
+            out.push(head);
+            out.push(ghost_run.clone());
+            inserted = true;
+        }
+        out.push(r);
+    }
+    if !inserted {
+        out.push(ghost_run); // at end of line (or an empty line)
     }
     out
 }
@@ -292,12 +355,18 @@ struct LineCtx<'a> {
     line_origin: Point<Pixels>,
     /// Uniform row height used for positioning within the line.
     line_height: Pixels,
+    /// Ghost text spliced into the display text at `(display index, byte len)`
+    /// — see [`LineLayout::ghost`].
+    ghost: Option<(usize, usize)>,
 }
 
 impl LineCtx<'_> {
     /// Display index of an absolute buffer offset at or after the line start.
     fn disp(&self, offset: usize) -> usize {
-        to_display(offset.saturating_sub(self.range.start), self.holes)
+        ghost_to_display(
+            to_display(offset.saturating_sub(self.range.start), self.holes),
+            self.ghost,
+        )
     }
 
     /// Emit background quads for the absolute byte range `[s, e)` where it
@@ -512,9 +581,13 @@ fn layout_cursor(
     let origin = point(line.line_origin.x + cpos.x, line.line_origin.y + cpos.y);
     let (width, color) = if cfg.block {
         // Width of the grapheme under the cursor (or one char at EOL), but
-        // only if it sits on the same visual row.
+        // only if it sits on the same visual row. With ghost text at point the
+        // next buffer grapheme renders past the whole suggestion — measuring
+        // to it would stretch the block across the ghost, so fall back to one
+        // character's advance (the block sits over the ghost's first char).
+        let ghost_at_cursor = line.ghost.is_some_and(|(at, _)| line.disp(cursor) == at);
         let next = buffer.next_grapheme(cursor);
-        let npos = (next > cursor && next <= line.range.end)
+        let npos = (!ghost_at_cursor && next > cursor && next <= line.range.end)
             .then(|| {
                 line.wrapped
                     .position_for_index(line.disp(next), line.line_height)
@@ -840,6 +913,37 @@ impl Element for EditorElement {
         // Diagnostic colors (gutter dots + underlines), resolved once per frame.
         let diag_colors = DiagnosticColors::resolve(theme);
 
+        // Copilot-style ghost text (selected pane only — it lives on the active
+        // buffer, like `line_holes`). `ghost_at` validates at read time: the
+        // suggestion is only visible while point still sits on its anchor byte.
+        // The first line is spliced into the anchor line's display text; the
+        // continuation lines paint on display rows reserved below it. The split
+        // and face lookup only run while a ghost is showing — this path is
+        // per-frame, and no ghost is the overwhelmingly common case.
+        let ghost = if selected { editor.ghost_at() } else { None };
+        let (ghost_first, ghost_tail, ghost_color) = match ghost {
+            Some((_, t)) => {
+                let mut parts = t.split('\n');
+                let first = parts.next().unwrap_or("");
+                // The `ghost` face, falling back to the theme's dim shade,
+                // then to a faded foreground so the suggestion reads as
+                // tentative even on a theme that defines neither.
+                let mut faded = text_color;
+                faded.a *= 0.55;
+                let color = theme.color("ghost", theme.color("dim", faded));
+                (first, parts.collect::<Vec<_>>(), color)
+            }
+            None => ("", Vec::new(), text_color),
+        };
+        // The ghost's anchor line + reserved tail rows, resolved once per frame
+        // (folded-away anchors contribute nothing) — the row loop below must
+        // not re-derive this per line.
+        let ghost_rows = if ghost.is_some() {
+            editor.ghost_rows()
+        } else {
+            None
+        };
+
         // Folds collapse lines into fewer rows; inline images expand a line into
         // extra rows below it. Either way `rows[k]` is the buffer line drawn
         // starting at a known screen row. Without either, this is the identity
@@ -847,7 +951,7 @@ impl Element for EditorElement {
         let folds = selected && editor.has_folds();
         let images = selected && editor.has_line_images();
         let scales = selected && editor.has_line_scales();
-        let dynamic = folds || images || scales;
+        let dynamic = folds || images || scales || ghost_rows.is_some();
         let display_count = if dynamic {
             editor.display_line_count()
         } else {
@@ -868,10 +972,15 @@ impl Element for EditorElement {
                     continue;
                 }
                 // 1 row for the line's text + N reserved rows for its image, +
-                // any extra rows a scaled (larger) line claims.
+                // any extra rows a scaled (larger) line or a multi-line ghost
+                // suggestion claims.
                 let line_rows = 1
                     + if images { editor.image_rows_at(i) } else { 0 }
-                    + if scales { editor.scale_rows_at(i) } else { 0 };
+                    + if scales { editor.scale_rows_at(i) } else { 0 }
+                    + match ghost_rows {
+                        Some((g, rows)) if g == i => rows,
+                        _ => 0,
+                    };
                 if r < last_row && r + line_rows > first_row {
                     if v.is_empty() {
                         first_top_row = r;
@@ -1101,10 +1210,27 @@ impl Element for EditorElement {
                     theme,
                 )
             };
+            // Ghost anchored on this line (point's line): splice the
+            // suggestion's first line into the display text at point — the
+            // inverse of the `holes` splice-out — so the rest of the real line
+            // is pushed right and soft-wrap measures the suggestion like real
+            // text. Point's line is `revealed` above, so `holes` is empty here
+            // and display indices equal line-relative buffer offsets.
+            let ghost_here = ghost.filter(|(at, _)| *at >= range.start && *at <= range.end);
+            let line_ghost = ghost_here
+                .filter(|_| !ghost_first.is_empty())
+                .map(|(at, _)| (to_display(at - range.start, &holes), ghost_first.len()));
+            let mut display_text = remove_holes(&text, &holes);
+            let mut display_runs = punch_runs(runs, &holes);
+            if let Some((at, len)) = line_ghost {
+                display_text.insert_str(at, ghost_first);
+                display_runs =
+                    inject_ghost_run(display_runs, at, ghost_run(len, &editor_font, ghost_color));
+            }
             let wrapped = window.text_system().shape_text(
-                SharedString::from(remove_holes(&text, &holes)),
+                SharedString::from(display_text),
                 line_font_size,
-                &punch_runs(runs, &holes),
+                &display_runs,
                 line_wrap_width,
                 None,
             );
@@ -1142,6 +1268,7 @@ impl Element for EditorElement {
                 line_h,
                 line_origin,
                 line_height,
+                ghost: line_ghost,
             };
 
             // Gutter: line number, fold chevron, diagnostic dot, git bar.
@@ -1251,8 +1378,29 @@ impl Element for EditorElement {
                 indent: indent_px,
                 height: line_h,
                 content_dy,
+                ghost: line_ghost,
             });
             y += line_h;
+
+            // Ghost continuation lines: painted on the display rows reserved
+            // below point's line (the inline-image pattern), one per `\n` in
+            // the suggestion. Not hit-testable — a click below the anchor line
+            // maps to the following buffer line, and moving point dismisses
+            // the ghost anyway.
+            if ghost_here.is_some() {
+                for t in &ghost_tail {
+                    if !t.is_empty() {
+                        let shaped = window.text_system().shape_line(
+                            SharedString::from(t.to_string()),
+                            font_size,
+                            &[ghost_run(t.len(), &editor_font, ghost_color)],
+                            None,
+                        );
+                        acc.virtual_text.push((shaped, point(lx, bounds.top() + y)));
+                    }
+                    y += px(lh);
+                }
+            }
 
             // Inline image: paint it in the rows reserved below this line, and
             // advance past them. `image_rows_at` and the displayed size agree on
@@ -2305,6 +2453,59 @@ mod tests {
         let default: Hsla = rgb(0x111111).into();
         let runs = line_runs(&[], &[], 0..7, &font, default, false, &theme);
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 7);
+    }
+
+    #[test]
+    fn ghost_display_shift_and_inverse() {
+        let ghost = Some((4usize, 3usize)); // 3 ghost bytes injected at index 4
+        // Point itself (== insertion index) does NOT shift: the cursor renders
+        // before the ghost.
+        assert_eq!(ghost_to_display(4, ghost), 4);
+        // Everything after point shifts right by the ghost length.
+        assert_eq!(ghost_to_display(5, ghost), 8);
+        assert_eq!(ghost_to_display(3, ghost), 3);
+        assert_eq!(ghost_to_display(9, None), 9);
+        // Inverse: real positions round-trip…
+        for rel in [0, 3, 4, 5, 9] {
+            assert_eq!(ghost_from_display(ghost_to_display(rel, ghost), ghost), rel);
+        }
+        // …and a display index inside the ghost (a click on the suggestion)
+        // collapses to the insertion point.
+        assert_eq!(ghost_from_display(5, ghost), 4);
+        assert_eq!(ghost_from_display(7, ghost), 4);
+    }
+
+    #[test]
+    fn inject_ghost_run_splits_covering_run() {
+        let font = font("Lilex");
+        let c: Hsla = rgb(0x111111).into();
+        let g: Hsla = rgb(0x888888).into();
+        let ghost = plain_run(3, font.clone(), g);
+        // Mid-run: [6] at index 4 → [4, 3(ghost), 2].
+        let runs = inject_ghost_run(vec![plain_run(6, font.clone(), c)], 4, ghost.clone());
+        assert_eq!(
+            runs.iter().map(|r| r.len).collect::<Vec<_>>(),
+            vec![4, 3, 2]
+        );
+        assert_eq!(runs[1].color, g);
+        // On a run boundary: [2, 4] at index 2 → the ghost slots between them.
+        let runs = inject_ghost_run(
+            vec![plain_run(2, font.clone(), c), plain_run(4, font.clone(), c)],
+            2,
+            ghost.clone(),
+        );
+        assert_eq!(
+            runs.iter().map(|r| r.len).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(runs[1].color, g);
+        // At the start and past the end (EOL), and on an empty line.
+        let runs = inject_ghost_run(vec![plain_run(5, font.clone(), c)], 0, ghost.clone());
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![3, 5]);
+        let runs = inject_ghost_run(vec![plain_run(5, font.clone(), c)], 5, ghost.clone());
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![5, 3]);
+        let runs = inject_ghost_run(Vec::new(), 0, ghost);
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![3]);
     }
 
     #[test]

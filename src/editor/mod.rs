@@ -205,6 +205,20 @@ struct Document {
     /// Working-tree-vs-HEAD gutter marks by line index (git-gutter / diff-hl),
     /// recomputed by `magit-gutter-refresh`. Mirrors `line_faces`.
     diff_marks: HashMap<usize, DiffMark>,
+    /// Copilot-style inline suggestion (`ghost-text-show`), if one is showing.
+    ghost: Option<GhostText>,
+}
+
+/// A copilot-style inline suggestion: display-only text rendered dim at point.
+/// It occupies no buffer bytes (offsets, search, undo, and save are untouched)
+/// and is deliberately ephemeral — any edit clears it (see [`Editor::edit`]),
+/// and it only renders while point still sits at `at` (see
+/// [`Editor::ghost_at`]), so cursor motion hides it without hooking every
+/// movement path.
+struct GhostText {
+    /// Byte offset of point when the ghost was shown.
+    at: usize,
+    text: String,
 }
 
 /// A working-tree-vs-HEAD change marker for one buffer line — the git-gutter /
@@ -1656,7 +1670,14 @@ impl Editor {
         let buffer_line = self.active.buffer.line_index_at_byte(self.point());
         let line = self.display_row_of_line(buffer_line) as f32;
         let top = line * lh;
-        let bottom = top + lh;
+        // A multi-line ghost suggestion reserves rows below point's line;
+        // include them so showing one near the viewport bottom scrolls the
+        // whole suggestion into view, not just its first line.
+        let ghost_rows = match self.ghost_rows() {
+            Some((g, rows)) if g == buffer_line => rows as f32,
+            _ => 0.0,
+        };
+        let bottom = top + lh * (1.0 + ghost_rows);
         let mut scroll = f32::from(self.active.scroll_offset);
         if top < scroll {
             scroll = top;
@@ -1878,6 +1899,10 @@ impl Editor {
     /// **incrementally**: the edit's positions are captured before the change,
     /// then tree-sitter reuses the unchanged subtrees on reparse.
     fn edit(&mut self, range: Range<usize>, new_text: &str) -> usize {
+        // A ghost suggestion never survives a buffer change — the text it was
+        // computed against is gone. Eager clearing here (every mutation funnels
+        // through `edit`) is what keeps the ghost free of any byte bookkeeping.
+        self.active.ghost = None;
         let (range_start, range_end) = (range.start, range.end);
         let removed = self.active.buffer.slice_to_string(range.clone());
         let removed_newlines = removed.matches('\n').count();
@@ -2591,6 +2616,7 @@ impl Editor {
         self.collapse_to(p);
         self.pending_keys.clear();
         self.avy_hints.clear(); // cancel any pending avy jump
+        self.active.ghost = None; // C-g dismisses an inline suggestion
         if self.has_extra_cursors() {
             self.mc_clear(cx); // C-g collapses back to a single cursor
         }
@@ -3885,6 +3911,7 @@ fn blank_document(
         overlays: Overlays::default(),
         locals: HashMap::new(),
         diff_marks: HashMap::new(),
+        ghost: None,
     }
 }
 
