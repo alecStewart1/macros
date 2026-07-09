@@ -293,6 +293,164 @@ impl Editor {
         }
     }
 
+    /// One-shot HTTP request (`http-request`). Runs the blocking `ureq` call on a
+    /// worker thread (same model as [`http_stream`](Self::http_stream)), then
+    /// delivers the whole response to `on_response` as one `"<status>\n<body>"`
+    /// string — status `0` for a transport failure. Any verb; empty `body` sends
+    /// no body.
+    pub(super) fn http_request(
+        &mut self,
+        args: crate::script::HttpRequestArgs,
+        cx: &mut Context<Self>,
+    ) {
+        let crate::script::HttpRequestArgs {
+            method,
+            url,
+            headers,
+            body,
+            on_response,
+        } = args;
+
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
+        std::thread::spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(15))
+                .build();
+            let mut req = agent.request(&method, &url);
+            for (k, v) in &headers {
+                req = req.set(k, v);
+            }
+            let result = if body.is_empty() {
+                req.call()
+            } else {
+                req.send_string(&body)
+            };
+            let payload = match result {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.into_string().unwrap_or_default();
+                    format!("{status}\n{text}")
+                }
+                // Non-2xx: relay the server's own status + error body to Scheme.
+                Err(ureq::Error::Status(code, resp)) => {
+                    let text = resp.into_string().unwrap_or_default();
+                    format!("{code}\n{text}")
+                }
+                // Transport failure (DNS, TLS, connect): status 0, error as body.
+                Err(e) => format!("0\n{e}"),
+            };
+            let _ = tx.unbounded_send(payload);
+        });
+
+        cx.spawn(async move |this, cx| {
+            if let Some(payload) = rx.next().await {
+                let _ = this.update(cx, |editor, _| {
+                    editor.script.dispatch_action(&on_response, Some(&payload));
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Start a local HTTP server (`http-serve`). The listener is already bound (in
+    /// the registry, so the port is known synchronously); here we move it to a
+    /// worker thread that accepts connections, writes one fixed response, and
+    /// forwards each request target to `on_request`. A stop flag (checked each
+    /// poll) lets `http-server-stop` unwind the blocking accept.
+    pub(super) fn http_serve(
+        &mut self,
+        args: crate::script::HttpServeArgs,
+        cx: &mut Context<Self>,
+    ) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let crate::script::HttpServeArgs {
+            listener,
+            port,
+            content_type,
+            body,
+            on_request,
+        } = args;
+
+        let Some(listener) = listener.lock().unwrap().take() else {
+            return;
+        };
+        // Non-blocking accept + short sleep so the stop flag is honored promptly
+        // without a second wakeup mechanism.
+        if listener.set_nonblocking(true).is_err() {
+            return;
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        self.http_servers.insert(port, stop.clone());
+
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ProcMsg>();
+        std::thread::spawn(move || {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content_type,
+                body.len(),
+                body,
+            );
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((mut conn, _)) => {
+                        // Read the request line ("GET /path?query HTTP/1.1") to
+                        // pull out the target; ignore the rest of the request.
+                        conn.set_nonblocking(false).ok();
+                        let target = {
+                            let mut reader = BufReader::new(&conn);
+                            let mut line = String::new();
+                            let _ = reader.read_line(&mut line);
+                            line.split_whitespace().nth(1).unwrap_or("").to_string()
+                        };
+                        let _ = conn.write_all(response.as_bytes());
+                        let _ = conn.flush();
+                        if tx.unbounded_send(ProcMsg::Line(target)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.unbounded_send(ProcMsg::Exit);
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Some(msg) = rx.next().await {
+                let alive = this
+                    .update(cx, |editor, _| match &msg {
+                        ProcMsg::Line(target) => {
+                            editor.script.dispatch_action(&on_request, Some(target));
+                        }
+                        ProcMsg::Exit => {
+                            editor.http_servers.remove(&port);
+                        }
+                    })
+                    .is_ok();
+                if !alive || matches!(msg, ProcMsg::Exit) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Stop a local HTTP server (`http-server-stop`): flip its flag so the accept
+    /// loop exits on its next poll and drops the socket.
+    pub(super) fn http_server_stop(&mut self, port: u16) {
+        if let Some(flag) = self.http_servers.get(&port) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     // --- Embedded terminal ------------------------------------------------
 
     /// Spawn a terminal (`make-terminal`): start the PTY/shell and show it in a

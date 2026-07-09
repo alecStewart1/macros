@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use base64::Engine as _;
 use regex::Regex;
 use ropey::Rope;
+use sha2::Digest as _;
 use steel::rvals::{IntoSteelVal, SteelVal};
 use steel::steel_vm::engine::Engine;
 use steel::steel_vm::register_fn::RegisterFn;
@@ -453,6 +455,12 @@ pub(crate) fn build_engine(
             q.lock()
                 .unwrap()
                 .push(EditorCommand::SetFaceUnderline(name, on));
+        });
+    }
+    {
+        let q = queue.clone();
+        reg.register_fn("set-face-bold", move |name: String, on: bool| {
+            q.lock().unwrap().push(EditorCommand::SetFaceBold(name, on));
         });
     }
     register_unary(
@@ -1569,6 +1577,117 @@ pub(crate) fn build_engine(
     }
     register_unary(&mut reg, queue, "http-stream-cancel", |id| {
         EditorCommand::HttpStreamCancel { id }
+    });
+    {
+        // `(http-request method url headers body on-response)` → #t once queued.
+        // A one-shot request of any verb ("GET"/"POST"/"PATCH"/"DELETE"); the
+        // streaming `make-http-stream` is POST-only and hides the status code.
+        // `headers` is a flat alternating key/value string list; `body` "" means
+        // no body. `on-response` (a "name" string or 'name symbol) is called once
+        // with "<status>\n<body>" — status on the first line (0 = transport
+        // failure), body after the first newline. Parse it in Scheme with
+        // `string->jsexpr` after splitting off the status line.
+        let q = queue.clone();
+        reg.register_fn(
+            "http-request",
+            move |method: String,
+                  url: String,
+                  headers: SteelVal,
+                  body: String,
+                  on_response: Callback|
+                  -> bool {
+                let flat = steel_string_list(&headers);
+                let headers = flat
+                    .chunks_exact(2)
+                    .map(|kv| (kv[0].clone(), kv[1].clone()))
+                    .collect();
+                let Callback(on_response) = on_response;
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::HttpRequest(Box::new(HttpRequestArgs {
+                        method,
+                        url,
+                        headers,
+                        body,
+                        on_response,
+                    })));
+                true
+            },
+        );
+    }
+    {
+        // `(http-serve host port content-type body on-request)` → the bound port
+        // (the handle for `http-server-stop`), or 0 if the bind failed. Pass port
+        // 0 for an OS-assigned ephemeral port (an OAuth loopback wants
+        // host="127.0.0.1", port=0). The socket is bound here so the port is known
+        // synchronously; the accept loop runs on a worker thread. Each connection
+        // gets one fixed response (status 200, the given `content-type` + `body`);
+        // `on-request` is called with the request target ("/path?query") so Scheme
+        // can pull the OAuth code/state out of the query string. Serves until
+        // `http-server-stop` is called.
+        let q = queue.clone();
+        reg.register_fn(
+            "http-serve",
+            move |host: String,
+                  port: usize,
+                  content_type: String,
+                  body: String,
+                  on_request: Callback|
+                  -> usize {
+                let listener = match std::net::TcpListener::bind((host.as_str(), port as u16)) {
+                    Ok(l) => l,
+                    Err(_) => return 0,
+                };
+                let bound = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                if bound == 0 {
+                    return 0;
+                }
+                let Callback(on_request) = on_request;
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::HttpServe(Box::new(HttpServeArgs {
+                        listener: Arc::new(Mutex::new(Some(listener))),
+                        port: bound,
+                        content_type,
+                        body,
+                        on_request,
+                    })));
+                bound as usize
+            },
+        );
+    }
+    register_unary(&mut reg, queue, "http-server-stop", |port: u16| {
+        EditorCommand::HttpServerStop { port }
+    });
+    // --- Crypto / encoding (OAuth PKCE + general use) ---------------------
+    // Binary is exchanged with Scheme as hex strings (always valid UTF-8);
+    // `hex->base64url` bridges hex into base64url so PKCE composes cleanly:
+    //   (define verifier  (hex->base64url (random-bytes 32)))
+    //   (define challenge (hex->base64url (sha256 verifier)))
+    //   (define state     (hex->base64url (random-bytes 32)))
+    reg.register_fn("random-bytes", |n: usize| -> String {
+        let mut buf = vec![0u8; n];
+        match getrandom::getrandom(&mut buf) {
+            Ok(()) => hex::encode(&buf),
+            Err(_) => String::new(),
+        }
+    });
+    reg.register_fn("sha256", |input: String| -> String {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(input.as_bytes());
+        hex::encode(hasher.finalize())
+    });
+    reg.register_fn("base64url-encode", |input: String| -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input.as_bytes())
+    });
+    reg.register_fn("hex->base64url", |input: String| -> String {
+        match hex::decode(input.trim()) {
+            Ok(bytes) => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+            Err(_) => String::new(),
+        }
+    });
+    reg.register_fn("open-url", |url: String| -> bool {
+        crate::update::open_url(&url).is_ok()
     });
     // --- ANVIL REPL (a second, independent Steel interpreter) -------------
     {

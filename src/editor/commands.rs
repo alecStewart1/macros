@@ -817,6 +817,9 @@ impl Editor {
             KillProcess { id } => self.kill_process(id),
             HttpStream(args) => self.http_stream(*args, cx),
             HttpStreamCancel { id } => self.http_stream_cancel(id),
+            HttpRequest(args) => self.http_request(*args, cx),
+            HttpServe(args) => self.http_serve(*args, cx),
+            HttpServerStop { port } => self.http_server_stop(port),
             AnvilEval { source, on_result } => self.anvil.eval(&source, &on_result),
             AnvilInterrupt => self.anvil.interrupt(),
             AnvilReset => self.anvil.reset(),
@@ -1081,6 +1084,10 @@ impl Editor {
             },
             SetFaceUnderline(face, on) => {
                 cx.update_global::<Theme, ()>(|theme, _| theme.set_underline(face, on));
+                cx.notify();
+            }
+            SetFaceBold(face, on) => {
+                cx.update_global::<Theme, ()>(|theme, _| theme.set_bold(face, on));
                 cx.notify();
             }
             LoadTheme(name) => match crate::runtime::theme_script(&name) {

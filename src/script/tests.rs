@@ -48,6 +48,82 @@ mod engine_tests {
     }
 
     #[test]
+    fn crypto_primitives_compose_pkce_challenge() {
+        let (engine, _rx) = ScriptEngine::new();
+        // base64url of a plain string (no padding).
+        let b64 = engine.eval(r#"(base64url-encode "abc")"#).unwrap();
+        assert!(
+            b64.value.as_deref().unwrap().contains("YWJj"),
+            "base64url-encode wrong: {:?}",
+            b64.value
+        );
+        // RFC 7636 Appendix B vector: challenge = base64url(sha256(verifier)).
+        // `(hex->base64url (sha256 verifier))` must reproduce it exactly.
+        let challenge = engine
+            .eval(r#"(hex->base64url (sha256 "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"))"#)
+            .unwrap();
+        assert!(
+            challenge
+                .value
+                .as_deref()
+                .unwrap()
+                .contains("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"),
+            "PKCE challenge wrong: {:?}",
+            challenge.value
+        );
+        // random-bytes returns hex: 32 bytes -> 64 hex chars.
+        let rnd = engine.eval("(string-length (random-bytes 32))").unwrap();
+        assert_eq!(rnd.value.as_deref(), Some("64"));
+    }
+
+    // Exercises the exact HTTP framing the `http-serve` worker thread uses
+    // (request-line target parse + Content-Length response), proving a real
+    // `ureq` client round-trips against it. The `http_serve` method itself needs
+    // a live GPUI Context, so this validates the transport mechanics standalone.
+    #[test]
+    fn http_serve_transport_round_trips_with_ureq() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = "you may close this tab";
+
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            // Same target extraction as the worker: 2nd token of the request line.
+            let target = {
+                let mut reader = BufReader::new(&conn);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                line.split_whitespace().nth(1).unwrap_or("").to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            conn.write_all(response.as_bytes()).unwrap();
+            conn.flush().unwrap();
+            target
+        });
+
+        let got = ureq::get(&format!(
+            "http://127.0.0.1:{port}/callback?code=abc&state=xyz"
+        ))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap();
+        assert_eq!(got, body, "client did not read the fixed response body");
+
+        let target = server.join().unwrap();
+        assert_eq!(
+            target, "/callback?code=abc&state=xyz",
+            "request target parsed wrong (this is what on-request receives)"
+        );
+    }
+
+    #[test]
     fn single_run_evaluates_forms_top_to_bottom() {
         let (engine, _rx) = ScriptEngine::new();
         // Both forms in ONE eval, exactly as a whole-region eval would submit

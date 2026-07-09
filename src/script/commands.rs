@@ -37,6 +37,46 @@ pub struct HttpStreamArgs {
     pub on_done: String,
 }
 
+/// Payload for [`EditorCommand::HttpRequest`]. A one-shot request of any method
+/// (the streaming [`HttpStreamArgs`] is POST-only and has no status code); the
+/// whole response is delivered to one Steel callback. Boxed for the same reason
+/// as `HttpStreamArgs`.
+#[derive(Debug, Clone)]
+pub struct HttpRequestArgs {
+    /// HTTP method verb: `GET`, `POST`, `PATCH`, `DELETE`, …
+    pub method: String,
+    /// Request URL.
+    pub url: String,
+    /// Request headers as `(key, value)` pairs.
+    pub headers: Vec<(String, String)>,
+    /// Request body; empty means no body (e.g. a bare `GET`).
+    pub body: String,
+    /// Steel fn called once with `"<status>\n<body>"` — the numeric status on the
+    /// first line, the response body after the first newline. Status `0` marks a
+    /// transport failure, with the error text as the body.
+    pub on_response: String,
+}
+
+/// Payload for [`EditorCommand::HttpServe`]. A minimal local HTTP server: it
+/// accepts connections, writes back one fixed response, and hands each request's
+/// target (`/path?query`) to a Steel callback. The transport for an OAuth
+/// loopback redirect, but not OAuth-specific. Boxed to keep the enum small.
+#[derive(Debug, Clone)]
+pub struct HttpServeArgs {
+    /// The already-bound listener, moved to the worker thread on first drain.
+    /// Bound in the registry so the caller learns the (possibly OS-assigned)
+    /// port synchronously; wrapped so the `Debug`/`Clone` enum can carry it.
+    pub listener: std::sync::Arc<std::sync::Mutex<Option<std::net::TcpListener>>>,
+    /// The bound port — the handle for `http-server-stop`.
+    pub port: u16,
+    /// `Content-Type` header written on every response.
+    pub content_type: String,
+    /// Response body written on every request (e.g. "you may close this tab").
+    pub body: String,
+    /// Steel fn called with each request target string as it arrives.
+    pub on_request: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
     // Motion
@@ -390,6 +430,8 @@ pub enum EditorCommand {
     SetFace(String, String),
     /// Toggle a face's underline attribute: `(set-face-underline "link" #t)`.
     SetFaceUnderline(String, bool),
+    /// Toggle a face's bold attribute: `(set-face-bold "feeds-unread" #t)`.
+    SetFaceBold(String, bool),
     /// Load a built-in theme by name. Queued by the `load-theme-impl` primitive,
     /// which the core.scm `load-theme` wrapper calls for `(load-theme 'macros-light)`
     /// or `(load-theme "macros-light")` (a symbol or string).
@@ -615,6 +657,18 @@ pub enum EditorCommand {
     /// drops the connection (the chat client's "cancel turn").
     HttpStreamCancel {
         id: u64,
+    },
+    /// One-shot HTTP request of any method (see [`HttpRequestArgs`]); the whole
+    /// response goes to a single callback. Used for an OAuth token exchange and
+    /// authenticated non-streaming API calls.
+    HttpRequest(Box<HttpRequestArgs>),
+    /// Start a local HTTP server (see [`HttpServeArgs`]) — the OAuth loopback
+    /// redirect target, or any local callback endpoint.
+    HttpServe(Box<HttpServeArgs>),
+    /// Stop the local HTTP server bound to `port` (its accept loop exits on its
+    /// next poll and the socket is dropped).
+    HttpServerStop {
+        port: u16,
     },
     // ANVIL REPL — a second, independent Steel interpreter (see `crate::anvil`).
     /// Evaluate `source` in the ANVIL REPL engine; deliver the printed result to

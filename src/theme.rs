@@ -20,6 +20,10 @@ pub struct Theme {
     /// than a per-face attribute struct) keeps `color()` and every caller of it
     /// unchanged; the paint path additionally consults `is_underlined`.
     underlined: HashSet<String>,
+    /// Face names that should render bold, same model as `underlined`. A face
+    /// may appear here without a color entry — `color()` then falls back to the
+    /// caller's default, giving "default foreground, bold weight".
+    bold: HashSet<String>,
 }
 
 impl Global for Theme {}
@@ -68,6 +72,22 @@ impl Theme {
             self.underlined.insert(name);
         } else {
             self.underlined.remove(&name);
+        }
+    }
+
+    /// Whether text in `name` should be bold.
+    pub fn is_bold(&self, name: &str) -> bool {
+        self.bold.contains(name)
+    }
+
+    /// Turn a face's bold attribute on or off — drives `set-face-bold` from
+    /// Steel. Like colors, this is wiped by `load-theme` (a fresh palette).
+    pub fn set_bold(&mut self, name: impl Into<String>, on: bool) {
+        let name = name.into();
+        if on {
+            self.bold.insert(name);
+        } else {
+            self.bold.remove(&name);
         }
     }
 }

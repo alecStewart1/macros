@@ -114,6 +114,13 @@ ureq = "2"
 semver = "1"
 sha2 = "0.10"
 hex = "0.4"
+# Encoding + OS randomness for the Scheme crypto primitives (`base64url-encode`,
+# `hex->base64url`, `random-bytes`) that let a Steel package run an OAuth PKCE
+# login flow. `base64` does URL-safe/no-pad; `getrandom` reads the OS CSPRNG.
+# Both are already in the tree transitively (via gpui/uuid), so these are direct
+# promotions, not new builds.
+base64 = "0.22"
+getrandom = "0.2"
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
 # for staging update downloads and compiled user grammars (src/grammar.rs).
 dirs = "5"

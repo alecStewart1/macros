@@ -601,6 +601,9 @@ pub struct Editor {
     /// Cancel flags for in-flight HTTP streams, by id. `http-stream-cancel` flips
     /// the flag; the stream's reader thread checks it between lines and stops.
     http_streams: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Stop flags for running local HTTP servers, by bound port. `http-server-stop`
+    /// flips the flag; the server's accept loop checks it each poll and exits.
+    http_servers: HashMap<u16, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Live embedded terminals, by id. A `term-mode` buffer's name maps to one
     /// of these via [`Terminal::buffer_name`].
     terminals: HashMap<u64, Terminal>,
@@ -1255,6 +1258,7 @@ impl Editor {
             resizing: None,
             processes: HashMap::new(),
             http_streams: HashMap::new(),
+            http_servers: HashMap::new(),
             terminals: HashMap::new(),
             term_events_tx,
             lsp_fullsync_dirty: None,

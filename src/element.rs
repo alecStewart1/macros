@@ -1078,7 +1078,8 @@ impl Element for EditorElement {
                 // Special buffers (magit-style) paint whole lines by face name —
                 // but sub-line overlay accents (magit's status labels, diff +/-
                 // markers) still override their byte range, layered on top of the
-                // whole-line color as the base (no syntax spans here).
+                // whole-line color as the base (no syntax spans here). The face's
+                // bold attribute rides along as the line's base weight.
                 let color = theme.color(face, text_color);
                 line_runs(
                     &[],
@@ -1086,6 +1087,7 @@ impl Element for EditorElement {
                     range.clone(),
                     &editor_font,
                     color,
+                    theme.is_bold(face),
                     theme,
                 )
             } else {
@@ -1095,6 +1097,7 @@ impl Element for EditorElement {
                     range.clone(),
                     &editor_font,
                     text_color,
+                    false,
                     theme,
                 )
             };
@@ -1807,10 +1810,13 @@ fn line_runs(
     line: std::ops::Range<usize>,
     font: &Font,
     default: Hsla,
+    default_bold: bool,
     theme: &Theme,
 ) -> Vec<TextRun> {
-    // 1. Base segments `(start, end, color, underline)` from syntax spans.
-    let mut segs: Vec<(usize, usize, Hsla, bool)> = Vec::new();
+    // 1. Base segments `(start, end, color, underline, bold)` from syntax
+    //    spans. `default_bold` styles the face-less base — a whole-line face is
+    //    resolved to `default` by the caller, so its bold flag arrives here.
+    let mut segs: Vec<(usize, usize, Hsla, bool, bool)> = Vec::new();
     let mut covered = line.start;
     for span in spans {
         if span.range.end <= line.start {
@@ -1822,24 +1828,29 @@ fn line_runs(
         let start = span.range.start.max(line.start);
         let end = span.range.end.min(line.end);
         if start > covered {
-            segs.push((covered, start, default, false));
+            segs.push((covered, start, default, false, default_bold));
         }
-        let (color, ul) = span.face.map_or((default, false), |i| {
+        let (color, ul, bold) = span.face.map_or((default, false, default_bold), |i| {
             let name = face_name(i);
-            (theme.color(name, default), theme.is_underlined(name))
+            (
+                theme.color(name, default),
+                theme.is_underlined(name),
+                theme.is_bold(name),
+            )
         });
-        segs.push((start, end, color, ul));
+        segs.push((start, end, color, ul, bold));
         covered = end;
     }
     if covered < line.end {
-        segs.push((covered, line.end, default, false));
+        segs.push((covered, line.end, default, false, default_bold));
     }
     if segs.is_empty() {
-        segs.push((line.start, line.end, default, false));
+        segs.push((line.start, line.end, default, false, default_bold));
     }
 
     // 2. Overlay faces override their sub-range, splitting base segments. An
-    //    overlay face may also carry underline (e.g. web-reader link markers).
+    //    overlay face may also carry underline (e.g. web-reader link markers)
+    //    or bold.
     for (range, face) in overlays {
         let os = range.start.max(line.start);
         let oe = range.end.min(line.end);
@@ -1848,27 +1859,29 @@ fn line_runs(
         }
         let color = theme.color(face, default);
         let ul = theme.is_underlined(face);
+        let bold = theme.is_bold(face);
         let mut next = Vec::with_capacity(segs.len() + 2);
-        for (s, e, c, u) in segs.drain(..) {
+        for (s, e, c, u, b) in segs.drain(..) {
             if e <= os || s >= oe {
-                next.push((s, e, c, u));
+                next.push((s, e, c, u, b));
                 continue;
             }
             if s < os {
-                next.push((s, os, c, u));
+                next.push((s, os, c, u, b));
             }
-            next.push((s.max(os), e.min(oe), color, ul));
+            next.push((s.max(os), e.min(oe), color, ul, bold));
             if e > oe {
-                next.push((oe, e, c, u));
+                next.push((oe, e, c, u, b));
             }
         }
         segs = next;
     }
 
-    // 3. Emit runs (skip any empty segment), underlining where the face asked.
+    // 3. Emit runs (skip any empty segment), underlining/bolding where the
+    //    face asked.
     segs.into_iter()
-        .filter(|(s, e, _, _)| e > s)
-        .map(|(s, e, color, ul)| {
+        .filter(|(s, e, _, _, _)| e > s)
+        .map(|(s, e, color, ul, bold)| {
             let mut run = plain_run(e - s, font.clone(), color);
             if ul {
                 run.underline = Some(UnderlineStyle {
@@ -1876,6 +1889,9 @@ fn line_runs(
                     color: Some(color),
                     wavy: false,
                 });
+            }
+            if bold {
+                run.font.weight = FontWeight::BOLD;
             }
             run
         })
@@ -2224,7 +2240,7 @@ mod tests {
         let default: Hsla = rgb(0x000000).into();
         // Line [0,10), no syntax spans, one overlay [2,5) with face "hl".
         let overlays = vec![(2usize..5usize, SharedString::from("hl"))];
-        let runs = line_runs(&[], &overlays, 0..10, &font, default, &theme);
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
         assert_eq!(
             runs.iter().map(|r| r.len).collect::<Vec<_>>(),
             vec![2, 3, 5]
@@ -2243,7 +2259,7 @@ mod tests {
         let default: Hsla = rgb(0x000000).into();
         // One overlay [2,5) with an underlined face; the rest of the line is not.
         let overlays = vec![(2usize..5usize, SharedString::from("link"))];
-        let runs = line_runs(&[], &overlays, 0..10, &font, default, &theme);
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
         assert!(
             runs[1].underline.is_some(),
             "underlined face underlines its run"
@@ -2257,8 +2273,35 @@ mod tests {
         let theme = Theme::default();
         let font = font("Lilex");
         let default: Hsla = rgb(0x111111).into();
-        let runs = line_runs(&[], &[], 0..7, &font, default, &theme);
+        let runs = line_runs(&[], &[], 0..7, &font, default, false, &theme);
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 7);
+    }
+
+    #[test]
+    fn bold_face_bolds_runs_without_needing_a_color() {
+        let mut theme = Theme::default();
+        theme.set_bold("feeds-unread", true); // NO color entry on purpose
+        let font = font("Lilex");
+        let default: Hsla = rgb(0x222222).into();
+        // Whole-line-face path: caller resolves the face to `default` (fallback
+        // — the face has no color) and passes its bold flag as the base.
+        let runs = line_runs(
+            &[],
+            &[],
+            0..7,
+            &font,
+            theme.color("feeds-unread", default),
+            theme.is_bold("feeds-unread"),
+            &theme,
+        );
+        assert_eq!(runs[0].font.weight, FontWeight::BOLD);
+        assert_eq!(runs[0].color, default, "colorless bold face keeps default");
+        // Overlay path: a bold overlay bolds only its sub-range.
+        let overlays = vec![(2usize..5usize, SharedString::from("feeds-unread"))];
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
+        assert_eq!(runs[0].font.weight, FontWeight::NORMAL);
+        assert_eq!(runs[1].font.weight, FontWeight::BOLD);
+        assert_eq!(runs[2].font.weight, FontWeight::NORMAL);
     }
 
     #[test]
