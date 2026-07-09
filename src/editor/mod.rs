@@ -4524,8 +4524,8 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, char_col_byte, file_completions, is_repeatable, language_for_path,
-        last_sexp, line_span, prefix_arg_value, push_capped, scheme_symbol_token, shift_fold_ranges,
-        shift_line_map, symbol_at, top_level_form_at, translate_backrefs,
+        last_sexp, line_span, prefix_arg_value, push_capped, scheme_symbol_token,
+        shift_fold_ranges, shift_line_map, symbol_at, top_level_form_at, translate_backrefs,
     };
 
     #[test]
