@@ -195,6 +195,19 @@ pub enum EditorCommand {
         max_width: usize,
     },
     ClearLineImages,
+    /// Abort the rest of this command batch unless the decoration target buffer
+    /// (the render-redirect target, else the active buffer) is still named
+    /// `name` with edit tick `tick` — both captured from the snapshot when the
+    /// Scheme call ran. A debounced repaint computed while the user kept typing
+    /// would otherwise land byte-offset decorations at stale positions (org /
+    /// markdown headings below the edit visibly blink until the next repaint).
+    /// On abort, `on_stale` (a global fn name; "" for none) is dispatched so the
+    /// caller can reschedule its repaint.
+    GuardBufferUnchanged {
+        name: String,
+        tick: u64,
+        on_stale: String,
+    },
     /// Virtual left indentation (in columns) for buffer `line` — display-only, the
     /// Org `org-indent-mode` primitive. The buffer text is untouched.
     SetLineIndent {

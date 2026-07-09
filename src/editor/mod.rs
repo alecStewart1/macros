@@ -655,6 +655,10 @@ pub struct Editor {
     /// same batch target it instead of the active buffer, and focus never moves.
     /// Reset to `None` after each applied command batch.
     render_redirect: Option<usize>,
+    /// Set by a failed `GuardBufferUnchanged` (the buffer was edited after the
+    /// script snapshotted it); `apply_script_outcome` drops the rest of that
+    /// batch — its byte-offset decorations are stale. Reset around every batch.
+    script_batch_stale: bool,
 }
 
 /// An open transient popup: a title and its `(key, label, command)` rows.
@@ -1299,6 +1303,7 @@ impl Editor {
                 watched_recursive: HashSet::new(),
             },
             render_redirect: None,
+            script_batch_stale: false,
         };
         // Drain async script outcomes from the engine thread onto the foreground.
         editor.script_task = Some(cx.spawn(async move |this, cx| {
@@ -1391,9 +1396,17 @@ impl Editor {
                 } else {
                     coalesce_inserts(commands)
                 };
+                // A failed `GuardBufferUnchanged` in the batch aborts everything
+                // after it: the script computed those commands against text the
+                // user has since edited, so their byte offsets are stale.
+                self.script_batch_stale = false;
                 for command in commands {
+                    if self.script_batch_stale {
+                        break;
+                    }
                     self.apply_command(command, cx);
                 }
+                self.script_batch_stale = false;
                 // `render-buffer` may have redirected icon/overlay writes to a
                 // sidebar buffer for this batch; that scope ends here.
                 self.render_redirect = None;
@@ -2858,6 +2871,7 @@ impl Editor {
             // O(1) copy-on-write clone of the rope; read bridges materialize
             // only the slice they need, off the UI thread.
             text: self.active.buffer.rope().clone(),
+            tick: self.active.buffer.tick(),
             region,
             selections,
             props,
@@ -2912,6 +2926,7 @@ impl Editor {
                 .map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
             // O(1) copy-on-write clone of the rope, as in `publish_point`.
             text: doc.buffer.rope().clone(),
+            tick: doc.buffer.tick(),
             locals: doc
                 .locals
                 .iter()

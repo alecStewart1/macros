@@ -82,6 +82,13 @@
 ;; faces on every edit).
 (define (md--fontify)
   (when (md--fontify-ok?)
+    ;; Captured before the text is read: this runs debounced while the user may
+    ;; still be typing, and a repaint computed against since-edited text would
+    ;; land hides/scales at stale offsets (headings below the edit blink). On a
+    ;; drop, Rust dispatches `md--fontify-stale`, which forgets the signature —
+    ;; the signature was already committed for a repaint that never applied —
+    ;; and reschedules.
+    (guard-buffer-unchanged "md--fontify-stale")
     (let* ((lines (md-lines))
            (sig (md--heading-signature lines)))
       (when (not (equal? sig *md-heading-signature*))
@@ -117,6 +124,13 @@
                  (lambda () (when (md--active?) (md--fontify)))))
 (define (md--fontify-schedule)
   (when (md--fontify-ok?) (md--fontify-debounce)))
+
+;; Called by Rust when a guarded repaint batch was dropped (the buffer changed
+;; while it was in flight): the signature describes decorations that never made
+;; it to the screen, so forget it and repaint once the current burst settles.
+(define (md--fontify-stale)
+  (set! *md-heading-signature* #f)
+  (md--fontify-schedule))
 
 ;; On open, always repaint (the global signature may carry over from another
 ;; markdown buffer with the same heading shape); edits use the signature guard.

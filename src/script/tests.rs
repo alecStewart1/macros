@@ -193,13 +193,15 @@ mod engine_tests {
         for src in crate::runtime::startup_scripts() {
             engine.eval(src).expect("a startup script failed to load");
         }
-        // A two-line region ("helllo world\nok wrld") queued as sent lines;
-        // the checker's reply arrives split at awkward chunk boundaries.
+        // A two-line region ("helllo world\nok wrld") queued as sent lines
+        // (each entry carries the check-time edit tick + buffer, here matching
+        // the live snapshot so the reply counts as fresh); the checker's reply
+        // arrives split at awkward chunk boundaries.
         let _ = engine
             .eval(
                 r#"(set! *spell-pipe-fifo*
-                     (list (list 0 "helllo world" #f)
-                           (list 13 "ok wrld" #t)))"#,
+                     (list (list 0 "helllo world" #f (buffer-tick) (current-buffer))
+                           (list 13 "ok wrld" #t (buffer-tick) (current-buffer))))"#,
             )
             .unwrap();
         let _ = engine
@@ -262,6 +264,76 @@ mod engine_tests {
         assert!(cmds.iter().any(
             |c| matches!(c, EditorCommand::ClearOverlayFacesMatching(f) if f == "spell-error")
         ));
+    }
+
+    /// Spell replies guard their squiggle batch with the buffer name + edit
+    /// tick captured when the text was SENT for checking (threaded through the
+    /// reply FIFO), mirroring `org_fontify_batch_is_guarded`: a reply landing
+    /// on an unchanged buffer paints behind a `GuardBufferUnchanged`; one that
+    /// arrives after an edit paints nothing and reschedules the check instead
+    /// of caching squiggles at shifted offsets.
+    #[test]
+    fn spell_result_batches_are_guarded() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        let snapshot = |tick: u64| EditorSnapshot {
+            name: "notes.org".into(),
+            tick,
+            text: Rope::from_str("helllo wrld\nsome more text\n"),
+            visible_lines: (0, 1),
+            ..Default::default()
+        };
+        engine.set_snapshot(snapshot(5));
+        let _ = engine.eval("(set! *spell-backend* 'native)").unwrap();
+        // Enabling runs the first check: the FIFO records (start tick buffer).
+        engine.eval("(spell-mode)").unwrap();
+        // Reply with the buffer untouched (tick still 5): the batch opens with
+        // the check-time guard, then paints — so an edit racing the batch's
+        // application still drops it in the editor.
+        let cmds = engine
+            .eval(r#"(spell--native-apply "0\t6\thelllo\n")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            matches!(
+                cmds.first(),
+                Some(EditorCommand::GuardBufferUnchanged { name, tick: 5, on_stale })
+                    if name == "notes.org" && on_stale == "spell--schedule"
+            ),
+            "a fresh reply must open with the check-time guard: {cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                EditorCommand::OverlayFace { start: 0, end: 6, face } if face == "spell-error"
+            )),
+            "a fresh reply should paint the squiggle: {cmds:?}"
+        );
+        // Second check pass (FIFO entry captured at tick 5), then an edit
+        // before the reply arrives (tick 6): stale — nothing painted or
+        // cleared, just a rescheduled check.
+        engine.eval("(spell--check-now)").unwrap();
+        engine.set_snapshot(snapshot(6));
+        let cmds = engine
+            .eval(r#"(spell--native-apply "0\t6\thelllo\n")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                EditorCommand::OverlayFace { .. }
+                    | EditorCommand::ClearOverlayFacesMatching(_)
+                    | EditorCommand::GuardBufferUnchanged { .. }
+            )),
+            "a stale reply must not touch overlays: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::RunWithTimer { .. })),
+            "a stale reply should reschedule the check: {cmds:?}"
+        );
     }
 
     #[test]
@@ -3216,6 +3288,73 @@ mod magit_tests {
                 .as_slice(),
             [EditorCommand::ClearLineIndents]
         ));
+    }
+
+    /// `guard-buffer-unchanged` captures the snapshot's buffer name and edit
+    /// tick at call time — the editor drops the rest of the batch when either
+    /// no longer matches at application time (a stale debounced repaint).
+    #[test]
+    fn guard_buffer_unchanged_primitive() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.set_snapshot(EditorSnapshot {
+            name: "notes.org".into(),
+            tick: 7,
+            ..Default::default()
+        });
+        assert!(matches!(
+            engine
+                .eval(r#"(guard-buffer-unchanged "org--fontify-schedule")"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::GuardBufferUnchanged { name, tick: 7, on_stale }]
+                if name == "notes.org" && on_stale == "org--fontify-schedule"
+        ));
+    }
+
+    /// `org--fontify` opens its batch with a `GuardBufferUnchanged` captured
+    /// BEFORE any text is read, so a repaint raced by live typing is dropped
+    /// whole instead of painting faces/hides/indents at stale byte offsets
+    /// (the "headings below the edit blink while typing" bug). The indent pass
+    /// shares the guard: `set-line-indent` rows follow in the same batch.
+    #[test]
+    fn org_fontify_batch_is_guarded() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/folding.scm"))
+            .expect("folding.scm");
+        engine
+            .eval(include_str!("../../scheme/org.scm"))
+            .expect("org.scm");
+        engine.set_snapshot(EditorSnapshot {
+            name: "notes.org".into(),
+            tick: 3,
+            text: Rope::from_str("* top\nbody\n** child\n"),
+            ..Default::default()
+        });
+        let commands = engine.eval("(org--fontify)").unwrap().commands;
+        assert!(
+            matches!(
+                commands.first(),
+                Some(EditorCommand::GuardBufferUnchanged { name, tick: 3, on_stale })
+                    if name == "notes.org" && on_stale == "org--fontify-schedule"
+            ),
+            "the guard must be the batch's FIRST command: {commands:?}"
+        );
+        // Body line 1 sits one level under the level-1 heading (1 * 4 columns);
+        // the level-2 heading on line 2 is indented (2-1) * 4 columns.
+        for expect in [(1usize, 4usize), (2, 4)] {
+            assert!(
+                commands.iter().any(|c| matches!(
+                    c,
+                    EditorCommand::SetLineIndent { line, cols } if (*line, *cols) == expect
+                )),
+                "missing indent {expect:?}: {commands:?}"
+            );
+        }
     }
 
     /// The per-line scale primitives enqueue the right commands.

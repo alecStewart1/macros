@@ -19,12 +19,29 @@ impl Editor {
         // back on its byte.
         self.active.ghost = None;
         // Invert the current node's edit group (last edit undone first):
-        // restore `removed` over the inserted span.
+        // restore `removed` over the inserted span. Overlays and markers track
+        // each inverse edit just like `edit()` does — without this, org's
+        // hidden stars / faces / virtual indents sit at stale positions after
+        // an undo, and (with no after-change hook fired) nothing repaints them.
         let group = self.active.undo_tree[node].edit.clone();
         let mut cursor = 0;
         for record in group.into_iter().rev() {
-            let span = record.at..record.at + record.inserted.len();
-            self.active.buffer.replace(span, &record.removed);
+            let old_end = record.at + record.inserted.len();
+            self.active
+                .buffer
+                .replace(record.at..old_end, &record.removed);
+            let line_delta = record.removed.matches('\n').count() as isize
+                - record.inserted.matches('\n').count() as isize;
+            let start_line = self.active.buffer.byte_to_position(record.at).0;
+            self.adjust_overlays(
+                record.at,
+                old_end,
+                record.removed.len(),
+                line_delta,
+                start_line,
+            );
+            self.script
+                .adjust_markers(record.at, old_end, record.removed.len());
             cursor = record.at + record.removed.len();
         }
         self.active.undo_current = parent;
@@ -33,6 +50,9 @@ impl Editor {
         self.parse_full();
         self.collapse_to(cursor);
         self.ensure_cursor_visible();
+        // Emacs runs `after-change-functions` for undo like any other edit —
+        // this is what schedules org/markdown's debounced refontify.
+        self.run_hook("after-change-functions");
         let branches = self.active.undo_tree[parent].children.len();
         if branches > 1 {
             self.echo(format!("Undo (branch point: {branches} redo branches)"), cx);
@@ -52,12 +72,28 @@ impl Editor {
             return;
         };
         self.active.ghost = None; // direct buffer mutation, like undo() above
-        // Re-apply the child's edit group forward: `inserted` over the removed span.
+        // Re-apply the child's edit group forward: `inserted` over the removed
+        // span. Overlays/markers track each edit and the after-change hook
+        // fires, mirroring `undo` above.
         let group = self.active.undo_tree[child].edit.clone();
         let mut cursor = 0;
         for record in &group {
-            let span = record.at..record.at + record.removed.len();
-            self.active.buffer.replace(span, &record.inserted);
+            let old_end = record.at + record.removed.len();
+            self.active
+                .buffer
+                .replace(record.at..old_end, &record.inserted);
+            let line_delta = record.inserted.matches('\n').count() as isize
+                - record.removed.matches('\n').count() as isize;
+            let start_line = self.active.buffer.byte_to_position(record.at).0;
+            self.adjust_overlays(
+                record.at,
+                old_end,
+                record.inserted.len(),
+                line_delta,
+                start_line,
+            );
+            self.script
+                .adjust_markers(record.at, old_end, record.inserted.len());
             cursor = record.at + record.inserted.len();
         }
         self.active.undo_current = child;
@@ -66,6 +102,7 @@ impl Editor {
         self.parse_full();
         self.collapse_to(cursor);
         self.ensure_cursor_visible();
+        self.run_hook("after-change-functions");
         self.echo("Redo", cx);
     }
 

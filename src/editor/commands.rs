@@ -266,6 +266,32 @@ impl Editor {
                     cx.notify();
                 }
             }
+            GuardBufferUnchanged {
+                name,
+                tick,
+                on_stale,
+            } => {
+                // Compare against the buffer this batch's decorations will land
+                // on. A mismatch means the text (or the buffer under the batch)
+                // changed after the script read its snapshot: the remaining
+                // commands carry stale byte offsets, so the batch loop drops
+                // them (`apply_script_outcome`) and the caller's `on_stale`
+                // reschedules the repaint.
+                let (cur_name, cur_tick) = match self.render_redirect {
+                    Some(i) => (
+                        self.inactive[i].name.as_str(),
+                        self.inactive[i].buffer.tick(),
+                    ),
+                    None => (self.active.name.as_str(), self.active.buffer.tick()),
+                };
+                if cur_name != name || cur_tick != tick {
+                    self.script_batch_stale = true;
+                    if !on_stale.is_empty() {
+                        self.publish_point();
+                        self.script.dispatch_action(&on_stale, None);
+                    }
+                }
+            }
             SetLineIndent { line, cols } => {
                 let indents = &mut self.redirect_target().overlays.indents;
                 if cols == 0 {

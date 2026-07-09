@@ -354,47 +354,57 @@
 
 ;; Repaint the whole buffer's faces. One pass; carries a flag for src-block
 ;; interiors (which are painted as a literal block, not parsed for emphasis).
+;; The guard is captured BEFORE the text is read: this repaint runs debounced on
+;; the engine thread while the user may still be typing, and a batch computed
+;; against text that has since changed would paint faces/hides/indents at stale
+;; byte offsets (every heading below the edit visibly blinks — hidden stars
+;; swallow the previous newline, indents jump). If that happens, Rust drops the
+;; whole batch and `org--fontify-schedule` re-runs us once typing pauses.
 (define (org--fontify)
   (when (org--fontify-ok?)
+    (guard-buffer-unchanged "org--fontify-schedule")
     (clear-overlay-faces)
     (clear-overlay-hides)   ; clear-overlay-faces no longer clears hides
-    (let loop ((lines (org--lines)) (off 0) (insrc #f))
-      (when (not (null? lines))
-        (let* ((line (car lines))
-               (lend (+ off (utf8-length line)))
-               (lvl (org--heading-level line)))
-          (cond
-            ((and insrc (org--block-end? line))
-             (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-            (insrc
-             (overlay-set-face off lend "org-block") (loop (cdr lines) (+ lend 1) #t))
-            ((org--block-begin? line)
-             (overlay-set-face off lend "org-meta")
-             (loop (cdr lines) (+ lend 1)
-                   (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0)))
-            ((org--block-end? line)
-             (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-            (lvl
-             (org--fontify-heading off line lvl) (loop (cdr lines) (+ lend 1) #f))
-            ((or (org--keyword-line? line) (org--comment-line? line))
-             (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-            ((org--drawer-line? line)
-             (overlay-set-face off lend "org-drawer") (loop (cdr lines) (+ lend 1) #f))
-            ((org--table-line? line)
-             (overlay-set-face off lend "org-table") (loop (cdr lines) (+ lend 1) #f))
-            (else
-             (org--fontify-plain off line) (loop (cdr lines) (+ lend 1) #f))))))
-    (org--apply-indent)))
+    (let ((all-lines (org--lines)))   ; ONE split, shared with the indent pass
+      (let loop ((lines all-lines) (off 0) (insrc #f))
+        (when (not (null? lines))
+          (let* ((line (car lines))
+                 (lend (+ off (utf8-length line)))
+                 (lvl (org--heading-level line)))
+            (cond
+              ((and insrc (org--block-end? line))
+               (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
+              (insrc
+               (overlay-set-face off lend "org-block") (loop (cdr lines) (+ lend 1) #t))
+              ((org--block-begin? line)
+               (overlay-set-face off lend "org-meta")
+               (loop (cdr lines) (+ lend 1)
+                     (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0)))
+              ((org--block-end? line)
+               (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
+              (lvl
+               (org--fontify-heading off line lvl) (loop (cdr lines) (+ lend 1) #f))
+              ((or (org--keyword-line? line) (org--comment-line? line))
+               (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
+              ((org--drawer-line? line)
+               (overlay-set-face off lend "org-drawer") (loop (cdr lines) (+ lend 1) #f))
+              ((org--table-line? line)
+               (overlay-set-face off lend "org-table") (loop (cdr lines) (+ lend 1) #f))
+              (else
+               (org--fontify-plain off line) (loop (cdr lines) (+ lend 1) #f))))))
+      (org--apply-indent all-lines))))
 
 ;; Virtual `org-indent-mode` indentation. Walk the lines tracking the enclosing
 ;; heading level: a heading of level L is indented (L-1)*per-level columns, and
 ;; every body line beneath it L*per-level (one level deeper, so it sits under the
 ;; title). Display-only via `set-line-indent`; cleared first so toggling off and
-;; edits both refresh cleanly.
-(define (org--apply-indent)
+;; edits both refresh cleanly. Takes the caller's already-split lines so the face
+;; and indent passes always describe the SAME text (a second `(org--lines)` here
+;; could observe a newer snapshot mid-eval while the user types).
+(define (org--apply-indent lines)
   (clear-line-indents)
   (when *org-indent*
-    (let loop ((lines (org--lines)) (i 0) (curlvl 0))
+    (let loop ((lines lines) (i 0) (curlvl 0))
       (when (not (null? lines))
         (let ((lvl (org--heading-level (car lines))))
           (if lvl

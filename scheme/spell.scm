@@ -86,6 +86,23 @@
       (overlay-set-face (nth (car es) 0) (nth (car es) 1) "spell-error")
       (loop (cdr es)))))
 
+;; Cache and paint a backend's finished result set, whose byte offsets were
+;; computed against `buffer` at edit tick `tick` — both captured when the text
+;; was SENT for checking, an eval (and a subprocess round-trip) ago. If the
+;; buffer has been edited or switched since, the offsets are stale: caching or
+;; painting them would land squiggles shifted off their words, so skip and
+;; recheck once the current burst settles. When the reply IS fresh, the
+;; guard-buffer-tick covers the last gap — an edit between this eval and the
+;; moment its overlay commands apply makes Rust drop the paint whole and
+;; dispatch `spell--schedule` to reschedule.
+(define (spell--apply-results errors tick buffer)
+  (if (and (equal? buffer (current-buffer)) (= tick (buffer-tick)))
+      (begin
+        (guard-buffer-tick buffer tick "spell--schedule")
+        (spell--set-errors errors)
+        (spell--repaint))
+      (spell--schedule)))
+
 ;; Byte range of the lines currently on screen.
 (define (spell--visible-region)
   (let ((vl (visible-lines)))
@@ -93,34 +110,39 @@
           (position->byte (+ (cadr vl) 1) 0))))
 
 ;; --- native backend (NSSpellChecker via spell-check-text) --------------------------
-;; Requests are answered asynchronously in order, so a FIFO of region starts
-;; pairs each reply with the offsets it was computed against.
+;; Requests are answered asynchronously in order, so a FIFO of
+;; (region-start edit-tick buffer) entries pairs each reply with the offsets —
+;; and the exact buffer text — it was computed against.
 (define *spell-native-fifo* '())
 
 (define (spell--check-native start text)
-  (set! *spell-native-fifo* (append *spell-native-fifo* (list start)))
+  (set! *spell-native-fifo*
+        (append *spell-native-fifo*
+                (list (list start (buffer-tick) (current-buffer)))))
   (spell-check-text text "spell--native-apply"))
 
 ;; Callback: "start\tend\tword" rows, byte offsets relative to the checked text.
 (define (spell--native-apply rows)
   (unless (null? *spell-native-fifo*)
-    (let ((base (car *spell-native-fifo*)))
+    (let* ((entry (car *spell-native-fifo*))
+           (base (nth entry 0)))
       (set! *spell-native-fifo* (cdr *spell-native-fifo*))
-      (spell--set-errors
+      (spell--apply-results
        (map (lambda (row)
               (let ((p (split-many row "\t")))
                 (list (+ base (string->number (nth p 0)))
                       (+ base (string->number (nth p 1)))
                       (nth p 2))))
-            (non-empty-lines rows)))
-      (spell--repaint))))
+            (non-empty-lines rows))
+       (nth entry 1) (nth entry 2)))))
 
 ;; --- pipe backend (aspell/hunspell/enchant -a) --------------------------------------
 ;; One persistent process; each buffer line is sent `^`-escaped, and the
 ;; checker answers with zero or more `&`/`#` records then a blank terminator
-;; per line. A FIFO of (line-start line-text final?) entries pairs replies
-;; with the line they describe; `final?` marks a region's last line, whose
-;; terminator triggers the repaint.
+;; per line. A FIFO of (line-start line-text final? edit-tick buffer) entries
+;; pairs replies with the line they describe; `final?` marks a region's last
+;; line, whose terminator triggers the repaint (tick + buffer let it prove the
+;; offsets still describe the current text — see spell--apply-results).
 (define *spell-proc* #f)
 (define *spell-pipe-buf* "")
 (define *spell-pipe-fifo* '())
@@ -145,13 +167,16 @@
 (define (spell--pipe-exit code) (set! *spell-proc* #f))
 
 (define (spell--check-pipe start text)
-  (let ((id (spell--pipe-ensure)))
+  (let ((id (spell--pipe-ensure))
+        (tick (buffer-tick))
+        (buf (current-buffer)))
     (when (null? *spell-pipe-fifo*) (set! *spell-pipe-acc* '()))
     (let loop ((ls (split-many text "\n")) (off start))
       (unless (null? ls)
         (let ((line (car ls)))
           (set! *spell-pipe-fifo*
-                (append *spell-pipe-fifo* (list (list off line (null? (cdr ls))))))
+                (append *spell-pipe-fifo*
+                        (list (list off line (null? (cdr ls)) tick buf))))
           (process-send-string id (string-append "^" line "\n"))
           (loop (cdr ls) (+ off (utf8-length line) 1)))))))
 
@@ -179,9 +204,9 @@
        (let ((entry (car *spell-pipe-fifo*)))
          (set! *spell-pipe-fifo* (cdr *spell-pipe-fifo*))
          (when (nth entry 2)
-           (spell--set-errors (reverse *spell-pipe-acc*))
-           (set! *spell-pipe-acc* '())
-           (spell--repaint)))))
+           (let ((acc (reverse *spell-pipe-acc*)))
+             (set! *spell-pipe-acc* '())
+             (spell--apply-results acc (nth entry 3) (nth entry 4)))))))
     (else #f)))
 
 ;; Parse one ispell record against the line context `(line-start line-text _)`:

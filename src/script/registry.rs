@@ -682,6 +682,46 @@ pub(crate) fn build_engine(
             "clear-line-images",
             EditorCommand::ClearLineImages,
         );
+        // `(guard-buffer-unchanged on-stale)` — captures the snapshot's buffer
+        // name and edit tick NOW, before the caller reads any text; when the
+        // batch is applied, everything after this command is dropped if the
+        // target buffer was edited (or switched) in the meantime. A debounced
+        // repaint racing live typing would otherwise paint decorations at stale
+        // byte offsets. `on-stale` (a global fn name, or "") is dispatched on a
+        // drop so the caller can reschedule the repaint it just lost.
+        {
+            let q = queue.clone();
+            let shared = snapshot.clone();
+            reg.register_fn("guard-buffer-unchanged", move |on_stale: String| {
+                let s = shared.load();
+                q.lock().unwrap().push(EditorCommand::GuardBufferUnchanged {
+                    name: s.name.clone(),
+                    tick: s.tick,
+                    on_stale,
+                });
+            });
+        }
+        // `(buffer-tick)` → the published buffer's edit counter, and
+        // `(guard-buffer-tick name tick on-stale)` — the explicit-identity form
+        // of `guard-buffer-unchanged`, for repaints whose byte offsets were
+        // computed in an EARLIER eval than the one that paints them: an async
+        // backend reply (spell.scm's aspell / NSSpellChecker callbacks) must
+        // guard with the name+tick captured when the text was sent for
+        // checking, not with whatever the snapshot says when the reply lands.
+        register_snapshot_read(&mut reg, snapshot, "buffer-tick", |s| s.tick as usize);
+        {
+            let q = queue.clone();
+            reg.register_fn(
+                "guard-buffer-tick",
+                move |name: String, tick: usize, on_stale: String| {
+                    q.lock().unwrap().push(EditorCommand::GuardBufferUnchanged {
+                        name,
+                        tick: tick as u64,
+                        on_stale,
+                    });
+                },
+            );
+        }
         // `(set-line-indent line cols)` gives buffer `line` a virtual left indent
         // of `cols` columns (display-only); `(clear-line-indents)` removes them
         // all. Drives Org's org-indent-mode look.

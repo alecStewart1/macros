@@ -49,12 +49,18 @@ fn char_class(c: char) -> CharClass {
 #[derive(Debug, Default)]
 pub struct Buffer {
     rope: Rope,
+    /// Monotonic edit counter, bumped by every [`Self::replace`]. Published in
+    /// the Scheme snapshot so an async repaint (org/markdown fontify) can prove
+    /// its byte offsets were computed against the text as it still is — see
+    /// `EditorCommand::GuardBufferUnchanged`.
+    tick: u64,
 }
 
 impl Buffer {
     pub fn new(initial: impl AsRef<str>) -> Self {
         Self {
             rope: Rope::from_str(initial.as_ref()),
+            tick: 0,
         }
     }
 
@@ -63,7 +69,12 @@ impl Buffer {
     /// bridges working off the published snapshot rope — reuse the buffer's
     /// grapheme/word/line motion logic without rebuilding storage from a string.
     pub fn from_rope(rope: Rope) -> Self {
-        Self { rope }
+        Self { rope, tick: 0 }
+    }
+
+    /// The edit counter's current value (see the field doc).
+    pub fn tick(&self) -> u64 {
+        self.tick
     }
 
     /// Total length in bytes.
@@ -93,6 +104,7 @@ impl Buffer {
         if !new_text.is_empty() {
             self.rope.insert(start_char, new_text);
         }
+        self.tick += 1;
         range.start + new_text.len()
     }
 
@@ -313,6 +325,21 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tick_bumps_on_every_replace() {
+        // The tick is how the decoration guard detects "buffer edited since the
+        // repaint was computed", so every text mutation must bump it — inserts,
+        // deletes, and replacements alike.
+        let mut buffer = Buffer::new("hello");
+        assert_eq!(buffer.tick(), 0);
+        buffer.replace(0..0, "x");
+        assert_eq!(buffer.tick(), 1);
+        buffer.replace(0..1, "");
+        assert_eq!(buffer.tick(), 2);
+        buffer.replace(0..1, "H");
+        assert_eq!(buffer.tick(), 3);
+    }
 
     #[test]
     fn lsp_position_conversion_handles_utf16() {
