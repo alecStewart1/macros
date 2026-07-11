@@ -112,3 +112,12 @@
 ;; re-declared here: load-theme wipes attributes along with colors).
 (set-face "spell-error" "#e51400")
 (set-face-wavy "spell-error" #t)
+
+;; dap.scm / ui-dap.scm — debugger faces (breakpoint gutter dots, the stopped
+;; line, inline locals, the *dap* panel).
+(set-face "dap-breakpoint"         "#e51400")  ; verified breakpoint dot
+(set-face "dap-breakpoint-pending" "#b08d8d")  ; not (yet) bound by the adapter
+(set-face "dap-stopped-line"       "#b3591f")  ; line execution stopped on
+(set-face "dap-inline"             "#8f8f6a")  ; inline locals after the stopped line
+(set-face "dap-heading"            "#1a63a8")  ; panel section headings
+(set-face "dap-dim"                "#9a9a9a")  ; panel de-emphasis

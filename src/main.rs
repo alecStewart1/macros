@@ -2,6 +2,7 @@ mod analyze;
 mod anvil;
 mod assets;
 mod buffer;
+mod dap;
 mod editor;
 mod element;
 mod grammar;

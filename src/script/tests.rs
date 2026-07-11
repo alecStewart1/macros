@@ -8376,3 +8376,278 @@ mod modal_keys {
         );
     }
 }
+
+#[cfg(test)]
+mod dap_lib {
+    use super::*;
+
+    fn engine_with_libs() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        engine
+    }
+
+    /// dap-request stamps sequential `seq`s and dap--on-message routes a
+    /// response body back to the stored Scheme callback by `request_seq`.
+    #[test]
+    fn responses_correlate_to_request_callbacks() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(
+                r#"(begin
+                     (set! *dap-session* 99)   ; pretend a transport is up
+                     (define dap-test-got "")
+                     (dap-request "evaluate" (hash "expression" "x")
+                                  (lambda (body) (set! dap-test-got (dap--str body 'result)))))"#,
+            )
+            .unwrap();
+        // The response to the wrong seq is ignored; the right one fires.
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 "{\"type\":\"response\",\"request_seq\":42,\"success\":true,\"command\":\"evaluate\",\"body\":{\"result\":\"nope\"}}")"#,
+        );
+        assert_eq!(v("dap-test-got"), "\"\"");
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 "{\"type\":\"response\",\"request_seq\":1,\"success\":true,\"command\":\"evaluate\",\"body\":{\"result\":\"42\"}}")"#,
+        );
+        assert_eq!(v("dap-test-got"), "\"42\"");
+        assert_eq!(
+            v("(length *dap-pending*)"),
+            "0",
+            "pending entry not consumed"
+        );
+    }
+
+    /// A `stopped` event flips the state machine, records the thread, and the
+    /// stackTrace response populates the frames + selects the innermost.
+    #[test]
+    fn stopped_event_updates_state_thread_and_frames() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine.eval(r#"(set! *dap-session* 99)"#).unwrap();
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 "{\"type\":\"event\",\"event\":\"stopped\",\"body\":{\"reason\":\"breakpoint\",\"threadId\":7}}")"#,
+        );
+        assert_eq!(v("(eq? *dap-state* 'stopped)"), "#true");
+        assert_eq!(v("*dap-thread*"), "7");
+        // Answer the stackTrace request (the most recent seq). The frame's
+        // source doesn't exist, so the jump is skipped but the selection isn't.
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 (string-append
+                   "{\"type\":\"response\",\"request_seq\":" (int->string *dap-seq*)
+                   ",\"success\":true,\"command\":\"stackTrace\",\"body\":{\"stackFrames\":"
+                   "[{\"id\":3,\"name\":\"main\",\"line\":10,\"source\":{\"path\":\"/nonexistent/x.py\"}}]}}"))"#,
+        );
+        assert_eq!(v("(length *dap-frames*)"), "1");
+        assert_eq!(v("*dap-frame-idx*"), "0");
+        assert_eq!(v("(dap--current-frame-id)"), "3");
+    }
+
+    /// Breakpoint bookkeeping: per-file lookup, distinct files, condition
+    /// replacement, and the unverified marking from a setBreakpoints response.
+    #[test]
+    fn breakpoint_bookkeeping_and_verification() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(
+                r#"(set! *dap-breakpoints*
+                     (list (list "/a.py" 3 "") (list "/a.py" 9 "n > 2") (list "/b.go" 5 "")))"#,
+            )
+            .unwrap();
+        assert_eq!(v(r#"(length (dap--bps-for "/a.py"))"#), "2");
+        assert_eq!(v(r#"(length (dap--breakpoint-files))"#), "2");
+        assert_eq!(v(r#"(nth (dap--bp-at "/a.py" 9) 2)"#), "\"n > 2\"");
+        assert_eq!(v(r#"(dap--bp-at "/a.py" 4)"#), "#false");
+        // The adapter verifies the first /a.py breakpoint but not the second.
+        engine
+            .eval(
+                r#"(dap--note-verified "/a.py"
+                     (list (hash 'verified #t) (hash 'verified #f)))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (member (cons "/a.py" 9) *dap-bp-unverified*) #t #f)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(if (member (cons "/a.py" 3) *dap-bp-unverified*) #t #f)"#),
+            "#false"
+        );
+        // Setting a condition on an existing line replaces, not duplicates.
+        engine
+            .eval(r#"(begin (set! *dap--cond-target* (list "/a.py" 3)) (dap--set-condition "x == 1"))"#)
+            .unwrap();
+        assert_eq!(v(r#"(length (dap--bps-for "/a.py"))"#), "2");
+        assert_eq!(v(r#"(nth (dap--bp-at "/a.py" 3) 2)"#), "\"x == 1\"");
+    }
+
+    /// Adapter selection by file extension (debugpy for .py, delve for .go).
+    #[test]
+    fn adapter_registry_matches_extensions() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        assert_eq!(v(r#"(car (dap--adapter-for "/x/app.py"))"#), "\"debugpy\"");
+        assert_eq!(v(r#"(car (dap--adapter-for "/x/main.go"))"#), "\"delve\"");
+        assert_eq!(v(r#"(dap--adapter-for "/x/lib.rs")"#), "#false");
+    }
+
+    /// The panel build renders threads/stack/scopes/breakpoints from seeded
+    /// state and records the RET navigation tables.
+    #[test]
+    fn panel_build_renders_sections_and_nav_tables() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(
+                r#"(begin
+                     (set! *dap-state* 'stopped)
+                     (set! *dap-stopped-reason* "breakpoint")
+                     (set! *dap-adapter* (dap--adapter-for "/x/app.py"))
+                     (set! *dap-thread* 1)
+                     (set! *dap-threads* (list (hash 'id 1 'name "MainThread")))
+                     (set! *dap-frames* (list (hash 'id 3 'name "fetch" 'line 15
+                                                    'source (hash 'path "/x/app.py"))))
+                     (set! *dap-frame-idx* 0)
+                     (set! *dap-scopes* (list (list "Locals" 12 #f
+                                                    (list (hash 'name "resp" 'value "Response"
+                                                                'variablesReference 40)))))
+                     (set! *dap-breakpoints* (list (list "/x/app.py" 14 "")))
+                     (dap-ui--build))"#,
+            )
+            .unwrap();
+        let text = v("(section-text)");
+        assert!(text.contains("Debug: debugpy"), "header missing: {text}");
+        assert!(
+            text.contains("stopped: breakpoint"),
+            "state missing: {text}"
+        );
+        assert!(text.contains("MainThread"), "threads missing: {text}");
+        assert!(text.contains("fetch"), "stack missing: {text}");
+        assert!(text.contains("resp = Response"), "locals missing: {text}");
+        assert!(text.contains("app.py:14"), "breakpoints missing: {text}");
+        // The expandable variable landed in the RET table with its varref.
+        assert_eq!(v("(length *dap-ui--var-lines*)"), "1");
+        assert_eq!(v("(cdr (car *dap-ui--var-lines*))"), "40");
+        assert_eq!(v("(length *dap-ui--frame-lines*)"), "1");
+    }
+
+    /// delve listens on `:0`; the port comes from its announcement line.
+    #[test]
+    fn delve_port_parsed_from_announcement() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        assert_eq!(
+            v(r#"(dap--delve-port "DAP server listening at: 127.0.0.1:53211")"#),
+            "53211"
+        );
+        assert_eq!(
+            v(r#"(dap--delve-port "Type 'dlv help' for list")"#),
+            "#false"
+        );
+    }
+
+    /// Output for a console that isn't on screen is held in a capped backlog
+    /// instead of `append-to-buffer`, which would switch the selected window.
+    #[test]
+    fn hidden_console_output_is_backlogged_not_focus_stealing() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        let out = engine.eval(r#"(dap--console-append "hello\n")"#).unwrap();
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::AppendToBuffer { .. })),
+            "appended to a hidden console: {:?}",
+            out.commands
+        );
+        assert_eq!(v("*dap--console-backlog*"), "\"hello\\n\"");
+        engine
+            .eval(r#"(dap--console-append (make-string 70000 #\a))"#)
+            .unwrap();
+        assert_eq!(v("(string-length *dap--console-backlog*)"), "65536");
+    }
+
+    /// A force-kill timer only reaps the session it was scheduled for, and
+    /// dap-quit resets a session stuck "starting" with no transport.
+    #[test]
+    fn force_kill_is_pinned_and_quit_resets_starting() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval("(begin (set! *dap-session* 99) (dap--schedule-kill) (set! *dap-session* 100))")
+            .unwrap();
+        let out = engine.eval("(dap--force-kill)").unwrap();
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DapKill { .. })),
+            "killed the wrong session"
+        );
+        engine.eval("(set! *dap-session* 99)").unwrap();
+        let out = engine.eval("(dap--force-kill)").unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DapKill { id: 99 })),
+            "scheduled session not killed: {:?}",
+            out.commands
+        );
+        engine
+            .eval("(begin (set! *dap-session* -1) (set! *dap-state* 'starting) (dap-quit))")
+            .unwrap();
+        assert_eq!(v("(eq? *dap-state* 'dead)"), "#true");
+    }
+
+    /// Jumping to a file that isn't open parks the goto (open-file is async)
+    /// for the find-file-hook instead of moving point in the current buffer.
+    #[test]
+    fn jump_to_unopened_file_is_deferred_to_find_file_hook() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        let out = engine
+            .eval(r#"(dap--visit "/nonexistent-dap/x.py" 12 #t)"#)
+            .unwrap();
+        assert!(
+            matches!(out.commands.as_slice(), [EditorCommand::OpenFile(p)] if p == "/nonexistent-dap/x.py"),
+            "expected only OpenFile: {:?}",
+            out.commands
+        );
+        assert_eq!(v("(nth *dap--pending-jump* 1)"), "12");
+    }
+
+    /// file-truename resolves symlinks (the adapter reports real paths) and
+    /// passes a nonexistent path through unchanged.
+    #[test]
+    fn file_truename_resolves_symlinks() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        let dir = std::env::temp_dir().join(format!("macros-truename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.py");
+        std::fs::write(&real, "").unwrap();
+        let link = dir.join("link.py");
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            v(&format!("(file-truename {:?})", link.display().to_string())),
+            format!(
+                "{:?}",
+                std::fs::canonicalize(&real).unwrap().display().to_string()
+            )
+        );
+        assert_eq!(
+            v(r#"(file-truename "/nonexistent-dap/y.py")"#),
+            "\"/nonexistent-dap/y.py\""
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

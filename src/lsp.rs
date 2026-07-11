@@ -1958,7 +1958,8 @@ fn read_loop(stdout: std::process::ChildStdout, tx: UnboundedSender<Value>) {
 }
 
 /// The framing loop, generic over the reader so it's testable with a `Cursor`.
-fn read_frames<R: BufRead>(mut reader: R, tx: UnboundedSender<Value>) {
+/// Shared with the DAP transport ([`crate::dap`]) — same wire format.
+pub(crate) fn read_frames<R: BufRead>(mut reader: R, tx: UnboundedSender<Value>) {
     loop {
         let mut content_length = 0usize;
         loop {

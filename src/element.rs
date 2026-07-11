@@ -453,12 +453,15 @@ struct CursorCfg {
 /// Lay out one line's gutter: the line-number label, its fold chevron, the
 /// diagnostic dot, and the git-gutter change bar. Only called when the
 /// line-number gutter is shown (the other gutter features are gated on it).
+#[allow(clippy::too_many_arguments)]
 fn layout_gutter(
     line: &LineCtx,
     cfg: &GutterCfg,
     editor: &Editor,
+    theme: &Theme,
     diagnostics: &[crate::lsp::Diagnostic],
     diff_marks: &std::collections::HashMap<usize, crate::editor::DiffMark>,
+    gutter_dots: &std::collections::HashMap<usize, SharedString>,
     window: &mut Window,
     acc: &mut Accum,
 ) {
@@ -513,10 +516,22 @@ fn layout_gutter(
             .push(window.insert_hitbox(hit, HitboxBehavior::Normal));
     }
 
+    // Breakpoint gutter dot (`set-gutter-dot`, dap.scm): same shape and spot
+    // as the diagnostic dot, and it wins when both are present — the user put
+    // it there, and a diagnostic still shows via its text-area underline.
+    if let Some(face) = gutter_dots.get(&i) {
+        let color = theme.color(face, cfg.gg_removed);
+        let dot = px(DIAG_DOT);
+        let dx = bounds.left() + px(3.);
+        let dy = bounds.top() + line.top + px((f32::from(line.line_h) - DIAG_DOT) / 2.0);
+        let mut quad = fill(Bounds::new(point(dx, dy), size(dot, dot)), color);
+        quad.corner_radii = Corners::all(dot / 2.0);
+        acc.diagnostics.push(quad);
+    }
     // Diagnostic gutter dot: a colored circle on the far-left of the gutter
     // for any line carrying a diagnostic, colored by the worst severity
     // present (error > warning > info/hint).
-    if cfg.diag_gutter && marker.is_none() {
+    else if cfg.diag_gutter && marker.is_none() {
         let worst = diagnostics
             .iter()
             .filter(|d| d.range.start <= line.range.end && d.range.end >= line.range.start)
@@ -1030,6 +1045,7 @@ impl Element for EditorElement {
         let block_sel = editor.pane_visual_block(pane);
         let diagnostics = editor.pane_diagnostics(pane);
         let diff_marks = editor.pane_diff_marks(pane);
+        let gutter_dots = editor.pane_gutter_dots(pane);
         // Search matches highlight only in the selected pane (the active buffer),
         // and only over the visible line span — O(viewport), recomputed each
         // frame so it can't go stale.
@@ -1284,8 +1300,10 @@ impl Element for EditorElement {
                     &lc,
                     &gutter_cfg,
                     editor,
+                    theme,
                     &diagnostics,
                     diff_marks,
+                    gutter_dots,
                     window,
                     &mut acc,
                 );

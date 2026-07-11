@@ -194,6 +194,9 @@ struct Document {
     /// Per-line icon (asset name + char column to paint at), for special buffers
     /// like the file tree. Mirrors `line_faces`.
     line_icons: HashMap<usize, (usize, SharedString)>,
+    /// Gutter dot faces by line index — breakpoint signs (`set-gutter-dot`,
+    /// dap.scm). Mirrors `line_faces`.
+    gutter_dots: HashMap<usize, SharedString>,
     /// Per-line inline image: `line -> image file path`. The decoded bitmap lives
     /// in the editor-wide [`Editor::image_cache`]; this just records which lines
     /// display which image (Org inline images / LaTeX previews).
@@ -294,6 +297,7 @@ struct DecorationTarget<'a> {
     buffer: &'a Buffer,
     overlays: &'a mut Overlays,
     line_icons: &'a mut HashMap<usize, (usize, SharedString)>,
+    gutter_dots: &'a mut HashMap<usize, SharedString>,
     line_images: &'a mut HashMap<usize, (PathBuf, usize)>,
 }
 
@@ -633,6 +637,10 @@ pub struct Editor {
     resizing: Option<ResizeDrag>,
     /// Live async child processes, by id (for stdin/kill).
     processes: HashMap<u64, ProcessHandle>,
+    /// Live DAP sessions, by id (for dap-send / dap-kill). The transport
+    /// (framing, adapter process/socket) lives in [`crate::dap::DapClient`];
+    /// the protocol state machine lives in Scheme (dap.scm).
+    dap_sessions: HashMap<u64, crate::dap::DapClient>,
     /// Cancel flags for in-flight HTTP streams, by id. `http-stream-cancel` flips
     /// the flag; the stream's reader thread checks it between lines and stops.
     http_streams: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -1336,6 +1344,7 @@ impl Editor {
             resizing: None,
             processes: HashMap::new(),
             async_sockets: HashMap::new(),
+            dap_sessions: HashMap::new(),
             http_streams: HashMap::new(),
             http_servers: HashMap::new(),
             terminals: HashMap::new(),
@@ -3301,6 +3310,7 @@ impl Editor {
                     buffer: &doc.buffer,
                     overlays: &mut doc.overlays,
                     line_icons: &mut doc.line_icons,
+                    gutter_dots: &mut doc.gutter_dots,
                     line_images: &mut doc.line_images,
                 }
             }
@@ -3308,6 +3318,7 @@ impl Editor {
                 buffer: &self.active.buffer,
                 overlays: &mut self.active.overlays,
                 line_icons: &mut self.active.line_icons,
+                gutter_dots: &mut self.active.gutter_dots,
                 line_images: &mut self.active.line_images,
             },
         }
@@ -4403,6 +4414,7 @@ fn blank_document(
         special: None,
         line_faces: HashMap::new(),
         line_icons: HashMap::new(),
+        gutter_dots: HashMap::new(),
         line_images: HashMap::new(),
         overlays: Overlays::default(),
         locals: HashMap::new(),

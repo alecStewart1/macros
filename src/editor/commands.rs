@@ -291,6 +291,16 @@ impl Editor {
                 self.redirect_target().line_icons.clear();
                 cx.notify();
             }
+            SetGutterDot(line, face) => {
+                self.redirect_target()
+                    .gutter_dots
+                    .insert(line, SharedString::from(face));
+                cx.notify();
+            }
+            ClearGutterDots => {
+                self.redirect_target().gutter_dots.clear();
+                cx.notify();
+            }
             SetLineImage {
                 line,
                 path,
@@ -927,6 +937,16 @@ impl Editor {
             }
             SendProcess { id, text } => self.send_to_process(id, &text, cx),
             KillProcess { id } => self.kill_process(id),
+            DapStart(args) => self.dap_start(*args, cx),
+            DapConnect {
+                id,
+                host,
+                port,
+                on_message,
+                on_exit,
+            } => self.dap_connect(id, host, port, on_message, on_exit, cx),
+            DapSend { id, message } => self.dap_send(id, &message),
+            DapKill { id } => self.dap_kill(id),
             HttpStream(args) => self.http_stream(*args, cx),
             HttpStreamCancel { id } => self.http_stream_cancel(id),
             HttpRequest(args) => self.http_request(*args, cx),
