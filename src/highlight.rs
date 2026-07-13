@@ -64,7 +64,8 @@ pub fn face_name(face: usize) -> &'static str {
 /// highlight query, its optional indent query, the file extensions that map to
 /// it, and the fenced-code-block tags that inject it. All the per-language
 /// lookups ([`BUNDLED_LANGUAGES`], [`grammar`], [`indent_query`],
-/// [`injection_lang_id`], [`language_for_extension`]) derive from this table,
+/// [`injection_lang_id`], [`language_for_extension`],
+/// [`language_for_filename`]) derive from this table,
 /// so adding a language is a single entry here (plus its grammar crate in
 /// Cargo.toml).
 struct LangSpec {
@@ -76,6 +77,10 @@ struct LangSpec {
     indent: Option<&'static str>,
     /// File extensions that open in this language (case-sensitive, no dot).
     extensions: &'static [&'static str],
+    /// Exact basenames that open in this language — extensionless config
+    /// files like Dune's `dune` / `dune-project`, which the extension column
+    /// can never match. Checked before extensions in `language_for_path`.
+    filenames: &'static [&'static str],
     /// Fenced-block info-string tags (lowercased) that inject this language
     /// into markdown. Empty for languages that are never injected (markdown
     /// itself is excluded so a nested ```markdown block can't recurse).
@@ -91,6 +96,9 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: include_str!("../grammars/queries/scheme.scm"),
         indent: None,
         extensions: &["scm", "ss", "sld", "sls", "steel"],
+        // Dune build files are plain s-expressions; the scheme grammar parses
+        // them and the Lisp aligner indents them.
+        filenames: &["dune", "dune-project", "dune-workspace"],
         injection_tags: &["scheme", "scm", "lisp"],
     },
     LangSpec {
@@ -99,6 +107,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_rust::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/rust.scm")),
         extensions: &["rs"],
+        filenames: &[],
         injection_tags: &["rust", "rs"],
     },
     LangSpec {
@@ -107,6 +116,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_python::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/python.scm")),
         extensions: &["py", "pyi"],
+        filenames: &[],
         injection_tags: &["python", "py"],
     },
     LangSpec {
@@ -115,6 +125,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_javascript::HIGHLIGHT_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/javascript.scm")),
         extensions: &["js", "jsx", "mjs", "cjs"],
+        filenames: &[],
         injection_tags: &["javascript", "js", "jsx", "mjs"],
     },
     LangSpec {
@@ -123,6 +134,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_json::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/json.scm")),
         extensions: &["json"],
+        filenames: &[],
         injection_tags: &["json"],
     },
     LangSpec {
@@ -131,6 +143,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_c::HIGHLIGHT_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/c.scm")),
         extensions: &["c", "h"],
+        filenames: &[],
         injection_tags: &["c", "h"],
     },
     LangSpec {
@@ -139,6 +152,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_cpp::HIGHLIGHT_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/cpp.scm")),
         extensions: &["cc", "cpp", "cxx", "hpp", "hh", "hxx"],
+        filenames: &[],
         injection_tags: &["cpp", "c++", "cc", "cxx", "hpp"],
     },
     LangSpec {
@@ -147,6 +161,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_go::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/go.scm")),
         extensions: &["go"],
+        filenames: &[],
         injection_tags: &["go"],
     },
     LangSpec {
@@ -155,6 +170,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_html::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/html.scm")),
         extensions: &["html", "htm"],
+        filenames: &[],
         injection_tags: &["html"],
     },
     LangSpec {
@@ -163,6 +179,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_css::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/css.scm")),
         extensions: &["css"],
+        filenames: &[],
         injection_tags: &["css"],
     },
     LangSpec {
@@ -171,6 +188,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_bash::HIGHLIGHT_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/bash.scm")),
         extensions: &["sh", "bash", "zsh"],
+        filenames: &[],
         injection_tags: &["bash", "sh", "shell", "zsh", "console"],
     },
     LangSpec {
@@ -179,6 +197,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/typescript.scm")),
         extensions: &["ts"],
+        filenames: &[],
         injection_tags: &["typescript", "ts"],
     },
     LangSpec {
@@ -187,6 +206,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/tsx.scm")),
         extensions: &["tsx"],
+        filenames: &[],
         injection_tags: &["tsx"],
     },
     LangSpec {
@@ -195,6 +215,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_java::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/java.scm")),
         extensions: &["java"],
+        filenames: &[],
         injection_tags: &["java"],
     },
     LangSpec {
@@ -203,6 +224,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_ruby::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/ruby.scm")),
         extensions: &["rb"],
+        filenames: &[],
         injection_tags: &["ruby", "rb"],
     },
     LangSpec {
@@ -211,6 +233,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_lua::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/lua.scm")),
         extensions: &["lua"],
+        filenames: &[],
         injection_tags: &["lua"],
     },
     LangSpec {
@@ -219,6 +242,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_yaml::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/yaml.scm")),
         extensions: &["yaml", "yml"],
+        filenames: &[],
         injection_tags: &["yaml", "yml"],
     },
     LangSpec {
@@ -227,6 +251,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
         indent: None,
         extensions: &["toml"],
+        filenames: &[],
         injection_tags: &["toml"],
     },
     LangSpec {
@@ -237,6 +262,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
         indent: None,
         extensions: &["md", "markdown"],
+        filenames: &[],
         injection_tags: &[],
     },
     LangSpec {
@@ -245,6 +271,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_zig::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/zig.scm")),
         extensions: &["zig"],
+        filenames: &[],
         injection_tags: &["zig"],
     },
     LangSpec {
@@ -253,6 +280,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_r::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/r.scm")),
         extensions: &["r", "R"],
+        filenames: &[],
         injection_tags: &["r"],
     },
     LangSpec {
@@ -261,6 +289,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_ocaml::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/ocaml.scm")),
         extensions: &["ml", "mli"],
+        filenames: &[],
         injection_tags: &["ocaml", "ml"],
     },
     LangSpec {
@@ -269,6 +298,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_haskell::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/haskell.scm")),
         extensions: &["hs"],
+        filenames: &[],
         injection_tags: &["haskell", "hs"],
     },
     LangSpec {
@@ -277,6 +307,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_scala::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/scala.scm")),
         extensions: &["scala", "sc", "sbt"],
+        filenames: &[],
         injection_tags: &["scala", "sc"],
     },
     LangSpec {
@@ -285,6 +316,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_clojure_orchard::HIGHLIGHTS_QUERY,
         indent: None,
         extensions: &["clj", "cljs", "cljc", "edn"],
+        filenames: &[],
         injection_tags: &["clojure", "clj", "cljs", "cljc", "edn"],
     },
     LangSpec {
@@ -293,6 +325,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_sequel::HIGHLIGHTS_QUERY,
         indent: None,
         extensions: &["sql"],
+        filenames: &[],
         injection_tags: &["sql"],
     },
     LangSpec {
@@ -301,6 +334,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: tree_sitter_elixir::HIGHLIGHTS_QUERY,
         indent: Some(include_str!("../grammars/queries/indents/elixir.scm")),
         extensions: &["ex", "exs"],
+        filenames: &[],
         injection_tags: &["elixir", "ex", "exs"],
     },
     // LaTeX, Typst, and Mermaid bundle no highlights query with the parser,
@@ -312,6 +346,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: include_str!("../grammars/queries/latex.scm"),
         indent: None,
         extensions: &["tex", "sty", "cls"],
+        filenames: &[],
         injection_tags: &[],
     },
     LangSpec {
@@ -320,6 +355,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: include_str!("../grammars/queries/typst.scm"),
         indent: None,
         extensions: &["typ"],
+        filenames: &[],
         injection_tags: &[],
     },
     LangSpec {
@@ -328,6 +364,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: include_str!("../grammars/queries/mermaid.scm"),
         indent: None,
         extensions: &["mmd", "mermaid"],
+        filenames: &[],
         injection_tags: &[],
     },
     // Racket has its own grammar (`.rkt`); Steel/Scheme files still use the
@@ -338,6 +375,7 @@ const LANGUAGES: &[LangSpec] = &[
         highlights: include_str!("../grammars/queries/racket.scm"),
         indent: None,
         extensions: &["rkt"],
+        filenames: &[],
         injection_tags: &["racket", "rkt"],
     },
 ];
@@ -366,6 +404,16 @@ pub fn language_for_extension(ext: &str) -> Option<&'static str> {
     LANGUAGES
         .iter()
         .find(|spec| spec.extensions.contains(&ext))
+        .map(|spec| spec.id)
+}
+
+/// The bundled language claiming exact file basename `name` (case-sensitive),
+/// if any. The filename side of `language_for_path` — how extensionless config
+/// files like `dune-project` get a language.
+pub fn language_for_filename(name: &str) -> Option<&'static str> {
+    LANGUAGES
+        .iter()
+        .find(|spec| spec.filenames.contains(&name))
         .map(|spec| spec.id)
 }
 
@@ -1106,6 +1154,12 @@ mod tests {
             assert_eq!(language_for_extension(ext), Some(lang), "extension {ext}");
         }
         assert_eq!(language_for_extension("nope"), None);
+        // Exact basenames resolve through the filenames column of the same
+        // table — extensionless files like Dune's can't match by extension.
+        for name in ["dune", "dune-project", "dune-workspace"] {
+            assert_eq!(language_for_filename(name), Some("scheme"), "file {name}");
+        }
+        assert_eq!(language_for_filename("main.rs"), None, "exact match only");
         // Injection tags resolve through the same table.
         assert_eq!(injection_lang_id("C++"), Some("cpp"));
         assert_eq!(injection_lang_id(" shell "), Some("bash"));

@@ -3875,11 +3875,20 @@ fn load_inline_image(path: &Path) -> Option<CachedImage> {
     })
 }
 
-/// The highlighting language for a file, by extension. Bundled grammars
-/// (the extension column of `highlight::LANGUAGES`) win; otherwise a grammar a
-/// user installed at runtime (M-x install-language) may claim the extension —
-/// checked so opening the file highlights without a restart.
+/// The highlighting language for a file, by exact basename then extension.
+/// The basename check (the filenames column of `highlight::LANGUAGES`) is how
+/// extensionless config files like Dune's `dune-project` match. On the
+/// extension side, bundled grammars win; otherwise a grammar a user installed
+/// at runtime (M-x install-language) may claim the extension — checked so
+/// opening the file highlights without a restart.
 fn language_for_path(path: &Path) -> Option<&'static str> {
+    if let Some(lang) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(crate::highlight::language_for_filename)
+    {
+        return Some(lang);
+    }
     let ext = path.extension().and_then(|e| e.to_str())?;
     crate::highlight::language_for_extension(ext)
         .or_else(|| crate::grammar::language_for_extension(ext))

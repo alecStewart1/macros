@@ -324,7 +324,7 @@ impl Editor {
             }
             References => {
                 let locations = lsp::parse_locations(result);
-                self.show_references(locations, cx);
+                self.goto_locations("references", locations, cx);
             }
             DocumentSymbols | WorkspaceSymbols => {
                 let uri = self.active_uri().unwrap_or_default();
@@ -1181,47 +1181,6 @@ impl Editor {
         let value: Value = serde_json::from_str(&json_text).unwrap_or(Value::Null);
         let edits = lsp::parse_text_edits(&value);
         self.apply_format_edits(edits, cx);
-    }
-
-    /// Render a list of locations into the read-only `*lsp-xref*` buffer (RET
-    /// visits). Each row is `path:line: <source text>`.
-    pub(super) fn show_references(
-        &mut self,
-        locations: Vec<lsp::Location>,
-        cx: &mut Context<Self>,
-    ) {
-        if locations.is_empty() {
-            self.echo("No references found", cx);
-            return;
-        }
-        // Cache the source line of each file once, to render readable rows.
-        let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
-        let mut rows = Vec::new();
-        let mut targets = Vec::new();
-        for loc in &locations {
-            let path = lsp::uri_to_path(&loc.uri);
-            let lines = file_cache.entry(path.clone()).or_insert_with(|| {
-                std::fs::read_to_string(&path)
-                    .unwrap_or_default()
-                    .lines()
-                    .map(str::to_string)
-                    .collect()
-            });
-            let short = basename(&path);
-            let text = lines.get(loc.start.0).map_or("", |s| s.trim());
-            rows.push(format!("{short}:{}: {text}", loc.start.0 + 1));
-            targets.push((loc.uri.clone(), loc.start.0, loc.start.1));
-        }
-        self.xref_targets = targets;
-        let header = format!("References ({})", locations.len());
-        let text = format!("{header}\n\n{}", rows.join("\n"));
-        self.render_buffer(
-            "*lsp-xref*".into(),
-            "lsp-xref-mode".into(),
-            text,
-            Vec::new(),
-            cx,
-        );
     }
 
     /// Render document/workspace symbols into `*lsp-symbols*` (RET visits).

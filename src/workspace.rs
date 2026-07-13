@@ -332,6 +332,7 @@ impl Workspace {
                 .flex_1()
                 .px_2()
                 .py_1()
+                .text_size(px(13.))
                 .text_color(dim)
                 .bg(panel_bg)
                 .child(SharedString::from(text))

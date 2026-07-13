@@ -720,10 +720,18 @@ impl Editor {
         }
     }
 
-    /// `C-x k`: kill the active buffer (confirming first if it has unsaved
-    /// changes), then show the most-recent other buffer (or a fresh scratch).
+    /// Does killing the active buffer need a confirm? Emacs semantics: only a
+    /// FILE-VISITING buffer guards unsaved changes — a scratch-like buffer
+    /// (*scratch*, a package's query pane) has nowhere to save to, so killing
+    /// it just discards, no prompt.
+    fn kill_needs_confirm(&self) -> bool {
+        self.active.modified && self.active.path.is_some()
+    }
+
+    /// `C-x k`: kill the active buffer (confirming first if it's a modified
+    /// file buffer), then show the most-recent other buffer (or a fresh scratch).
     pub(super) fn kill_buffer(&mut self, cx: &mut Context<Self>) {
-        if self.active.modified {
+        if self.kill_needs_confirm() {
             self.open_confirm(
                 "Buffer modified; kill anyway?",
                 PendingAction::KillActiveBuffer,
@@ -735,10 +743,10 @@ impl Editor {
     }
 
     /// Kill the active buffer *and* close its window (Emacs `kill-buffer-and-
-    /// window`), confirming first if the buffer has unsaved changes. With a sole
+    /// window`), confirming first if it's a modified file buffer. With a sole
     /// window, the buffer is killed and `delete_window` just declines.
     pub(super) fn kill_buffer_and_window(&mut self, cx: &mut Context<Self>) {
-        if self.active.modified {
+        if self.kill_needs_confirm() {
             self.open_confirm(
                 "Buffer modified; kill anyway?",
                 PendingAction::KillBufferAndWindow,
