@@ -15,6 +15,7 @@ mod spell;
 mod terminal;
 mod theme;
 mod update;
+mod util;
 mod workspace;
 
 use std::borrow::Cow;

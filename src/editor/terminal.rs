@@ -94,6 +94,8 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         // Spawn here (not on the worker) so we can keep the child for stdin/kill.
+        // Expand a leading `~/` — `Command::new` does no shell expansion.
+        let program = crate::util::expand_tilde(&program);
         let mut cmd = Command::new(&program);
         cmd.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped());
         // Its own process group, so kill_process can take down the whole tree

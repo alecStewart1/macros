@@ -3846,12 +3846,7 @@ fn translate_backrefs(replacement: &str) -> String {
 
 /// Expand a leading `~/` to the home directory.
 fn expand_path(input: &str) -> String {
-    if let Some(rest) = input.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return format!("{home}/{rest}");
-    }
-    input.to_string()
+    crate::util::expand_tilde(input)
 }
 
 /// Decode an image file into a GPUI [`RenderImage`] (RGBA → BGRA, the byte order

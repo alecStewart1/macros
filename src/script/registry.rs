@@ -1533,6 +1533,7 @@ pub(crate) fn build_engine(
         "call-process",
         move |program: String, args: SteelVal| -> String {
             let args = steel_string_list(&args);
+            let program = crate::util::expand_tilde(&program);
             std::process::Command::new(&program)
                 .args(&args)
                 .output()
@@ -1549,6 +1550,7 @@ pub(crate) fn build_engine(
             use std::io::Write;
             use std::process::Stdio;
             let args = steel_string_list(&args);
+            let program = crate::util::expand_tilde(&program);
             let spawn = std::process::Command::new(&program)
                 .args(&args)
                 .stdin(Stdio::piped())

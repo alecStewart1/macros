@@ -67,7 +67,11 @@ impl LspClient {
         let program = parts
             .next()
             .ok_or_else(|| "empty LSP command".to_string())?;
-        let mut child = match Command::new(program)
+        // `Command::new` does no shell expansion, so expand a leading `~/` in the
+        // program path ourselves — otherwise `~/.opam/…/ocaml_lsp` is looked up
+        // as a literal path and fails with NotFound.
+        let program = crate::util::expand_tilde(program);
+        let mut child = match Command::new(&program)
             .args(parts)
             .current_dir(root)
             .stdin(Stdio::piped())
