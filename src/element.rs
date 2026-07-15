@@ -710,7 +710,7 @@ fn layout_decorations(
         // Inlay-hint / code-lens text is LSP-sourced; collapse any newline so the
         // single-line `shape_line` below can't panic and abort the editor.
         let suffix = if suffix.contains(['\n', '\r']) {
-            crate::util::single_line(&suffix)
+            crate::util::single_line(suffix)
         } else {
             suffix.to_string()
         };
