@@ -102,6 +102,9 @@ const OPTIONS: &[OptionSpec] = &[
     opt("completion-auto-prefix", Kind::Int, Some(0.0), None),
     opt("completion-max-rows", Kind::Int, Some(1.0), None),
     opt("completion-style", Kind::Str, None, None),
+    opt("completion-trigger-chars", Kind::Str, None, None),
+    opt("indent-after", Kind::Str, None, None),
+    opt("align-after", Kind::Str, None, None),
     opt("cursor-style", Kind::Str, None, None),
     opt("font-family", Kind::Str, None, None),
     opt("completion-auto", Kind::Bool, None, None),
@@ -153,6 +156,18 @@ fn option_kind(key: &str) -> Option<(Kind, Option<f64>, Option<f64>)> {
         .iter()
         .find(|spec| spec.name == base)
         .map(|spec| (spec.kind, spec.min, spec.max))
+}
+
+/// Best-effort read of an [`OptionValue`] as a non-negative `usize`, tolerating
+/// the string form (so a value stored uncoerced — an unregistered per-mode key —
+/// still parses).
+fn opt_usize(v: &OptionValue) -> Option<usize> {
+    match v {
+        OptionValue::Int(i) if *i >= 0 => Some(*i as usize),
+        OptionValue::Float(f) if *f >= 0.0 => Some(*f as usize),
+        OptionValue::Str(s) => s.trim().parse::<usize>().ok(),
+        _ => None,
+    }
 }
 
 /// Coerce a raw value (as supplied to `set-option`) to `kind`, applying the
@@ -278,6 +293,29 @@ impl Settings {
         .unwrap_or_else(|| self.bool_or(base, default))
     }
 
+    /// Resolve a *per-major-mode* unsigned-int option: a `base:<mode>` value, if
+    /// set, overrides the global `base`. `Settings::set` coerces `base:<mode>` to
+    /// the base's declared type (via [`option_kind`], which strips the `:mode`
+    /// suffix), so for a registered base like `tab-width` the value is already an
+    /// `Int`; `opt_usize` still accepts the string form defensively for any
+    /// unregistered base.
+    fn usize_per_mode(&self, base: &str, mode: Option<&str>, default: usize) -> usize {
+        mode.and_then(|m| self.values.get(&format!("{base}:{m}")))
+            .and_then(opt_usize)
+            .unwrap_or_else(|| self.usize_or(base, default))
+    }
+
+    /// Resolve a *per-major-mode* string option: a `base:<mode>` value, if set,
+    /// overrides the global `base`. Returns an owned `String` since it may come
+    /// from either the mode key or the base.
+    fn str_per_mode(&self, base: &str, mode: Option<&str>, default: &str) -> String {
+        mode.and_then(|m| match self.values.get(&format!("{base}:{m}")) {
+            Some(OptionValue::Str(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| self.str_or(base, default).to_string())
+    }
+
     /// Editor font family. A single family name (not a fallback list); the
     /// named font must be installed or GPUI falls back to its own default.
     pub fn font_family(&self) -> &str {
@@ -300,6 +338,38 @@ impl Settings {
     /// with `(set-option "tab-width" N)`; default 4.
     pub fn tab_width(&self) -> usize {
         self.usize_or("tab-width", 4)
+    }
+
+    /// The indent step for a specific language: a `tab-width:<mode>` override, if
+    /// set, otherwise the global `tab-width`. Bundled `scheme/indent.scm` seeds
+    /// per-language conventions (OCaml/Ruby → 2, …); `(set-option "tab-width:ocaml"
+    /// N)` in `init.scm` (loaded last) overrides them.
+    pub fn tab_width_for(&self, mode: Option<&str>) -> usize {
+        self.usize_per_mode("tab-width", mode, 4)
+    }
+
+    /// Extra completion trigger characters for a language, *added to* whatever the
+    /// language server advertises. Lets a language whose server under-advertises
+    /// (e.g. ocamllsp, which doesn't list `.`) still auto-open completion on member
+    /// access. Bundled `scheme/completion.scm` seeds `completion-trigger-chars:ocaml`
+    /// = "."; override per language with `(set-option "completion-trigger-chars:<lang>" "…")`.
+    pub fn completion_trigger_chars(&self, mode: Option<&str>) -> String {
+        self.str_per_mode("completion-trigger-chars", mode, "")
+    }
+
+    /// Trailing-token indent rules for a language (a token-level layer on top of
+    /// the structural tree-sitter indent). `indent-after` lists tokens whose
+    /// presence at the END of a line opens the next line one step deeper (OCaml
+    /// `->`); `align-after` lists tokens that keep the next line at the current
+    /// line's column (OCaml `in` / `with`, which align rather than indent). Each is
+    /// a whitespace-separated token list, set per language, e.g.
+    /// `(set-option "indent-after:ocaml" "->")`.
+    pub fn indent_after(&self, mode: Option<&str>) -> String {
+        self.str_per_mode("indent-after", mode, "")
+    }
+
+    pub fn align_after(&self, mode: Option<&str>) -> String {
+        self.str_per_mode("align-after", mode, "")
     }
 
     /// Whether RET keeps the current indentation (and, in Lisp buffers, indents
@@ -592,5 +662,46 @@ mod tests {
         s.set("font-size".into(), OptionValue::Int(16));
         s.set("font-size".into(), OptionValue::Str("abc".into()));
         assert_eq!(s.font_size(), 16.0);
+    }
+
+    #[test]
+    fn completion_trigger_chars_per_language() {
+        let mut s = Settings::default();
+        // No config: empty (server-advertised triggers still apply elsewhere).
+        assert_eq!(s.completion_trigger_chars(Some("ocaml")), "");
+        // A per-language value applies only to that language.
+        s.set(
+            "completion-trigger-chars:ocaml".into(),
+            OptionValue::Str(".".into()),
+        );
+        assert_eq!(s.completion_trigger_chars(Some("ocaml")), ".");
+        assert_eq!(s.completion_trigger_chars(Some("rust")), "");
+        // A global value applies to languages without an override.
+        s.set(
+            "completion-trigger-chars".into(),
+            OptionValue::Str(".:".into()),
+        );
+        assert_eq!(s.completion_trigger_chars(Some("rust")), ".:");
+        assert_eq!(s.completion_trigger_chars(Some("ocaml")), "."); // override wins
+    }
+
+    #[test]
+    fn tab_width_per_language_override() {
+        let mut s = Settings::default();
+        // No override: every language uses the global tab-width.
+        assert_eq!(s.tab_width_for(Some("ocaml")), 4);
+        assert_eq!(s.tab_width_for(None), 4);
+        // A `tab-width:<lang>` override applies only to that language. `set`
+        // coerces it to the base's Int type…
+        s.set("tab-width:ocaml".into(), OptionValue::Int(2));
+        assert_eq!(s.tab_width_for(Some("ocaml")), 2);
+        assert_eq!(s.tab_width_for(Some("rust")), 4); // untouched
+        // …including the string form `(set-option "tab-width:ruby" "2")`.
+        s.set("tab-width:ruby".into(), OptionValue::Str("2".into()));
+        assert_eq!(s.tab_width_for(Some("ruby")), 2);
+        // A changed global tab-width flows to languages without an override.
+        s.set("tab-width".into(), OptionValue::Int(8));
+        assert_eq!(s.tab_width_for(Some("go")), 8);
+        assert_eq!(s.tab_width_for(Some("ocaml")), 2); // override still wins
     }
 }

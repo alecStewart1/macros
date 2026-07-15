@@ -9,6 +9,13 @@
 (define-key "completion" "enter" 'completion-accept) ; …ENTER accepts the selected one
 (define-key "completion" "ctrl-g" 'completion-abort)
 
+;; --- per-language completion trigger characters -----------------------------
+;; Characters that auto-open the completion popup with no word prefix (member
+;; access), ADDED to whatever the language server advertises. ocamllsp advertises
+;; none, so `Stdlib.` wouldn't auto-complete without this; add other languages
+;; whose servers under-advertise the same way. Override in init.scm (loaded last).
+(set-option "completion-trigger-chars:ocaml" ".")
+
 ;; --- completion-at-point-functions (CAPF) -----------------------------------
 ;; `completion-at-point` (M-i) tries each registered Scheme CAPF in order before
 ;; falling back to the language server. A CAPF is a function of the prefix word

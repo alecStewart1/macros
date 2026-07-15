@@ -194,8 +194,9 @@ Turn the whole feature off with `(set-option "electric-indent" "false")`.
 | `@outdent` | A closing token (`}`, `)`, `end`) whose own line dedents one step. |
 | `@extend` | Indent the lines that follow this node **even when its body is still empty** — for layout languages (`if x:` …) where there is no delimiter token to open a block. |
 | `@indent.always` | Like `@indent`, but exempt from the "one step per start row" dedup (rarely needed). |
+| `@align` + `@anchor` | Column alignment (Helix-style): continuation lines inside the `@align` node line up under the `@anchor` node's column instead of stepping in a fixed amount — e.g. wrapped call arguments under the first one. Capture the container `@align` and the node to align to `@anchor` in the same pattern. |
 
-A step is one [`tab-width`](/docs/configuration). Two `@indent` nodes that open on the *same* row count once, so capturing both an `if` statement and its block won't double-indent.
+A step is one indent width — the global [`tab-width`](/docs/configuration), or a per-language `tab-width:<id>` override where set (OCaml is 2, matching ocamlformat). Two `@indent` nodes that open on the *same* row count once, so capturing both an `if` statement and its block won't double-indent.
 
 A brace-delimited language is usually just its block-like nodes plus the closing brackets. For Rust:
 
@@ -231,6 +232,21 @@ A layout language (no closing token for blocks) leans on `@extend` for its compo
 Keyword-delimited languages (Ruby, Lua) combine both: `@extend` on `def`/`class`/`do` blocks, with `"end"` as an `@outdent` token.
 
 The bundled queries live in `grammars/queries/indents/` and are the best templates. If a query won't compile against its grammar, the language silently falls back to copy-previous-indent — so a typo degrades gracefully rather than breaking. Lisps deliberately have **no** indent query (the built-in aligner is better at column alignment than the step model).
+
+### Trailing-token rules
+
+Some distinctions aren't structural. In OCaml a match arm whose `->` **dangles** at the end of a line should indent its body, but a `let … in` or `match … with` line should keep the next line at the same column — and the syntax tree can't tell a dangling `->` from a satisfied one (`| A -> a`). For these, a per-language token layer runs on top of the structural indent:
+
+```scheme
+;; A line ENDING in one of these opens the next line one step deeper.
+(set-option "indent-after:ocaml" "->")
+;; A line ENDING in one of these keeps the next line at the current column.
+(set-option "align-after:ocaml" "in with")
+```
+
+Each value is a whitespace-separated list of tokens (compared to the line's last whitespace-delimited token, so `main` never matches `in`). `indent-after` only ever *raises* the indent — it never reduces a deeper structural result — and `align-after` pins to the current line's column. They're per-language options (see [Per-mode options](/docs/configuration#per-mode-options)); the bundled set lives in `scheme/indent.scm`.
+
+This is the same layered approach Neovim's per-language indent scripts take, for the cases pure tree-sitter can't express. When in doubt, keep the structural query simple and reach for a token rule only for a genuinely ambiguous keyword.
 
 ### Adding an indent query
 

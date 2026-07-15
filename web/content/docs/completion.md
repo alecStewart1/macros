@@ -11,6 +11,7 @@ Macros has a **corfu-style** in-buffer completion popup. It can appear automatic
 
 - **On demand:** <kbd>M-i</kbd> (`completion-at-point`). In modal editing, <kbd>Space c</kbd>.
 - **Automatically:** when `completion-auto` is on (the default), the popup appears after you've typed `completion-auto-prefix` word characters.
+- **On a trigger character:** the popup opens immediately — no word prefix — after a *trigger character* such as `.` for member access (`List.` → members). Trigger characters come from the language server plus a configurable per-language set (see [Options](#options)); this is what makes `Stdlib.` complete on the dot.
 
 ## Popup keys
 
@@ -36,6 +37,14 @@ Set these in your `init.scm` (defaults shown). Values are typed — numbers and 
 (set-option "completion-show-kind"   #t)       ; show kind tag (fn, var, kw…)
 (set-option "completion-capf"        #t)       ; set #f for LSP-only
 ```
+
+**Trigger characters.** A trigger character auto-opens the popup with no word prefix. The language server advertises its own (most do), and you can add more per language — *added to*, not replacing, the server's set. This matters for servers that advertise none: ocamllsp lists no trigger characters, so the bundled config supplies the dot:
+
+```scheme
+(set-option "completion-trigger-chars:ocaml" ".")   ; each char triggers; "" disables
+```
+
+The key is `completion-trigger-chars:<language-id>` (a [per-language option](/docs/configuration#per-mode-options)); a bare `completion-trigger-chars` applies to every language.
 
 ## completion-at-point functions (CAPFs)
 

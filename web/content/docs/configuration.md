@@ -91,6 +91,22 @@ Append `:mode-name` to scope an option to one major mode. For example, the dired
 (set-option "line-numbers:dired-sidebar-mode" #f)
 ```
 
+For code buffers the mode name is the **language id** (`ocaml`, `rust`, `tsx`, …, the same id used by `lsp-language` and syntax highlighting), so `:mode` doubles as a per-language override. Several editor defaults use this:
+
+```scheme
+;; Indent step per language — one structural level is this many columns.
+;; The bundled config ships each language's convention (OCaml/Ruby → 2,
+;; Rust/Python → 4, …) so live editing matches its formatter; override freely:
+(set-option "tab-width:ocaml" 2)   ; vs the global "tab-width" (default 4)
+
+;; Extra completion trigger characters, added to whatever the language server
+;; advertises — auto-open completion on member access even when the server
+;; lists none (ocamllsp doesn't advertise ".").
+(set-option "completion-trigger-chars:ocaml" ".")
+```
+
+The bundled defaults live in `scheme/indent.scm` and `scheme/completion.scm`; because your `init.scm` loads last, any `(set-option …)` there wins. The full per-language indent set — including the trailing-token rules (`indent-after` / `align-after`) — is covered under [Auto-indentation](/docs/languages#auto-indentation-indent-query).
+
 ## Watching the filesystem
 
 Macros watches the filesystem so the editor stays in sync with changes made outside it (a `git checkout`, a code formatter, a build step, another editor).

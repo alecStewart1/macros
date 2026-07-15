@@ -707,6 +707,13 @@ fn layout_decorations(
     // Virtual suffix text (inlay hint / blame), after the line content.
     if selected && let Some((suffix, face)) = editor.line_suffix(i) {
         let color = theme.color(face, theme.color("dim", text_color));
+        // Inlay-hint / code-lens text is LSP-sourced; collapse any newline so the
+        // single-line `shape_line` below can't panic and abort the editor.
+        let suffix = if suffix.contains(['\n', '\r']) {
+            crate::util::single_line(&suffix)
+        } else {
+            suffix.to_string()
+        };
         let label = SharedString::from(format!("  {suffix}"));
         let n = label.len();
         let shaped_suffix = window.text_system().shape_line(
@@ -1793,6 +1800,14 @@ fn build_popup(
             text.push_str(&segment);
         }
         let length = text.len();
+        // `shape_line` panics (aborting the editor) on an embedded newline. Items
+        // are sanitized at parse time, but guard here too so no future text source
+        // can crash the popup. Same byte length, so `runs` stay valid.
+        debug_assert!(!text.contains('\n'), "completion row text has a newline");
+        let text: String = text
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
         let line =
             window
                 .text_system()

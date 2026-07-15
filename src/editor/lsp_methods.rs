@@ -111,6 +111,7 @@ impl Editor {
                 pending: HashMap::new(),
                 semantic_legend: Vec::new(),
                 prepare_rename: false,
+                completion_triggers: Vec::new(),
                 semantic_state: HashMap::new(),
                 _task: task,
             },
@@ -261,11 +262,13 @@ impl Editor {
             let sync_kind = lsp::parse_sync_kind(&message["result"]);
             let legend = lsp::parse_semantic_legend(&message["result"]);
             let prepare_rename = lsp::parse_prepare_rename_support(&message["result"]);
+            let completion_triggers = lsp::parse_completion_triggers(&message["result"]);
             if let Some(server) = self.servers.get_mut(&language) {
                 server.ready = true;
                 server.sync_kind = sync_kind;
                 server.semantic_legend = legend;
                 server.prepare_rename = prepare_rename;
+                server.completion_triggers = completion_triggers;
                 server.client.initialized();
             }
             // Open the buffer that triggered the server (if it's this language).

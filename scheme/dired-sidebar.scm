@@ -383,6 +383,23 @@
 ;; q closes the sidebar outright — kills the tree buffer AND collapses its pane.
 (define-key "dired-sidebar-mode" "q" 'dired-sidebar-quit)
 
+;; Evil + Helix overlays (each consulted only under its own modal mode, before
+;; the keymap above — same pattern as magit-status). The collection layer only
+;; gives j/k, so add the top/bottom motions: `g g` and `G` (evil), plus helix's
+;; `g e`. `g g` makes `g` a prefix, shadowing the single-`g` refresh, so
+;; re-expose refresh on `g r`. The motion helpers are evil.scm's (plain point
+;; moves, modal-agnostic; helix-goto-top/-bottom rewrite selections, which a
+;; read-only tree doesn't have). Emacs M-< / M-> need nothing here — alt chords
+;; fall through the special-buffer dispatch to fundamental's bindings.
+(for-each
+ (lambda (prefix)
+   (let ((km (string-append prefix "dired-sidebar-mode")))
+     (define-key km "g g" 'evil-goto-first-line)
+     (define-key km "shift-g" 'evil-goto-last-line)
+     (define-key km "g r" 'dired-sidebar-refresh)))
+ (list "evil-normal:" "helix-normal:"))
+(define-key "helix-normal:dired-sidebar-mode" "g e" 'evil-goto-last-line)
+
 ;; The tree is a listing, not code — no line-number gutter (on by default for
 ;; every other major mode); highlight the current row; truncate long names at the
 ;; pane edge instead of wrapping (ordinary buffers still soft-wrap).

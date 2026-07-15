@@ -1061,6 +1061,10 @@ struct LspServer {
     semantic_legend: Vec<String>,
     /// Whether the server supports `prepareRename` (gates the pre-check).
     prepare_rename: bool,
+    /// `completionProvider.triggerCharacters` from `initialize`: single-char
+    /// strings (e.g. `.` for OCaml/Rust member access) that auto-open completion
+    /// even though they aren't word characters.
+    completion_triggers: Vec<String>,
     /// Cached semantic tokens per URI: `(resultId, packed data)`, for deltas.
     semantic_state: HashMap<String, (Option<String>, Vec<i64>)>,
     /// The reader task forwarding this server's messages; dropped on removal.
@@ -2251,7 +2255,7 @@ impl Editor {
             .as_deref()
             .is_some_and(is_lisp_language)
         {
-            let tab = cx.global::<crate::settings::Settings>().tab_width();
+            let tab = self.structural_indent_width(cx);
             let text = self
                 .active
                 .buffer
@@ -2262,9 +2266,20 @@ impl Editor {
         }
 
         // Tree-sitter structural indent, when the grammar carries an indent query.
+        // `tab` is the literal-tab display width; `step` is the columns added per
+        // structural level (per-language — e.g. OCaml is 2 regardless of a user's
+        // tab-width, matching ocamlformat).
         let tab = cx.global::<crate::settings::Settings>().tab_width();
+        let step = self.structural_indent_width(cx);
         let target_row = self.active.buffer.byte_to_position(p).0 + 1;
         let anchor = self.prev_nonspace(p);
+        // Column alignment (`@align`/`@anchor`) wins over the step model when a
+        // query defines it — continuation lines align under a delimiter (e.g. call
+        // arguments under the first one) rather than stepping in a fixed amount.
+        if let Some(col) = self.tree_align(anchor, p, target_row) {
+            self.insert_text(&format!("\n{}", " ".repeat(col)), cx);
+            return;
+        }
         if let Some(level) = self.tree_indent(anchor, p, target_row, Some(p)) {
             // Cursor sitting just before a closing bracket: open a body line and
             // push the closer down to its own (dedented) line.
@@ -2276,8 +2291,8 @@ impl Editor {
                 && let Some(body) = self.tree_indent(anchor, p, target_row, None)
                 && body > level
             {
-                let first = " ".repeat(body * tab);
-                let second = " ".repeat(level * tab);
+                let first = " ".repeat(body * step);
+                let second = " ".repeat(level * step);
                 self.edit(
                     self.active.selected_range.clone(),
                     &format!("\n{first}\n{second}"),
@@ -2287,7 +2302,40 @@ impl Editor {
                 cx.notify();
                 return;
             }
-            self.insert_text(&format!("\n{}", " ".repeat(level * tab)), cx);
+            // Structural indent — but a plain RET must never fall to column 0
+            // when the current line is itself indented: that only happens when
+            // the query couldn't place us (e.g. `match … with` before its first
+            // `|` arm exists, whose bodyless node can't attach to the enclosing
+            // binding). Inherit the current line's indent so the caret lands at
+            // the construct's column. Only rescues the level-0 case, so a genuine
+            // structural dedent (a line that closed brackets → level ≥ 1) is
+            // untouched.
+            let mut indent = level * step;
+            if level == 0 {
+                let cur = self.line_leading_width(p, tab);
+                if cur > 0 {
+                    indent = cur;
+                }
+            }
+            // Trailing-token rules (the token-level layer): a line ending in an
+            // `indent-after` token (OCaml `->`) opens a body one step past the
+            // current line — the tree can't distinguish a dangling `->` from a
+            // satisfied one. A line ending in an `align-after` token (`in`/`with`)
+            // keeps the next line at the current column. `max`/exact-set so they
+            // compose with the structural result instead of double-counting.
+            let cur = self.line_leading_width(p, tab);
+            let lang = self.active_language();
+            let (indent_after, align_after) = {
+                let s = cx.global::<crate::settings::Settings>();
+                (
+                    s.indent_after(lang.as_deref()),
+                    s.align_after(lang.as_deref()),
+                )
+            };
+            if let Some(tok) = self.trailing_token(p) {
+                indent = apply_trailing_rule(indent, cur, step, &tok, &indent_after, &align_after);
+            }
+            self.insert_text(&format!("\n{}", " ".repeat(indent)), cx);
             return;
         }
 
@@ -2323,6 +2371,18 @@ impl Editor {
             ref_byte,
             target_row,
             outdent_byte,
+        )
+    }
+
+    /// Column-alignment indent for the target line (tree-sitter `@align`/`@anchor`),
+    /// in spaces. `None` when no `@align` scope applies. See
+    /// [`crate::highlight::Highlighter::align_column`].
+    fn tree_align(&self, anchor: usize, ref_byte: usize, target_row: usize) -> Option<usize> {
+        self.active.highlighter.as_ref()?.align_column(
+            self.active.buffer.rope(),
+            anchor,
+            ref_byte,
+            target_row,
         )
     }
 
@@ -2419,6 +2479,40 @@ impl Editor {
         None
     }
 
+    /// Columns to add per structural indent level for the active buffer's
+    /// language: a per-language convention (e.g. OCaml is 2, matching ocamlformat)
+    /// when one exists, otherwise the global `tab-width`. This is the indent
+    /// *step*, distinct from how wide a literal tab renders.
+    fn structural_indent_width(&self, cx: &mut Context<Self>) -> usize {
+        let lang = self.active_language();
+        cx.global::<crate::settings::Settings>()
+            .tab_width_for(lang.as_deref())
+    }
+
+    /// The last whitespace-delimited token on the line containing `byte`, up to
+    /// `byte` (so a mid-line split sees the token before the cursor). `None` if
+    /// the line is blank before the point. Powers the trailing-token indent rules
+    /// (`indent-after` / `align-after`) — e.g. detecting a line that ends in `->`.
+    fn trailing_token(&self, byte: usize) -> Option<String> {
+        let line = self.active.buffer.line_range_at(byte);
+        let text = self.active.buffer.slice_to_string(line.start..byte);
+        text.split_whitespace().next_back().map(str::to_string)
+    }
+
+    /// The display width (in columns) of the leading whitespace on the line
+    /// containing `byte`, counting a tab as one `tab` step. Used as an indent
+    /// floor so a plain RET never dedents below the current line.
+    fn line_leading_width(&self, byte: usize, tab: usize) -> usize {
+        let line = self.active.buffer.line_range_at(byte);
+        self.active
+            .buffer
+            .slice_to_string(line)
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .map(|c| if c == '\t' { tab } else { 1 })
+            .sum()
+    }
+
     /// Byte where the nearest non-whitespace grapheme before `from` begins, or 0
     /// if only whitespace precedes it. Anchors a fresh line's indentation to the
     /// previous line's syntax (e.g. a compound-statement header) rather than the
@@ -2479,10 +2573,8 @@ impl Editor {
     }
 
     fn indent_for_tab(&mut self, cx: &mut Context<Self>) {
-        let (electric, tab) = {
-            let s = cx.global::<crate::settings::Settings>();
-            (s.electric_indent(), s.tab_width())
-        };
+        let electric = cx.global::<crate::settings::Settings>().electric_indent();
+        let step = self.structural_indent_width(cx);
         if electric && !self.has_extra_cursors() && self.region().is_none() {
             // Lisp: paren-aligning reindent.
             if self
@@ -2509,12 +2601,18 @@ impl Editor {
             let target_row = self.active.buffer.byte_to_position(line.start).0;
             // Reindent anchors on the line's own content (no scan back), so a
             // line that belongs outside an enclosing block isn't pulled into it.
+            // Column alignment (`@align`/`@anchor`) wins over the step model, the
+            // same precedence the newline path uses.
+            if let Some(col) = self.tree_align(ref_byte, ref_byte, target_row) {
+                self.reindent_current_line(col, cx);
+                return;
+            }
             if let Some(level) = self.tree_indent(ref_byte, ref_byte, target_row, Some(ref_byte)) {
-                self.reindent_current_line(level * tab, cx);
+                self.reindent_current_line(level * step, cx);
                 return;
             }
         }
-        self.insert_text(&" ".repeat(tab), cx);
+        self.insert_text(&" ".repeat(step), cx);
     }
 
     fn set_mark(&mut self, cx: &mut Context<Self>) {
@@ -3528,12 +3626,15 @@ impl Editor {
         Some(format!("E:{errors} W:{warnings}"))
     }
 
-    /// The diagnostic message at point, if any (shown in the echo area).
+    /// The diagnostic message at point, if any (shown in the echo area). Collapsed
+    /// to a single line — the echo row shapes it with `shape_line`, which panics
+    /// on a newline, and LSP diagnostics (e.g. ocamllsp type errors) are often
+    /// multi-line.
     fn diagnostic_at_offset(&self, offset: usize) -> Option<String> {
         self.active_diagnostics()
             .into_iter()
             .find(|d| d.range.contains(&offset) || d.range.start == offset)
-            .map(|d| d.message)
+            .map(|d| crate::util::single_line(&d.message))
     }
 
     fn diagnostic_at_point(&self) -> Option<String> {
@@ -3842,6 +3943,28 @@ fn translate_backrefs(replacement: &str) -> String {
         }
     }
     out
+}
+
+/// Compose the trailing-token indent rules with the structural result. A line
+/// ending in an `indent-after` token opens the next line at least one `step` past
+/// the current line (`max`, so it never *reduces* a deeper structural indent). A
+/// line ending in an `align-after` token pins the next line to the current line's
+/// column. Neither list matching leaves the structural result untouched.
+fn apply_trailing_rule(
+    structural: usize,
+    cur: usize,
+    step: usize,
+    tok: &str,
+    indent_after: &str,
+    align_after: &str,
+) -> usize {
+    if indent_after.split_whitespace().any(|t| t == tok) {
+        structural.max(cur + step)
+    } else if align_after.split_whitespace().any(|t| t == tok) {
+        cur
+    } else {
+        structural
+    }
 }
 
 /// Expand a leading `~/` to the home directory.
@@ -4469,7 +4592,22 @@ impl EntityInputHandler for Editor {
         let cursor = self.edit(range, new_text);
         self.collapse_to(cursor);
         self.ensure_cursor_visible();
-        if self.completion_popup.is_some() {
+        // A trigger character (e.g. `.`) always starts a fresh completion, even
+        // mid-word with a popup already open — otherwise typing `List.` would just
+        // refilter (and drop) the `List` popup instead of requesting members.
+        let triggers = cx
+            .global::<crate::settings::Settings>()
+            .completion_trigger_chars(self.active_language().as_deref());
+        let trigger = new_text.chars().count() == 1
+            && new_text
+                .chars()
+                .next()
+                .is_some_and(|c| self.lsp_trigger_char(c, &triggers));
+        if trigger {
+            self.completion_popup = None;
+            self.completion_auto_pending = false;
+            self.maybe_auto_complete(new_text, cx);
+        } else if self.completion_popup.is_some() {
             self.popup_refilter(cx);
         } else {
             self.maybe_auto_complete(new_text, cx);
@@ -4569,10 +4707,33 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Buffer, EditorCommand, char_col_byte, file_completions, is_repeatable, language_for_path,
-        last_sexp, line_span, prefix_arg_value, push_capped, scheme_symbol_token,
-        shift_fold_ranges, shift_line_map, symbol_at, top_level_form_at, translate_backrefs,
+        Buffer, EditorCommand, apply_trailing_rule, char_col_byte, file_completions, is_repeatable,
+        language_for_path, last_sexp, line_span, prefix_arg_value, push_capped,
+        scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at, top_level_form_at,
+        translate_backrefs,
     };
+
+    #[test]
+    fn trailing_token_rule_composes_with_structural() {
+        // Exercise the composition with sample token lists (both branches),
+        // independent of any language's actual config; step 2.
+        let (ia, aa, step) = ("->", "in with", 2);
+        // A dangling `->` opens the body one step past the current line (col 2),
+        // even though the tree only placed us at the match column (col 2 → still 2).
+        assert_eq!(apply_trailing_rule(2, 2, step, "->", ia, aa), 4);
+        // …but it never *reduces* a deeper structural indent.
+        assert_eq!(apply_trailing_rule(6, 2, step, "->", ia, aa), 6);
+        // `in` / `with` pin the next line to the current column, ignoring a
+        // spurious structural over-indent.
+        assert_eq!(apply_trailing_rule(4, 2, step, "in", ia, aa), 2);
+        assert_eq!(apply_trailing_rule(0, 2, step, "with", ia, aa), 2);
+        // A token in neither list leaves the structural result untouched, and a
+        // near-miss (`main` ends in "in") must not match `in`.
+        assert_eq!(apply_trailing_rule(4, 2, step, "=", ia, aa), 4);
+        assert_eq!(apply_trailing_rule(4, 2, step, "main", ia, aa), 4);
+        // No rules configured (another language): structural is returned as-is.
+        assert_eq!(apply_trailing_rule(4, 2, step, "->", "", ""), 4);
+    }
 
     #[test]
     fn char_col_byte_maps_columns_and_clamps() {

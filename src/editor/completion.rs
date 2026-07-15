@@ -176,6 +176,26 @@ impl Editor {
             .is_some_and(|s| s.ready && s.open.contains(&uri))
     }
 
+    /// Whether `c` is a completion trigger character (e.g. `.` for member access)
+    /// for the active buffer — either advertised by its ready language server or
+    /// configured via `completion-trigger-chars` (`extra`, resolved by the caller
+    /// from settings). Trigger characters open completion with no word prefix — the
+    /// `Module.member` case. The `extra` fallback covers servers that under-
+    /// advertise (ocamllsp lists no trigger characters, so `.` never fires without it).
+    pub(super) fn lsp_trigger_char(&self, c: char, extra: &str) -> bool {
+        let (Some(language), Some(uri)) = (self.active_language(), self.active_uri()) else {
+            return false;
+        };
+        self.servers.get(&language).is_some_and(|s| {
+            s.ready
+                && s.open.contains(&uri)
+                && (extra.contains(c)
+                    || s.completion_triggers
+                        .iter()
+                        .any(|t| t.starts_with(c) && t.chars().count() == 1))
+        })
+    }
+
     /// After a self-insert, open the popup automatically if `completion-auto` is
     /// on, a word prefix of sufficient length precedes point, and a server is
     /// ready (corfu's auto behavior). One request per session: once the popup is
@@ -190,18 +210,20 @@ impl Editor {
         }
         let min_prefix = settings.completion_auto_prefix();
         let capf_enabled = settings.completion_capf();
-        // Only trigger right after typing a word character.
-        if !typed
-            .chars()
-            .last()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return;
-        }
-        let point = self.point();
-        let word_start = self.active.buffer.backward_word(point);
-        if point.saturating_sub(word_start) < min_prefix.max(1) {
-            return;
+        let triggers = settings.completion_trigger_chars(self.active_language().as_deref());
+        let last = typed.chars().last();
+        // A trigger character (e.g. `.`) opens completion immediately with no word
+        // prefix — the `Module.member` case. Otherwise only trigger right after a
+        // word character, once a prefix of sufficient length precedes point.
+        if !last.is_some_and(|c| self.lsp_trigger_char(c, &triggers)) {
+            if !last.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                return;
+            }
+            let point = self.point();
+            let word_start = self.active.buffer.backward_word(point);
+            if point.saturating_sub(word_start) < min_prefix.max(1) {
+                return;
+            }
         }
         // Fire when a language server can complete OR a Scheme CAPF can (argument
         // completion like `(load-theme 'mac…)`, dabbrev in plain-text/scratch

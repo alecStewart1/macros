@@ -269,7 +269,7 @@ impl Editor {
     /// Reindent the current line to its Lisp indentation (Emacs TAB in a Lisp
     /// buffer).
     pub(super) fn lisp_reindent_line(&mut self, cx: &mut Context<Self>) {
-        let tab = cx.global::<crate::settings::Settings>().tab_width();
+        let tab = self.structural_indent_width(cx);
         let line = self.active.buffer.line_range_at(self.point());
         let target = lisp_indent_for(
             &self

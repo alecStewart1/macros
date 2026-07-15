@@ -481,6 +481,11 @@ enum IndentKind {
 struct IndentQuery {
     query: Query,
     kinds: Vec<Option<IndentKind>>,
+    /// Capture indices for `@align` (a node whose continuation lines align to a
+    /// column) and its paired `@anchor` (the node whose column they align to).
+    /// Helix-style column alignment — `None` when the query uses neither.
+    align_idx: Option<u32>,
+    anchor_idx: Option<u32>,
 }
 
 /// Detection + sub-highlighter cache for language injection.
@@ -606,7 +611,14 @@ fn build_indent(language: &Language, src: &str) -> Option<IndentQuery> {
             _ => None,
         })
         .collect();
-    Some(IndentQuery { query, kinds })
+    let align_idx = query.capture_index_for_name("align");
+    let anchor_idx = query.capture_index_for_name("anchor");
+    Some(IndentQuery {
+        query,
+        kinds,
+        align_idx,
+        anchor_idx,
+    })
 }
 
 /// Map a fenced-block info-string tag (`rust`, `rs`, `py`, `c++`, …) to a
@@ -920,6 +932,81 @@ impl Highlighter {
         Some(levels)
     }
 
+    /// Column-alignment indent (Helix `@align`/`@anchor`): if the line at
+    /// `target_row` sits inside an open `@align` node whose paired `@anchor` began
+    /// on an earlier row, return the `@anchor`'s start column — so continuation
+    /// lines align under a delimiter (e.g. call arguments under the first one)
+    /// rather than stepping in by a fixed amount. `None` when no `@align` scope
+    /// applies (the caller then uses the step-based [`indent_level`]). The column
+    /// is a byte offset within the row — exact for the ASCII/space code this
+    /// targets. `anchor`/`ref_byte`/`target_row` mirror [`indent_level`].
+    pub fn align_column(
+        &self,
+        rope: &Rope,
+        anchor: usize,
+        ref_byte: usize,
+        target_row: usize,
+    ) -> Option<usize> {
+        let iq = self.indent.as_ref()?;
+        let (align_idx, anchor_idx) = (iq.align_idx?, iq.anchor_idx?);
+        let tree = self.tree.as_ref()?;
+        let root = tree.root_node();
+
+        let mut scope = root
+            .descendant_for_byte_range(anchor, anchor)
+            .unwrap_or(root);
+        while let Some(parent) = scope.parent() {
+            if parent == root {
+                break;
+            }
+            scope = parent;
+        }
+
+        let provider = |node: Node| {
+            rope.byte_slice(node.byte_range())
+                .chunks()
+                .map(str::as_bytes)
+        };
+        // Pair each `@align` node with its match's `@anchor` node.
+        let mut anchors: HashMap<usize, Node> = HashMap::new();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&iq.query, scope, provider);
+        while let Some(m) = matches.next() {
+            let mut align_node = None;
+            let mut anchor_node = None;
+            for cap in m.captures {
+                if cap.index == align_idx {
+                    align_node = Some(cap.node);
+                } else if cap.index == anchor_idx {
+                    anchor_node = Some(cap.node);
+                }
+            }
+            if let (Some(a), Some(anc)) = (align_node, anchor_node) {
+                anchors.entry(a.id()).or_insert(anc);
+            }
+        }
+        if anchors.is_empty() {
+            return None;
+        }
+
+        // Innermost enclosing `@align` node still open past `ref_byte`, whose
+        // anchor began before the target row.
+        let mut node = root.descendant_for_byte_range(anchor, anchor);
+        while let Some(n) = node {
+            if let Some(anc) = anchors.get(&n.id()) {
+                let open_past = n.start_byte() < ref_byte && n.end_byte() > ref_byte;
+                if n.start_position().row < target_row
+                    && open_past
+                    && anc.start_position().row < target_row
+                {
+                    return Some(anc.start_position().column);
+                }
+            }
+            node = n.parent();
+        }
+        None
+    }
+
     /// Run an arbitrary tree-sitter query over the current tree, returning each
     /// capture as `(capture_name, start_byte, end_byte, node_kind)`. Returns
     /// `None` if the query source won't compile against this grammar, and an
@@ -1192,6 +1279,179 @@ mod tests {
         h.set_text(&nrope);
         let y = nested.find("y()").unwrap();
         assert_eq!(h.indent_level(&nrope, y, y, 2, Some(y)), Some(2));
+    }
+
+    /// OCaml's indent query covers the keyword-delimited forms (`let =`,
+    /// `match with`, `struct`/`sig`/`do`, records), not just brackets — so a body
+    /// line indents one step and the closing token dedents. Each program lists the
+    /// expected per-line level (the `reindent` path: anchor == first non-blank).
+    #[test]
+    fn ocaml_indent_covers_keyword_forms() {
+        let cases: &[(&str, &[usize])] = &[
+            ("let f x =\n  x + 1\n", &[0, 1]),
+            ("let a = 1\nlet b = 2\n", &[0, 0]), // sibling bindings don't indent
+            // `match`/`try` arms align with the keyword (ocamlformat style).
+            ("match x with\n| 1 -> a\n| _ -> b\n", &[0, 0, 0]),
+            ("module M = struct\n  let x = 1\nend\n", &[0, 1, 0]),
+            ("try f () with\n| Not_found -> 0\n", &[0, 0]),
+            ("let r = { base with\n  a = 1;\n}\n", &[0, 1, 0]),
+            // Nested match: arms sit at the match's column (1), not one deeper.
+            (
+                "let f x =\n  match x with\n  | 0 -> a\n  | _ -> b\n",
+                &[0, 1, 1, 1],
+            ),
+        ];
+        let mut h = Highlighter::for_language("ocaml").unwrap();
+        for (prog, expected) in cases {
+            let rope = Rope::from_str(prog);
+            h.set_text(&rope);
+            let mut off = 0usize;
+            for (row, (line, want)) in prog.lines().zip(expected.iter()).enumerate() {
+                let first = line.len() - line.trim_start().len();
+                let b = off + first;
+                assert_eq!(
+                    h.indent_level(&rope, b, b, row, Some(b)),
+                    Some(*want),
+                    "line {row} of {prog:?}"
+                );
+                off += line.len() + 1;
+            }
+        }
+
+        // Pressing RET into a still-empty body (closer not yet typed) indents via
+        // the opener-keyword captures, since the enclosing node hasn't formed.
+        for (opener, want) in [
+            ("module M = struct", 1),
+            ("type t = {", 1),
+            ("let f x =", 1),
+        ] {
+            let src = format!("{opener}\n\n");
+            let rope = Rope::from_str(&src);
+            h.set_text(&rope);
+            let anchor = src.trim_end().len() - 1;
+            assert_eq!(
+                h.indent_level(&rope, anchor, opener.len(), 1, Some(opener.len())),
+                Some(want),
+                "RET after {opener:?}"
+            );
+        }
+    }
+
+    /// Pressing RET at the end of a line: reproduce the newline handler exactly —
+    /// the buffer holds the text BEFORE the newline is inserted (no trailing
+    /// newline), anchor = last non-whitespace byte, target_row = current row + 1.
+    /// This is the path the user drives when writing OCaml top-to-bottom.
+    #[test]
+    fn ocaml_newline_indents_after_openers() {
+        let cases: &[(&str, usize)] = &[
+            ("let f x =", 1),
+            ("module M = struct", 1),
+            ("type t = {", 1),
+            ("let x = 1\nlet f y =", 1), // a prior binding above doesn't confuse it
+            ("let () =\n  foo ();", 1),  // continuing a let body keeps its indent
+            // `match`/`try` arms align with the keyword, not one step in.
+            ("match x with", 0),
+            ("match x with\n| 0 -> a", 0), // RET after a complete arm → next arm, col 0
+            ("let f x =\n  match x with\n  | 0 -> a", 1), // nested → next arm aligns at col 2
+            ("let f = function\n  | 0 -> a", 1), // function arms DO indent one step
+        ];
+        let mut h = Highlighter::for_language("ocaml").unwrap();
+        for (src, want) in cases {
+            let rope = Rope::from_str(src);
+            h.set_text(&rope);
+            let p = src.len();
+            let anchor = src
+                .char_indices()
+                .rev()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let target_row = src.matches('\n').count() + 1;
+            assert_eq!(
+                h.indent_level(&rope, anchor, p, target_row, Some(p)),
+                Some(*want),
+                "RET at end of {src:?}"
+            );
+        }
+    }
+
+    /// `let … in` bodies align with the binding (no extra step), both top-level
+    /// and nested — the RET path with `tail` already present on the next line.
+    #[test]
+    fn ocaml_letin_body_aligns_with_binding() {
+        let cases: &[(&str, &str, usize)] = &[
+            // (head-before-RET, tail-already-below, expected level)
+            ("let x = 1 in", "\nbody", 0),
+            ("let f x =\n  let y = 2 in", "\n  body", 1),
+            ("let () =\n  let x = 1 in", "\n  body", 1),
+            ("let x = 1 in\nlet y = 2 in", "\nbody", 0),
+        ];
+        let mut h = Highlighter::for_language("ocaml").unwrap();
+        for (head, tail, want) in cases {
+            let src = format!("{head}{tail}");
+            let rope = Rope::from_str(&src);
+            h.set_text(&rope);
+            let p = head.len();
+            let anchor = head
+                .char_indices()
+                .rev()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let row = head.matches('\n').count() + 1;
+            assert_eq!(
+                h.indent_level(&rope, anchor, p, row, Some(p)),
+                Some(*want),
+                "RET after {head:?}"
+            );
+        }
+    }
+
+    /// `let open … in` (and `let … in`) bodies sit at ONE structural level under
+    /// the enclosing binding — the reported `let main_loop … =` case. The
+    /// per-language 2-space step (not this level) is what makes it render as 2
+    /// columns; see `language_indent_width`.
+    #[test]
+    fn ocaml_let_open_in_is_one_level() {
+        let mut h = Highlighter::for_language("ocaml").unwrap();
+        let src = "let main_loop state : unit Fiber.t =\n  let open Fiber.O in\n  body";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        // RET at the end of line 2 (`let open Fiber.O in`).
+        let p = src.find(" in").unwrap() + 3;
+        let anchor = p - 1; // the `n` of `in`
+        assert_eq!(h.indent_level(&rope, anchor, p, 2, Some(p)), Some(1));
+    }
+
+    /// `@align`/`@anchor`: continuation lines align under the anchored node's
+    /// column instead of stepping in. Uses a synthetic query (no bundled grammar
+    /// ships one yet) — align args under the first argument.
+    #[test]
+    fn align_column_aligns_under_anchor() {
+        let mut h = Highlighter::for_language("rust").unwrap();
+        h.indent = build_indent(&h.language, "(arguments . (_) @anchor) @align");
+        assert!(h.indent.is_some(), "align query should compile");
+        // `bar` starts at column 4; `baz` on the next line aligns to it.
+        let src = "foo(bar,\n    baz)\n";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        let baz = src.find("baz").unwrap();
+        assert_eq!(h.align_column(&rope, baz, baz, 1), Some(4));
+        // Outside any `@align` scope → None, so the caller uses the step model.
+        let plain = Rope::from_str("let x = 1;\n");
+        h.set_text(&plain);
+        assert_eq!(h.align_column(&plain, 0, 0, 0), None);
+    }
+
+    /// A query with no `@align`/`@anchor` captures never reports alignment.
+    #[test]
+    fn align_column_absent_without_captures() {
+        let mut h = Highlighter::for_language("rust").unwrap();
+        let src = "fn f() {\n    g();\n}\n";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        let g = src.find("g()").unwrap();
+        assert_eq!(h.align_column(&rope, g, g, 1), None);
     }
 
     /// Python: `@extend` indents the body of a compound statement even though

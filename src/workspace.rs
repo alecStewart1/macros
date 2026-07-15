@@ -8,6 +8,14 @@ use crate::theme::Theme;
 /// them at the window edge, capped at a few lines so it can't swallow the
 /// editor. The full history remains in `*Messages*`.
 fn echo_row(text: SharedString, color: gpui::Hsla, bg: gpui::Hsla) -> impl IntoElement {
+    // gpui shapes this child with `shape_line`, which panics (aborting the app)
+    // on an embedded newline. Sources are sanitized individually, but collapse
+    // here too so no status/echo text can ever crash the editor.
+    let text: SharedString = if text.contains(['\n', '\r']) {
+        crate::util::single_line(&text).into()
+    } else {
+        text
+    };
     div()
         .w_full()
         .px_2()

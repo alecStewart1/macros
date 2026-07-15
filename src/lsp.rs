@@ -489,13 +489,20 @@ impl WireCompletionItem {
 }
 
 fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
+    // Completion labels and detail annotations render as a single popup line
+    // (`shape_line`, which panics on an embedded newline) — and servers like
+    // ocamllsp put multi-line type signatures in `detail`.
+    use crate::util::single_line;
     let wire: WireCompletionItem = serde_json::from_value(item.clone()).ok()?;
-    let detail = wire.signature();
-    let label = wire.label?;
+    let detail = wire.signature().map(|d| single_line(&d));
+    let raw_label = wire.label?;
+    // `insert_text` goes into the buffer, so fall back to the *raw* label; the
+    // display `label` is collapsed to a single line for the popup.
     let insert_text = wire
         .insert_text
         .or(wire.text_edit.and_then(|e| e.new_text))
-        .unwrap_or_else(|| label.clone());
+        .unwrap_or_else(|| raw_label.clone());
+    let label = single_line(&raw_label);
     let kind = wire.kind.and_then(completion_kind).map(str::to_string);
     Some(CompletionItem {
         label,
@@ -580,6 +587,20 @@ pub fn parse_prepare_rename_support(result: &Value) -> bool {
     result["capabilities"]["renameProvider"]["prepareProvider"]
         .as_bool()
         .unwrap_or(false)
+}
+
+/// The server's `completionProvider.triggerCharacters` — characters that should
+/// auto-open completion even though they aren't identifier characters (e.g. `.`
+/// for member access in OCaml/Rust). Empty if the server advertises none.
+pub fn parse_completion_triggers(result: &Value) -> Vec<String> {
+    result["capabilities"]["completionProvider"]["triggerCharacters"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A code lens: where it sits, its title (if the command is already present),
@@ -2558,6 +2579,43 @@ mod tests {
         assert!(!parse_prepare_rename_support(
             &json!({ "capabilities": { "renameProvider": true } })
         ));
+    }
+
+    #[test]
+    fn completion_triggers_parse_from_capabilities() {
+        let init = json!({
+            "capabilities": { "completionProvider": { "triggerCharacters": [".", "#", "~"] } }
+        });
+        assert_eq!(parse_completion_triggers(&init), vec![".", "#", "~"]);
+        // No completionProvider, or no triggerCharacters → empty.
+        assert!(parse_completion_triggers(&json!({ "capabilities": {} })).is_empty());
+        assert!(
+            parse_completion_triggers(&json!({
+                "capabilities": { "completionProvider": {} }
+            }))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn completion_detail_and_label_collapse_newlines() {
+        // ocamllsp puts multi-line type signatures in `detail`; the popup renders
+        // label+detail on one line via `shape_line`, which panics on a newline.
+        let item = &parse_completion(&json!([{
+            "label": "map",
+            "detail": "('a -> 'b) ->\n  'a list ->\n  'b list",
+            "insertText": "map"
+        }]))[0];
+        assert!(!item.label.contains('\n'));
+        let detail = item.detail.as_deref().unwrap();
+        assert!(!detail.contains('\n') && !detail.contains('\t'));
+        assert_eq!(detail, "('a -> 'b) -> 'a list -> 'b list");
+
+        // A newline in the label is collapsed for display, but a missing
+        // insertText still inserts the raw label text.
+        let item = &parse_completion(&json!([{ "label": "a\nb" }]))[0];
+        assert_eq!(item.label, "a b");
+        assert_eq!(item.insert_text, "a\nb");
     }
 
     #[test]

@@ -6755,6 +6755,39 @@ mod dired_subtree_lib {
             "\"y\""
         );
     }
+
+    /// The evil/helix overlays give the sidebar top/bottom motions (`g g`,
+    /// `G`, helix `g e`) WITHOUT touching its Emacs-default keymap: `g`
+    /// becomes a prefix only under a modal mode, refresh moves to `g r` there,
+    /// and with modal off the base single-`g` refresh is untouched (M-< / M->
+    /// fall through to fundamental, so they need no binding here).
+    #[test]
+    fn sidebar_modal_overlay_motions() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        let cmds = engine
+            .eval(include_str!("../../scheme/dired-sidebar.scm"))
+            .unwrap()
+            .commands;
+        let bound = |mode: &str, key: &str, cmd: &str| {
+            cmds.iter().any(|c| {
+                matches!(c, EditorCommand::DefineKey(m, s, x)
+                if m == mode && s == key && x == cmd)
+            })
+        };
+        for prefix in ["evil-normal:", "helix-normal:"] {
+            let km = format!("{prefix}dired-sidebar-mode");
+            assert!(bound(&km, "g g", "evil-goto-first-line"));
+            assert!(bound(&km, "shift-g", "evil-goto-last-line"));
+            assert!(bound(&km, "g r", "dired-sidebar-refresh"));
+        }
+        assert!(bound(
+            "helix-normal:dired-sidebar-mode",
+            "g e",
+            "evil-goto-last-line"
+        ));
+        assert!(bound("dired-sidebar-mode", "g", "dired-sidebar-refresh"));
+    }
 }
 
 #[cfg(test)]
