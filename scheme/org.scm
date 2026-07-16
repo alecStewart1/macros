@@ -122,8 +122,11 @@
 ;; The generic byte/string helpers (char-bytes, byte-drop, byte-take,
 ;; string-trim, string-concat, string-repeat) live in core.scm.
 
-;; Pad `s` with spaces to `w` BYTE columns (org tables align by byte width).
-(define (org--pad s w) (string-append s (string-repeat " " (- w (utf8-length s)))))
+;; Pad `s` with spaces to `w` display columns. Width is CHARS, not bytes
+;; (string-length, not utf8-length): a multibyte cell like "café" occupies 4
+;; columns on screen but 5 bytes, and byte-width padding left every column
+;; containing non-ASCII text visibly short of its pipe.
+(define (org--pad s w) (string-append s (string-repeat " " (- w (string-length s)))))
 
 ;; Inclusive sublist `lines[a..b]`, clamped; '() when the range is empty.
 (define (org--slice lines a b)
@@ -1217,7 +1220,7 @@
   (let loop ((ps parsed) (m 1))
     (cond ((null? ps) m)
           ((car (car ps)) (loop (cdr ps) m))
-          (else (loop (cdr ps) (max m (utf8-length (org--cell (cdr (car ps)) c))))))))
+          (else (loop (cdr ps) (max m (string-length (org--cell (cdr (car ps)) c))))))))
 (define (org--col-widths parsed ncols)
   (let loop ((c 0) (acc '()))
     (if (>= c ncols) (reverse acc) (loop (+ c 1) (cons (org--col-width parsed c) acc)))))
@@ -1472,7 +1475,22 @@
 (define (org--on-heading?) (and (org--heading-level (org--line-text (buffer-line))) #t))
 (define (org-tab)        (if (org--in-table?) (org-table-next-cell) (org-cycle)))
 (define (org-shift-tab)  (if (org--in-table?) (org-table-prev-cell) (org-global-cycle)))
-(define (org-return)     (if (org--in-table?) (org-table-next-row) (newline)))
+
+;; Whether RET at byte column `col` of table line `line` should insert a plain
+;; newline instead of jumping to the next row: point at end of line (nothing
+;; but whitespace after it) or still in the leading indentation. This is
+;; org.el's `org-return` escape hatch — it's how you add a fresh line below a
+;; row (type the `|` and go) or break out of a table, instead of being
+;; trapped cycling through rows.
+(define (org--return-escapes? line col)
+  (or (>= (string-match "^[ \t]*$" (byte-drop line col)) 0)
+      (>= (string-match "^[ \t]*$" (byte-take line col)) 0)))
+
+(define (org-return)
+  (if (and (org--in-table?)
+           (not (org--return-escapes? (org--line-text (buffer-line)) (org--point-col))))
+      (org-table-next-row)
+      (newline)))
 ;; M-arrows act on the table column/row, else on the heading *at point* — never on
 ;; an enclosing heading from body text (Emacs leaves plain body alone).
 (define (org-meta-right)

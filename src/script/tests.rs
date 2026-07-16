@@ -2927,6 +2927,25 @@ mod magit_tests {
             v(r#"(car (org--format-table (list "| a | bb |" "| ccc | d |")))"#),
             "\"| a   | bb |\""
         );
+        // Padding is by CHARS, not bytes: "é" is one display column (2 bytes),
+        // so it pads to the ASCII neighbour's width instead of falling a
+        // column short and skewing the pipes.
+        assert_eq!(
+            v(r#"(org--format-table (list "| é | b |" "| cc | d |"))"#),
+            "(\"| é  | b |\" \"| cc | d |\")"
+        );
+        // Separator dashes track the same char widths as the data rows.
+        assert_eq!(
+            v(r#"(org--format-table (list "| é |" "|-|"))"#),
+            "(\"| é |\" \"|---|\")"
+        );
+
+        // RET-in-table escape hatch (org.el's org-return): a plain newline at
+        // end of line or in the leading indentation, table-next-row otherwise.
+        assert_eq!(v(r#"(if (org--return-escapes? "| a | b |" 9) 1 0)"#), "1"); // EOL
+        assert_eq!(v(r#"(if (org--return-escapes? "| a | b |" 0) 1 0)"#), "1"); // BOL
+        assert_eq!(v(r#"(if (org--return-escapes? "  | a |" 1) 1 0)"#), "1"); // indent
+        assert_eq!(v(r#"(if (org--return-escapes? "| a | b |" 4) 1 0)"#), "0"); // mid-cell
 
         // Inline-image link detection: only image-typed, undescribed links.
         assert_eq!(

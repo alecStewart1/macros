@@ -121,8 +121,12 @@ const LANGUAGES: &[LangSpec] = &[
     },
     LangSpec {
         id: "javascript",
+        // The crate's `HIGHLIGHT_QUERY` opens with blanket identifier/property
+        // rules that out-rank every context rule in this engine, leaving
+        // function names and calls uncolored. Ours is adapted to the engine
+        // (the sibling of typescript.scm, minus the type layer, plus JSX).
         language: tree_sitter_javascript::LANGUAGE,
-        highlights: tree_sitter_javascript::HIGHLIGHT_QUERY,
+        highlights: include_str!("../grammars/queries/javascript.scm"),
         indent: Some(include_str!("../grammars/queries/indents/javascript.scm")),
         extensions: &["js", "jsx", "mjs", "cjs"],
         filenames: &[],
@@ -193,8 +197,11 @@ const LANGUAGES: &[LangSpec] = &[
     },
     LangSpec {
         id: "typescript",
+        // The crate's `HIGHLIGHTS_QUERY` is only the TypeScript *addition* —
+        // upstream layers it on the JavaScript query, so alone it left most
+        // TS code uncolored. Ours is the full combined query.
         language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
-        highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        highlights: include_str!("../grammars/queries/typescript.scm"),
         indent: Some(include_str!("../grammars/queries/indents/typescript.scm")),
         extensions: &["ts"],
         filenames: &[],
@@ -202,8 +209,13 @@ const LANGUAGES: &[LangSpec] = &[
     },
     LangSpec {
         id: "tsx",
+        // The TypeScript base plus the JSX-only rules (those node kinds don't
+        // exist in the plain TypeScript grammar, so they live in their own file).
         language: tree_sitter_typescript::LANGUAGE_TSX,
-        highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        highlights: concat!(
+            include_str!("../grammars/queries/typescript.scm"),
+            include_str!("../grammars/queries/tsx.scm"),
+        ),
         indent: Some(include_str!("../grammars/queries/indents/tsx.scm")),
         extensions: &["tsx"],
         filenames: &[],
@@ -1189,6 +1201,130 @@ mod tests {
             );
         }
         assert!(Highlighter::for_language("cobol").is_none());
+    }
+
+    /// The face at the start of `needle` in `src`, per `spans_in` over the
+    /// whole buffer. `None` = uncaptured (default foreground).
+    fn face_of(h: &Highlighter, rope: &Rope, src: &str, needle: &str) -> Option<&'static str> {
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not in src"));
+        h.spans_in(rope, 0..src.len())
+            .iter()
+            .find(|s| s.range.contains(&at))
+            .and_then(|s| s.face.map(face_name))
+    }
+
+    /// TypeScript uses a vendored combined query: the crate's stock
+    /// `HIGHLIGHTS_QUERY` is only the TS *addition* to the JavaScript query it
+    /// upstream expects underneath, which left keywords, strings, calls, and
+    /// punctuation uncolored. Both layers must color: the JavaScript base and
+    /// the TypeScript type layer.
+    #[test]
+    fn typescript_colors_base_and_type_layer() {
+        let mut h = Highlighter::for_language("typescript").unwrap();
+        let src = "interface Shape { area(): number }\n\
+                   const MAX_N = 3;\n\
+                   enum Color { Red }\n\
+                   async function render(s: Shape): Promise<string> {\n  \
+                     return `size ${s.area().toFixed(MAX_N)} px`;\n\
+                   }\n";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        for (needle, want) in [
+            // JavaScript base layer.
+            ("const", "keyword"),
+            ("async", "keyword"),
+            ("return", "keyword"),
+            ("render", "function"),  // function declaration name
+            ("toFixed", "function"), // method call
+            ("3;", "number"),
+            ("size ", "string"),   // template string body
+            ("${", "punctuation"), // substitution delimiter
+            // TypeScript layer.
+            ("interface", "keyword"),
+            ("Shape", "type"),  // type_identifier
+            ("number", "type"), // predefined_type
+            ("Promise", "type"),
+            ("<string>", "bracket"), // generics delimit, they don't compare
+            ("area()", "function"),  // method_signature name
+            ("Red", "constant"),     // enum member
+            ("MAX_N", "constant"),   // SCREAMING_CASE binding
+        ] {
+            assert_eq!(
+                face_of(&h, &rope, src, needle),
+                Some(want),
+                "face of {needle:?}"
+            );
+        }
+        // Substitution contents are plain code, not string-colored: `s` is an
+        // ordinary variable inside `${...}`.
+        assert_eq!(face_of(&h, &rope, src, "s.area"), Some("variable"));
+        // A comparison `<` is still an operator (generics excluded it from the
+        // blanket token list, so it's only captured in comparison position).
+        let cmp = "if (a < b) { }\n";
+        let crope = Rope::from_str(cmp);
+        h.set_text(&crope);
+        assert_eq!(face_of(&h, &crope, cmp, "<"), Some("operator"));
+    }
+
+    /// JavaScript uses a vendored query too: the crate's stock one opens with
+    /// blanket `(identifier) @variable` / `(property_identifier) @property`
+    /// rules that out-rank every context rule in this engine, so function
+    /// names, calls, and method calls all painted as plain variables.
+    #[test]
+    fn javascript_colors_functions_and_jsx() {
+        let mut h = Highlighter::for_language("javascript").unwrap();
+        let src = "async function go(n) {\n  \
+                     return n ? fetch(URL_BASE) : cache.get(`v ${n} z`);\n\
+                   }\n\
+                   const App = () => <div id=\"x\">{items.map(go)}<Child /></div>;\n";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        for (needle, want) in [
+            ("async", "keyword"),
+            ("function", "keyword"),
+            ("return", "keyword"),
+            ("go(n)", "function"), // declaration name
+            ("fetch", "function"), // call
+            ("get(", "function"),  // method call
+            ("URL_BASE", "constant"),
+            ("v ", "string"),      // template string body
+            ("${", "punctuation"), // substitution delimiter
+            ("div", "keyword"),    // JSX tag
+            ("Child", "type"),     // capitalized component
+            ("\"x\"", "string"),   // JSX attribute value
+        ] {
+            assert_eq!(
+                face_of(&h, &rope, src, needle),
+                Some(want),
+                "face of {needle:?}"
+            );
+        }
+        // Substitution contents are plain code, not string-colored.
+        assert_eq!(face_of(&h, &rope, src, "n} z"), Some("variable"));
+        // A function-valued binding out-ranks the Capitalized rule (its match
+        // completes later, at the arrow body), so `App` reads as a function.
+        assert_eq!(face_of(&h, &rope, src, "App"), Some("function"));
+    }
+
+    /// TSX = the TypeScript base query plus JSX rules: lowercase elements are
+    /// tags, capitalized components resolve as types (the identifier-rooted
+    /// Capitalized rule out-ranks the enclosing @tag rule), and the base layer
+    /// still colors expressions inside JSX.
+    #[test]
+    fn tsx_colors_jsx_elements() {
+        let mut h = Highlighter::for_language("tsx").unwrap();
+        let src = "const App = () => <div id=\"x\">{items.map(render)}<Child /></div>;\n";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        assert_eq!(face_of(&h, &rope, src, "div"), Some("keyword")); // @tag
+        assert_eq!(face_of(&h, &rope, src, "Child"), Some("type"));
+        assert_eq!(face_of(&h, &rope, src, "map"), Some("function"));
+        assert_eq!(face_of(&h, &rope, src, "\"x\""), Some("string"));
+        // A function-valued binding out-ranks the Capitalized rule (its match
+        // completes later, at the arrow body), so `App` reads as a function.
+        assert_eq!(face_of(&h, &rope, src, "App"), Some("function"));
     }
 
     /// Every bundled indent query must compile against its grammar — a bad node
