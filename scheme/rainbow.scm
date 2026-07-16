@@ -71,18 +71,21 @@
   (let ((brackets (rainbow--sort
                    (filter (lambda (x) x)
                            (map rainbow--parse (non-empty-lines records))))))
-    (let loop ((bs brackets) (depth 0))
-      (when (not (null? bs))
-        (let* ((b (car bs)) (start (nth b 0)) (end (nth b 1)) (kind (nth b 2)))
-          (cond
-            ((rainbow--open? kind)
-             (overlay-set-face start end (rainbow--face depth))
-             (loop (cdr bs) (+ depth 1)))
-            ((rainbow--close? kind)
-             (let ((d (max 0 (- depth 1))))
-               (overlay-set-face start end (rainbow--face d))
-               (loop (cdr bs) d)))
-            (else (loop (cdr bs) depth))))))))
+    ;; Accumulate the spans and paint them with ONE overlay-set-faces call — a
+    ;; bracket-heavy buffer has thousands, and per-span calls dominated.
+    (let loop ((bs brackets) (depth 0) (spans '()))
+      (if (null? bs)
+          (overlay-set-faces (reverse spans))
+          (let* ((b (car bs)) (start (nth b 0)) (end (nth b 1)) (kind (nth b 2)))
+            (cond
+              ((rainbow--open? kind)
+               (loop (cdr bs) (+ depth 1)
+                     (cons (list start end (rainbow--face depth)) spans)))
+              ((rainbow--close? kind)
+               (let ((d (max 0 (- depth 1))))
+                 (loop (cdr bs) d
+                       (cons (list start end (rainbow--face d)) spans))))
+              (else (loop (cdr bs) depth spans))))))))
 
 ;; Buffers where rainbow-delimiters is unwanted, matched by extension. Two
 ;; reasons land here:

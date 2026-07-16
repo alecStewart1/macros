@@ -1208,6 +1208,32 @@ pub(crate) fn build_engine(
     register_ternary(&mut reg, queue, "overlay-set-face", |start, end, face| {
         EditorCommand::OverlayFace { start, end, face }
     });
+    {
+        // `(overlay-set-faces triples)` — batch overlay-set-face: applies a
+        // whole list of (start end face) accents in ONE Steel→Rust call. A big
+        // magit render carries thousands of accents; the per-call dispatch of
+        // the unary form dominated it. Malformed entries are skipped.
+        let q = queue.clone();
+        reg.register_fn("overlay-set-faces", move |triples: SteelVal| {
+            let mut queue = q.lock().unwrap();
+            for t in steel_list(&triples).unwrap_or_default() {
+                let Some(items) = steel_list(&t) else {
+                    continue;
+                };
+                let usize_at = |i: usize| match items.get(i) {
+                    Some(SteelVal::IntV(n)) if *n >= 0 => Some(*n as usize),
+                    _ => None,
+                };
+                if let (Some(start), Some(end), Some(face)) = (
+                    usize_at(0),
+                    usize_at(1),
+                    items.get(2).and_then(steel_string),
+                ) {
+                    queue.push(EditorCommand::OverlayFace { start, end, face });
+                }
+            }
+        });
+    }
     register_binary(&mut reg, queue, "overlay-hide", |start, end| {
         EditorCommand::OverlayHide { start, end }
     });

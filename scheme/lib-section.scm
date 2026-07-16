@@ -113,11 +113,12 @@
 
 ;; Paint the accumulated sub-line accents onto the CURRENT buffer. Shared by
 ;; section-apply-overlays and by consumers with their own fold model (magit).
+;; One batched overlay-set-faces call — a big build carries thousands of
+;; accents, and per-accent overlay-set-face calls dominated the re-apply.
 ;; NOTE: like all the build state, accents belong to the LAST build — callers
 ;; that re-apply later (fold toggles) assume no other section build ran since.
 (define (section-apply-accents)
-  (for-each (lambda (a) (overlay-set-face (nth a 0) (nth a 1) (nth a 2)))
-            (reverse *section-accents*)))
+  (overlay-set-faces (reverse *section-accents*)))
 
 ;; Re-apply accents + folds to the CURRENT buffer (after a render, or after a
 ;; toggle that didn't rebuild the text). clear-overlays first so stale folds and

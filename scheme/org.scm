@@ -266,6 +266,19 @@
   (string-append "org-level-"
                  (number->string (+ 1 (modulo (- n 1) (length *org-level-colors*))))))
 
+;; Fontify span batching: face spans accumulate here and flush as ONE
+;; overlay-set-faces call per repaint — a large .org repaint carries thousands
+;; of spans, and one FFI call per span dominated it. Emission order is
+;; preserved (later spans win where they overlap, e.g. the keyword face on top
+;; of the heading's whole-line level face). overlay-hide stays per-call: hides
+;; are few (one per heading) and a different primitive.
+(define *org--spans* '())
+(define (org--span start end face)
+  (set! *org--spans* (cons (list start end face) *org--spans*)))
+(define (org--flush-spans)
+  (overlay-set-faces (reverse *org--spans*))
+  (set! *org--spans* '()))
+
 ;; Overlay `face` on every match of `pattern` within one line. `lstart` is the
 ;; line's start byte; `string-match` gives the byte offset of a match inside the
 ;; line and `regexp-captures` its text (→ byte length), so offsets stay exact
@@ -278,13 +291,13 @@
                (whole (if (null? caps) "" (car caps)))
                (wlen (utf8-length whole)))
           (when (> wlen 0)
-            (overlay-set-face (+ lstart base m) (+ lstart base m wlen) face)
+            (org--span (+ lstart base m) (+ lstart base m wlen) face)
             (let ((consumed (+ m wlen)))
               (loop (+ base consumed) (byte-drop s consumed)))))))))
 
 (define (org--fontify-heading lstart line level)
   (let ((lend (+ lstart (utf8-length line))))
-    (overlay-set-face lstart lend (org--level-face level))
+    (org--span lstart lend (org--level-face level))
     ;; Collapse all the leading stars AND the single separator space after them, so
     ;; the title sits exactly at the heading's virtual indent — a level-N heading
     ;; then aligns with the body under a level-(N-1) heading, like org-indent.
@@ -305,26 +318,26 @@
           (cond
             ((org--custom-keyword? kw)
              (when (org--keyword-color kw)
-               (overlay-set-face ks (+ ks (string-length kw)) (org--keyword-face-name kw))))
+               (org--span ks (+ ks (string-length kw)) (org--keyword-face-name kw))))
             ((org--done-keyword? kw)
-             (overlay-set-face ks (+ ks (string-length kw)) "org-done"))
+             (org--span ks (+ ks (string-length kw)) "org-done"))
             (else
-             (overlay-set-face ks (+ ks (string-length kw)) "org-todo"))))))
+             (org--span ks (+ ks (string-length kw)) "org-todo"))))))
     ;; priority cookie [#A]
     (let ((b (string-match org--priority-re line)))
-      (when (>= b 0) (overlay-set-face (+ lstart b) (+ lstart b 4) "org-priority")))
+      (when (>= b 0) (org--span (+ lstart b) (+ lstart b 4) "org-priority")))
     ;; trailing tags
     (let ((c (regexp-captures org--tags-capture-re line)))
       (when (not (null? c))
         (let ((tags (nth c 1)))
-          (overlay-set-face (- lend (utf8-length tags)) lend "org-tag"))))))
+          (org--span (- lend (utf8-length tags)) lend "org-tag"))))))
 
 (define (org--fontify-plain lstart line)
   ;; checkbox state
   (let ((b (string-match "\\[[ xX-]\\]" line)))
     (when (and (>= b 0) (>= (string-match "^[ \t]*[-+*][ \t]+\\[[ xX-]\\]" line) 0))
       (let ((mark (substring line (+ b 1) (+ b 2))))
-        (overlay-set-face (+ lstart b) (+ lstart b 3)
+        (org--span (+ lstart b) (+ lstart b 3)
                           (if (equal? (string-upcase mark) "X") "org-checkbox-done" "org-checkbox")))))
   ;; inline emphasis (delimiters cannot span their own delimiter or a newline)
   (org--paint lstart line "\\*[^ \t\n*][^*\n]*\\*" "org-bold")
@@ -365,6 +378,7 @@
     (guard-buffer-unchanged "org--fontify-schedule")
     (clear-overlay-faces)
     (clear-overlay-hides)   ; clear-overlay-faces no longer clears hides
+    (set! *org--spans* '()) ; fresh batch (a prior aborted walk can't leak)
     (let ((all-lines (org--lines)))   ; ONE split, shared with the indent pass
       (let loop ((lines all-lines) (off 0) (insrc #f))
         (when (not (null? lines))
@@ -373,25 +387,26 @@
                  (lvl (org--heading-level line)))
             (cond
               ((and insrc (org--block-end? line))
-               (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
+               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
               (insrc
-               (overlay-set-face off lend "org-block") (loop (cdr lines) (+ lend 1) #t))
+               (org--span off lend "org-block") (loop (cdr lines) (+ lend 1) #t))
               ((org--block-begin? line)
-               (overlay-set-face off lend "org-meta")
+               (org--span off lend "org-meta")
                (loop (cdr lines) (+ lend 1)
                      (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0)))
               ((org--block-end? line)
-               (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
+               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
               (lvl
                (org--fontify-heading off line lvl) (loop (cdr lines) (+ lend 1) #f))
               ((or (org--keyword-line? line) (org--comment-line? line))
-               (overlay-set-face off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
+               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
               ((org--drawer-line? line)
-               (overlay-set-face off lend "org-drawer") (loop (cdr lines) (+ lend 1) #f))
+               (org--span off lend "org-drawer") (loop (cdr lines) (+ lend 1) #f))
               ((org--table-line? line)
-               (overlay-set-face off lend "org-table") (loop (cdr lines) (+ lend 1) #f))
+               (org--span off lend "org-table") (loop (cdr lines) (+ lend 1) #f))
               (else
                (org--fontify-plain off line) (loop (cdr lines) (+ lend 1) #f))))))
+      (org--flush-spans)
       (org--apply-indent all-lines))))
 
 ;; Virtual `org-indent-mode` indentation. Walk the lines tracking the enclosing

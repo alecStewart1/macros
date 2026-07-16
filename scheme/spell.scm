@@ -81,10 +81,10 @@
 ;; --- painting ---------------------------------------------------------------------
 (define (spell--repaint)
   (clear-overlay-faces-matching "spell-error")
-  (let loop ((es (spell--errors)))
-    (unless (null? es)
-      (overlay-set-face (nth (car es) 0) (nth (car es) 1) "spell-error")
-      (loop (cdr es)))))
+  ;; One batched overlay-set-faces call — a prose buffer can carry hundreds of
+  ;; squiggles, and per-span overlay-set-face calls dominated the repaint.
+  (overlay-set-faces
+    (map (lambda (e) (list (nth e 0) (nth e 1) "spell-error")) (spell--errors))))
 
 ;; Cache and paint a backend's finished result set, whose byte offsets were
 ;; computed against `buffer` at edit tick `tick` — both captured when the text

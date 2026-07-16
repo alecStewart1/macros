@@ -310,7 +310,9 @@
                                ; other file section is collapsed by default
                                ; (persists). Keyed by type AND path so expanding a
                                ; file in Unstaged doesn't also expand its Staged
-                               ; counterpart when it moves groups.
+                               ; counterpart when it moves groups. Bodies render
+                               ; LAZILY: a collapsed file emits only its heading,
+                               ; so TAB re-renders instead of unfolding in place.
 (define *magit-hunks* '())     ; (start-line end-line file-header hunk-text type path)
 ;; Structural view (see "structural grouping" below): runs of hunks grouped by
 ;; their enclosing function. (heading-line body-start body-end type path context).
@@ -357,11 +359,6 @@
 
 ;; --- diff rendering ---------------------------------------------------------
 
-;; Keep only hunk/body lines from `git diff` (drop the file-header noise).
-(define (magit-diff-keep? l)
-  (not (or (starts-with? l "diff --git") (starts-with? l "index ")
-           (starts-with? l "--- ") (starts-with? l "+++ "))))
-
 (define (magit-diff-face l)
   (cond ((starts-with? l "@@") "magit-hunk")
         ((starts-with? l "+") "magit-added")
@@ -389,32 +386,32 @@
 ;; Pairing happens only when a run of N removed lines is immediately followed by
 ;; N added lines (same as diff-highlight); otherwise lines stay whole-line lit.
 
+;; Count of leading elements two CHAR LISTS share — one O(n) walk. (A per-char
+;; `substring` loop is O(n²) here: Steel's substring is char-indexed, so every
+;; call re-walks the string from the start, and long paired lines dominated the
+;; render.) UTF-8 safe: string->list yields chars, not bytes.
+(define (magit-common-prefix-chars a b)
+  (let loop ((a a) (b b) (n 0))
+    (if (and (pair? a) (pair? b) (equal? (car a) (car b)))
+        (loop (cdr a) (cdr b) (+ n 1))
+        n)))
 ;; Count of leading chars `a` and `b` share (char-indexed, UTF-8 safe).
 (define (magit-common-prefix a b)
-  (let ((la (string-length a)) (lb (string-length b)))
-    (let loop ((i 0))
-      (if (and (< i la) (< i lb)
-               (equal? (substring a i (+ i 1)) (substring b i (+ i 1))))
-          (loop (+ i 1))
-          i))))
+  (magit-common-prefix-chars (string->list a) (string->list b)))
 ;; Count of trailing chars shared, capped at `limit` so head and tail can't
 ;; overlap (e.g. a one-sided insertion).
 (define (magit-common-suffix a b limit)
-  (let ((la (string-length a)) (lb (string-length b)))
-    (let loop ((i 0))
-      (if (and (< i limit)
-               (equal? (substring a (- la i 1) (- la i))
-                       (substring b (- lb i 1) (- lb i))))
-          (loop (+ i 1))
-          i))))
+  (min limit (magit-common-prefix-chars (reverse (string->list a))
+                                        (reverse (string->list b)))))
 ;; The changed middle of `a` relative to `b`, as a (start . end) CHAR range on
 ;; `a`. Empty (start = end) when `a`'s content is wholly shared (pure insertion
 ;; on the other side) — the caller then paints nothing.
 (define (magit-change-span a b)
-  (let* ((la (string-length a)) (lb (string-length b))
-         (p (magit-common-prefix a b))
-         (s (magit-common-suffix a b (min (- la p) (- lb p)))))
-    (cons p (- la s))))
+  (let* ((la (string->list a)) (lb (string->list b))
+         (p (magit-common-prefix-chars la lb))
+         (s (min (min (- (length la) p) (- (length lb) p))
+                 (magit-common-prefix-chars (reverse la) (reverse lb)))))
+    (cons p (- (length la) s))))
 
 ;; Emit diff line `l`, accenting its +/- marker AND its changed span vs the
 ;; paired line `other`. `removed?` selects the removed vs added word face. The
@@ -520,18 +517,22 @@
   (or (chunk-prefixed chunk "+++ b/")
       (chunk-prefixed chunk "--- a/")))
 
-;; (path diff-text) per file in a bulk `git diff`. trim-end first so the last
-;; file's slice carries no trailing blank line (keeps its hunks apply-clean).
+;; path → diff-text hash per file in a bulk `git diff` (a hash, not an assoc
+;; list — the per-file lookup would otherwise be O(files²)). trim-end first so
+;; the last file's slice carries no trailing blank line (keeps its hunks
+;; apply-clean).
 (define (build-diff-map raw)
-  (if (equal? (trim-end raw) "")
-      '()
-      (map (lambda (chunk) (list (chunk-path chunk) (join-lines chunk)))
-           (split-diff-files (split-many (trim-end raw) "\n")))))
+  (let loop ((chunks (if (equal? (trim-end raw) "")
+                         '()
+                         (split-diff-files (split-many (trim-end raw) "\n"))))
+             (m (hash)))
+    (if (null? chunks)
+        m
+        (loop (cdr chunks)
+              (hash-insert m (chunk-path (car chunks)) (join-lines (car chunks)))))))
 
 (define (diff-map-get dmap path)
-  (cond ((null? dmap) "")
-        ((equal? (car (car dmap)) path) (cadr (car dmap)))
-        (else (diff-map-get (cdr dmap) path))))
+  (or (hash-try-get dmap path) ""))
 
 ;; --- structural grouping ----------------------------------------------------
 ;; `git diff` already names the enclosing function on every hunk header
@@ -622,21 +623,34 @@
 ;; range + the patch material so `s`/`u`/`k` can act on a single hunk. In the
 ;; structural view the hunks are first grouped by enclosing function.
 ;; `entry` is (label path); `diff-text` is this file's slice of the section's
-;; bulk diff (see build-diff-map).
+;; bulk diff (see build-diff-map). Lazy body: sections are collapsed by
+;; default, so the diff is parsed + emitted (word-diff, accents, hunk records)
+;; only for files the user has expanded — a collapsed file costs one heading
+;; line, which is what keeps a many-file refresh cheap. Point can't sit inside
+;; a collapsed body, so the missing hunk records are unreachable anyway.
 (define (magit-emit-diff entry type diff-text)
   (let* ((label (car entry))
          (path (cadr entry))
-         (heading (section-point-line))
-         (parsed (parse-diff diff-text))
-         (header (car parsed))
-         (hunks (cdr parsed)))
+         (heading (section-point-line)))
     (magit-emit-file-heading label path)
     (let ((body-start (section-point-line)))
-      (if (magit-structural?)
-          (magit-emit-hunks-grouped header hunks type path)
-          (magit-emit-hunks-flat header hunks type path))
+      (when (member (cons type path) *magit-expanded*)
+        (let* ((parsed (parse-diff diff-text))
+               (header (car parsed))
+               (hunks (cdr parsed)))
+          (if (magit-structural?)
+              (magit-emit-hunks-grouped header hunks type path)
+              (magit-emit-hunks-flat header hunks type path))))
       (set! *magit-sections*
             (cons (list heading path type body-start (section-point-line)) *magit-sections*)))))
+
+;; #t when any of `files` ((label path) …) of `type` has been expanded — the
+;; render needs a section's bulk diff at all only when some file will show it.
+(define (magit-any-expanded? files type)
+  (let loop ((fs files))
+    (cond ((null? fs) #f)
+          ((member (cons type (cadr (car fs))) *magit-expanded*) #t)
+          (else (loop (cdr fs))))))
 
 ;; `dmap` is the section's bulk-diff map; each file pulls its slice by path.
 (define (magit-emit-diff-section title files type dmap)
@@ -647,16 +661,18 @@
     (for-each (lambda (f) (magit-emit-diff f type (diff-map-get dmap (magit-newpath (cadr f))))) files)
     (magit-emit "" #f)))
 
-;; Untracked files have no index entry, so `git diff` skips them. Diff each one
-;; against /dev/null (`--no-index`) to render its whole content as added lines —
-;; this exits non-zero whenever the files differ, so we keep stdout regardless of
-;; the code. Strip the file-header noise (magit-diff-keep?) so only the @@ hunk +
-;; body lines remain. Empty/binary files yield no body (nothing to expand).
+;; Untracked files have no index entry, so `git diff` skips them. Render one's
+;; content directly (read-file — no subprocess; the old `git diff --no-index`
+;; spawn cost a fork/exec PER FILE PER REFRESH) as an added-lines diff body: a
+;; synthesized @@ header plus each line prefixed "+". Empty and binary files
+;; (read-file yields "" for both) get no body — nothing to expand.
 (define (magit-untracked-diff path)
-  (let ((r (call-process-full "git"
-             (list "-C" *magit-dir* "diff" "--no-index" "--"
-                   "/dev/null" (magit-newpath path)) "")))
-    (filter magit-diff-keep? (split-many (trim-end (nth r 1)) "\n"))))
+  (let ((raw (read-file (path-join *magit-dir* (magit-newpath path)))))
+    (if (equal? raw "")
+        '()
+        (let ((body (map (lambda (l) (string-append "+" l))
+                         (split-many (trim-end raw) "\n"))))
+          (cons (string-append "@@ -0,0 +1," (int->string (length body)) " @@") body)))))
 
 ;; Render each untracked file as a foldable section: its content shown as added
 ;; lines, with a body range so TAB folds/expands it like a tracked file. We do
@@ -671,7 +687,11 @@
                 (let ((heading (section-point-line)))
                   (magit-emit-file-heading "" f)
                   (let ((body-start (section-point-line)))
-                    (for-each magit-emit-diff-line (magit-untracked-diff f))
+                    ;; Lazy body: content is read + emitted only once the user
+                    ;; expands the file (TAB re-renders) — a collapsed section
+                    ;; costs nothing, however many untracked files there are.
+                    (when (member (cons type f) *magit-expanded*)
+                      (for-each magit-emit-diff-line (magit-untracked-diff f)))
                     (set! *magit-sections*
                           (cons (list heading f type body-start (section-point-line))
                                 *magit-sections*)))))
@@ -733,22 +753,14 @@
 
 ;; Apply overlay accents + folds AFTER render (they target the now-active buffer).
 ;; clear-overlays first so a refresh doesn't stack stale accents/folds.
+;; File sections need no folds: bodies render lazily, so a collapsed file has
+;; no body lines to hide. Only collapsed function groups (structural view,
+;; inside an expanded file) still fold real lines away.
 (define (magit-apply-overlays)
   (clear-overlays)
   (section-apply-accents)
-  ;; Fold every file section the user hasn't explicitly expanded (collapsed by
-  ;; default). Sections with no diff body (untracked files) have nothing to fold.
-  (for-each (lambda (sec)
-              (when (and (not (member (sec-key sec) *magit-expanded*))
-                         (> (sec-body-end sec) (sec-body-start sec)))
-                (fold-lines (sec-body-start sec) (sec-body-end sec))))
-            *magit-sections*)
-  ;; Then fold each collapsed group — but only inside an expanded file section,
-  ;; since a collapsed file already hides its groups (and double-folding an
-  ;; already-hidden range is needless).
   (for-each (lambda (g)
               (when (and (member (grp-key g) *magit-collapsed-groups*)
-                         (member (cons (grp-type g) (grp-path g)) *magit-expanded*)
                          (> (grp-body-end g) (grp-body-start g)))
                 (fold-lines (grp-body-start g) (grp-body-end g))))
             *magit-groups*))
@@ -828,10 +840,14 @@
       (magit-emit "" #f)
       ;; --- working tree ---
       (magit-emit-file-section "Untracked files" untracked "untracked")
+      ;; The bulk diff is computed only when some file in the section is
+      ;; expanded — the common all-collapsed refresh does no diffing at all.
       (magit-emit-diff-section "Unstaged changes" unstaged "unstaged"
-                               (if (null? unstaged) '() (build-diff-map (gix-diff *magit-dir*))))
+                               (if (magit-any-expanded? unstaged "unstaged")
+                                   (build-diff-map (gix-diff *magit-dir*)) (hash)))
       (magit-emit-diff-section "Staged changes" staged "staged"
-                               (if (null? staged) '() (build-diff-map (gix-diff-cached *magit-dir*))))
+                               (if (magit-any-expanded? staged "staged")
+                                   (build-diff-map (gix-diff-cached *magit-dir*)) (hash)))
       (when (and (null? untracked) (null? unstaged) (null? staged))
         (magit-emit "Nothing to commit, working tree clean." "magit-file")
         (magit-emit "" #f))
@@ -1631,34 +1647,35 @@
                 (list "shift-m" "Remote" 'magit-remote-popup))))))
 
 ;; --- TAB / RET (sections) ---------------------------------------------------
-;; TAB: expand/collapse the section at point. Sections are collapsed by default,
-;; so this toggles the file's membership in the explicitly-expanded set, then
-;; just re-applies folds/accents to the EXISTING buffer — no git, no re-render
-;; (the text and section data are unchanged, only which sections are folded).
+;; TAB: expand/collapse the section at point. Diff bodies render lazily — a
+;; collapsed file emits no lines at all — so toggling a FILE section re-renders
+;; the buffer (cheap: only expanded bodies are built). Toggling a function
+;; group inside an expanded file keeps the in-place fold path: its lines
+;; already exist, only their visibility changes.
 (define (magit-toggle-fold)
-  ;; `magit-apply-overlays` unfolds everything then re-folds, which churns the
-  ;; scroll; pin the cursor's screen row so the buffer doesn't jump. Point stays
-  ;; on the heading (byte unchanged), so its final row equals the captured one.
-  (let ((row (window-cursor-row)))
-    (let ((g (and (magit-structural?) (magit-group-at-line (buffer-line)))))
-      (if g
-          ;; Structural view, point in a function group → fold just that function.
-          (let ((key (grp-key g)))
-            (set! *magit-collapsed-groups*
-                  (if (member key *magit-collapsed-groups*)
-                      (filter (lambda (k) (not (equal? k key))) *magit-collapsed-groups*)
-                      (cons key *magit-collapsed-groups*)))
-            (magit-apply-overlays))
-          ;; Otherwise (file heading, or line view) → fold the whole file section.
-          (let ((s (magit-section-at-line (buffer-line))))
-            (when s
-              (let ((key (sec-key s)))
-                (set! *magit-expanded*
-                      (if (member key *magit-expanded*)
-                          (filter (lambda (k) (not (equal? k key))) *magit-expanded*)
-                          (cons key *magit-expanded*)))
-                (magit-apply-overlays))))))
-    (scroll-cursor-to-row row)))
+  (let ((g (and (magit-structural?) (magit-group-at-line (buffer-line)))))
+    (if g
+        ;; Structural view, point in a function group → fold just that function.
+        ;; `magit-apply-overlays` unfolds everything then re-folds, which churns
+        ;; the scroll; pin the cursor's screen row so the buffer doesn't jump.
+        (let ((row (window-cursor-row))
+              (key (grp-key g)))
+          (set! *magit-collapsed-groups*
+                (if (member key *magit-collapsed-groups*)
+                    (filter (lambda (k) (not (equal? k key))) *magit-collapsed-groups*)
+                    (cons key *magit-collapsed-groups*)))
+          (magit-apply-overlays)
+          (scroll-cursor-to-row row))
+        ;; Otherwise (file heading, or line view) → toggle the file section and
+        ;; re-render (magit-render restores point + pins the screen row itself).
+        (let ((s (magit-section-at-line (buffer-line))))
+          (when s
+            (let ((key (sec-key s)))
+              (set! *magit-expanded*
+                    (if (member key *magit-expanded*)
+                        (filter (lambda (k) (not (equal? k key))) *magit-expanded*)
+                        (cons key *magit-expanded*))))
+            (magit-render))))))
 
 ;; The new-file starting line ("c" in "@@ -a,b +c,d @@") of a hunk header.
 (define (magit-hunk-new-start header)
@@ -1724,8 +1741,7 @@
           (begin
             (render-buffer "*magit-commit*" "magit-log-mode" raw (reverse faces))
             (clear-overlays)
-            (for-each (lambda (a) (overlay-set-face (nth a 0) (nth a 1) (nth a 2)))
-                      (reverse accents)))
+            (overlay-set-faces (reverse accents)))
           (let* ((l    (car ls))
                  (ind  (or in-diff (starts-with? l "diff --git")))
                  (face (magit-show-commit-face l ind))
@@ -1997,12 +2013,11 @@
            (loop (cdr hs) cur (car hs)))
           (else (loop (cdr hs) cur best)))))
 ;; S-TAB: collapse-all when anything is expanded, else expand-all (magit cycle).
+;; Bodies render lazily, so both directions rebuild the buffer text.
 (define (magit-cycle-all)
-  (let ((row (window-cursor-row)))
-    (set! *magit-expanded*
-          (if (null? *magit-expanded*) (map sec-key *magit-sections*) '()))
-    (magit-apply-overlays)
-    (scroll-cursor-to-row row)))
+  (set! *magit-expanded*
+        (if (null? *magit-expanded*) (map sec-key *magit-sections*) '()))
+  (magit-render))
 
 ;; v: switch between the line view and the structural (group-by-function) view.
 ;; A full re-render is needed — the two lay the diff out differently.

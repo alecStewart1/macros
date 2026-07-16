@@ -2635,6 +2635,34 @@ mod magit_tests {
             }
             other => panic!("expected OverlayFace, got {other:?}"),
         }
+        // The batch form queues one OverlayFace per (start end face) triple,
+        // skipping malformed entries.
+        match engine
+            .eval(
+                r#"(overlay-set-faces (list (list 3 8 "diff-added")
+                                            (list "bad")
+                                            (list 9 12 "diff-removed")))"#,
+            )
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [
+                EditorCommand::OverlayFace {
+                    start: 3,
+                    end: 8,
+                    face: f1,
+                },
+                EditorCommand::OverlayFace {
+                    start: 9,
+                    end: 12,
+                    face: f2,
+                },
+            ] => {
+                assert_eq!((f1.as_str(), f2.as_str()), ("diff-added", "diff-removed"));
+            }
+            other => panic!("expected two OverlayFace, got {other:?}"),
+        }
         assert!(matches!(
             engine.eval("(fold-lines 2 5)").unwrap().commands.as_slice(),
             [EditorCommand::FoldLines {
@@ -3353,6 +3381,17 @@ mod magit_tests {
                     EditorCommand::SetLineIndent { line, cols } if (*line, *cols) == expect
                 )),
                 "missing indent {expect:?}: {commands:?}"
+            );
+        }
+        // Faces accumulate in *org--spans* and flush through the batched
+        // overlay-set-faces call — the heading faces must reach the batch.
+        for face in ["org-level-1", "org-level-2"] {
+            assert!(
+                commands.iter().any(|c| matches!(
+                    c,
+                    EditorCommand::OverlayFace { face: f, .. } if f == face
+                )),
+                "missing {face} overlay: {commands:?}"
             );
         }
     }
@@ -4919,6 +4958,23 @@ mod magit_e2e {
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
+
+        // Bodies are lazy: an all-collapsed render parses no hunks at all.
+        engine.eval("(magit-render)").unwrap();
+        assert_eq!(
+            engine
+                .eval("(length *magit-hunks*)")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("0"),
+            "collapsed render builds no hunk bodies"
+        );
+
+        // Expand a.txt (unstaged) → its diff body renders on the next render.
+        engine
+            .eval(r#"(set! *magit-expanded* (list (cons "unstaged" "a.txt")))"#)
+            .unwrap();
         engine.eval("(magit-render)").unwrap();
 
         // Both files appear as sections; the unstaged one has a real diff body.
@@ -4985,6 +5041,10 @@ mod magit_hunk_e2e {
             .unwrap();
         engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
+        // Bodies are lazy — expand f.txt so its hunks are parsed + recorded.
+        engine
+            .eval(r#"(set! *magit-expanded* (list (cons "unstaged" "f.txt")))"#)
+            .unwrap();
         engine.eval("(magit-render)").unwrap();
 
         // The diff parsed into at least one hunk with a header + @@ text.
@@ -5101,6 +5161,18 @@ mod magit_hunk_e2e {
                 .as_deref(),
             Some("\"untracked\""),
             "the recorded untracked header line resolves back to \"untracked\""
+        );
+
+        // An untracked file's body comes straight from read-file (no
+        // subprocess): a synthesized @@ header plus "+"-prefixed lines.
+        assert_eq!(
+            engine
+                .eval(r#"(string-join (magit-untracked-diff "u1.txt") "|")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"@@ -0,0 +1,1 @@|+1\""),
+            "untracked body is read + rendered as added lines"
         );
 
         // `s` on the "Untracked files" header stages every untracked file.
@@ -5463,9 +5535,24 @@ mod magit_quiet_refresh {
             "magit-render watches the repo root recursively"
         );
 
-        // Toggling a fold re-applies overlays (which churns scroll) but pins the
-        // cursor's screen row back, so expanding a section doesn't shift the view.
+        // Toggling a FILE section re-renders (bodies are lazy — expanding must
+        // build them) and pins the cursor's screen row via magit-render.
+        std::fs::write(dir.join("a.txt"), "CHANGED\n").unwrap(); // unstaged mod
+        engine.eval("(set! *magit-quiet* #f)").unwrap();
+        engine.eval("(magit-render)").unwrap();
+        // The test snapshot's point sits on line 0; alias it to a.txt's section
+        // so magit-toggle-fold resolves a file heading there.
+        engine
+            .eval(r#"(set! *magit-sections* (list (list 0 "a.txt" "unstaged" 1 1)))"#)
+            .unwrap();
         let cmds = engine.eval("(magit-toggle-fold)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                EditorCommand::RenderBuffer { text, .. } if text.contains("+CHANGED")
+            )),
+            "expanding a lazy section re-renders with its diff body"
+        );
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, EditorCommand::ScrollCursorToRow(_))),

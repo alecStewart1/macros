@@ -84,12 +84,13 @@
   (lsp-request "textDocument/documentHighlight" "position" "" 'lsp--highlight-apply))
 (define (lsp--highlight-apply json)
   (clear-overlay-faces)             ; only faces — keep folds/suffixes/semantic
-  (for-each
-   (lambda (h)
-     (let ((r (jget h 'range)))
-       (when (hash? r)
-         (overlay-set-face (range-start-byte r) (range-end-byte r) "lsp-highlight"))))
-   (as-list (string->jsexpr json))))
+  (overlay-set-faces                ; one batched call for all occurrences
+   (filter (lambda (t) t)
+           (map (lambda (h)
+                  (let ((r (jget h 'range)))
+                    (and (hash? r)
+                         (list (range-start-byte r) (range-end-byte r) "lsp-highlight"))))
+                (as-list (string->jsexpr json))))))
 (define (lsp-highlight-clear) (clear-overlay-faces))
 
 ;; --- inlay hints ------------------------------------------------------------
@@ -193,18 +194,21 @@
   (lsp-semantic-tokens-delta "lsp--semantic-apply"))
 (define (lsp--semantic-apply records)
   (clear-overlay-faces)             ; repaint from scratch each refresh
-  (for-each
-   (lambda (rec)
-     (let ((parts (split-many rec "\t")))
-       (when (>= (length parts) 4)
-         (let* ((line (string->number (list-ref parts 0)))
-                (col  (string->number (list-ref parts 1)))
-                (len  (string->number (list-ref parts 2)))
-                (type (list-ref parts 3)))
-           (overlay-set-face (position->byte line col)
-                             (position->byte line (+ col len))
-                             (string-append "lsp-sem-" type))))))
-   (split-many records "\n")))
+  ;; One batched overlay-set-faces call — a buffer's token set runs to
+  ;; thousands, and per-token overlay-set-face calls dominated the refresh.
+  (overlay-set-faces
+   (filter (lambda (t) t)
+           (map (lambda (rec)
+                  (let ((parts (split-many rec "\t")))
+                    (and (>= (length parts) 4)
+                         (let* ((line (string->number (list-ref parts 0)))
+                                (col  (string->number (list-ref parts 1)))
+                                (len  (string->number (list-ref parts 2)))
+                                (type (list-ref parts 3)))
+                           (list (position->byte line col)
+                                 (position->byte line (+ col len))
+                                 (string-append "lsp-sem-" type))))))
+                (split-many records "\n")))))
 
 ;;; ===========================================================================
 ;;; ERGONOMIC PER-LANGUAGE CONFIG — the one form to set up a language.

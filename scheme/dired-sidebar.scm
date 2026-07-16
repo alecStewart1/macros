@@ -146,7 +146,7 @@
         (render-buffer buffer mode (join-lines lines) faces))
     (for-each (lambda (ic) (set-line-icon (nth ic 0) (nth ic 1) (nth ic 2))) icons)
     (clear-overlays)
-    (for-each (lambda (g) (overlay-set-face (nth g 0) (nth g 1) (nth g 2))) guides)))
+    (overlay-set-faces guides)))  ; already (start end face) triples — one call
 
 ;; The (path is-dir) of the ENTRIES row at LINE, or #f. ENTRIES is element 1 of a
 ;; dired-subtree-build result; consumers keep it from the last render to resolve
