@@ -23,7 +23,7 @@
 ;; Completion popup (corfu-style). Behaviour is in Rust; policy lives here.
 (set-option "completion-style" "popup")     ; "popup" or "minibuffer"
 (set-option "completion-auto" #t)            ; pop up automatically while typing
-(set-option "completion-auto-prefix" 2)      ; min chars before auto-popup
+(set-option "completion-auto-prefix" 1)      ; min chars before auto-popup
 (set-option "completion-max-rows" 10)        ; visible rows in the popup
 (set-option "completion-show-detail" #t)     ; show signature/type next to name
 (set-option "completion-show-kind" #t)       ; show kind tag (fn, var, kw, …)

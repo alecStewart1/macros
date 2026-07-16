@@ -4,16 +4,18 @@ use super::*;
 
 impl Editor {
     /// The candidate set filtered by the live prefix `buffer[anchor..point]`.
+    /// Point BEFORE the anchor means the completed word is gone (deleted via a
+    /// path that never refiltered — evil `C-w`, a Scheme edit): nothing matches,
+    /// rather than an empty prefix matching everything.
     pub(super) fn popup_filtered(&self) -> Vec<CompletionItem> {
         let Some(popup) = self.completion_popup.as_ref() else {
             return Vec::new();
         };
         let point = self.point();
-        let prefix = if point >= popup.anchor {
-            self.active.buffer.slice_to_string(popup.anchor..point)
-        } else {
-            String::new()
-        };
+        if point < popup.anchor {
+            return Vec::new();
+        }
+        let prefix = self.active.buffer.slice_to_string(popup.anchor..point);
         popup
             .items
             .iter()
@@ -111,13 +113,34 @@ impl Editor {
     }
 
     /// After an edit while the popup is open: close it if the prefix no longer
-    /// matches anything or point moved before the anchor; otherwise reset the
-    /// selection to the top.
+    /// matches anything, point moved before the anchor, or the prefix was
+    /// erased entirely; otherwise reset the selection to the top.
+    ///
+    /// The erased-prefix rule matches other editors: backspacing away the word
+    /// that opened the popup dismisses it instead of leaving an
+    /// everything-matches menu up. The exception is a popup anchored right
+    /// after a trigger char (`foo.`), where an empty prefix legitimately means
+    /// "all members" — erasing back to the dot keeps the full list.
     pub(super) fn popup_refilter(&mut self, cx: &mut Context<Self>) {
         let Some(anchor) = self.completion_popup.as_ref().map(|p| p.anchor) else {
             return;
         };
-        if self.point() < anchor || self.popup_filtered().is_empty() {
+        let erased = self.point() == anchor && {
+            let triggers = cx
+                .global::<crate::settings::Settings>()
+                .completion_trigger_chars(self.active_language().as_deref());
+            let before = anchor > 0 && {
+                let prev = self.active.buffer.prev_grapheme(anchor);
+                self.active
+                    .buffer
+                    .slice_to_string(prev..anchor)
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| self.lsp_trigger_char(c, &triggers))
+            };
+            !before
+        };
+        if self.point() < anchor || erased || self.popup_filtered().is_empty() {
             self.completion_popup = None;
         } else if let Some(popup) = self.completion_popup.as_mut() {
             popup.selected = 0;
@@ -220,7 +243,7 @@ impl Editor {
                 return;
             }
             let point = self.point();
-            let word_start = self.active.buffer.backward_word(point);
+            let word_start = self.active.buffer.word_start(point);
             if point.saturating_sub(word_start) < min_prefix.max(1) {
                 return;
             }

@@ -79,23 +79,20 @@
 ;; (so a perspective survives a restart as soon as it exists — no clean quit
 ;; required, matching projectile's recent-ring behaviour).
 ;;
-;; The title bar names a project only while a file INSIDE that project is
-;; active. Anything else — a file outside every project, or a fileless buffer
-;; (*scratch*, magit, dashboards; their buffer-directory is just the process
-;; cwd, so they can't be attributed to any project) — clears it back to the
-;; neutral "projects" trigger rather than keep naming the last project.
+;; The current perspective is STICKY: only visiting a file inside some project
+;; moves it. Everything else — dired / the sidebar / terminal / magit /
+;; *scratch* (fileless buffers whose buffer-directory can't attribute them to
+;; a project), or a stray file outside every root — leaves the title bar on
+;; the project you were working in rather than flapping to the neutral
+;; "projects" trigger on every sidebar or terminal visit.
 (define (perspective-track)
   (let ((root (project-root (buffer-directory)))
         (file (buffer-file-name)))
-    (if (and root (not (equal? file "")))
-        (begin
-          (perspective-update root file)
-          (set! *perspective-current* root)
-          (perspective-sync-titlebar)
-          (perspective-save))
-        (when *perspective-current*
-          (set! *perspective-current* #f)
-          (perspective-sync-titlebar)))))
+    (when (and root (not (equal? file "")))
+      (perspective-update root file)
+      (set! *perspective-current* root)
+      (perspective-sync-titlebar)
+      (perspective-save))))
 
 ;; --- switching ----------------------------------------------------------------
 
@@ -183,8 +180,8 @@
 ;; buffer cycling, find-file to a buffered file, the survivor after a kill),
 ;; so the title bar would keep naming the previous project when moving between
 ;; projects through existing buffers. `buffer-switch-hook` (buffers.rs) fires
-;; on exactly those switches; on non-project buffers (fileless or outside
-;; every root) perspective-track clears the title bar instead of tracking.
+;; on exactly those switches; non-project buffers (fileless or outside every
+;; root) are ignored, so the current perspective sticks across them.
 (add-hook "buffer-switch-hook" "perspective-track")
 (perspective-load)
 

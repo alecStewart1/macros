@@ -11,10 +11,12 @@
 
 ;; --- per-language completion trigger characters -----------------------------
 ;; Characters that auto-open the completion popup with no word prefix (member
-;; access), ADDED to whatever the language server advertises. ocamllsp advertises
-;; none, so `Stdlib.` wouldn't auto-complete without this; add other languages
-;; whose servers under-advertise the same way. Override in init.scm (loaded last).
-(set-option "completion-trigger-chars:ocaml" ".")
+;; access), ADDED to whatever the language server advertises. The built-in
+;; default is "." for every language, so `Stdlib.` auto-completes even under a
+;; server that under-advertises (ocamllsp lists no trigger characters). Override
+;; globally or per language in init.scm (loaded last), e.g.
+;;   (set-option "completion-trigger-chars:rust" ".:")   ; add `:` for paths
+;;   (set-option "completion-trigger-chars" "")          ; server-advertised only
 
 ;; --- completion-at-point-functions (CAPF) -----------------------------------
 ;; `completion-at-point` (M-i) tries each registered Scheme CAPF in order before
@@ -182,7 +184,7 @@
 ;; (returns '()) when a language server is ready — so in code buffers LSP wins,
 ;; and dabbrev only kicks in for plain-text / config / scratch buffers.
 (define (dabbrev-capf prefix)
-  (if (or (lsp-server-ready?) (< (string-length prefix) 2))
+  (if (or (lsp-server-ready?) (< (string-length prefix) 1))
       '()
       (capf-dedup
         (filter (lambda (w) (and (starts-with? w prefix) (not (equal? w prefix))))

@@ -31,17 +31,17 @@ Set these in your `init.scm` (defaults shown). Values are typed — numbers and 
 ```scheme
 (set-option "completion-style"       "popup")  ; "popup" or "minibuffer"
 (set-option "completion-auto"        #t)       ; auto-popup while typing
-(set-option "completion-auto-prefix" 2)        ; min chars before auto-popup
+(set-option "completion-auto-prefix" 1)        ; min chars before auto-popup
 (set-option "completion-max-rows"    10)       ; visible rows
 (set-option "completion-show-detail" #t)       ; show signature/type
 (set-option "completion-show-kind"   #t)       ; show kind tag (fn, var, kw…)
 (set-option "completion-capf"        #t)       ; set #f for LSP-only
 ```
 
-**Trigger characters.** A trigger character auto-opens the popup with no word prefix. The language server advertises its own (most do), and you can add more per language — *added to*, not replacing, the server's set. This matters for servers that advertise none: ocamllsp lists no trigger characters, so the bundled config supplies the dot:
+**Trigger characters.** A trigger character auto-opens the popup with no word prefix. The language server advertises its own, and the editor adds `.` for every language by default — *added to*, not replacing, the server's set — so member access completes on the dot even under a server that advertises no trigger characters (ocamllsp lists none). Add more per language, or set `""` to rely on server-advertised triggers only:
 
 ```scheme
-(set-option "completion-trigger-chars:ocaml" ".")   ; each char triggers; "" disables
+(set-option "completion-trigger-chars:rust" ".:")   ; each char triggers; "" disables
 ```
 
 The key is `completion-trigger-chars:<language-id>` (a [per-language option](/docs/configuration#per-mode-options)); a bare `completion-trigger-chars` applies to every language.

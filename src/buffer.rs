@@ -251,6 +251,21 @@ impl Buffer {
         self.rope.char_to_byte(ci)
     }
 
+    /// The start of the word ending at `from`: walks back over word characters
+    /// ONLY, returning `from` itself when the preceding char isn't one (empty
+    /// prefix). Unlike [`Self::backward_word`] — a motion that first crosses
+    /// separators and then the previous word — this never jumps a word back, so
+    /// it's the right boundary for completion prefixes: after `self.` it yields
+    /// point (empty prefix), where `backward_word` would yield the whole
+    /// `self.` and every candidate would be filtered out.
+    pub fn word_start(&self, from: usize) -> usize {
+        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        while ci > 0 && is_word_char(self.rope.char(ci - 1)) {
+            ci -= 1;
+        }
+        self.rope.char_to_byte(ci)
+    }
+
     /// The start of the Lisp symbol ending at `from` — walks back over symbol
     /// constituents (see [`is_symbol_char`]) so a whole token like
     /// `string->number` is returned, not just its last hyphen-delimited piece.
@@ -378,6 +393,22 @@ mod tests {
         );
         // Right after a delimiter → empty prefix (complete everything).
         assert_eq!(buffer.backward_symbol(1), 1); // just after '('
+    }
+
+    #[test]
+    fn word_start_never_jumps_a_word_back() {
+        // The completion prefix boundary: mid-word → word start, but right
+        // after a separator → point itself (empty prefix). `backward_word`
+        // would cross the `.` and return the start of `self`, anchoring the
+        // popup so every candidate gets filtered out (the invisible-popup bug
+        // right after a trigger char).
+        let buffer = Buffer::new("self.foo");
+        assert_eq!(buffer.word_start(8), 5); // "foo|"  → start of "foo"
+        assert_eq!(buffer.word_start(6), 5); // "f|oo"  → start of "foo"
+        assert_eq!(buffer.word_start(5), 5); // "self.|" → empty prefix, NOT 0
+        assert_eq!(buffer.backward_word(5), 0); // the motion does jump — by design
+        assert_eq!(buffer.word_start(4), 0); // "self|" → start of "self"
+        assert_eq!(buffer.word_start(0), 0);
     }
 
     #[test]

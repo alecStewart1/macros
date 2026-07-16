@@ -7030,8 +7030,8 @@ mod capf_lib {
             v(r#"(capf-dedup (list "a" "b" "a" "c" "b"))"#),
             "(\"a\" \"b\" \"c\")"
         );
-        // A one-character prefix is declined (too short).
-        assert_eq!(v(r#"(dabbrev-capf "f")"#), "()");
+        // An empty prefix is declined; a single character is enough to offer.
+        assert_eq!(v(r#"(dabbrev-capf "")"#), "()");
     }
 }
 
@@ -7225,6 +7225,49 @@ mod perspectives_lib {
             "expected an empty SetTitlebarDropdown, got {:?}",
             outcome.commands
         );
+    }
+
+    /// The current perspective is sticky: entering a fileless buffer (dired,
+    /// the sidebar, terminal, magit, *scratch*) or a file outside every
+    /// project leaves the title bar on the project being worked in. Only
+    /// visiting a file inside some project moves it. Regression: it used to
+    /// clear to the neutral trigger on every sidebar or terminal visit.
+    #[test]
+    fn perspective_track_sticks_across_non_project_buffers() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
+        // Stubs must precede perspectives.scm: Steel resolves free identifiers
+        // at definition time, so later redefinitions wouldn't be seen.
+        engine
+            .eval(
+                r#"
+                (define (persistence-dir) "/nonexistent-macros-test")
+                (define *stub-root* "/w/proj")
+                (define *stub-file* "/w/proj/a.rs")
+                (define (project-root d) *stub-root*)
+                (define (buffer-directory) "/w/proj")
+                (define (buffer-file-name) *stub-file*)
+                "#,
+            )
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/perspectives.scm"))
+            .unwrap();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        // Visiting a project file makes its perspective current.
+        engine.eval("(perspective-track)").unwrap();
+        assert_eq!(v("*perspective-current*"), "\"/w/proj\"");
+        // A fileless buffer (dired / sidebar / terminal) leaves it alone.
+        engine.eval(r#"(set! *stub-file* "")"#).unwrap();
+        engine.eval("(perspective-track)").unwrap();
+        assert_eq!(v("*perspective-current*"), "\"/w/proj\"");
+        // So does a file outside every project root.
+        engine
+            .eval(r#"(begin (set! *stub-root* #f) (set! *stub-file* "/elsewhere/x.txt"))"#)
+            .unwrap();
+        engine.eval("(perspective-track)").unwrap();
+        assert_eq!(v("*perspective-current*"), "\"/w/proj\"");
     }
 
     /// Switching back to a perspective whose resume file is already open gets

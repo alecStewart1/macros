@@ -46,7 +46,7 @@ Set options with `(set-option "name" value)`. Values are **typed** — pass a nu
 ;; Completion popup (corfu-style) — see Completion
 (set-option "completion-style"       "popup")  ; "popup" or "minibuffer"
 (set-option "completion-auto"        #t)       ; pop up while typing
-(set-option "completion-auto-prefix" 2)        ; min chars before auto-popup
+(set-option "completion-auto-prefix" 1)        ; min chars before auto-popup
 (set-option "completion-max-rows"    10)
 (set-option "completion-show-detail" #t)       ; signature/type beside name
 (set-option "completion-show-kind"   #t)       ; kind tag (fn, var, kw, …)
@@ -100,9 +100,10 @@ For code buffers the mode name is the **language id** (`ocaml`, `rust`, `tsx`, �
 (set-option "tab-width:ocaml" 2)   ; vs the global "tab-width" (default 4)
 
 ;; Extra completion trigger characters, added to whatever the language server
-;; advertises — auto-open completion on member access even when the server
-;; lists none (ocamllsp doesn't advertise ".").
-(set-option "completion-trigger-chars:ocaml" ".")
+;; advertises — "." is the built-in default for every language, so member
+;; access auto-opens completion even when the server lists none (ocamllsp
+;; doesn't advertise "."). Set "" to rely on server-advertised triggers only.
+(set-option "completion-trigger-chars:rust" ".:")
 ```
 
 The bundled defaults live in `scheme/indent.scm` and `scheme/completion.scm`; because your `init.scm` loads last, any `(set-option …)` there wins. The full per-language indent set — including the trailing-token rules (`indent-after` / `align-after`) — is covered under [Auto-indentation](/docs/languages#auto-indentation-indent-query).

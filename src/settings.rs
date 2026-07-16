@@ -349,12 +349,12 @@ impl Settings {
     }
 
     /// Extra completion trigger characters for a language, *added to* whatever the
-    /// language server advertises. Lets a language whose server under-advertises
-    /// (e.g. ocamllsp, which doesn't list `.`) still auto-open completion on member
-    /// access. Bundled `scheme/completion.scm` seeds `completion-trigger-chars:ocaml`
-    /// = "."; override per language with `(set-option "completion-trigger-chars:<lang>" "…")`.
+    /// language server advertises. Defaults to `.` everywhere so member access
+    /// auto-opens completion even under a server that under-advertises (e.g.
+    /// ocamllsp, which doesn't list `.`). Override globally or per language with
+    /// `(set-option "completion-trigger-chars[:<lang>]" "…")` ("" disables).
     pub fn completion_trigger_chars(&self, mode: Option<&str>) -> String {
-        self.str_per_mode("completion-trigger-chars", mode, "")
+        self.str_per_mode("completion-trigger-chars", mode, ".")
     }
 
     /// Trailing-token indent rules for a language (a token-level layer on top of
@@ -405,9 +405,9 @@ impl Settings {
     }
 
     /// Minimum prefix length before auto-completion triggers
-    /// (corfu `corfu-auto-prefix`).
+    /// (corfu `corfu-auto-prefix`): the first word character typed.
     pub fn completion_auto_prefix(&self) -> usize {
-        self.usize_or("completion-auto-prefix", 2)
+        self.usize_or("completion-auto-prefix", 1)
     }
 
     /// Maximum candidate rows shown in the popup (corfu `corfu-count`). The
@@ -667,15 +667,15 @@ mod tests {
     #[test]
     fn completion_trigger_chars_per_language() {
         let mut s = Settings::default();
-        // No config: empty (server-advertised triggers still apply elsewhere).
-        assert_eq!(s.completion_trigger_chars(Some("ocaml")), "");
+        // No config: `.` everywhere (added to server-advertised triggers).
+        assert_eq!(s.completion_trigger_chars(Some("ocaml")), ".");
         // A per-language value applies only to that language.
         s.set(
             "completion-trigger-chars:ocaml".into(),
             OptionValue::Str(".".into()),
         );
         assert_eq!(s.completion_trigger_chars(Some("ocaml")), ".");
-        assert_eq!(s.completion_trigger_chars(Some("rust")), "");
+        assert_eq!(s.completion_trigger_chars(Some("rust")), ".");
         // A global value applies to languages without an override.
         s.set(
             "completion-trigger-chars".into(),

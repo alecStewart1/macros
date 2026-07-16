@@ -3659,7 +3659,7 @@ impl Editor {
         let capf_enabled = cx.global::<crate::settings::Settings>().completion_capf();
         if capf_enabled && !self.capf_functions.is_empty() {
             let point = self.point();
-            let start = self.active.buffer.backward_word(point);
+            let start = self.active.buffer.word_start(point);
             let prefix = self.active.buffer.slice_to_string(start..point);
             self.publish_point();
             self.script
@@ -3672,12 +3672,20 @@ impl Editor {
     /// Request completions from the active buffer's language server.
     fn completion_at_point_lsp(&mut self, cx: &mut Context<Self>) {
         let (Some(language), Some(uri)) = (self.active_language(), self.active_uri()) else {
-            self.echo(NO_LSP_FOR_BUFFER, cx);
+            // Same contract as the !sent path below: drop the auto flag (or it
+            // jams auto-completion for the session) and only echo for explicit
+            // requests.
+            if !std::mem::take(&mut self.completion_auto_pending) {
+                self.echo(NO_LSP_FOR_BUFFER, cx);
+            }
             return;
         };
         let point = self.point();
         let (line, character) = self.active.buffer.byte_to_position(point);
-        let word_range = self.active.buffer.backward_word(point)..point;
+        // `word_start`, not `backward_word`: the range becomes the popup anchor
+        // AND the live filter prefix, so right after `self.` it must be empty —
+        // a motion-style word jump would filter every member candidate out.
+        let word_range = self.active.buffer.word_start(point)..point;
         let sent = if let Some(server) = self.servers.get_mut(&language) {
             if server.ready && server.open.contains(&uri) {
                 let id = server.client.completion(&uri, line, character);
@@ -3690,7 +3698,14 @@ impl Editor {
             false
         };
         if !sent {
-            self.echo(NO_LSP_FOR_BUFFER, cx);
+            // Nothing will answer this round, so the auto flag must drop here or
+            // auto-completion is dead for the whole session (one keystroke in a
+            // serverless buffer whose CAPFs decline would jam it). Auto requests
+            // also stay quiet — no "No LSP" echo per keystroke in text buffers.
+            let was_auto = std::mem::take(&mut self.completion_auto_pending);
+            if !was_auto {
+                self.echo(NO_LSP_FOR_BUFFER, cx);
+            }
         }
     }
 
