@@ -76,6 +76,304 @@ mod engine_tests {
         assert_eq!(rnd.value.as_deref(), Some("64"));
     }
 
+    #[test]
+    fn tls_connect_reports_failure_cleanly() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        // Nothing listens on port 1 — connect must return id 0, not hang or
+        // panic, and leave a readable message in tls-last-error.
+        assert!(val(r#"(tls-connect "127.0.0.1" 1 500 500)"#).contains('0'));
+        assert!(val("(string-length (tls-last-error))") != "0");
+        // Operations on a bogus id fail soft.
+        assert!(
+            val("(tls-send 9999 \"x\")").contains("#f")
+                || val("(tls-send 9999 \"x\")").contains("false")
+        );
+        assert_eq!(val("(string-length (tls-recv-line 9999))"), "0");
+    }
+
+    #[test]
+    fn tcp_listen_accept_roundtrips_over_loopback() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        // A background thread connects to a listener the primitives create, so
+        // accept → recv-line → send exercises the whole plain-TCP path with no
+        // network. bind port 0 → the OS assigns; read it back.
+        engine
+            .eval(r#"(define srv (tcp-listen "127.0.0.1" 0))"#)
+            .unwrap();
+        assert!(
+            val("(> srv 0)").contains("#t"),
+            "listen failed: {}",
+            val("(socket-last-error)")
+        );
+        let port: u16 = val("(tcp-listener-port srv)").parse().unwrap();
+        let client = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.write_all(b"ping\n").unwrap();
+            let mut line = String::new();
+            BufReader::new(&c).read_line(&mut line).unwrap();
+            line
+        });
+        engine.eval("(define conn (tcp-accept srv))").unwrap();
+        assert!(
+            val("(> conn 0)").contains("#t"),
+            "accept failed: {}",
+            val("(socket-last-error)")
+        );
+        assert!(val("(socket-recv-line conn)").contains("ping"));
+        assert!(val(r#"(socket-send conn "pong\n")"#).contains("#t"));
+        assert!(client.join().unwrap().contains("pong"));
+        assert!(val("(socket-close conn)").contains("#t"));
+        assert!(val("(tcp-listener-close srv)").contains("#t"));
+    }
+
+    #[test]
+    fn udp_datagram_roundtrips_over_loopback() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        // A std UdpSocket echoes one datagram back; the primitives send hex and
+        // receive "addr\nhex".
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sport = server.local_addr().unwrap().port();
+        let echo = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let (n, from) = server.recv_from(&mut buf).unwrap();
+            server.send_to(&buf[..n], from).unwrap();
+        });
+        engine.eval("(define u (udp-open))").unwrap();
+        assert!(val("(> u 0)").contains("#t"));
+        // 68656c6c6f = "hello"
+        assert!(val(&format!(r#"(udp-send u "127.0.0.1" {sport} "68656c6c6f")"#)).contains("#t"));
+        let got = val("(udp-recv u 64)");
+        assert!(got.contains("68656c6c6f"), "udp echo wrong: {got}");
+        echo.join().unwrap();
+        assert!(val("(udp-close u)").contains("#t"));
+    }
+
+    #[test]
+    fn async_socket_and_ws_primitives_queue_cleanly() {
+        // The async socket / WebSocket / http-request-full workers run editor-
+        // side (GPUI cx.spawn), so the harness can't drive them end-to-end —
+        // same as http-request / make-process. This checks the registry
+        // boundary: the primitives exist, type-check their args, mint a
+        // positive id, and the send/close verbs return #t (they just enqueue an
+        // EditorCommand).
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        assert!(
+            val(r#"(socket-connect-async "example.com" 993 #t 'on-data 'on-close)"#)
+                .parse::<i64>()
+                .unwrap()
+                > 0
+        );
+        assert!(val(r#"(socket-async-send 1 "6869")"#).contains("#t"));
+        assert!(val("(socket-async-close 1)").contains("#t"));
+        assert!(
+            val(r#"(ws-connect "wss://example.com/socket" 'on-msg 'on-close)"#)
+                .parse::<i64>()
+                .unwrap()
+                > 0
+        );
+        assert!(val(r#"(ws-send 1 "hello")"#).contains("#t"));
+        assert!(val("(ws-close 1)").contains("#t"));
+        // http-request / http-request-full both queue and return #t.
+        assert!(val(r#"(http-request-full "GET" "https://x" '() "" 'k)"#).contains("#t"));
+    }
+
+    #[test]
+    fn delete_file_removes_and_tolerates_absent() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        let dir = std::env::temp_dir().join(format!("macros-del-{}", std::process::id()));
+        let f = dir.join("x.txt");
+        let p = f.display();
+        assert!(val(&format!(r#"(write-file "{p}" "hi")"#)).contains("#t"));
+        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#t"));
+        assert!(val(&format!(r#"(file-exists? "{p}")"#)).contains("#f"));
+        // Already-absent is #t (idempotent retract); a directory is #f.
+        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#t"));
+        assert!(val(&format!(r#"(delete-file "{}")"#, dir.display())).contains("#f"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sqlite_primitives_fts5_roundtrip() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        // In-memory db; create a plain table + an FTS5 virtual table, insert
+        // bound rows, and query both ways.
+        assert!(val(r#"(define db (sqlite-open ":memory:")) (> db 0)"#).contains("#t"));
+        assert!(val(
+            r#"(sqlite-exec db "CREATE TABLE t(id TEXT, n INT); CREATE VIRTUAL TABLE ft USING fts5(id, body);" (list))"#
+        )
+        .contains("#t"));
+        assert!(
+            val(r#"(sqlite-exec db "INSERT INTO t VALUES (?1, ?2)" (list "a" "7"))"#)
+                .contains("#t")
+        );
+        // Bound params are injection-safe: this text is stored literally.
+        assert!(val(r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m1" "invoice payment overdue"))"#).contains("#t"));
+        assert!(
+            val(
+                r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m2" "lunch tomorrow"))"#
+            )
+            .contains("#t")
+        );
+        // Column values come back US-joined (0x1f); integer coerced to text.
+        let row = val(r#"(car (sqlite-query db "SELECT id, n FROM t" (list)))"#);
+        assert!(row.contains("a") && row.contains('7'), "row wrong: {row:?}");
+        // FTS5 MATCH: "invoice" hits m1 only; ranked query returns its id.
+        let hits = val(
+            r#"(sqlite-query db "SELECT id FROM ft WHERE ft MATCH ?1 ORDER BY rank" (list "invoice"))"#,
+        );
+        assert!(
+            hits.contains("m1") && !hits.contains("m2"),
+            "fts wrong: {hits:?}"
+        );
+        // Phrase / prefix query.
+        assert!(
+            val(
+                r#"(length (sqlite-query db "SELECT id FROM ft WHERE ft MATCH ?1" (list "pay*")))"#
+            )
+            .contains('1')
+        );
+        assert!(val("(sqlite-close db)").contains("#t"));
+        // Ops on a closed/bogus id fail soft.
+        assert!(val("(sqlite-exec 9999 \"SELECT 1\" (list))").contains("#f"));
+        assert_eq!(val("(length (sqlite-query 9999 \"SELECT 1\" (list)))"), "0");
+    }
+
+    #[test]
+    fn websocket_handshake_over_sock_roundtrips() {
+        // Exercises the exact protocol path `ws_run` uses — tungstenite's client
+        // handshake driven over our own `Sock` stream — against a loopback
+        // tungstenite echo server. Proves the "no second TLS stack, we own the
+        // stream" design frames correctly; the editor-side drain is separate.
+        use tungstenite::Message;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let msg = ws.read().unwrap();
+            if let Message::Text(t) = msg {
+                ws.send(Message::Text(format!("echo:{t}"))).unwrap();
+            }
+        });
+        let tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let sock = crate::script::Sock::Plain(tcp);
+        let (mut ws, _) = tungstenite::client(format!("ws://127.0.0.1:{port}/"), sock).unwrap();
+        ws.send(Message::Text("hi".into())).unwrap();
+        let reply = ws.read().unwrap();
+        assert_eq!(reply, Message::Text("echo:hi".into()));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn socket_family_bogus_ids_fail_soft() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        assert!(val(r#"(tcp-connect "127.0.0.1" 1 500 500)"#).contains('0'));
+        assert!(val("(socket-send 9999 \"x\")").contains("#f"));
+        assert_eq!(val("(string-length (socket-recv-line 9999))"), "0");
+        assert!(val("(tls-upgrade 9999 \"x\")").contains("#f"));
+        assert!(val("(socket-set-timeout 9999 100)").contains("#f"));
+        assert!(val("(> (string-length (socket-last-error)) 0)").contains("#t"));
+        assert!(val("(tcp-accept 9999)").contains('0'));
+    }
+
+    // Network tests (run manually: `cargo test <name> -- --ignored`). Ignored
+    // by default so the suite stays offline-safe.
+    #[test]
+    #[ignore]
+    fn dns_resolves_real_records() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        // gmail.com always has MX records; each line is "<pref> <host>".
+        let mx = val(r#"(dns-resolve "gmail.com" "MX")"#);
+        assert!(mx.contains("google.com"), "no gmail MX: {mx}");
+        // A record is dotted-quad.
+        let a = val(r#"(dns-resolve "one.one.one.one" "A")"#);
+        assert!(a.contains("1.1.1.1") || a.contains("1.0.0.1"), "no A: {a}");
+    }
+
+    #[test]
+    #[ignore]
+    fn tls_handshake_reads_imap_greeting() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        let _ = engine.eval(r#"(define tls-test-conn (tls-connect "imap.gmail.com" 993 0 0))"#);
+        assert!(
+            val("(> tls-test-conn 0)").contains("#t"),
+            "connect failed: {}",
+            val("(tls-last-error)")
+        );
+        let greeting = val("(tls-recv-line tls-test-conn)");
+        assert!(greeting.contains("* OK"), "unexpected greeting: {greeting}");
+        assert!(val("(tls-close tls-test-conn)").contains("#t"));
+    }
+
+    #[test]
+    fn base64url_to_hex_accepts_both_alphabets() {
+        let (engine, _rx) = ScriptEngine::new();
+        let eval = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        // "abc" is 616263; round-trips through the encoder.
+        assert!(eval(r#"(base64url-hex (base64url-encode "abc"))"#).contains("616263"));
+        // Standard alphabet + padding + a line wrap (MIME style): 0xfb 0xff
+        // encodes as "+/8=" standard, "-_8" URL-safe — both must decode.
+        assert!(eval("(base64url-hex \"+/\n8=\")").contains("fbff"));
+        assert!(eval(r#"(base64url-hex "-_8")"#).contains("fbff"));
+        // Garbage → "".
+        assert!(eval(r#"(string-length (base64url-hex "!!!"))"#).contains('0'));
+    }
+
+    #[test]
+    fn decode_charset_maps_legacy_bytes_to_utf8() {
+        let (engine, _rx) = ScriptEngine::new();
+        let eval = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        // 0xe9 is é in both iso-8859-1 and windows-1252.
+        assert!(eval(r#"(decode-charset "e9" "iso-8859-1")"#).contains('é'));
+        // 0x93 is “ in windows-1252 (undefined in latin-1 proper).
+        assert!(eval(r#"(decode-charset "93" "windows-1252")"#).contains('“'));
+        // UTF-8 passthrough, and an unknown label falls back to UTF-8.
+        assert!(eval(r#"(decode-charset "c3a9" "utf-8")"#).contains('é'));
+        assert!(eval(r#"(decode-charset "c3a9" "no-such-charset")"#).contains('é'));
+    }
+
+    #[test]
+    fn file_hex_round_trips_binary() {
+        let (engine, _rx) = ScriptEngine::new();
+        let dir = std::env::temp_dir().join(format!("macros-hex-test-{}", std::process::id()));
+        let path = dir.join("blob.bin");
+        // Bytes that are NOT valid UTF-8 (0xff 0xfe) — read-file would mangle.
+        let src = format!(
+            r#"(begin (write-file-hex "{p}" "fffe0001")
+                      (read-file-hex "{p}"))"#,
+            p = path.display()
+        );
+        let got = engine.eval(&src).unwrap().value.unwrap();
+        assert!(got.contains("fffe0001"), "round-trip failed: {got}");
+        // Bad hex refuses to write; missing file reads as "".
+        let bad = engine
+            .eval(r#"(write-file-hex "/tmp/x" "zz")"#)
+            .unwrap()
+            .value
+            .unwrap();
+        assert!(
+            bad.contains("#f") || bad.contains("false"),
+            "bad hex wrote: {bad}"
+        );
+        let missing = engine
+            .eval(r#"(string-length (read-file-hex "/no/such/file"))"#)
+            .unwrap()
+            .value
+            .unwrap();
+        assert!(missing.contains('0'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // Exercises the exact HTTP framing the `http-serve` worker thread uses
     // (request-line target parse + Content-Length response), proving a real
     // `ureq` client round-trips against it. The `http_serve` method itself needs

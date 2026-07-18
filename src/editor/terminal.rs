@@ -311,6 +311,7 @@ impl Editor {
             headers,
             body,
             on_response,
+            full,
         } = args;
 
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
@@ -327,19 +328,37 @@ impl Editor {
             } else {
                 req.send_string(&body)
             };
+            // Render a response (2xx or the error variant) either as the plain
+            // "<status>\n<text>" payload or the rich "<status>\n<headers>\n\n
+            // <hex-body>" one, per `full`.
+            let render = |status: u16, resp: ureq::Response| -> String {
+                if full {
+                    let mut head = String::new();
+                    for name in resp.headers_names() {
+                        if let Some(v) = resp.header(&name) {
+                            head.push_str(&format!("{name}: {v}\n"));
+                        }
+                    }
+                    let mut bytes = Vec::new();
+                    let _ = std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes);
+                    format!("{status}\n{head}\n{}", hex::encode(&bytes))
+                } else {
+                    format!("{status}\n{}", resp.into_string().unwrap_or_default())
+                }
+            };
             let payload = match result {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.into_string().unwrap_or_default();
-                    format!("{status}\n{text}")
-                }
+                Ok(resp) => render(resp.status(), resp),
                 // Non-2xx: relay the server's own status + error body to Scheme.
-                Err(ureq::Error::Status(code, resp)) => {
-                    let text = resp.into_string().unwrap_or_default();
-                    format!("{code}\n{text}")
-                }
+                Err(ureq::Error::Status(code, resp)) => render(code, resp),
                 // Transport failure (DNS, TLS, connect): status 0, error as body.
-                Err(e) => format!("0\n{e}"),
+                // In full mode the empty header block still precedes the body.
+                Err(e) => {
+                    if full {
+                        format!("0\n\n{}", hex::encode(e.to_string().as_bytes()))
+                    } else {
+                        format!("0\n{e}")
+                    }
+                }
             };
             let _ = tx.unbounded_send(payload);
         });
@@ -450,6 +469,205 @@ impl Editor {
     pub(super) fn http_server_stop(&mut self, port: u16) {
         if let Some(flag) = self.http_servers.get(&port) {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // --- async sockets + WebSockets ---------------------------------------
+
+    /// Open a long-lived async socket (`socket-connect-async`). A worker thread
+    /// connects (TLS when `tls`), then loops: drain outbound commands from the
+    /// channel, then read with a short timeout, forwarding each inbound chunk —
+    /// hex-encoded — to `on_data`. On peer close or error it signals `on_close`.
+    /// The socket analogue of [`make_process`](Self::make_process): same channel
+    /// + `cx.spawn` drain, so the callbacks' editor commands flow normally.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn socket_connect_async(
+        &mut self,
+        id: u64,
+        host: String,
+        port: u16,
+        tls: bool,
+        on_data: String,
+        on_close: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SockCmd>();
+        self.async_sockets.insert(id, cmd_tx);
+
+        let (tx, rx) = futures::channel::mpsc::unbounded::<ProcMsg>();
+        std::thread::spawn(move || {
+            // Connect (poll timeout short so the command channel stays responsive).
+            let tcp = match crate::script::tcp_connect_for_async(&host, port) {
+                Ok(t) => t,
+                Err(e) => {
+                    crate::script::tls_set_error(e);
+                    let _ = tx.unbounded_send(ProcMsg::Exit);
+                    return;
+                }
+            };
+            let mut sock = if tls {
+                match crate::script::tls_wrap(tcp, &host) {
+                    Ok(mut s) => {
+                        // Drive the TLS handshake to completion under the
+                        // connect helper's default (30s) read timeout. Without
+                        // this the handshake would run lazily on the first
+                        // send/recv under the 150ms poll timeout below and a
+                        // server slower than that would fail spuriously.
+                        if let Err(e) = s.conn.complete_io(&mut s.sock) {
+                            crate::script::tls_set_error(format!("tls handshake: {e}"));
+                            let _ = tx.unbounded_send(ProcMsg::Exit);
+                            return;
+                        }
+                        crate::script::Sock::Tls(Box::new(s))
+                    }
+                    Err(e) => {
+                        crate::script::tls_set_error(e);
+                        let _ = tx.unbounded_send(ProcMsg::Exit);
+                        return;
+                    }
+                }
+            } else {
+                crate::script::Sock::Plain(tcp)
+            };
+            // Now drop to a short read timeout so the poll loop can service the
+            // command channel between inbound chunks.
+            let _ = sock
+                .tcp()
+                .set_read_timeout(Some(std::time::Duration::from_millis(150)));
+            let mut buf = [0u8; 16384];
+            'outer: loop {
+                // Drain EVERY queued command before the (up-to-150ms) read, so
+                // a burst of sends or a close-after-sends isn't paced one per
+                // poll tick.
+                loop {
+                    match cmd_rx.try_recv() {
+                        Ok(SockCmd::Send(bytes)) => {
+                            use std::io::Write;
+                            if sock.write_all(&bytes).is_err() {
+                                break 'outer;
+                            }
+                            let _ = sock.flush();
+                        }
+                        Ok(SockCmd::Close) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            break 'outer;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break, // drained
+                    }
+                }
+                use std::io::Read;
+                match sock.read(&mut buf) {
+                    Ok(0) => break, // peer closed
+                    Ok(n) => {
+                        if tx
+                            .unbounded_send(ProcMsg::Line(hex::encode(&buf[..n])))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.unbounded_send(ProcMsg::Exit);
+        });
+
+        self.drain_socket_worker(id, on_data, on_close, rx, cx);
+    }
+
+    /// Shared worker→foreground drain for async sockets and WebSockets: `Line`
+    /// payloads go to `on_data`, `Exit` calls `on_close` with the id and drops
+    /// the handle. (`rx` is the worker's channel; identical shape to
+    /// `make_process`'s drain.)
+    fn drain_socket_worker(
+        &mut self,
+        id: u64,
+        on_data: String,
+        on_close: String,
+        mut rx: futures::channel::mpsc::UnboundedReceiver<ProcMsg>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Some(msg) = rx.next().await {
+                let alive = this
+                    .update(cx, |editor, _| match &msg {
+                        ProcMsg::Line(data) => {
+                            editor.publish_point();
+                            editor.script.dispatch_action(&on_data, Some(data));
+                        }
+                        ProcMsg::Exit => {
+                            editor.async_sockets.remove(&id);
+                            editor
+                                .script
+                                .dispatch_action(&on_close, Some(&id.to_string()));
+                        }
+                    })
+                    .is_ok();
+                if !alive || matches!(msg, ProcMsg::Exit) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Queue bytes (`socket-async-send`) for async socket `id`; the worker sends
+    /// them on its next poll. `hex` decodes to the raw bytes.
+    pub(super) fn socket_async_send(&mut self, id: u64, hex: &str) {
+        if let Some(tx) = self.async_sockets.get(&id)
+            && let Ok(bytes) = hex::decode(hex.trim())
+        {
+            let _ = tx.send(SockCmd::Send(bytes));
+        }
+    }
+
+    /// Close async socket `id` (`socket-async-close`): tell its worker to stop.
+    pub(super) fn socket_async_close(&mut self, id: u64) {
+        if let Some(tx) = self.async_sockets.get(&id) {
+            let _ = tx.send(SockCmd::Close);
+        }
+    }
+
+    /// Open a WebSocket (`ws-connect`). A worker connects the TCP/TLS stream,
+    /// performs the tungstenite handshake over our own `Sock` (so no second TLS
+    /// stack), then polls: drain outbound text/close commands, then read one
+    /// message, forwarding text (and the text of binary) frames to `on_message`.
+    pub(super) fn ws_connect(
+        &mut self,
+        id: u64,
+        url: String,
+        on_message: String,
+        on_close: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SockCmd>();
+        self.async_sockets.insert(id, cmd_tx);
+
+        let (tx, rx) = futures::channel::mpsc::unbounded::<ProcMsg>();
+        std::thread::spawn(move || {
+            match ws_run(&url, &cmd_rx, &tx) {
+                Ok(()) => {}
+                Err(e) => crate::script::tls_set_error(e),
+            }
+            let _ = tx.unbounded_send(ProcMsg::Exit);
+        });
+
+        self.drain_socket_worker(id, on_message, on_close, rx, cx);
+    }
+
+    /// Queue a text message (`ws-send`) for WebSocket `id`.
+    pub(super) fn ws_send(&mut self, id: u64, text: &str) {
+        if let Some(tx) = self.async_sockets.get(&id) {
+            let _ = tx.send(SockCmd::Send(text.as_bytes().to_vec()));
+        }
+    }
+
+    /// Close WebSocket `id` (`ws-close`).
+    pub(super) fn ws_close(&mut self, id: u64) {
+        if let Some(tx) = self.async_sockets.get(&id) {
+            let _ = tx.send(SockCmd::Close);
         }
     }
 
@@ -766,4 +984,95 @@ impl Editor {
         }
         cx.notify();
     }
+}
+
+/// A command sent from the engine thread to an async socket / WebSocket worker.
+pub(crate) enum SockCmd {
+    /// Bytes (raw for a socket; a text message's UTF-8 for a WebSocket) to send.
+    Send(Vec<u8>),
+    /// Stop the worker and drop the connection.
+    Close,
+}
+
+/// Drive a WebSocket worker: connect the TCP/TLS stream, hand it to tungstenite
+/// for the handshake (over our own `Sock`, so no second TLS stack), then poll —
+/// draining outbound text/close commands, then reading one frame with a short
+/// timeout and forwarding text (and binary-as-text) frames to the foreground as
+/// `ProcMsg::Line`. Returns when the socket closes or errors.
+fn ws_run(
+    url: &str,
+    cmd_rx: &std::sync::mpsc::Receiver<SockCmd>,
+    tx: &futures::channel::mpsc::UnboundedSender<ProcMsg>,
+) -> Result<(), String> {
+    use tungstenite::Message;
+    let parsed = url
+        .parse::<tungstenite::http::Uri>()
+        .map_err(|e| format!("bad ws url: {e}"))?;
+    let host = parsed.host().ok_or("ws url has no host")?.to_string();
+    let secure = matches!(parsed.scheme_str(), Some("wss") | None);
+    let port = parsed.port_u16().unwrap_or(if secure { 443 } else { 80 });
+
+    let tcp = crate::script::tcp_connect_for_async(&host, port)?;
+    let sock = if secure {
+        crate::script::Sock::Tls(Box::new(crate::script::tls_wrap(tcp, &host)?))
+    } else {
+        crate::script::Sock::Plain(tcp)
+    };
+    // The handshake runs under the connect helper's default (30s) read
+    // timeout — a 150ms cap here would make `tungstenite::client` fail the
+    // upgrade against any server slower than 150ms RTT (its blocking reads
+    // would surface as WouldBlock).
+    let (mut ws, _resp) =
+        tungstenite::client(url, sock).map_err(|e| format!("ws handshake: {e}"))?;
+    // NOW drop to a short read timeout so the poll loop can service the
+    // command channel between inbound frames.
+    let _ = ws
+        .get_ref()
+        .tcp()
+        .set_read_timeout(Some(std::time::Duration::from_millis(150)));
+
+    'outer: loop {
+        // Drain every queued command before the (up-to-150ms) read.
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(SockCmd::Send(bytes)) => {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    if ws.send(Message::Text(text)).is_err() {
+                        break 'outer;
+                    }
+                }
+                Ok(SockCmd::Close) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let _ = ws.close(None);
+                    break 'outer;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break, // drained
+            }
+        }
+        // One inbound frame (read timeout surfaces as a WouldBlock/IO error).
+        match ws.read() {
+            Ok(Message::Text(t)) => {
+                if tx.unbounded_send(ProcMsg::Line(t)).is_err() {
+                    break;
+                }
+            }
+            Ok(Message::Binary(b)) => {
+                if tx
+                    .unbounded_send(ProcMsg::Line(String::from_utf8_lossy(&b).into_owned()))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(Message::Ping(p)) => {
+                let _ = ws.send(Message::Pong(p));
+            }
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(ref e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }

@@ -618,6 +618,10 @@ pub struct Editor {
     /// Stop flags for running local HTTP servers, by bound port. `http-server-stop`
     /// flips the flag; the server's accept loop checks it each poll and exits.
     http_servers: HashMap<u16, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Command senders for live async sockets (`socket-connect-async`) and
+    /// WebSockets (`ws-connect`), by id. Each worker thread owns its stream and
+    /// drains this channel for outbound sends and a close request.
+    async_sockets: HashMap<u64, std::sync::mpsc::Sender<crate::editor::terminal::SockCmd>>,
     /// Live embedded terminals, by id. A `term-mode` buffer's name maps to one
     /// of these via [`Terminal::buffer_name`].
     terminals: HashMap<u64, Terminal>,
@@ -1279,6 +1283,7 @@ impl Editor {
             fold_hitboxes: Vec::new(),
             resizing: None,
             processes: HashMap::new(),
+            async_sockets: HashMap::new(),
             http_streams: HashMap::new(),
             http_servers: HashMap::new(),
             terminals: HashMap::new(),

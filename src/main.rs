@@ -174,6 +174,18 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
                 // the very first key the user can press is already modal.
                 workspace.update(cx, |w, cx| w.mark_config_loaded(cx)).ok();
 
+                // Surface the dyld-hijack tripwire in the echo area too —
+                // stderr is invisible for Finder/dock launches, and this
+                // failure mode otherwise presents as a random paint crash.
+                #[cfg(target_os = "macos")]
+                if let Some(warning) = dyld_hijack_warning() {
+                    let scheme = format!(
+                        "(message \"{}\")",
+                        warning.replace('\\', " ").replace('"', "'")
+                    );
+                    workspace.update(cx, |w, cx| w.eval(&scheme, cx)).ok();
+                }
+
                 // Theme is applied — reveal the styled window (unless the
                 // watchdog already did).
                 if !guard.swap(true, Ordering::SeqCst) {
@@ -199,6 +211,27 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
         .unwrap();
 
     window
+}
+
+/// The DYLD_LIBRARY_PATH hijack warning text, when the environment carries
+/// third-party library dirs that shadow system frameworks' dependents — the
+/// known crash vector is Homebrew's libpng vs ImageIO during emoji
+/// rasterization. `None` when the environment is clean.
+#[cfg(target_os = "macos")]
+fn dyld_hijack_warning() -> Option<String> {
+    let v = std::env::var("DYLD_LIBRARY_PATH").ok()?;
+    if v.split(':')
+        .any(|p| p.contains("/homebrew") || p == "/usr/local/lib")
+    {
+        Some(format!(
+            "DYLD_LIBRARY_PATH includes third-party library dirs ({v}) — these \
+             shadow Apple's ImageIO codecs and crash emoji rendering (SIGBUS in \
+             PNGReadPlugin). Remove the export from your shell config, or use \
+             DYLD_FALLBACK_LIBRARY_PATH instead."
+        ))
+    } else {
+        None
+    }
 }
 
 fn main() {
@@ -229,6 +262,21 @@ fn main() {
     // macOS/Linux don't inherit it, which otherwise hides LSP servers and other
     // tools from every subprocess we spawn. Must run before any threads start.
     runtime::import_shell_env();
+
+    // dyld hijack tripwire (macOS): a globally exported DYLD_LIBRARY_PATH
+    // pointing at Homebrew substitutes Homebrew's libpng/libtiff/… for the
+    // copies Apple's ImageIO expects (dyld overrides by LEAF NAME), and the
+    // first color-emoji glyph the editor rasterizes then dies with SIGBUS at
+    // a poisoned pointer inside PNGReadPlugin — a crash that looks like ours
+    // but is entirely environmental. dyld consumed the variable before main,
+    // so it can't be undone here; it CAN be named loudly instead of the app
+    // dying mysteriously mid-paint. (Fix: remove the export from the shell
+    // config; DYLD_FALLBACK_LIBRARY_PATH is the safe variant if a tool needs
+    // Homebrew's libs.)
+    #[cfg(target_os = "macos")]
+    if let Some(warning) = dyld_hijack_warning() {
+        eprintln!("macros: {warning}");
+    }
 
     let app = Application::new().with_assets(assets::Assets);
 

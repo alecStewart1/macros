@@ -51,10 +51,16 @@ pub struct HttpRequestArgs {
     pub headers: Vec<(String, String)>,
     /// Request body; empty means no body (e.g. a bare `GET`).
     pub body: String,
-    /// Steel fn called once with `"<status>\n<body>"` — the numeric status on the
-    /// first line, the response body after the first newline. Status `0` marks a
-    /// transport failure, with the error text as the body.
+    /// Steel fn called once with the response. When `full` is false:
+    /// `"<status>\n<body>"` — status on the first line, text body after. When
+    /// `full` is true: `"<status>\n<Header: value>\n…\n\n<hex-body>"` — status,
+    /// then each response header on its own line, a blank line, then the body
+    /// hex-encoded (so binary downloads survive). Status `0` marks a transport
+    /// failure, with the error text as the body in both modes.
     pub on_response: String,
+    /// Deliver the rich header+hex-body payload (`http-request-full`) rather
+    /// than the plain status+text payload (`http-request`).
+    pub full: bool,
 }
 
 /// Payload for [`EditorCommand::HttpServe`]. A minimal local HTTP server: it
@@ -719,6 +725,47 @@ pub enum EditorCommand {
     /// next poll and the socket is dropped).
     HttpServerStop {
         port: u16,
+    },
+    /// Open a long-lived async socket under `id` (`socket-connect-async`): a
+    /// worker thread connects (TLS when `tls`), then forwards inbound chunks —
+    /// hex-encoded — to Steel fn `on_data`, and calls `on_close` with the id
+    /// when the peer closes or errors. The socket analogue of `make-process`.
+    SocketConnectAsync {
+        id: u64,
+        host: String,
+        port: u16,
+        tls: bool,
+        on_data: String,
+        on_close: String,
+    },
+    /// Send `hex`-decoded bytes on async socket `id` (`socket-async-send`).
+    SocketAsyncSend {
+        id: u64,
+        hex: String,
+    },
+    /// Close async socket `id` (`socket-async-close`); its reader stops and the
+    /// connection drops.
+    SocketAsyncClose {
+        id: u64,
+    },
+    /// Open a WebSocket under `id` (`ws-connect`): a worker thread performs the
+    /// handshake to `url` (ws:// or wss://), forwards each inbound text message
+    /// to Steel fn `on_message`, and calls `on_close` with the id when the
+    /// socket closes.
+    WsConnect {
+        id: u64,
+        url: String,
+        on_message: String,
+        on_close: String,
+    },
+    /// Send a text message on WebSocket `id` (`ws-send`).
+    WsSend {
+        id: u64,
+        text: String,
+    },
+    /// Close WebSocket `id` (`ws-close`).
+    WsClose {
+        id: u64,
     },
     // ANVIL REPL — a second, independent Steel interpreter (see `crate::anvil`).
     /// Evaluate `source` in the ANVIL REPL engine; deliver the printed result to

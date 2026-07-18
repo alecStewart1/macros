@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.3.9"
+version = "0.4.0"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://codeberg.org/macros-app/macros"
@@ -121,6 +121,28 @@ hex = "0.4"
 # promotions, not new builds.
 base64 = "0.22"
 getrandom = "0.2"
+# Charset decoding for the `decode-charset` Scheme primitive: legacy-encoded
+# bytes (hex interchange) → UTF-8 string, by WHATWG label ("windows-1252",
+# "iso-8859-1", "shift_jis", …). Already in the tree transitively; a promotion.
+encoding_rs = "0.8"
+# Blocking TLS client sockets for the `tls-*` Scheme primitives (IMAP/SMTP
+# protocol code in Steel — macros-email-client). Both already in the tree via
+# ureq; direct promotions, same major versions.
+# default-features off: the default provider is aws-lc-rs, but the rest of the
+# tree (ureq) builds rustls with ring — enabling both makes the process-level
+# CryptoProvider ambiguous and rustls panics at handshake. Mirror ureq's set.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-native-certs = "0.8"
+# WebSocket protocol for the `ws-*` Scheme primitives. default-features off and
+# NO tls feature: we hand tungstenite an already-connected stream (our own
+# `Sock`, plain or ring-rustls), so it only frames the protocol — no second TLS
+# stack, no crypto-provider clash.
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+# SQLite for the generic `sqlite-*` Scheme primitives (a local search index in
+# macros-email-client; also usable by any package wanting a real database). The
+# `bundled` feature compiles SQLite from source — no system libsqlite3 — and
+# includes FTS5, the full-text search engine those primitives expose.
+rusqlite = { version = "0.32", features = ["bundled"] }
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
 # for staging update downloads and compiled user grammars (src/grammar.rs).
 dirs = "5"
