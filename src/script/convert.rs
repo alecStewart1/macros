@@ -120,9 +120,7 @@ pub(crate) fn option_to_steelval(v: &crate::settings::OptionValue) -> SteelVal {
         OptionValue::Float(f) => SteelVal::NumV(*f),
         OptionValue::Str(s) => SteelVal::StringV(s.clone().into()),
         OptionValue::Symbol(s) => SteelVal::SymbolV(s.clone().into()),
-        OptionValue::List(items) => {
-            SteelVal::ListV(items.iter().map(option_to_steelval).collect())
-        }
+        OptionValue::List(items) => SteelVal::ListV(items.iter().map(option_to_steelval).collect()),
         OptionValue::Map(pairs) => {
             let map: steel::HashMap<SteelVal, SteelVal> = pairs
                 .iter()
@@ -323,20 +321,36 @@ mod option_roundtrip_tests {
     #[test]
     fn list_of_hashes_roundtrips() {
         let mut hm: steel::HashMap<SteelVal, SteelVal> = steel::HashMap::new();
-        hm.insert(SteelVal::SymbolV("name".into()), SteelVal::StringV("kyle@x".into()));
-        hm.insert(SteelVal::SymbolV("method".into()), SteelVal::StringV("oauth".into()));
-        let original =
-            SteelVal::ListV([SteelVal::HashMapV(steel::gc::Gc::new(hm).into())].into_iter().collect());
+        hm.insert(
+            SteelVal::SymbolV("name".into()),
+            SteelVal::StringV("kyle@x".into()),
+        );
+        hm.insert(
+            SteelVal::SymbolV("method".into()),
+            SteelVal::StringV("oauth".into()),
+        );
+        let original = SteelVal::ListV(
+            [SteelVal::HashMapV(steel::gc::Gc::new(hm).into())]
+                .into_iter()
+                .collect(),
+        );
 
         // → OptionValue (what set-option stores) → SteelVal (what get-option returns)
         let stored = option_from_steelval(&original);
-        assert!(matches!(stored, OptionValue::List(_)), "not a list: {stored:?}");
+        assert!(
+            matches!(stored, OptionValue::List(_)),
+            "not a list: {stored:?}"
+        );
         let back = option_to_steelval(&stored);
 
         // The element is still a hash with the SYMBOL keys intact (not decayed
         // to strings) and the right values.
-        let SteelVal::ListV(items) = back else { panic!("not a list") };
-        let Some(SteelVal::HashMapV(h)) = items.iter().next() else { panic!("no hash") };
+        let SteelVal::ListV(items) = back else {
+            panic!("not a list")
+        };
+        let Some(SteelVal::HashMapV(h)) = items.iter().next() else {
+            panic!("no hash")
+        };
         let name = h.get(&SteelVal::SymbolV("name".into()));
         assert!(
             matches!(name, Some(SteelVal::StringV(s)) if s.as_str() == "kyle@x"),
@@ -349,7 +363,10 @@ mod option_roundtrip_tests {
     #[test]
     fn scalars_unchanged() {
         // Existing scalar options behave exactly as before.
-        assert!(matches!(option_from_steelval(&SteelVal::BoolV(true)), OptionValue::Bool(true)));
+        assert!(matches!(
+            option_from_steelval(&SteelVal::BoolV(true)),
+            OptionValue::Bool(true)
+        ));
         assert!(matches!(
             option_from_steelval(&SteelVal::StringV("x".into())),
             OptionValue::Str(s) if s == "x"
