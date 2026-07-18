@@ -20,6 +20,15 @@ pub enum OptionValue {
     Int(i64),
     Float(f64),
     Str(String),
+    /// A Scheme symbol (kept distinct from `Str` so it round-trips back to a
+    /// symbol — hash keys written `'name` stay symbols on read).
+    Symbol(String),
+    /// A Scheme list — `(set-option "k" (list …))` stores it structurally and
+    /// `(get-option "k")` returns the list. Elements recurse.
+    List(Vec<OptionValue>),
+    /// A Scheme hash — `(set-option "k" (hash 'a 1 …))`. Keys and values both
+    /// recurse; iteration order is not preserved (hashes are unordered).
+    Map(Vec<(OptionValue, OptionValue)>),
 }
 
 /// Compare an option value against a string literal — true only for the `Str`
@@ -39,7 +48,9 @@ impl OptionValue {
             OptionValue::Bool(b) => *b,
             OptionValue::Int(i) => *i != 0,
             OptionValue::Float(f) => *f != 0.0,
-            OptionValue::Str(s) => parse_bool(s),
+            OptionValue::Str(s) | OptionValue::Symbol(s) => parse_bool(s),
+            OptionValue::List(v) => !v.is_empty(),
+            OptionValue::Map(m) => !m.is_empty(),
         }
     }
 
@@ -194,25 +205,29 @@ fn coerce(
             OptionValue::Bool(b) => *b,
             OptionValue::Int(i) => *i != 0,
             OptionValue::Str(s) => parse_bool(s),
-            OptionValue::Float(_) => return None,
+            _ => return None,
         }),
         Kind::Int => OptionValue::Int(clamp(match raw {
             OptionValue::Int(i) => *i as f64,
             OptionValue::Float(f) => *f,
             OptionValue::Str(s) => s.trim().parse::<f64>().ok()?,
-            OptionValue::Bool(_) => return None,
+            _ => return None,
         }) as i64),
         Kind::Float => OptionValue::Float(clamp(match raw {
             OptionValue::Float(f) => *f,
             OptionValue::Int(i) => *i as f64,
             OptionValue::Str(s) => s.trim().parse::<f64>().ok()?,
-            OptionValue::Bool(_) => return None,
+            _ => return None,
         })),
         Kind::Str => OptionValue::Str(match raw {
             OptionValue::Str(s) => s.clone(),
             OptionValue::Bool(b) => b.to_string(),
             OptionValue::Int(i) => i.to_string(),
             OptionValue::Float(f) => f.to_string(),
+            // A symbol coerces to its text; a list/hash can't sensibly become a
+            // scalar string option — drop it (keep the default).
+            OptionValue::Symbol(s) => s.clone(),
+            _ => return None,
         }),
     })
 }

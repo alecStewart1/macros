@@ -85,8 +85,10 @@ pub(crate) fn steel_string(value: &SteelVal) -> Option<String> {
 }
 
 /// Convert a value passed to `(set-option …)` into an untyped [`OptionValue`].
-/// Numbers, booleans, and strings map to the matching variant; anything else is
-/// stringified. The real coercion to the option's declared type happens later in
+/// Numbers, booleans, strings, and symbols map to the matching variant; lists
+/// and hashes are preserved structurally (recursing into their contents) so
+/// packages can store an array/object of config; any other value stringifies.
+/// The real coercion to the option's declared type happens later in
 /// `Settings::set`.
 pub(crate) fn option_from_steelval(value: &SteelVal) -> crate::settings::OptionValue {
     use crate::settings::OptionValue;
@@ -95,7 +97,16 @@ pub(crate) fn option_from_steelval(value: &SteelVal) -> crate::settings::OptionV
         SteelVal::IntV(i) => OptionValue::Int(*i as i64),
         SteelVal::NumV(f) => OptionValue::Float(*f),
         SteelVal::StringV(s) => OptionValue::Str(s.to_string()),
-        SteelVal::SymbolV(s) => OptionValue::Str(s.to_string()),
+        SteelVal::SymbolV(s) => OptionValue::Symbol(s.to_string()),
+        // Structured values round-trip: a list stays a list, a hash stays a
+        // hash. Elements/keys/values recurse, so nested config (an array of
+        // account objects, say) survives set-option → get-option intact.
+        SteelVal::ListV(l) => OptionValue::List(l.iter().map(option_from_steelval).collect()),
+        SteelVal::HashMapV(h) => OptionValue::Map(
+            h.iter()
+                .map(|(k, v)| (option_from_steelval(k), option_from_steelval(v)))
+                .collect(),
+        ),
         other => OptionValue::Str(other.to_string()),
     }
 }
@@ -108,6 +119,17 @@ pub(crate) fn option_to_steelval(v: &crate::settings::OptionValue) -> SteelVal {
         OptionValue::Int(i) => SteelVal::IntV(*i as isize),
         OptionValue::Float(f) => SteelVal::NumV(*f),
         OptionValue::Str(s) => SteelVal::StringV(s.clone().into()),
+        OptionValue::Symbol(s) => SteelVal::SymbolV(s.clone().into()),
+        OptionValue::List(items) => {
+            SteelVal::ListV(items.iter().map(option_to_steelval).collect())
+        }
+        OptionValue::Map(pairs) => {
+            let map: steel::HashMap<SteelVal, SteelVal> = pairs
+                .iter()
+                .map(|(k, v)| (option_to_steelval(k), option_to_steelval(v)))
+                .collect();
+            SteelVal::HashMapV(steel::gc::Gc::new(map).into())
+        }
     }
 }
 
@@ -289,4 +311,51 @@ pub(crate) fn steel_error_string(err: &impl std::fmt::Display) -> String {
         return rest.to_string();
     }
     s.to_string()
+}
+
+#[cfg(test)]
+mod option_roundtrip_tests {
+    use super::*;
+    use crate::settings::OptionValue;
+
+    // A list of hashes with symbol keys — the email-accounts shape — survives
+    // option_from_steelval → option_to_steelval byte-for-byte.
+    #[test]
+    fn list_of_hashes_roundtrips() {
+        let mut hm: steel::HashMap<SteelVal, SteelVal> = steel::HashMap::new();
+        hm.insert(SteelVal::SymbolV("name".into()), SteelVal::StringV("kyle@x".into()));
+        hm.insert(SteelVal::SymbolV("method".into()), SteelVal::StringV("oauth".into()));
+        let original =
+            SteelVal::ListV([SteelVal::HashMapV(steel::gc::Gc::new(hm).into())].into_iter().collect());
+
+        // → OptionValue (what set-option stores) → SteelVal (what get-option returns)
+        let stored = option_from_steelval(&original);
+        assert!(matches!(stored, OptionValue::List(_)), "not a list: {stored:?}");
+        let back = option_to_steelval(&stored);
+
+        // The element is still a hash with the SYMBOL keys intact (not decayed
+        // to strings) and the right values.
+        let SteelVal::ListV(items) = back else { panic!("not a list") };
+        let Some(SteelVal::HashMapV(h)) = items.iter().next() else { panic!("no hash") };
+        let name = h.get(&SteelVal::SymbolV("name".into()));
+        assert!(
+            matches!(name, Some(SteelVal::StringV(s)) if s.as_str() == "kyle@x"),
+            "name key lost: {name:?}"
+        );
+        let method = h.get(&SteelVal::SymbolV("method".into()));
+        assert!(matches!(method, Some(SteelVal::StringV(s)) if s.as_str() == "oauth"));
+    }
+
+    #[test]
+    fn scalars_unchanged() {
+        // Existing scalar options behave exactly as before.
+        assert!(matches!(option_from_steelval(&SteelVal::BoolV(true)), OptionValue::Bool(true)));
+        assert!(matches!(
+            option_from_steelval(&SteelVal::StringV("x".into())),
+            OptionValue::Str(s) if s == "x"
+        ));
+        // A bare symbol now round-trips as a symbol (was: coerced to string).
+        let sym = option_from_steelval(&SteelVal::SymbolV("foo".into()));
+        assert!(matches!(option_to_steelval(&sym), SteelVal::SymbolV(s) if s.as_str() == "foo"));
+    }
 }
