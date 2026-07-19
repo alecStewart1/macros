@@ -5,6 +5,20 @@ use ropey::Rope;
 
 use super::*;
 
+/// A unique, empty persistence dir for one test engine. Tests must NOT share a
+/// stub path (even an "unwritable" one like /nonexistent-…): CI runs as root,
+/// where the shared path silently becomes real, so one test's
+/// `perspective-save` leaks perspectives into every later test's
+/// `perspective-load`. Unique per call; pre-cleaned so reruns start empty.
+fn fresh_persistence_dir() -> String {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("macros-test-persist-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.to_str().unwrap().to_string()
+}
+
 #[cfg(test)]
 mod engine_tests {
     use super::*;
@@ -2219,6 +2233,154 @@ mod magit_tests {
                 "{cmd} is not registered for M-x"
             );
         }
+    }
+
+    /// END-TO-END over the real startup load: switching perspectives (as the
+    /// title-bar dropdown does, via perspective-open) repoints BOTH consumers —
+    /// core.scm's `project-directory` (compile, term) and magit.scm's
+    /// `magit-current-repo` (`C-x g`). This must run through the actual
+    /// cross-file wiring: perspectives.scm cannot install the hooks with a raw
+    /// top-level `set!` (a later file's top-level set! doesn't mutate the
+    /// binding an earlier file's functions read — Steel resolves free
+    /// identifiers at definition time); it must call the owner files' setter
+    /// functions, whose internal set! mutates the binding the owners read.
+    #[test]
+    fn perspective_switch_repoints_project_directory_and_magit() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        // This repo is a real project + git work-tree — a root the hooks can
+        // resolve without any editor/buffer state behind the snapshot.
+        let root = env!("CARGO_MANIFEST_DIR");
+        engine
+            .eval(&format!(
+                r#"(perspective-update "{root}" "{root}/Cargo.toml")"#
+            ))
+            .unwrap();
+        engine
+            .eval(&format!(r#"(perspective-open "{root}")"#))
+            .unwrap();
+        // No file-visiting buffer exists (empty snapshot), so both results can
+        // only come from the perspective hooks — the buffer fallbacks yield #f.
+        assert_eq!(
+            v("(project-directory)"),
+            format!("\"{root}\""),
+            "compile/term should target the selected perspective"
+        );
+        assert_eq!(
+            v("(magit-current-repo)"),
+            format!("\"{root}\""),
+            "magit should target the selected perspective"
+        );
+    }
+
+    /// PRODUCTION-FAITHFUL repro of "first compile after a title-bar switch runs
+    /// in the old project": every step goes through the editor's real dispatch
+    /// (`call_action` = Task::Call, exactly what dropdown clicks, hooks, and
+    /// minibuffer callbacks use — NOT Task::Eval), with the snapshot updated the
+    /// way the editor publishes it around each step. Two real on-disk projects;
+    /// switch A→B via the dropdown's `perspective-select`, simulate the resume
+    /// file opening (snapshot → B, find-file-hook), then run compile ONCE — it
+    /// must cd into B immediately, not on the second try.
+    ///
+    /// Flat harness with a stubbed persistence-dir, NOT the full startup set:
+    /// perspective-track calls perspective-save, and under the real startup
+    /// scripts that writes to the developer's live ~/.config/macros/perspectives.
+    /// The per-file eval structure (the binding semantics under test) is the
+    /// same either way.
+    #[test]
+    fn dropdown_switch_then_first_compile_uses_new_project() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/diagnostics.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
+        engine
+            .eval(&format!(
+                r#"
+                (define (persistence-dir) "{}")
+                (define *magit-scope-hook* #f)
+                (define (set-magit-scope-hook! f) (set! *magit-scope-hook* f))
+                "#,
+                fresh_persistence_dir()
+            ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/perspectives.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
+        // Two throwaway projects with distinct basenames (so dropdown labels are
+        // their basenames) and a marker file each.
+        let base = std::env::temp_dir().join("macros-persp-switch-test");
+        let (proj_a, proj_b) = (base.join("alpha"), base.join("beta"));
+        for p in [&proj_a, &proj_b] {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::write(p.join(".projectile"), "").unwrap();
+            std::fs::write(p.join("main.txt"), "x\n").unwrap();
+        }
+        let (a, b) = (proj_a.to_str().unwrap(), proj_b.to_str().unwrap());
+        let snap = |dir: &str, file: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                name: "main.txt".to_string(),
+                directory: dir.to_string(),
+                path: file.to_string(),
+                ..Default::default()
+            });
+        };
+        // Work in A, then in B, then back in A — as find-file-hook would fire.
+        snap(a, &format!("{a}/main.txt"));
+        engine.call_action("perspective-track", None);
+        snap(b, &format!("{b}/main.txt"));
+        engine.call_action("perspective-track", None);
+        snap(a, &format!("{a}/main.txt"));
+        engine.call_action("perspective-track", None);
+        // Title-bar switch to beta: the dropdown click's exact dispatch.
+        engine.call_action("perspective-select", Some("beta"));
+        // The editor processes the queued open-file: snapshot now describes B's
+        // resume file and find-file-hook fires perspective-track.
+        snap(b, &format!("{b}/main.txt"));
+        engine.call_action("perspective-track", None);
+        let compile_cd = |engine: &ScriptEngine| {
+            let cmds = engine.call_action("compile-run", Some("make"));
+            cmds.iter()
+                .find_map(|c| match c {
+                    EditorCommand::MakeProcess { args, .. } => {
+                        args.iter().find(|s| s.contains("cd ")).cloned()
+                    }
+                    _ => None,
+                })
+                .expect("compile should spawn a process")
+        };
+        // FIRST compile after the switch — regression: it ran in alpha.
+        let cd = compile_cd(&engine);
+        assert!(
+            cd.contains(&format!("cd {b} && make")),
+            "first compile after switch must run in beta, ran: {cd}"
+        );
+        engine.call_action("compile-done", Some("0"));
+        // An INCIDENTAL activation of an alpha buffer — killing *compilation*
+        // activates the ring's survivor, pane dances re-select windows — fires
+        // buffer-switch-hook (perspective-note). It must do resume bookkeeping
+        // only, NOT re-point the current perspective: the user selected beta.
+        // Regression: the next compile silently ran in alpha.
+        snap(a, &format!("{a}/main.txt"));
+        engine.call_action("perspective-note", None);
+        assert_eq!(
+            engine.eval("*perspective-current*").unwrap().value.unwrap(),
+            format!("\"{b}\""),
+            "incidental buffer activation must not switch the perspective"
+        );
+        let cd = compile_cd(&engine);
+        assert!(
+            cd.contains(&format!("cd {b} && make")),
+            "second compile must still run in beta, ran: {cd}"
+        );
     }
 
     /// Helix selection-first motions read every selection from the snapshot and
@@ -4663,13 +4825,13 @@ mod magit_tests {
         ));
     }
 
-    /// `(make-terminal name program args)` enqueues a `MakeTerminal` and returns
-    /// a fresh id.
+    /// `(make-terminal name program args directory)` enqueues a `MakeTerminal`
+    /// with the requested launch directory and returns a fresh id.
     #[test]
     fn make_terminal_parses() {
         let (engine, _rx) = ScriptEngine::new();
         match engine
-            .eval(r#"(make-terminal "*terminal*" "/bin/fish" (list "-l"))"#)
+            .eval(r#"(make-terminal "*terminal*" "/bin/fish" (list "-l") "/w/proj")"#)
             .unwrap()
             .commands
             .as_slice()
@@ -4679,12 +4841,14 @@ mod magit_tests {
                     name,
                     program,
                     args,
+                    directory,
                     id,
                 },
             ] => {
                 assert_eq!(name, "*terminal*");
                 assert_eq!(program, "/bin/fish");
                 assert_eq!(args, &["-l"]);
+                assert_eq!(directory, "/w/proj");
                 assert!(*id > 0);
             }
             other => panic!("expected MakeTerminal, got {other:?}"),
@@ -6552,6 +6716,45 @@ mod compile_lib {
         (engine, rx)
     }
 
+    /// compile-run resolves its cwd via core.scm's `project-directory` (not
+    /// `buffer-directory`), so it follows the selected project. Here we override
+    /// `project-directory` before loading shell.scm so compile-run captures the
+    /// override, proving the call site changed; the hook→perspective wiring is
+    /// covered in perspectives_lib and by magit_and_project_scope_hooks_installed.
+    #[test]
+    fn compile_runs_in_project_directory() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/diagnostics.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        // Override must precede shell.scm: compile-run resolves `project-directory`
+        // at definition time (Steel free-identifier resolution).
+        engine
+            .eval(r#"(define (project-directory) "/w/proj")"#)
+            .unwrap();
+        engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
+        let result = engine.eval(r#"(compile-run "make")"#).unwrap();
+        let cd_in_proj = result.commands.iter().any(|c| match c {
+            EditorCommand::MakeProcess { args, .. } => {
+                args.iter().any(|a| a.contains("cd /w/proj && make"))
+            }
+            _ => false,
+        });
+        assert!(
+            cd_in_proj,
+            "compile should cd into the project dir: {:?}",
+            result.commands
+        );
+        assert_eq!(
+            engine.eval("*compile-dir*").unwrap().value.as_deref(),
+            Some("\"/w/proj\"")
+        );
+    }
+
     #[test]
     fn second_compile_prefills_last_command() {
         let (engine, _rx) = engine();
@@ -6679,8 +6882,9 @@ mod compile_lib {
                 EditorCommand::Message(m),
             ] => {
                 assert_eq!(name, "*compilation*");
+                // The header names the cwd (Emacs's "Entering directory").
                 assert!(
-                    text.starts_with("$ make\n\n"),
+                    text.starts_with("$ cd /proj && make\n\n"),
                     "header preserved, got:\n{text}"
                 );
                 assert!(text.contains("Compilation exited abnormally with code 2"));
@@ -7356,15 +7560,27 @@ mod capf_lib {
 mod perspectives_lib {
     use super::*;
 
-    /// core + helm + a stubbed persistence-dir (pointing nowhere, so
-    /// perspective-load is a no-op and nothing touches the real config), then
-    /// perspectives.scm itself — the same sorted-order prefix the runtime uses.
+    /// core + helm + a stubbed persistence-dir (a unique per-test sandbox, so
+    /// perspective-load starts empty and nothing touches the real config —
+    /// see `fresh_persistence_dir`), then perspectives.scm itself — the same
+    /// sorted-order prefix the runtime uses.
     fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
         let (engine, rx) = ScriptEngine::new();
         engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
         engine
-            .eval(r#"(define (persistence-dir) "/nonexistent-macros-test")"#)
+            .eval(&format!(
+                r#"(define (persistence-dir) "{}")"#,
+                fresh_persistence_dir()
+            ))
+            .unwrap();
+        // magit.scm declares these in production (it loads first); perspectives.scm
+        // installs the hook via the setter so magit follows the title-bar project.
+        engine
+            .eval(
+                r#"(define *magit-scope-hook* #f)
+                   (define (set-magit-scope-hook! f) (set! *magit-scope-hook* f))"#,
+            )
             .unwrap();
         engine
             .eval(include_str!("../../scheme/perspectives.scm"))
@@ -7557,16 +7773,19 @@ mod perspectives_lib {
         // Stubs must precede perspectives.scm: Steel resolves free identifiers
         // at definition time, so later redefinitions wouldn't be seen.
         engine
-            .eval(
+            .eval(&format!(
                 r#"
-                (define (persistence-dir) "/nonexistent-macros-test")
+                (define (persistence-dir) "{}")
                 (define *stub-root* "/w/proj")
                 (define *stub-file* "/w/proj/a.rs")
                 (define (project-root d) *stub-root*)
                 (define (buffer-directory) "/w/proj")
                 (define (buffer-file-name) *stub-file*)
+                (define *magit-scope-hook* #f)
+                (define (set-magit-scope-hook! f) (set! *magit-scope-hook* f))
                 "#,
-            )
+                fresh_persistence_dir()
+            ))
             .unwrap();
         engine
             .eval(include_str!("../../scheme/perspectives.scm"))
@@ -7585,6 +7804,56 @@ mod perspectives_lib {
             .unwrap();
         engine.eval("(perspective-track)").unwrap();
         assert_eq!(v("*perspective-current*"), "\"/w/proj\"");
+    }
+
+    /// perspectives.scm installs both scope hooks so project commands follow the
+    /// title bar: *magit-scope-hook* (magit's git work-tree) and *project-dir-hook*
+    /// (compile/term's project root). Each resolves the CURRENT perspective, and
+    /// #f when none is active (so callers fall back to the current buffer).
+    #[test]
+    fn perspective_installs_scope_hooks() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
+        // Stubs precede perspectives.scm so its hooks capture them (definition-
+        // time resolution). gix-toplevel echoes its arg so the resolved root
+        // flows through; the buffer/project stubs let perspective-track set one.
+        // *magit-scope-hook* is stubbed because magit.scm isn't loaded here;
+        // *project-dir-hook* comes from core.scm (loaded above).
+        engine
+            .eval(&format!(
+                r#"
+                (define (persistence-dir) "{}")
+                (define (project-root d) "/w/proj")
+                (define (buffer-directory) "/w/proj")
+                (define (buffer-file-name) "/w/proj/a.rs")
+                (define (gix-toplevel d) d)
+                (define *magit-scope-hook* #f)
+                (define (set-magit-scope-hook! f) (set! *magit-scope-hook* f))
+                "#,
+                fresh_persistence_dir()
+            ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/perspectives.scm"))
+            .unwrap();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        // Both installed real thunks over the defaults.
+        assert_eq!(
+            v("(if (procedure? *magit-scope-hook*) \"y\" \"n\")"),
+            "\"y\""
+        );
+        assert_eq!(
+            v("(if (procedure? *project-dir-hook*) \"y\" \"n\")"),
+            "\"y\""
+        );
+        // No perspective active yet → both #f (callers fall back to the buffer).
+        assert_eq!(v(r#"(if (*magit-scope-hook*) "y" "n")"#), "\"n\"");
+        assert_eq!(v(r#"(if (*project-dir-hook*) "y" "n")"#), "\"n\"");
+        // After visiting a project file, both resolve that project's root.
+        engine.eval("(perspective-track)").unwrap();
+        assert_eq!(v("(*magit-scope-hook*)"), "\"/w/proj\"");
+        assert_eq!(v("(*project-dir-hook*)"), "\"/w/proj\"");
     }
 
     /// Switching back to a perspective whose resume file is already open gets

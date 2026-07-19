@@ -682,6 +682,7 @@ impl Editor {
         name: String,
         program: String,
         args: Vec<String>,
+        directory: String,
         cx: &mut Context<Self>,
     ) {
         if self.terminals.values().any(|t| t.buffer_name == name) {
@@ -699,12 +700,18 @@ impl Editor {
         } else {
             Some((program, args))
         };
-        let cwd = self
-            .active
-            .path
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf);
+        // Prefer an explicit directory (term.scm passes the current project's
+        // root so terminals follow the title-bar project); otherwise fall back
+        // to the active buffer's directory, then the process cwd.
+        let cwd = if directory.trim().is_empty() {
+            self.active
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+        } else {
+            Some(std::path::PathBuf::from(directory))
+        };
 
         match Terminal::new(
             id,

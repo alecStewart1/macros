@@ -2435,20 +2435,22 @@ pub(crate) fn build_engine(
         );
     }
     {
-        // `(make-terminal name program args)` → a terminal id. Empty `program`
-        // runs the user's login shell. The terminal is shown in a `term-mode`
+        // `(make-terminal name program args directory)` → a terminal id. Empty
+        // `program` runs the user's login shell; empty `directory` uses the
+        // active buffer's directory. The terminal is shown in a `term-mode`
         // buffer named `name`; switching to that buffer later reuses it.
         let q = queue.clone();
         let ids = async_ids.clone();
         reg.register_fn(
             "make-terminal",
-            move |name: String, program: String, args: SteelVal| -> usize {
+            move |name: String, program: String, args: SteelVal, directory: String| -> usize {
                 let id = ids.next();
                 q.lock().unwrap().push(EditorCommand::MakeTerminal {
                     id,
                     name,
                     program,
                     args: steel_string_list(&args),
+                    directory,
                 });
                 id as usize
             },

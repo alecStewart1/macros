@@ -175,14 +175,45 @@
       (non-empty-lines (read-file (perspectives-file))))
     (perspective-sync-titlebar)))
 
+;; Magit follows the title bar: scope it to the current perspective's git work
+;; tree so `C-x g` opens the project shown in the dropdown, not whatever buffer
+;; is current (a *magit* buffer, terminal, sidebar, …). Installed here because
+;; perspectives.scm loads AFTER magit.scm, so magit needn't reference perspective
+;; state at definition time. Returns #f when no perspective is active or its root
+;; isn't a git repo, letting magit fall back to the current buffer's work-tree.
+;; MUST go through the owners' setters, not a raw `set!` — a top-level set! from
+;; this later-loaded file would mutate a binding the owners' functions never read.
+(set-magit-scope-hook!
+  (lambda ()
+    (and *perspective-current*
+         (let ((top (gix-toplevel *perspective-current*)))
+           (and (not (equal? top "")) top)))))
+
+;; Same idea for project-aware commands (compile, term, …): they default to the
+;; current perspective's root (core.scm's `project-directory`) rather than the
+;; current buffer, so switching projects from the title bar repoints them too.
+(set-project-dir-hook! (lambda () *perspective-current*))
+
+;; buffer-switch-hook (re-activating an already-open buffer: C-x b, cycling,
+;; the survivor after a kill, pane focus) does BOOKKEEPING ONLY: refresh the
+;; buffer's project's resume file so switching back later lands right. It must
+;; NOT re-point the CURRENT perspective — those activations are often
+;; incidental (killing *compilation* activates whatever the ring surfaces;
+;; compile's window dance re-selects panes), and since project commands
+;; (compile, term, magit) follow the current perspective, a silent flip sends
+;; the next build to the wrong project. The current perspective changes only
+;; deliberately: the title-bar dropdown / perspective-switch, or visiting a
+;; project file fresh (find-file-hook above).
+(define (perspective-note)
+  (let ((root (project-root (buffer-directory)))
+        (file (buffer-file-name)))
+    (when (and root (not (equal? file "")))
+      (perspective-update root file)
+      (perspective-sync-titlebar)   ; labels may re-qualify on first touch
+      (perspective-save))))
+
 (add-hook "find-file-hook" "perspective-track")
-;; Re-activating an already-open buffer never fires find-file-hook (C-x b,
-;; buffer cycling, find-file to a buffered file, the survivor after a kill),
-;; so the title bar would keep naming the previous project when moving between
-;; projects through existing buffers. `buffer-switch-hook` (buffers.rs) fires
-;; on exactly those switches; non-project buffers (fileless or outside every
-;; root) are ignored, so the current perspective sticks across them.
-(add-hook "buffer-switch-hook" "perspective-track")
+(add-hook "buffer-switch-hook" "perspective-note")
 (perspective-load)
 
 (define-key "fundamental" "ctrl-c p s" 'perspective-switch)

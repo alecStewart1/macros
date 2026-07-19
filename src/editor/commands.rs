@@ -961,8 +961,9 @@ impl Editor {
                 name,
                 program,
                 args,
+                directory,
             } => {
-                self.make_terminal(id, name, program, args, cx);
+                self.make_terminal(id, name, program, args, directory, cx);
             }
             RunWithTimer { ms, callback } => self.run_with_timer(ms, callback, cx),
             other => return Err(other),

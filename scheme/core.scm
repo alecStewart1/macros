@@ -402,6 +402,24 @@
             (set! *project-known* (cons root *project-known*))))
         root)))
 
+;; The directory project-aware commands (compile, term, …) should default to.
+;; Prefers the title-bar project: perspectives.scm installs *project-dir-hook*
+;; as a thunk returning the current perspective's root (or #f). With no active
+;; perspective the hook is #f and we fall back to the current buffer's project
+;; root, then its own directory (a fileless / non-project buffer). This keeps
+;; project commands pinned to the SELECTED project rather than following whatever
+;; buffer happens to be current — the same intent as magit's *magit-scope-hook*.
+(define *project-dir-hook* #f)   ; #f or a thunk -> project-root-or-#f
+;; Installer for the hook. Installers MUST go through this setter: a raw
+;; top-level `set!` from a later-loaded file mutates a binding `project-directory`
+;; never reads (Steel resolves free identifiers at definition time); a set!
+;; executed inside this core-defined function mutates the one it does.
+(define (set-project-dir-hook! f) (set! *project-dir-hook* f))
+(define (project-directory)
+  (or (and *project-dir-hook* (*project-dir-hook*))
+      (project-root (buffer-directory))
+      (buffer-directory)))
+
 ;; --- updates ----------------------------------------------------------------
 
 ;; Enable or disable the launch-time auto-update check against macros.dev. On by

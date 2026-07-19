@@ -16,7 +16,9 @@
   (let ((name (if (= *term-count* 1)
                   "*terminal*"
                   (string-append "*terminal*<" (number->string *term-count*) ">"))))
-    (make-terminal name program (list))
+    ;; Launch in the SELECTED project (title-bar perspective), not whatever
+    ;; buffer is current, so switching projects repoints new terminals too.
+    (make-terminal name program (list) (project-directory))
     (message (string-append "Terminal " name " — keys go to the shell; C-x is the editor prefix"))))
 
 ;; The login shell ("" = the backend picks $SHELL / the default shell).

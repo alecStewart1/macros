@@ -885,30 +885,42 @@
     (when (and (not (equal? *magit-dir* "")) (not (equal? *magit-dir* ".")))
       (watch-tree "magit" (list *magit-dir*)))))
 
-;; The git work-tree the CURRENT buffer belongs to, or #f when it has none.
-;; A buffer that visits no file (e.g. *scratch*, *Messages*) is deliberately
-;; treated as "not in a repo": its `buffer-directory` falls back to the process
-;; cwd, so without this guard launching magit from *scratch* would silently open
-;; whatever repo the app happened to be started in. Requiring a real file (then
-;; walking up to its git work-tree) is the reliable "is this a project buffer?"
-;; signal — the same intent as projectile's `(project-root (buffer-directory))`
-;; guard, but git-exact (a file in a non-git project still returns #f).
-(define (magit-current-repo)
-  (and (not (equal? (buffer-file-name) ""))
-       (let ((top (gix-toplevel (buffer-directory))))
-         (and (not (equal? top "")) top))))
+;; Optional scoping hook: a thunk returning the git work-tree magit should scope
+;; to, or #f. perspectives.scm installs one so magit FOLLOWS THE TITLE-BAR
+;; project — the title bar is the user's project selector, so magit tracks it
+;; rather than whatever buffer happens to be current. Declared here (magit.scm
+;; loads before perspectives.scm) so the installer needn't be known to magit at
+;; definition time; stays #f if perspectives is unloaded. Installers MUST use
+;; the setter below: a raw top-level `set!` from a later-loaded file mutates a
+;; binding magit-current-repo never reads (Steel resolves free identifiers at
+;; definition time); a set! inside this magit-defined function mutates the one
+;; it does.
+(define *magit-scope-hook* #f)
+(define (set-magit-scope-hook! f) (set! *magit-scope-hook* f))
 
-;; Launch: resolve the repo from the buffer you're in, then render. A refresh
-;; from inside a *magit…* buffer keeps the repo we're already viewing; from any
-;; other buffer we require a git work-tree and refuse (like projectile) when the
-;; buffer isn't part of one.
+;; The git work-tree magit should operate on, or #f when none applies. Prefers
+;; the title-bar project (via *magit-scope-hook*); with no active perspective it
+;; falls back to the CURRENT buffer's work-tree. A buffer that visits no file
+;; (e.g. *scratch*, *Messages*) resolves to #f under the fallback — its
+;; `buffer-directory` falls back to the process cwd, so without the file guard
+;; launching magit from *scratch* would silently open whatever repo the app
+;; happened to be started in.
+(define (magit-current-repo)
+  (or (and *magit-scope-hook* (*magit-scope-hook*))
+      (and (not (equal? (buffer-file-name) ""))
+           (let ((top (gix-toplevel (buffer-directory))))
+             (and (not (equal? top "")) top)))))
+
+;; Launch: scope to the title-bar project (or the current buffer's repo when no
+;; perspective is active), then render. With neither available, a refresh from
+;; inside a *magit…* buffer keeps the repo we're already viewing; any other
+;; buffer isn't part of a repo, so refuse (like projectile).
 (define-command (magit-status)
-  (if (starts-with? (current-buffer) "*magit")
-      (magit-render)                       ; refresh the repo we're already viewing
-      (let ((repo (magit-current-repo)))
-        (if repo
-            (begin (set! *magit-dir* repo) (magit-render))
-            (message "Not inside a git repository")))))
+  (let ((repo (magit-current-repo)))
+    (cond
+      (repo (set! *magit-dir* repo) (magit-render))
+      ((starts-with? (current-buffer) "*magit") (magit-render))
+      (else (message "Not inside a git repository")))))
 
 ;; Open magit on an explicitly chosen directory (the override path — used by the
 ;; Helm picker below, or callable directly for any repo).
@@ -916,16 +928,18 @@
   (set! *magit-dir* (magit-toplevel dir))
   (magit-render))
 
-;; Point *magit-dir* at the current buffer's repo when invoked from a NON-magit
-;; buffer; returns #t on success, #f when the buffer isn't in a repo (so callers
-;; can refuse). M-x entry points reachable from a file buffer (log, dispatch)
-;; need this, or they'd inherit a stale/default *magit-dir* and operate on the
-;; wrong repo. Inside a *magit…* buffer the directory is already resolved.
+;; Point *magit-dir* at the title-bar project (or the current buffer's repo when
+;; no perspective is active); returns #t on success, #f when nothing resolves (so
+;; callers can refuse). M-x entry points reachable from a file buffer (log,
+;; dispatch) need this, or they'd inherit a stale/default *magit-dir* and operate
+;; on the wrong repo. Inside a *magit…* buffer with no resolvable repo the
+;; directory is already resolved, so succeed.
 (define (magit-ensure-dir)
-  (if (starts-with? (current-buffer) "*magit")
-      #t
-      (let ((repo (magit-current-repo)))
-        (and repo (begin (set! *magit-dir* repo) #t)))))
+  (let ((repo (magit-current-repo)))
+    (cond
+      (repo (set! *magit-dir* repo) #t)
+      ((starts-with? (current-buffer) "*magit") #t)
+      (else #f))))
 
 ;; Refresh re-runs git for the SAME repo (never re-resolves).
 (define (magit-refresh) (magit-render))

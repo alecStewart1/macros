@@ -55,7 +55,10 @@
 
 (define (compile-run cmd)
   (when (not (equal? (trim-end cmd) ""))
-    (let ((dir (buffer-directory)))
+    ;; Run in the SELECTED project (title-bar perspective) — like projectile's
+    ;; compile — not whatever buffer is current, so switching projects repoints
+    ;; the build. Falls back to the buffer's directory outside any project.
+    (let ((dir (project-directory)))
       ;; lib-async's "compile" lane: one build at a time (a second is refused),
       ;; cancellable via kill-compilation / C-g in *compilation*.
       ;; `2>&1`: make-process captures stdout only, but compilers report on stderr.
@@ -69,7 +72,9 @@
         (set! *compile-line* 2)
         (set! *compile-idx* -1)
         (set! *next-error-source* "compile")
-        (compile-display (string-append "$ " cmd "\n\n"))))))
+        ;; Show the cwd in the command line (Emacs's "Entering directory"): the
+        ;; visible ground truth of where this build ran, whatever selected it.
+        (compile-display (string-append "$ cd " dir " && " cmd "\n\n"))))))
 
 ;; Stream each line live; record any error with the *compilation* line it sits on.
 (define (compile-output line)
@@ -91,7 +96,7 @@
          (status (cond (cancelled "Compilation cancelled")
                        (ok "Compilation finished")
                        (else (string-append "Compilation exited abnormally with code " code))))
-         (lines (append (list (string-append "$ " *compile-last*) "")
+         (lines (append (list (string-append "$ cd " *compile-dir* " && " *compile-last*) "")
                         (reverse *compile-out*)
                         (list "" status)))
          (status-line (- (length lines) 1))

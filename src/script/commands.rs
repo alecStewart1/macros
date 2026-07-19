@@ -800,6 +800,9 @@ pub enum EditorCommand {
         name: String,
         program: String,
         args: Vec<String>,
+        /// Working directory to launch the shell in; empty = the active buffer's
+        /// directory (or the process cwd for a fileless buffer).
+        directory: String,
     },
     /// Call Steel fn `callback` after `ms` milliseconds (Emacs `run-with-timer`).
     RunWithTimer {
