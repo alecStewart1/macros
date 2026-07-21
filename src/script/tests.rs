@@ -2383,6 +2383,85 @@ mod magit_tests {
         );
     }
 
+    /// Deliberately switching to a file in another project (C-x b / cycling /
+    /// revisiting an open buffer / an LSP jump) fires `buffer-select-hook`,
+    /// which re-points the current perspective — the title bar and the project
+    /// commands that follow it move with the user. An INCIDENTAL activation of
+    /// the same file (pane-focus dance) fires only `buffer-switch-hook` and must
+    /// leave the perspective put. Same flat, stubbed-persistence harness as
+    /// `dropdown_switch_then_first_compile_uses_new_project`.
+    #[test]
+    fn deliberate_buffer_switch_follows_project_incidental_does_not() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/diagnostics.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
+        engine
+            .eval(&format!(
+                r#"
+                (define (persistence-dir) "{}")
+                (define *magit-scope-hook* #f)
+                (define (set-magit-scope-hook! f) (set! *magit-scope-hook* f))
+                "#,
+                fresh_persistence_dir()
+            ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/perspectives.scm"))
+            .unwrap();
+        let base = std::env::temp_dir().join("macros-persp-follow-test");
+        let (proj_a, proj_b) = (base.join("alpha"), base.join("beta"));
+        for p in [&proj_a, &proj_b] {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::write(p.join(".projectile"), "").unwrap();
+            std::fs::write(p.join("main.txt"), "x\n").unwrap();
+        }
+        let (a, b) = (proj_a.to_str().unwrap(), proj_b.to_str().unwrap());
+        let snap = |dir: &str, file: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                name: "main.txt".to_string(),
+                directory: dir.to_string(),
+                path: file.to_string(),
+                ..Default::default()
+            });
+        };
+        let current =
+            |engine: &ScriptEngine| engine.eval("*perspective-current*").unwrap().value.unwrap();
+        // Open alpha's file (fresh find-file): perspective becomes alpha.
+        snap(a, &format!("{a}/main.txt"));
+        engine.call_action("perspective-track", None);
+        assert_eq!(current(&engine), format!("\"{a}\""));
+        // Now the alpha and beta buffers are both open. Deliberately switch to
+        // beta's already-open buffer (C-x b): buffer-select-hook fires and the
+        // perspective must follow into beta.
+        snap(b, &format!("{b}/main.txt"));
+        engine.call_action("perspective-follow", None);
+        assert_eq!(
+            current(&engine),
+            format!("\"{b}\""),
+            "deliberate switch to a file in another project must re-point the perspective"
+        );
+        // An incidental pane-focus activation of alpha's buffer fires only
+        // buffer-switch-hook (perspective-note) — the perspective stays beta.
+        snap(a, &format!("{a}/main.txt"));
+        engine.call_action("perspective-note", None);
+        assert_eq!(
+            current(&engine),
+            format!("\"{b}\""),
+            "incidental activation must not re-point the perspective"
+        );
+        // Switching within the same project must not thrash / re-render need not
+        // change the current root.
+        snap(b, &format!("{b}/main.txt"));
+        engine.call_action("perspective-follow", None);
+        assert_eq!(current(&engine), format!("\"{b}\""));
+    }
+
     /// Helix selection-first motions read every selection from the snapshot and
     /// hand a new set back via `set-selections` — the multi-selection core that
     /// scheme/helix.scm drives. Exercised end to end through the engine.

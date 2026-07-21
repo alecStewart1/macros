@@ -2836,7 +2836,7 @@ impl Editor {
             return;
         }
         if let Some(index) = self.inactive.iter().position(|d| d.name == "*Messages*") {
-            self.activate(index, cx);
+            self.activate(index, true, cx);
         } else {
             let text = if self.messages.is_empty() {
                 String::new()
@@ -2857,7 +2857,7 @@ impl Editor {
             return;
         }
         if let Some(index) = self.inactive.iter().position(|d| d.name == "*lsp-log*") {
-            self.activate(index, cx);
+            self.activate(index, true, cx);
         } else {
             let text = if self.lsp_log.is_empty() {
                 String::new()
@@ -4354,6 +4354,27 @@ fn pretty_key(key: &str) -> String {
 /// [`pretty_key`] so the per-chord shift→uppercase rule still applies.
 fn pretty_sequence(seq: &str) -> String {
     seq.split(' ').map(pretty_key).collect::<Vec<_>>().join(" ")
+}
+
+/// A shifted letter as the literal character it types (shift+f → `"F"`), so a
+/// transient row can be declared with the glyph users see (`"F"`, `"G"`).
+/// Only bare shift qualifies — ctrl/alt/cmd chords keep their prefixed form.
+fn shifted_letter(ks: &Keystroke) -> Option<String> {
+    if ks.modifiers.shift
+        && !ks.modifiers.control
+        && !ks.modifiers.alt
+        && !ks.modifiers.platform
+        && ks.key.len() == 1
+        && ks
+            .key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+    {
+        Some(ks.key.to_ascii_uppercase())
+    } else {
+        None
+    }
 }
 
 /// Render a [`Keystroke`] as a chord string like `"ctrl-g"` or `"alt-shift-,"`.

@@ -212,8 +212,30 @@
       (perspective-sync-titlebar)   ; labels may re-qualify on first touch
       (perspective-save))))
 
+;; buffer-select-hook (DELIBERATE buffer switches only: C-x b, C-x <arrow>
+;; cycling, revisiting an already-open file, an LSP jump) re-points the current
+;; perspective the way a fresh find-file does — so switching to a file in
+;; another project moves the title bar (and the project commands that follow it:
+;; compile / term / magit) to that project. Incidental activations (pane-focus
+;; dances, process-output surfacing) fire buffer-switch-hook but NOT this hook,
+;; so they still leave the title bar on the project you were working in.
+;;
+;; Guard on a real file inside a project: switching to *scratch*, a terminal, or
+;; magit (fileless buffers) leaves the current perspective alone, matching
+;; perspective-track's stickiness. No-op — and no re-render — when the target's
+;; project is already current.
+(define (perspective-follow)
+  (let ((root (project-root (buffer-directory)))
+        (file (buffer-file-name)))
+    (when (and root (not (equal? file "")) (not (equal? root *perspective-current*)))
+      (perspective-update root file)
+      (set! *perspective-current* root)
+      (perspective-sync-titlebar)
+      (perspective-save))))
+
 (add-hook "find-file-hook" "perspective-track")
 (add-hook "buffer-switch-hook" "perspective-note")
+(add-hook "buffer-select-hook" "perspective-follow")
 (perspective-load)
 
 (define-key "fundamental" "ctrl-c p s" 'perspective-switch)

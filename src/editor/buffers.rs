@@ -96,7 +96,12 @@ impl Editor {
     }
 
     /// Make the buffer `name` active, snapshotting the current one.
-    pub(super) fn activate(&mut self, index: usize, cx: &mut Context<Self>) {
+    ///
+    /// `deliberate` marks a user-initiated switch (C-x b, find-file reuse, an
+    /// LSP jump) as opposed to an incidental activation (pane-focus dance,
+    /// process-output surfacing). Both fire `buffer-switch-hook`; only a
+    /// deliberate switch also fires `buffer-select-hook` — see [`switch_hooks`].
+    pub(super) fn activate(&mut self, index: usize, deliberate: bool, cx: &mut Context<Self>) {
         let target = self.inactive.remove(index);
         let current = self.snapshot_active();
         self.inactive.push(current);
@@ -104,11 +109,24 @@ impl Editor {
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
-        // Re-activating an existing buffer never fires `find-file-hook`, so
-        // anything tracking "which buffer is the user in" (the perspectives
-        // title bar) needs its own signal. Free when nothing is registered.
-        self.run_hook("buffer-switch-hook");
+        self.switch_hooks(deliberate);
         cx.notify();
+    }
+
+    /// Fire the buffer-change hooks after the active buffer was replaced.
+    ///
+    /// Re-activating an existing buffer never fires `find-file-hook`, so
+    /// anything tracking "which buffer is the user in" needs its own signal.
+    /// `buffer-switch-hook` fires on EVERY activation (bookkeeping: spell,
+    /// perspective resume files); `buffer-select-hook` fires only on a
+    /// DELIBERATE switch, so the perspectives title bar can follow the user
+    /// into another project without incidental pane-focus activations
+    /// hijacking it. Both are free when nothing is registered.
+    pub(super) fn switch_hooks(&mut self, deliberate: bool) {
+        self.run_hook("buffer-switch-hook");
+        if deliberate {
+            self.run_hook("buffer-select-hook");
+        }
     }
 
     /// `C-x <right>`: cycle forward through the buffer ring (the active buffer
@@ -148,7 +166,7 @@ impl Editor {
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
-        self.run_hook("buffer-switch-hook"); // see `activate`
+        self.switch_hooks(true); // C-x <arrow> cycling is a deliberate switch
         let name = self.active.name.clone();
         self.echo(name, cx);
     }
@@ -168,7 +186,7 @@ impl Editor {
             .iter()
             .position(|d| d.path.as_deref() == Some(path.as_path()))
         {
-            self.activate(index, cx);
+            self.activate(index, true, cx);
             self.echo(format!("Switched to {}", self.active.name), cx);
             return;
         }
@@ -473,13 +491,26 @@ impl Editor {
 
     /// `C-x b`: switch to an already-open buffer by name.
     pub(super) fn switch_to_buffer(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.switch_to_buffer_ex(name, true, cx);
+    }
+
+    /// [`switch_to_buffer`](Self::switch_to_buffer) with explicit intent:
+    /// `deliberate` is false when a pane-focus change (`select_pane`) surfaces a
+    /// buffer, so the perspectives title bar doesn't follow that incidental
+    /// activation into another project.
+    pub(super) fn switch_to_buffer_ex(
+        &mut self,
+        name: &str,
+        deliberate: bool,
+        cx: &mut Context<Self>,
+    ) {
         let name = name.trim();
         if name == self.active.name {
             cx.notify();
             return;
         }
         match self.inactive.iter().position(|d| d.name == name) {
-            Some(index) => self.activate(index, cx),
+            Some(index) => self.activate(index, deliberate, cx),
             None => self.echo(format!("No buffer named {name}"), cx),
         }
     }
@@ -945,7 +976,7 @@ impl Editor {
                 return;
             }
             if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
-                self.activate(idx, cx);
+                self.activate(idx, false, cx); // process output surfacing, not a user switch
             } else {
                 let current = self.snapshot_active();
                 self.inactive.push(current);

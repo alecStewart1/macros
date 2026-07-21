@@ -167,6 +167,11 @@
 
 (add-hook "find-file-hook" "projectile-update-modeline")
 (add-hook "find-file-hook" "projectile-track")
+;; Re-activating an already-open buffer skips find-file-hook, so the mode-line
+;; project/branch would show the previous buffer's project after C-x b or
+;; cycling. buffer-switch-hook fires on every activation — keep the indicator
+;; pointed at whatever buffer is now current.
+(add-hook "buffer-switch-hook" "projectile-update-modeline")
 
 ;; Restore the persisted recent-project list at startup.
 (projectile-recent-load)

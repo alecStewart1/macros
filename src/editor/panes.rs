@@ -391,7 +391,10 @@ impl Editor {
         let restore = self.pane(id).map(|p| (p.point, p.scroll));
         self.selected_pane = id;
         if target_buffer != self.active.name && !target_buffer.is_empty() {
-            self.switch_to_buffer(&target_buffer, cx);
+            // Pane focus moving is not a deliberate buffer switch: the
+            // perspectives title bar must not follow a window dance (e.g.
+            // compile re-selecting panes) into another project.
+            self.switch_to_buffer_ex(&target_buffer, false, cx);
         }
         if let Some((point, scroll)) = restore {
             self.move_to(point.min(self.active.buffer.len()), cx);

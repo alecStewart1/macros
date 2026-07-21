@@ -1042,7 +1042,7 @@ impl Editor {
             .iter()
             .position(|d| d.path.as_deref() == Some(path))
         {
-            self.activate(index, cx);
+            self.activate(index, true, cx);
             return true;
         }
         let contents = match std::fs::read_to_string(path) {
@@ -1420,7 +1420,7 @@ impl Editor {
         // Return to the source buffer before applying, so edits land there (the
         // `*lsp-actions*` buffer is active when this runs).
         if let Some(idx) = self.inactive.iter().position(|d| d.special.is_none()) {
-            self.activate(idx, cx);
+            self.activate(idx, true, cx);
         }
         self.apply_code_action(action, cx);
     }

@@ -225,7 +225,12 @@ impl Editor {
         }
         if (ks.modifiers.control && ks.key == "g") || ks.key == "escape" {
             self.transient_quit(cx);
-        } else if let Some(command) = self.transient_command(&chord_string(ks)) {
+        } else if let Some(command) = self
+            .transient_command(&chord_string(ks))
+            // Rows are declared with the glyph users see ("F"), but a shifted
+            // letter arrives as "shift-f" — try the literal character too.
+            .or_else(|| shifted_letter(ks).and_then(|k| self.transient_command(&k)))
+        {
             // A sticky popup stays open after a row runs (the command re-opens
             // it to refresh, or calls `transient-quit`); a normal one closes
             // first so its command runs without the menu in the way.
