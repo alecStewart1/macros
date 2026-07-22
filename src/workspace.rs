@@ -8,24 +8,31 @@ use crate::theme::Theme;
 /// them at the window edge, capped at a few lines so it can't swallow the
 /// editor. The full history remains in `*Messages*`.
 fn echo_row(text: SharedString, color: gpui::Hsla, bg: gpui::Hsla) -> impl IntoElement {
-    // gpui shapes this child with `shape_line`, which panics (aborting the app)
-    // on an embedded newline. Sources are sanitized individually, but collapse
-    // here too so no status/echo text can ever crash the editor.
-    let text: SharedString = if text.contains(['\n', '\r']) {
-        crate::util::single_line(&text).into()
-    } else {
-        text
-    };
-    div()
+    // gpui shapes each child with `shape_line`, which panics (aborting the app)
+    // on an embedded newline. So instead of collapsing the message to one line,
+    // split it into physical lines and give each its OWN row — multi-line
+    // messages (e.g. `email-status`) stack vertically, and no child ever holds a
+    // newline. Single-line messages (the common case) still render as one row.
+    // `max_h` + `overflow_hidden` cap the growth at a few lines.
+    let mut col = div()
         .w_full()
         .px_2()
         .py(px(2.))
-        .max_h(px(96.))
+        .max_h(px(160.))
         .overflow_hidden()
         .bg(bg)
         .text_color(color)
         .text_size(px(13.))
-        .child(text)
+        .flex()
+        .flex_col();
+    let cleaned = text.replace('\r', "");
+    for line in cleaned.split('\n') {
+        // An empty line needs a non-empty child, or the row collapses to zero
+        // height and the blank-line spacing is lost.
+        let line = if line.is_empty() { " " } else { line };
+        col = col.child(div().child(SharedString::from(line.to_string())));
+    }
+    col
 }
 
 /// The theme colors the bottom-region renderers share. Resolved once per frame
@@ -255,8 +262,11 @@ impl Workspace {
         let key_color = theme.color("magit-key", colors.prompt_color);
         let foreground = theme.foreground();
         let dim = colors.dim;
-        // Build each column as a flex-col; lay the columns out in a row.
-        let mut columns_row = div().flex().flex_row().gap_4().px_2();
+        // Build each column as a flex-col; lay the columns out in a row that
+        // WRAPS — on a narrow window the columns flow onto additional rows
+        // instead of running off the right edge. `gap_4` spaces both the
+        // columns and the wrapped rows.
+        let mut columns_row = div().flex().flex_row().flex_wrap().gap_4().px_2();
         for column in transient.columns {
             let mut col = div().flex().flex_col();
             if let Some(title) = column.title {
