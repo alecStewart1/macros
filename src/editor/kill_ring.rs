@@ -175,6 +175,11 @@ impl Editor {
         let (Some(range), false) = (self.last_yank.clone(), self.kill_ring.is_empty()) else {
             return;
         };
+        // The range was recorded by the previous yank; anything that rewrote the
+        // buffer without going through a command (auto-revert, an async LSP
+        // workspace edit) can have shrunk it since, and splicing past the end
+        // aborts the editor inside ropey.
+        let range = clamp_range(range, self.active.buffer.len());
         self.kill_index = (self.kill_index + self.kill_ring.len() - 1) % self.kill_ring.len();
         let text = self.kill_ring[self.kill_index].clone();
         let cursor = self.edit(range.clone(), &text);

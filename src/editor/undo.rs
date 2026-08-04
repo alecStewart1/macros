@@ -27,9 +27,18 @@ impl Editor {
         let mut cursor = 0;
         for record in group.into_iter().rev() {
             let old_end = record.at + record.inserted.len();
+            // Capture the pre-change LSP positions BEFORE mutating the rope,
+            // exactly as `edit()` does — an undo is an ordinary document change
+            // as far as the server is concerned, and skipping it leaves an
+            // incremental-sync server (rust-analyzer, gopls, …) permanently
+            // out of step with the buffer for the rest of the session.
+            let lsp_change = self.lsp_change_positions(record.at, old_end);
             self.active
                 .buffer
                 .replace(record.at..old_end, &record.removed);
+            if let Some((language, start, end)) = lsp_change {
+                self.lsp_did_change(&language, start, end, &record.removed);
+            }
             let line_delta = record.removed.matches('\n').count() as isize
                 - record.inserted.matches('\n').count() as isize;
             let start_line = self.active.buffer.byte_to_position(record.at).0;
@@ -79,9 +88,13 @@ impl Editor {
         let mut cursor = 0;
         for record in &group {
             let old_end = record.at + record.removed.len();
+            let lsp_change = self.lsp_change_positions(record.at, old_end); // see `undo`
             self.active
                 .buffer
                 .replace(record.at..old_end, &record.inserted);
+            if let Some((language, start, end)) = lsp_change {
+                self.lsp_did_change(&language, start, end, &record.inserted);
+            }
             let line_delta = record.inserted.matches('\n').count() as isize
                 - record.removed.matches('\n').count() as isize;
             let start_line = self.active.buffer.byte_to_position(record.at).0;

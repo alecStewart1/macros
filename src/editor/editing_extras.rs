@@ -285,14 +285,22 @@ impl Editor {
     pub(super) fn mc_add_line(&mut self, dir: isize, cx: &mut Context<Self>) {
         let primary = self.active.selected_range.start;
         let line = self.active.buffer.line_index_at_byte(primary);
-        let col = primary - self.active.buffer.line_range(line).start;
         let target = line as isize + dir;
         if target < 0 || target as usize >= self.active.buffer.line_count() {
             self.echo("multiple-cursors: no line there", cx);
             return;
         }
+        // Track the CHARACTER column, not the byte column (same rule as
+        // `line_offset`). A byte column carried onto a line with multibyte text
+        // lands mid-codepoint, and the marker it seeds then hands `edit()` an
+        // offset the rope refuses to slice at.
+        let line_start = self.active.buffer.line_range(line).start;
+        let goal =
+            self.active.buffer.byte_to_char(primary) - self.active.buffer.byte_to_char(line_start);
         let lr = self.active.buffer.line_range(target as usize);
-        let pos = (lr.start + col).min(lr.end);
+        let ts = self.active.buffer.byte_to_char(lr.start);
+        let tlen = self.active.buffer.byte_to_char(lr.end) - ts;
+        let pos = self.active.buffer.char_to_byte(ts + goal.min(tlen));
         if self.mc_add_cursor_at(pos) {
             cx.notify();
         }

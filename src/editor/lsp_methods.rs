@@ -23,6 +23,10 @@ fn is_builtin_lsp(command: &str) -> bool {
     command == "builtin" || command.starts_with("builtin:")
 }
 
+/// One pending `textDocument/didChange`: the server's language plus the
+/// pre-edit `(line, character)` bounds of the range being replaced.
+pub(super) type LspChange = (String, (usize, usize), (usize, usize));
+
 /// Cap on the `*lsp-log*` scrollback ring (captured server stderr).
 const LSP_LOG_CAP: usize = 2000;
 
@@ -143,6 +147,23 @@ impl Editor {
             server.open.insert(uri.clone());
             server.versions.insert(uri, 1);
         }
+    }
+
+    /// The `(language, start, end)` an about-to-happen replacement of
+    /// `[start_byte, end_byte)` should be reported to `lsp_did_change` with, or
+    /// `None` when the buffer has no language server language. MUST be called
+    /// *before* the rope is mutated — the positions are the pre-edit ones.
+    /// Shared by `edit()` and the undo/redo paths, which mutate the rope
+    /// directly.
+    pub(super) fn lsp_change_positions(
+        &self,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Option<LspChange> {
+        let language = self.active_language()?;
+        let start = self.active.buffer.byte_to_position(start_byte);
+        let end = self.active.buffer.byte_to_position(end_byte);
+        Some((language, start, end))
     }
 
     /// Notify the active buffer's server of an edit. `start`/`end` are the

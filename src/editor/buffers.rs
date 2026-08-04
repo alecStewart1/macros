@@ -80,6 +80,19 @@ impl Editor {
         self.extra_cursors.clear();
         self.snippet_fields.clear();
         self.avy_hints.clear();
+        // Everything else that pins a RAW byte range in the buffer we just left
+        // goes too. These are re-armed per command in the normal flow, but a
+        // switch can land between the arm and the use — click into another
+        // pane right after `C-y`, then press `M-y`, and `yank_pop` would splice
+        // the old buffer's range into the new one (a panic outright when the
+        // new buffer is shorter). Same for a completion popup left open when a
+        // hook or process output surfaces a different buffer.
+        self.last_yank = None;
+        self.last_was_yank = false;
+        self.completion_popup = None;
+        self.completion_popup_hit = None;
+        self.completion_range = None;
+        self.completion_auto_pending = false;
         // The selected window now shows this buffer (Emacs: switching the active
         // buffer changes what the selected window displays).
         let active = self.active.name.clone();

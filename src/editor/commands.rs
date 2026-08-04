@@ -193,6 +193,26 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> Result<(), EditorCommand> {
         use EditorCommand::*;
+        // A special buffer (magit, dired, *Help*, …) is read-only: its text is
+        // program-generated and its line/byte offsets back the mode's own
+        // bookkeeping. Plain keys can't reach the buffer (the special-buffer key
+        // layer swallows them) and neither can the IME, but the Emacs editing
+        // CHORDS fall through to the global `fundamental` map — so without this
+        // guard `C-k`, `C-y`, `C-w`, `M-d`, `C-t`, `C-o`, `cmd-v`, … would
+        // happily rewrite a magit status buffer. Emacs answers with
+        // "Buffer is read-only"; so do we. Programmatic primitives
+        // (`replace-region`, `insert-at`, `delete-region`, `insert`) stay
+        // allowed — that's how Scheme builds these buffers in the first place.
+        // A *running* terminal buffer is special too, but there the clipboard
+        // commands delegate to the PTY (cmd-v types into the shell) before ever
+        // touching the rope, so they must not be refused here.
+        if self.active.special.is_some()
+            && self.active_running_terminal_id().is_none()
+            && is_interactive_edit(&command)
+        {
+            self.echo("Buffer is read-only", cx);
+            return Ok(());
+        }
         match command {
             Insert(text) => self.insert_text(&text, cx),
             Newline => self.newline(cx),
@@ -1261,5 +1281,85 @@ impl Editor {
             other => return Err(other),
         }
         Ok(())
+    }
+}
+
+/// Whether `command` is an *interactive* text mutation — the kind a keybinding
+/// runs on "the text at point". These are refused in read-only special buffers
+/// (see [`Editor::cmd_edit`]). The explicitly-addressed primitives
+/// (`ReplaceRegion`, `DeleteRegion`, `InsertAt`, `KillRegionBetween`, `Insert`)
+/// are NOT listed: Scheme uses them to populate and rewrite these buffers, and
+/// no default keybinding reaches them.
+fn is_interactive_edit(command: &EditorCommand) -> bool {
+    use EditorCommand::*;
+    matches!(
+        command,
+        Newline
+            | OpenLine
+            | IndentForTab
+            | DeleteChar
+            | DeleteBackwardChar
+            | TransposeChars
+            | KillLine
+            | KillWord
+            | BackwardKillWord
+            | KillRegion
+            | ClipboardCut
+            | ClipboardPaste
+            | Yank
+            | YankPop
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_interactive_edit;
+    use crate::script::EditorCommand::*;
+
+    #[test]
+    fn read_only_guard_covers_keybound_edits_only() {
+        // Every editing chord `fundamental` binds is refused in a read-only
+        // buffer: C-d, C-k, M-d, M-backspace, C-w, C-y, M-y, C-t, C-o, cmd-x,
+        // cmd-v, plus RET/TAB.
+        for c in [
+            DeleteChar,
+            KillLine,
+            KillWord,
+            BackwardKillWord,
+            KillRegion,
+            Yank,
+            YankPop,
+            TransposeChars,
+            OpenLine,
+            ClipboardCut,
+            ClipboardPaste,
+            Newline,
+            IndentForTab,
+            DeleteBackwardChar,
+        ] {
+            assert!(is_interactive_edit(&c), "{c:?} must be refused");
+        }
+        // Programmatic primitives still run — that is how Scheme builds and
+        // rewrites these buffers.
+        for c in [
+            Insert("x".into()),
+            InsertAt {
+                pos: 0,
+                text: "x".into(),
+            },
+            DeleteRegion { start: 0, end: 1 },
+            ReplaceRegion {
+                start: 0,
+                end: 1,
+                text: "x".into(),
+            },
+            KillRegionBetween { start: 0, end: 1 },
+            KillRingSave,
+            ClipboardCopy,
+            Undo,
+            Redo,
+        ] {
+            assert!(!is_interactive_edit(&c), "{c:?} must stay allowed");
+        }
     }
 }

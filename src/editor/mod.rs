@@ -1964,11 +1964,7 @@ impl Editor {
         });
 
         // Capture pre-edit LSP positions for incremental sync (before the change).
-        let lsp_change = self.active_language().map(|language| {
-            let start = self.active.buffer.byte_to_position(range.start);
-            let end = self.active.buffer.byte_to_position(range.end);
-            (language, start, end)
-        });
+        let lsp_change = self.lsp_change_positions(range.start, range.end);
 
         let cursor = self.active.buffer.replace(range, new_text);
         self.active.modified = true;
@@ -2580,7 +2576,15 @@ impl Editor {
     fn indent_for_tab(&mut self, cx: &mut Context<Self>) {
         let electric = cx.global::<crate::settings::Settings>().electric_indent();
         let step = self.structural_indent_width(cx);
-        if electric && !self.has_extra_cursors() && self.region().is_none() {
+        // With a region active, TAB shifts the lines it spans one step right
+        // (Emacs `indent-for-tab-command` hands off to `indent-region`). The
+        // self-insert fallback below REPLACES the selection, so without this a
+        // stray TAB over a mouse-drag selection silently swallows it.
+        if let Some(region) = self.region() {
+            self.indent_region(region, step, cx);
+            return;
+        }
+        if electric && !self.has_extra_cursors() {
             // Lisp: paren-aligning reindent.
             if self
                 .active_language()
@@ -2618,6 +2622,35 @@ impl Editor {
             }
         }
         self.insert_text(&" ".repeat(step), cx);
+    }
+
+    /// Shift every line `region` touches `step` columns right, as one undo unit,
+    /// leaving the (now wider) lines selected so repeated TABs keep indenting.
+    /// Blank lines are skipped, matching Emacs's `indent-region`.
+    fn indent_region(&mut self, region: Range<usize>, step: usize, cx: &mut Context<Self>) {
+        let first = self.active.buffer.line_index_at_byte(region.start);
+        // `region.end` is exclusive: a selection that stops at a line's start
+        // must not indent that line, so anchor on the last byte inside it.
+        let last_byte = region.end.saturating_sub(1).max(region.start);
+        let last = self.active.buffer.line_index_at_byte(last_byte);
+        let pad = " ".repeat(step);
+        self.begin_undo_group();
+        // Bottom-up, so an earlier line's insertion can't shift the offsets of
+        // the lines still to come.
+        for line in (first..=last).rev() {
+            let lr = self.active.buffer.line_range(line);
+            if lr.end > lr.start {
+                self.edit(lr.start..lr.start, &pad);
+            }
+        }
+        self.end_undo_group();
+        self.active.selected_range =
+            self.active.buffer.line_range(first).start..self.active.buffer.line_range(last).end;
+        self.active.selection_reversed = false;
+        self.active.marked_range = None;
+        self.active.mark_active = true;
+        self.ensure_cursor_visible();
+        cx.notify();
     }
 
     fn set_mark(&mut self, cx: &mut Context<Self>) {
@@ -4397,15 +4430,26 @@ fn chord_string(ks: &Keystroke) -> String {
     s
 }
 
+/// Ceiling on how many times a universal-argument repeats a command. A repeat
+/// is a foreground loop (each iteration reparses, re-lays-out, and re-reveals
+/// the cursor), so an unbounded count is a hung window, not a slow command —
+/// and the counts that get that large are never typed on purpose. `C-u` held
+/// down on key-repeat stacks the ×4 default into the billions within a second;
+/// this is the valve that keeps that recoverable.
+const MAX_PREFIX_REPEAT: i64 = 100_000;
+
 /// The numeric value of a universal-argument from its parts: an explicit typed
 /// number wins; otherwise each `C-u` multiplies the default by 4 (`C-u` = 4,
-/// `C-u C-u` = 16, …); with neither, the count is 1.
+/// `C-u C-u` = 16, …); with neither, the count is 1. Clamped to
+/// [`MAX_PREFIX_REPEAT`] — without it a long `C-u` chain saturates to
+/// `i64::MAX` and the repeat loop never returns.
 fn prefix_arg_value(digits: Option<i64>, cu: u32) -> i64 {
-    match digits {
+    let n = match digits {
         Some(n) => n,
-        None if cu > 0 => 4i64.saturating_pow(cu),
+        None if cu > 0 => 4i64.saturating_pow(cu.min(31)),
         None => 1,
-    }
+    };
+    n.min(MAX_PREFIX_REPEAT)
 }
 
 /// Whether a command should repeat under a universal-argument (Emacs `C-u N`).
@@ -4664,10 +4708,27 @@ impl EntityInputHandler for Editor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The same routing `replace_text_in_range` does. Composition (dead keys,
+        // CJK IMEs) goes through THIS entry point, so a filter surface missing
+        // here doesn't just lose the composed text — it lands the text in the
+        // buffer underneath the popup. IME composition isn't tracked in any of
+        // these single-line fields; treat it as a direct insert of the text so
+        // far, matching the minibuffer's long-standing behavior.
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_input(new_text, cx);
+            return;
+        }
+        if self.helm.is_some() {
+            self.helm_input(new_text, cx);
+            return;
+        }
         if self.minibuffer.is_some() {
-            // IME composition isn't tracked in the minibuffer; treat as a
-            // direct insert of the committed text.
             self.mb_insert(new_text, cx);
+            return;
+        }
+        // Surfaces where plain keys are never text: evil Normal/Visual (they're
+        // commands), a modal transient, and read-only special buffers.
+        if self.evil_intercepts() || self.transient.is_some() || self.active.special.is_some() {
             return;
         }
         let range = range_utf16
@@ -4748,10 +4809,10 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Buffer, EditorCommand, apply_trailing_rule, char_col_byte, file_completions, is_repeatable,
-        language_for_path, last_sexp, line_span, prefix_arg_value, push_capped,
-        scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at, top_level_form_at,
-        translate_backrefs,
+        Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
+        file_completions, is_repeatable, language_for_path, last_sexp, line_span, prefix_arg_value,
+        push_capped, scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at,
+        top_level_form_at, translate_backrefs,
     };
 
     #[test]
@@ -4803,6 +4864,12 @@ mod tests {
         // An explicit typed number wins over the C-u default (C-u 10 == 10).
         assert_eq!(prefix_arg_value(Some(10), 1), 10);
         assert_eq!(prefix_arg_value(Some(0), 0), 0);
+        // A long C-u chain (key repeat) must not saturate into an unbounded
+        // repeat loop — 4^32 overflows i64, and i64::MAX iterations is a hang.
+        assert_eq!(prefix_arg_value(None, 40), MAX_PREFIX_REPEAT);
+        assert_eq!(prefix_arg_value(None, 8), 4i64.pow(8)); // still exact below the cap
+        // A typed number is clamped the same way.
+        assert_eq!(prefix_arg_value(Some(i64::MAX), 0), MAX_PREFIX_REPEAT);
     }
 
     #[test]
