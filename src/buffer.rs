@@ -239,6 +239,112 @@ impl Buffer {
         self.rope.char_to_byte(ci)
     }
 
+    /// The byte offset at the start of the previous word, using Vim `b`
+    /// semantics: skip whitespace backwards, then walk back over the run of the
+    /// class ([`CharClass`]) we land in. Unlike [`Self::backward_word`] (Emacs
+    /// `M-b`, which treats punctuation as a separator and never stops inside
+    /// it), this is the exact mirror of [`Self::forward_word_start`] — so on
+    /// `foo.bar` with point on `b`, `b` lands on `.`, not on `foo`.
+    pub fn backward_word_start(&self, from: usize) -> usize {
+        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        while ci > 0 && char_class(self.rope.char(ci - 1)) == CharClass::Space {
+            ci -= 1;
+        }
+        if ci > 0 {
+            let class = char_class(self.rope.char(ci - 1));
+            while ci > 0 && char_class(self.rope.char(ci - 1)) == class {
+                ci -= 1;
+            }
+        }
+        self.rope.char_to_byte(ci)
+    }
+
+    /// The byte offset ON the last character of the next word, using Vim `e`
+    /// semantics: step forward one, skip whitespace, then run to the end of the
+    /// class run and step back onto its final character. Unlike
+    /// [`Self::forward_word`] (Emacs `M-f`, word characters only) this stops at
+    /// the end of a punctuation run too.
+    pub fn forward_word_end(&self, from: usize) -> usize {
+        let total = self.rope.len_chars();
+        let start = self.rope.byte_to_char(from.min(self.len()));
+        let mut ci = start + 1;
+        while ci < total && char_class(self.rope.char(ci)) == CharClass::Space {
+            ci += 1;
+        }
+        if ci >= total {
+            return self.rope.char_to_byte(total.saturating_sub(1).max(start));
+        }
+        let class = char_class(self.rope.char(ci));
+        while ci + 1 < total && char_class(self.rope.char(ci + 1)) == class {
+            ci += 1;
+        }
+        self.rope.char_to_byte(ci)
+    }
+
+    /// Vim `W` — the start of the next whitespace-delimited WORD (every
+    /// non-blank character is one class, so `foo.bar` is a single WORD).
+    pub fn forward_bigword_start(&self, from: usize) -> usize {
+        let total = self.rope.len_chars();
+        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        while ci < total && !self.rope.char(ci).is_whitespace() {
+            ci += 1;
+        }
+        while ci < total && self.rope.char(ci).is_whitespace() {
+            ci += 1;
+        }
+        self.rope.char_to_byte(ci)
+    }
+
+    /// Vim `B` — the start of the previous whitespace-delimited WORD.
+    pub fn backward_bigword_start(&self, from: usize) -> usize {
+        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        while ci > 0 && self.rope.char(ci - 1).is_whitespace() {
+            ci -= 1;
+        }
+        while ci > 0 && !self.rope.char(ci - 1).is_whitespace() {
+            ci -= 1;
+        }
+        self.rope.char_to_byte(ci)
+    }
+
+    /// Vim `E` — the last character of the next whitespace-delimited WORD.
+    pub fn forward_bigword_end(&self, from: usize) -> usize {
+        let total = self.rope.len_chars();
+        let start = self.rope.byte_to_char(from.min(self.len()));
+        let mut ci = start + 1;
+        while ci < total && self.rope.char(ci).is_whitespace() {
+            ci += 1;
+        }
+        if ci >= total {
+            return self.rope.char_to_byte(total.saturating_sub(1).max(start));
+        }
+        while ci + 1 < total && !self.rope.char(ci + 1).is_whitespace() {
+            ci += 1;
+        }
+        self.rope.char_to_byte(ci)
+    }
+
+    /// The character column (NOT byte offset) of `byte` within its line, and the
+    /// byte offset of that column on line `line` — the pair vertical motion
+    /// needs. Byte columns land mid-codepoint on lines with multibyte text; the
+    /// rope then refuses to slice there, so every vertical move in the editor
+    /// (Rust and Scheme alike) goes through these.
+    pub fn char_column(&self, byte: usize) -> usize {
+        let byte = byte.min(self.len());
+        let line_start = self.line_range_at(byte).start;
+        self.rope.byte_to_char(byte) - self.rope.byte_to_char(line_start)
+    }
+
+    /// The byte offset of character column `col` on (0-based) `line`, clamped to
+    /// the line's end. Inverse of [`Self::char_column`].
+    pub fn byte_at_char_column(&self, line: usize, col: usize) -> usize {
+        let last = self.line_count().saturating_sub(1);
+        let lr = self.line_range(line.min(last));
+        let start = self.rope.byte_to_char(lr.start);
+        let len = self.rope.byte_to_char(lr.end) - start;
+        self.rope.char_to_byte(start + col.min(len))
+    }
+
     /// The byte offset at the start of the word at or before `from` (Emacs `M-b`).
     pub fn backward_word(&self, from: usize) -> usize {
         let mut ci = self.rope.byte_to_char(from.min(self.len()));

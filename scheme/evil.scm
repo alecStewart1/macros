@@ -21,11 +21,22 @@
   (kill-region) (evil-set-linewise))
 ;; Visual-mode delete/yank are character-wise (the selection's exact range).
 (define (evil-visual-delete) (kill-region) (evil-set-charwise) (evil-normal-state))
-(define (evil-visual-yank)   (kill-ring-save) (evil-set-charwise) (evil-normal-state))
+(define (evil-visual-yank)
+  ;; Vim parks the cursor at the START of the yanked text, not at the end where
+  ;; the motion left it — `goto-char` before leaving visual state (the region is
+  ;; read from the pre-command snapshot, so `region-beginning` is still live).
+  (let ((rb (region-beginning)))
+    (kill-ring-save) (evil-set-charwise)
+    (when (>= rb 0) (goto-char rb)))
+  (evil-normal-state))
 ;; Visual-LINE delete/yank are line-wise: the visual region already covers whole
 ;; lines (incl. the trailing newline), so a following `p`/`P` pastes the vim way.
 (define (evil-visual-line-delete) (kill-region) (evil-set-linewise) (evil-normal-state))
-(define (evil-visual-line-yank)   (kill-ring-save) (evil-set-linewise) (evil-normal-state))
+(define (evil-visual-line-yank)
+  (let ((rb (region-beginning)))
+    (kill-ring-save) (evil-set-linewise)
+    (when (>= rb 0) (goto-char rb)))
+  (evil-normal-state))
 ;; Normal-mode yanks (copy → kill ring AND the system clipboard). `kill-ring-save`
 ;; syncs the OS clipboard, so these reach cmd-v in other apps. Cursor is restored
 ;; to where the yank started, vim-style. Each marks the yank line- or char-wise
@@ -87,10 +98,13 @@
                         (else (loop (- i 1)))))))
     (goto-char (evil-skip-blanks-to start end))))
 
-;; e — end of word: land ON the last char of the current/next word. Emacs
-;; `forward-word` stops just AFTER a word, so nudge in by one then step back; the
-;; leading forward-char also makes `e` advance when already sitting on a word end.
-(define (evil-forward-word-end) (forward-char) (forward-word) (backward-char))
+;; e — end of word: land ON the last char of the current/next word. Backed by
+;; the class-aware `forward-word-end` primitive (Vim `e`), NOT the old
+;; forward-char + Emacs `forward-word` + backward-char dance: Emacs's motion
+;; treats punctuation as a separator, so that form walked straight past a `);`
+;; run instead of stopping on it, and `e` disagreed with `w` about where words
+;; are. Kept as a wrapper so the visual maps can bind the same name.
+(define (evil-forward-word-end) (forward-word-end))
 
 ;; x — delete the char under the cursor INTO the register (Vim `x` = `dl`), so a
 ;; following `p` can put it back. Char-wise; a no-op on an empty line.
@@ -115,9 +129,9 @@
 ;; dw / db, cw / cb — word operators. `dw` runs to the next word start (Vim `w`,
 ;; trailing space included); `cw` stops at the word end (Vim treats `cw` as `ce`).
 (define (evil-delete-word)      (set-mark) (forward-word-start) (kill-region) (evil-set-charwise))
-(define (evil-delete-word-back) (set-mark) (backward-word)      (kill-region) (evil-set-charwise))
-(define (evil-change-word)      (set-mark) (forward-word)       (kill-region) (evil-insert-state))
-(define (evil-change-word-back) (set-mark) (backward-word)      (kill-region) (evil-insert-state))
+(define (evil-delete-word-back) (set-mark) (backward-word-start) (kill-region) (evil-set-charwise))
+(define (evil-change-word)      (set-mark) (forward-word-end)   (kill-region) (evil-insert-state))
+(define (evil-change-word-back) (set-mark) (backward-word-start) (kill-region) (evil-insert-state))
 
 ;; ~ — toggle the case of the char under the cursor; the replace leaves the
 ;; cursor on the next char, matching Vim's advance. Only cased letters change.
@@ -205,10 +219,11 @@
 ;; one anonymous register, `q` toggles recording, `@@` (or `@q`) replays. The
 ;; name contains "kbd-macro" so the key recorder skips the closing toggle
 ;; (exprs mentioning kbd-macro are never recorded into the macro itself).
-(define *evil-kbd-macro-recording* #f)
+;; The recording flag is READ FROM THE EDITOR, not tracked here: a Scheme-side
+;; boolean desynced the moment you used the Emacs chords (C-x ( / C-x )) instead
+;; of `q`, after which `q` did the opposite of what the modeline said.
 (define (evil-kbd-macro-toggle)
-  (if *evil-kbd-macro-recording* (end-kbd-macro) (start-kbd-macro))
-  (set! *evil-kbd-macro-recording* (not *evil-kbd-macro-recording*)))
+  (if (kbd-macro-recording?) (end-kbd-macro) (start-kbd-macro)))
 
 ;; --- f / F / t / T char find (+ ; and , repeat) ---------------------------------
 ;; Built on the core `read-char` primitive: pressing `f` arms a one-keystroke
@@ -507,6 +522,40 @@
 ;; its place and insert (the selection already spans entire lines).
 (define (evil-visual-line-change) (kill-region) (evil-set-linewise) (evil-open-above))
 
+;; Visual `>` / `<` — shift the selected lines one indent step. Vim drops back to
+;; Normal after a single shift (`3>` repeats instead, which the count prefix now
+;; handles), so these end in normal state.
+(define (evil-visual-indent)  (indent-region)  (evil-normal-state))
+(define (evil-visual-outdent) (outdent-region) (evil-normal-state))
+
+;; Visual `J` — join every selected line into one, collapsing each newline plus
+;; the following indentation to a single space (vim `J` over a selection). One
+;; replace-region over the whole selected line span, computed from the snapshot.
+(define (evil-visual-join)
+  (let ((rb (region-beginning)) (re (region-end)))
+    (when (and (>= rb 0) (< rb re))
+      (let* ((s (line-start-pos rb))
+             (e (line-end-pos (max rb (- re 1)))))
+        (when (< s e)
+          (replace-region s e
+            (replace-regexp-in-string "\n[ \t]*" " " (buffer-substring s e)))
+          (goto-char s)))))
+  (evil-normal-state))
+
+;; Visual `r<char>` — overwrite EVERY character of the selection with the typed
+;; char (vim). Newlines are preserved, so a multi-line selection keeps its
+;; shape. Armed through the same `read-char` capture as normal-state `r`.
+(define (evil-visual-replace-dispatch ch)
+  (let ((rb (region-beginning)) (re (region-end)))
+    (when (and (>= rb 0) (< rb re))
+      (replace-region rb re
+        (list->string
+         (map (lambda (c) (if (equal? c #\newline) c (car (string->list ch))))
+              (string->list (buffer-substring rb re)))))
+      (goto-char rb)))
+  (evil-normal-state))
+(define (evil-visual-replace-char) (read-char "r-" 'evil-visual-replace-dispatch))
+
 ;; --- normal state -----------------------------------------------------------
 ;; motion
 (define-key "evil-normal" "h" 'backward-char)
@@ -514,7 +563,14 @@
 (define-key "evil-normal" "j" 'next-line)
 (define-key "evil-normal" "k" 'previous-line)
 (define-key "evil-normal" "w" 'forward-word-start)
-(define-key "evil-normal" "b" 'backward-word)
+;; `b` is the exact mirror of `w` (class-aware), NOT Emacs `backward-word` —
+;; that one skips punctuation as a separator, so it disagreed with `w` about
+;; where a word starts and `b` could never land on a `).` run.
+(define-key "evil-normal" "b" 'backward-word-start)
+;; W / B / E — whitespace-delimited WORD motions (vim's shifted trio).
+(define-key "evil-normal" "shift-w" 'forward-bigword-start)
+(define-key "evil-normal" "shift-b" 'backward-bigword-start)
+(define-key "evil-normal" "shift-e" 'forward-bigword-end)
 (define-key "evil-normal" "0" 'move-beginning-of-line)
 ;; macOS clears shift for non-letter keys and reports the produced char, so
 ;; bind the literal symbol ($, :, ?) — NOT shift-4 / shift-; / shift-/.
@@ -602,6 +658,29 @@
 (define-key "evil-normal" "ctrl-b" 'scroll-down)        ; full page back
 (define-key "evil-normal" "z z" 'recenter)              ; zz — center cursor line
 
+;; --- indent operators (>> / <<) ---------------------------------------------
+;; `indent-region` / `outdent-region` shift the region, or the current line when
+;; there isn't one, by one indent step — so the same command serves `>>` here and
+;; `>` in the visual maps below.
+(define-key "evil-normal" "> >" 'indent-region)         ; >> — indent line
+(define-key "evil-normal" "< <" 'outdent-region)        ; << — outdent line
+
+;; --- Emacs chords vim owns in Normal state ----------------------------------
+;; Unbound Ctrl chords fall through to the Emacs dispatch, which is what keeps
+;; C-x C-s / M-x / C-g working under evil. But four of those Emacs defaults
+;; EDIT the buffer, and in Normal state a vim user pressing them expects
+;; something else entirely — `C-o` above all, which is vim's jump-back and Emacs's
+;; `open-line`, so it silently inserted a newline. Shadow them:
+;;   C-o  → pop the xref marker stack (the nearest thing to vim's jump list)
+;;   C-k / C-w / C-y / C-t → undefined, like vim (beep instead of edit)
+(define (evil-undefined)
+  (message "Not a Normal-state command (Emacs binding shadowed by evil)"))
+(define-key "evil-normal" "ctrl-o" 'xref-pop-marker)    ; jump back (≈ vim C-o)
+(define-key "evil-normal" "ctrl-k" 'evil-undefined)     ; was kill-line
+(define-key "evil-normal" "ctrl-w" 'evil-undefined)     ; was kill-region
+(define-key "evil-normal" "ctrl-y" 'evil-undefined)     ; was yank
+(define-key "evil-normal" "ctrl-t" 'evil-undefined)     ; was transpose-chars
+
 ;; --- insert state -----------------------------------------------------------
 (define-key "evil-insert" "escape" 'evil-normal-state)
 
@@ -611,7 +690,7 @@
 (define-key "evil-visual" "j" 'next-line)
 (define-key "evil-visual" "k" 'previous-line)
 (define-key "evil-visual" "w" 'forward-word-start)
-(define-key "evil-visual" "b" 'backward-word)
+(define-key "evil-visual" "b" 'backward-word-start)
 (define-key "evil-visual" "0" 'move-beginning-of-line)
 (define-key "evil-visual" "$" 'move-end-of-line)
 (define-key "evil-visual" "g g" 'beginning-of-buffer)
@@ -637,6 +716,16 @@
 (define-key "evil-visual" "~" 'evil-visual-toggle-case)       ; ~ — toggle case
 (define-key "evil-visual" "g q" 'evil-visual-fill)            ; gq — format selected lines
 (define-key "evil-visual" "g w" 'evil-visual-fill)
+(define-key "evil-visual" ">" 'evil-visual-indent)            ; > / < — shift selected lines
+(define-key "evil-visual" "<" 'evil-visual-outdent)
+(define-key "evil-visual" "shift-j" 'evil-visual-join)        ; J — join selected lines
+(define-key "evil-visual" "r" 'evil-visual-replace-char)      ; r<char> — replace every char
+(define-key "evil-visual" "shift-w" 'forward-bigword-start)   ; W / B / E — WORD motions
+(define-key "evil-visual" "shift-b" 'backward-bigword-start)
+(define-key "evil-visual" "shift-e" 'forward-bigword-end)
+(define-key "evil-visual" "%" 'evil-matchit)                  ; % — matching bracket
+(define-key "evil-visual" "ctrl-d" 'evil-scroll-down)         ; half-page, extending
+(define-key "evil-visual" "ctrl-u" 'evil-scroll-up)
 (define-key "evil-visual" "escape" 'evil-normal-state)
 
 ;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
@@ -649,7 +738,7 @@
 (define-key "evil-visual-line" "j" 'next-line)
 (define-key "evil-visual-line" "k" 'previous-line)
 (define-key "evil-visual-line" "w" 'forward-word-start)
-(define-key "evil-visual-line" "b" 'backward-word)
+(define-key "evil-visual-line" "b" 'backward-word-start)
 (define-key "evil-visual-line" "0" 'move-beginning-of-line)
 (define-key "evil-visual-line" "$" 'move-end-of-line)
 (define-key "evil-visual-line" "g g" 'beginning-of-buffer)
@@ -668,6 +757,14 @@
 (define-key "evil-visual-line" "}" 'evil-forward-paragraph-visual)
 (define-key "evil-visual-line" "g q" 'evil-visual-fill)        ; gq — format selected lines
 (define-key "evil-visual-line" "g w" 'evil-visual-fill)
+(define-key "evil-visual-line" ">" 'evil-visual-indent)        ; > / < — shift selected lines
+(define-key "evil-visual-line" "<" 'evil-visual-outdent)
+(define-key "evil-visual-line" "shift-j" 'evil-visual-join)    ; J — join selected lines
+(define-key "evil-visual-line" "r" 'evil-visual-replace-char)  ; r<char> — replace every char
+(define-key "evil-visual-line" "shift-w" 'forward-bigword-start)
+(define-key "evil-visual-line" "shift-e" 'forward-bigword-end)
+(define-key "evil-visual-line" "ctrl-d" 'evil-scroll-down)
+(define-key "evil-visual-line" "ctrl-u" 'evil-scroll-up)
 (define-key "evil-visual-line" "shift-i" 'evil-visual-insert)  ; I — insert at each line start
 (define-key "evil-visual-line" "shift-a" 'evil-visual-append)  ; A — append at each line end
 (define-key "evil-visual-line" "v" 'evil-visual-state)         ; switch to charwise visual
@@ -685,7 +782,7 @@
 (define-key "evil-visual-block" "j" 'next-line)
 (define-key "evil-visual-block" "k" 'previous-line)
 (define-key "evil-visual-block" "w" 'forward-word-start)
-(define-key "evil-visual-block" "b" 'backward-word)
+(define-key "evil-visual-block" "b" 'backward-word-start)
 (define-key "evil-visual-block" "0" 'move-beginning-of-line)
 (define-key "evil-visual-block" "$" 'move-end-of-line)
 (define-key "evil-visual-block" "g g" 'beginning-of-buffer)
@@ -693,6 +790,12 @@
 (define-key "evil-visual-block" "d" 'evil-block-delete)
 (define-key "evil-visual-block" "x" 'evil-block-delete)
 (define-key "evil-visual-block" "y" 'evil-block-yank)
+(define-key "evil-visual-block" "c" 'evil-block-change)        ; c — change the rectangle
+(define-key "evil-visual-block" "s" 'evil-block-change)
+(define-key "evil-visual-block" "o" 'exchange-point-and-mark)  ; o — swap block corners
+(define-key "evil-visual-block" "r" 'evil-visual-replace-char) ; r<char> — replace every char
+(define-key "evil-visual-block" "shift-w" 'forward-bigword-start)
+(define-key "evil-visual-block" "shift-e" 'forward-bigword-end)
 (define-key "evil-visual-block" "shift-i" 'evil-block-insert)  ; I — insert down the left column
 (define-key "evil-visual-block" "shift-a" 'evil-block-append)  ; A — append down the right column
 (define-key "evil-visual-block" "v" 'evil-visual-state)        ; switch to charwise visual
@@ -841,7 +944,7 @@
     (define-key km "h" 'backward-char)
     (define-key km "l" 'forward-char)
     (define-key km "w" 'forward-word-start)
-    (define-key km "b" 'backward-word)
+    (define-key km "b" 'backward-word-start)
     (define-key km "e" 'evil-forward-word-end)
     (define-key km "0" 'move-beginning-of-line)
     (define-key km "$" 'move-end-of-line)

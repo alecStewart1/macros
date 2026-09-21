@@ -2211,6 +2211,9 @@
      ;; Escape = the modal C-g: cancels a live push/pull like C-g does.
      (define-key km "escape" 'magit-keyboard-quit)))
  (list "evil-normal:" "helix-normal:"))
+;; Helix goes to the bottom with `g e`, not `G` (which is vim's). Both are bound
+;; under Helix so either muscle memory works, matching dired-sidebar.
+(define-key "helix-normal:magit-status" "g e" 'evil-goto-last-line)
 
 ;; Log / commit / stash-list buffers.
 (define-list-mode-keys "magit-log-mode" 'magit-log-show)

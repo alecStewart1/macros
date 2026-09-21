@@ -81,6 +81,11 @@ pub struct EditorSnapshot {
     /// machine is shared) — `(helix-enabled?)` lets Scheme branch on the style,
     /// e.g. open the Helix tutorial instead of the Vim one.
     pub helix_enabled: bool,
+    /// Whether a keyboard macro is being recorded right now. For
+    /// `(kbd-macro-recording?)`: evil's `q` toggle must read the editor's real
+    /// state, not a Scheme-side mirror that desyncs the moment the user reaches
+    /// for the Emacs chords (`C-x (` / `C-x )`) instead.
+    pub kbd_macro_recording: bool,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the

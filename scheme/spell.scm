@@ -454,7 +454,13 @@
 (add-hook "buffer-switch-hook" "spell--buffer-switch")
 (add-hook "find-file-hook" "spell--maybe-auto-enable")
 
-(define-key "evil-normal" "] s" 'spell-next-error)
-(define-key "evil-normal" "[ s" 'spell-prev-error)
-(define-key "evil-normal" "z =" 'spell-correct-word)
-(define-key "evil-normal" "z g" 'spell-learn-word-at-point)
+;; Modal keys go on BOTH Normal maps: `evil-normal` alone left Helix users with
+;; no spell keys at all (the two styles have separate keymaps — see
+;; `evil_keymap`). `]s` / `[s` / `z=` / `zg` are the same in vim and Helix.
+(for-each
+ (lambda (km)
+   (define-key km "] s" 'spell-next-error)
+   (define-key km "[ s" 'spell-prev-error)
+   (define-key km "z =" 'spell-correct-word)
+   (define-key km "z g" 'spell-learn-word-at-point))
+ (list "evil-normal" "helix-normal"))

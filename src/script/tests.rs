@@ -7976,3 +7976,175 @@ mod perspectives_lib {
         }
     }
 }
+
+/// Regressions for the modal-keybinding fixes: Helix vertical motion must carry
+/// a CHARACTER column (a byte column lands inside a multibyte char), the vim
+/// word motions must be class-aware, and the help commands must follow the
+/// active modal keymap instead of assuming `fundamental`.
+#[cfg(test)]
+mod modal_keys {
+    use super::*;
+
+    /// A ScriptEngine with every startup script loaded. Returns the outcome
+    /// receiver too: the caller binds it so the channel stays open for the
+    /// engine's lifetime.
+    fn engine_with_startup() -> (
+        ScriptEngine,
+        futures::channel::mpsc::UnboundedReceiver<crate::script::ScriptOutcome>,
+    ) {
+        let (engine, rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        (engine, rx)
+    }
+
+    /// Helix `j`/`k` preserve the character column, so a move onto a line with
+    /// multibyte text lands ON a character — never inside one. With the old
+    /// byte-column arithmetic, moving down from column 2 of "abcd" onto "aébc"
+    /// produced byte 7, the second byte of `é`, which the rope refuses to slice
+    /// at.
+    #[test]
+    fn helix_vertical_motion_lands_on_char_boundaries() {
+        let (engine, _rx) = engine_with_startup();
+        // line 0 "abcd" = bytes 0..4; line 1 "aébc" starts at byte 5, where
+        // 'a'=5, 'é'=6..8, 'b'=8, 'c'=9. Byte 7 is mid-codepoint.
+        let text = "abcd\naébc\n";
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str(text),
+            selections: vec![(2, 2)],
+            ..Default::default()
+        });
+        let pos = match engine
+            .eval("(helix-line-down)")
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [EditorCommand::SetSelections(p)] => p[0].1,
+            other => panic!("expected one SetSelections, got {other:?}"),
+        };
+        assert!(
+            text.is_char_boundary(pos),
+            "helix-line-down produced mid-codepoint byte {pos} in {text:?}"
+        );
+        // Column 2 of "aébc" is the 'b', at byte 8.
+        assert_eq!(pos, 8);
+
+        // And `k` at the top line stays put rather than clamping to line 0 and
+        // silently resetting the column.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str(text),
+            selections: vec![(2, 2)],
+            ..Default::default()
+        });
+        match engine.eval("(helix-line-up)").unwrap().commands.as_slice() {
+            [EditorCommand::SetSelections(p)] => assert_eq!(p[0], (2, 2)),
+            other => panic!("expected one SetSelections, got {other:?}"),
+        }
+    }
+
+    /// Vim `b` / `e` are class-aware — the mirrors of `w` — so they stop inside
+    /// a punctuation run. Emacs's `backward-word` / `forward-word` skip
+    /// punctuation as a separator and so disagree with `w` about where words
+    /// are; that asymmetry is what these motions replace.
+    #[test]
+    fn vim_word_motions_are_class_aware() {
+        use crate::buffer::Buffer;
+        let b = Buffer::from_rope(Rope::from_str("foo.bar baz"));
+        // `b` from the start of "bar" (byte 4) stops on the '.', not on "foo".
+        assert_eq!(b.backward_word_start(4), 3);
+        assert_eq!(b.backward_word_start(3), 0);
+        // `e` from 0 lands ON the last char of "foo" (byte 2), then on the '.'.
+        assert_eq!(b.forward_word_end(0), 2);
+        assert_eq!(b.forward_word_end(2), 3);
+        // Emacs `backward-word` is unchanged and still skips the punctuation.
+        assert_eq!(b.backward_word(4), 0);
+        // WORD motions treat "foo.bar" as one token.
+        assert_eq!(b.forward_bigword_start(0), 8);
+        assert_eq!(b.forward_bigword_end(0), 6);
+        assert_eq!(b.backward_bigword_start(8), 0);
+    }
+
+    /// Character columns round-trip through the vertical-motion bridges, and a
+    /// column past a short line clamps to that line's end (still on a boundary).
+    #[test]
+    fn char_column_bridges_round_trip() {
+        use crate::buffer::Buffer;
+        let b = Buffer::from_rope(Rope::from_str("aébc\nxy\n"));
+        assert_eq!(b.char_column(3), 2); // byte 3 = 'b' = char column 2
+        assert_eq!(b.byte_at_char_column(0, 2), 3);
+        // "aébc" is bytes 0..5 (é is two bytes), so line 1 "xy" is bytes 6..8.
+        // A column past its end clamps to that end — still a char boundary.
+        assert_eq!(b.byte_at_char_column(1, 9), 8);
+        assert_eq!(b.byte_at_char_column(1, 1), 7);
+    }
+
+    /// The help commands follow the ACTIVE modal keymap. Under evil, `j` must
+    /// resolve (it is bound in `evil-normal`); with modal editing off, the same
+    /// lookup falls back to `fundamental` only.
+    #[test]
+    fn help_follows_the_active_modal_keymap() {
+        let (engine, _rx) = engine_with_startup();
+        let keymaps = |evil: bool, helix: bool| {
+            engine.set_snapshot(EditorSnapshot {
+                evil_enabled: evil,
+                helix_enabled: helix,
+                ..Default::default()
+            });
+            engine
+                .eval("(active-keymaps)")
+                .unwrap()
+                .value
+                .unwrap_or_default()
+        };
+        assert!(keymaps(false, false).contains("fundamental"));
+        assert!(!keymaps(false, false).contains("evil-normal"));
+        assert!(keymaps(true, false).contains("evil-normal"));
+        // Helix wins even though `evil-enabled?` is also true there (one shared
+        // state machine, two keymap families).
+        let h = keymaps(true, true);
+        assert!(h.contains("helix-normal"), "got {h}");
+        assert!(!h.contains("evil-normal"), "got {h}");
+    }
+
+    /// Every keymap chord is bound exactly once across all startup scripts.
+    /// `define-key` is a map insert, so a second binding for the same chord
+    /// silently wins by file load order and the first command becomes
+    /// unreachable by key — which is how `C-c c`, `C-c C-d`, `C-c C-f` and
+    /// `C-h b` each ended up with a dead binding.
+    #[test]
+    fn no_chord_is_silently_double_bound() {
+        use std::collections::HashMap;
+        // Deliberate overrides: a later package upgrades an earlier command on
+        // the same chord (helm/ibuffer replacing the plain builtins, undo-tree
+        // re-stating evil's C-r with the identical command).
+        const ALLOWED: &[(&str, &str)] = &[
+            ("fundamental", "alt-x"),
+            ("fundamental", "ctrl-x b"),
+            ("fundamental", "ctrl-x ctrl-b"),
+            ("fundamental", "ctrl-x ctrl-f"),
+            ("evil-normal", "ctrl-r"),
+        ];
+        let re = regex::Regex::new(r#"\(define-key\s+"([^"]+)"\s+"([^"]+)""#).unwrap();
+        let mut seen: HashMap<(String, String), usize> = HashMap::new();
+        for src in crate::runtime::startup_scripts() {
+            for c in re.captures_iter(src) {
+                *seen
+                    .entry((c[1].to_string(), c[2].to_string()))
+                    .or_default() += 1;
+            }
+        }
+        let mut dupes: Vec<String> = seen
+            .into_iter()
+            .filter(|((km, chord), n)| *n > 1 && !ALLOWED.contains(&(km.as_str(), chord.as_str())))
+            .map(|((km, chord), n)| format!("{km} {chord:?} bound {n}x"))
+            .collect();
+        dupes.sort();
+        assert!(
+            dupes.is_empty(),
+            "double-bound chords:\n  {}",
+            dupes.join("\n  ")
+        );
+    }
+}

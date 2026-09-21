@@ -431,6 +431,26 @@ impl Editor {
             return Handled::No;
         }
         let chord = chord_string(ks);
+        // Vim/Helix count prefix: at the start of a command, a digit is a
+        // repeat count, not a command — `3j`, `2dd`, `5w`. `0` keeps its
+        // binding (start of line) unless a count is already being typed, which
+        // is exactly vim's rule. The count is consumed by the next binding that
+        // resolves; Escape and an unbound key clear it (see below).
+        if self.pending_keys.is_empty()
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && let Some(d) = Self::ascii_digit(&chord)
+            && (d != 0 || self.modal_count.is_some())
+        {
+            let n = self.modal_count.unwrap_or(0).saturating_mul(10) + d as usize;
+            // Cap it: a pasted digit run shouldn't turn into a multi-million
+            // iteration loop that wedges the UI.
+            self.modal_count = Some(n.min(10_000));
+            self.status = format!("{n}").into();
+            cx.notify();
+            cx.stop_propagation();
+            return Handled::Yes;
+        }
         let candidate = if self.pending_keys.is_empty() {
             chord.clone()
         } else {
@@ -447,7 +467,14 @@ impl Editor {
         {
             self.pending_keys.clear();
             self.status = SharedString::default();
-            self.dispatch_recorded(&expr, cx);
+            // Consume any count prefix: run the binding that many times. Each
+            // run is a full dispatch, so a motion repeats and an operator (`3dd`)
+            // applies three times — vim's semantics for everything except the
+            // insert commands, which vim replays the typed text for.
+            let count = self.modal_count.take().unwrap_or(1).max(1);
+            for _ in 0..count {
+                self.dispatch_recorded(&expr, cx);
+            }
             cx.stop_propagation();
             return Handled::Yes;
         }
@@ -456,7 +483,9 @@ impl Editor {
             .is_prefix_evil(state, major.as_deref(), &candidate)
         {
             self.pending_keys.push(chord);
-            self.status = format!("{}-", pretty_sequence(&candidate)).into();
+            // Keep the count visible while the chord completes (`3d-` → `3dd`).
+            let count = self.modal_count.map(|n| n.to_string()).unwrap_or_default();
+            self.status = format!("{count}{}-", pretty_sequence(&candidate)).into();
             cx.notify();
             cx.stop_propagation();
             return Handled::Yes;
@@ -474,6 +503,11 @@ impl Editor {
                     || self.keymap.is_prefix(&self.active.modes, &candidate));
             if !continues_emacs {
                 self.pending_keys.clear();
+                // An unbound key aborts the whole command, count included (vim
+                // beeps and forgets); leaving it set would silently multiply the
+                // NEXT command the user types.
+                self.modal_count = None;
+                self.status = SharedString::default();
                 cx.notify();
                 cx.stop_propagation();
                 return Handled::Yes;
@@ -992,6 +1026,8 @@ impl Editor {
             // terminal: sent to the shell (DEL)
         } else if self.special_key("backspace", cx) {
             // read-only buffer: consumed (ran any binding)
+        } else if self.modal_action_key("backspace", cx) {
+            // an evil/helix keymap binding for Backspace wins
         } else if self.evil_intercepts() {
             self.apply_command(EditorCommand::BackwardChar, cx); // vim: move left
         } else {
@@ -1015,6 +1051,8 @@ impl Editor {
             // terminal: sent to the shell
         } else if self.special_key("delete", cx) {
             // read-only buffer: consumed
+        } else if self.modal_action_key("delete", cx) {
+            // an evil/helix keymap binding for Delete wins
         } else {
             // No `evil_intercepts` branch on purpose: in vim, Del in Normal mode
             // deletes the char under the cursor (like `x`), unlike Backspace
@@ -1030,6 +1068,8 @@ impl Editor {
         self.completion_popup = None; // horizontal motion dismisses the popup
         if self.minibuffer.is_some() {
             self.mb_left(cx);
+        } else if self.modal_action_key("left", cx) {
+            // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("left", cx) {
             // terminal: arrow sent to the shell
         } else {
@@ -1044,6 +1084,8 @@ impl Editor {
         self.completion_popup = None; // horizontal motion dismisses the popup
         if self.minibuffer.is_some() {
             self.mb_right(cx);
+        } else if self.modal_action_key("right", cx) {
+            // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("right", cx) {
             // terminal: arrow sent to the shell
         } else {
@@ -1064,6 +1106,8 @@ impl Editor {
         }
         if self.minibuffer.is_some() {
             self.mb_history(-1, cx); // older
+        } else if self.modal_action_key("up", cx) {
+            // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("up", cx) {
             // terminal: arrow sent to the shell (history)
         } else {
@@ -1084,6 +1128,8 @@ impl Editor {
         }
         if self.minibuffer.is_some() {
             self.mb_history(1, cx); // newer
+        } else if self.modal_action_key("down", cx) {
+            // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("down", cx) {
             // terminal: arrow sent to the shell (history)
         } else {
@@ -1095,6 +1141,8 @@ impl Editor {
             self.titlebar_dropdown_cursor_set(0, cx);
         } else if self.minibuffer.is_some() {
             self.mb_move(0, cx);
+        } else if self.modal_action_key("home", cx) {
+            // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("home", cx) {
             // terminal: sent to the shell
         } else {
@@ -1106,6 +1154,8 @@ impl Editor {
             self.titlebar_dropdown_cursor_set(usize::MAX, cx);
         } else if let Some(len) = self.minibuffer.as_ref().map(|mb| mb.input.len()) {
             self.mb_move(len, cx);
+        } else if self.modal_action_key("end", cx) {
+            // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("end", cx) {
             // terminal: sent to the shell
         } else {
@@ -1136,6 +1186,8 @@ impl Editor {
         } else if self.ghost_special_key("enter", cx) {
             // a `ghost`-keymap RET binding (some setups accept on RET) —
             // unbound falls through to the normal newline below
+        } else if self.modal_action_key("enter", cx) {
+            // an evil/helix keymap binding for RET wins
         } else if !self.evil_intercepts() && !self.mode_key("enter", cx) {
             // a mode may rebind RET (comint send-input); else insert a newline
             self.apply_command(EditorCommand::Newline, cx);
@@ -1167,6 +1219,9 @@ impl Editor {
             // showing behind an open minibuffer can't steal its completion):
             // scheme/ghost.scm binds it to ghost-text-accept. Before the mode
             // map, so e.g. org-tab doesn't shadow an accept.
+        } else if self.modal_action_key("tab", cx) {
+            // an evil/helix keymap binding for TAB wins (before the mode map,
+            // so a modal user's explicit binding isn't shadowed by org-tab)
         } else if !self.mode_key("tab", cx) && !self.evil_intercepts() {
             // A mode binding (e.g. org-mode's `org-tab` heading cycle) wins in
             // every state, including evil Normal/Visual — TAB is a gpui action

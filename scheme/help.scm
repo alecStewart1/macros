@@ -25,13 +25,23 @@
   (helm (list (list "M-x" (all-commands) 'execute-command))))
 (define-key "fundamental" "alt-x" 'helm-execute-command)
 
-;; describe-key (C-h k): what is a chord bound to (in fundamental)?
+;; Every help command below searches `active-keymaps` (core.scm) — the modal
+;; Normal map, when one is active, then `fundamental` — rather than assuming
+;; "fundamental". Without it `C-h k j` answered "j is unbound" to a vim user and
+;; `C-h b` never listed a single modal binding, leaving the whole modal keymap
+;; undiscoverable from inside the editor.
+;;
+;; describe-key (C-h k): what is a chord bound to? Searches the active modal
+;; keymap first, then fundamental (the Emacs chords survive into modal mode).
 (define (describe-key) (read-string "Describe key (e.g. ctrl-x ctrl-f): " 'describe-key-finish))
 (define (describe-key-finish chord)
-  (let ((cmd (key-binding "fundamental" chord)))
-    (message (if (equal? cmd "")
-                 (string-append chord " is unbound")
-                 (string-append chord " runs " cmd)))))
+  (let loop ((kms (active-keymaps)))
+    (cond ((null? kms)
+           (message (string-append chord " is unbound")))
+          ((not (equal? (key-binding (car kms) chord) ""))
+           (message (string-append chord " runs " (key-binding (car kms) chord)
+                                   " (" (car kms) ")")))
+          (else (loop (cdr kms))))))
 
 ;; Drop duplicates from a list (keeps the last of each — fine, we sort after).
 (define (dedupe lst)
@@ -183,12 +193,19 @@
 (define (version)
   (message (string-append "Macros " (macros-version))))
 
-;; describe-bindings (C-h b): every fundamental-mode binding.
+;; describe-bindings (C-h B): every binding in effect — the active modal keymap
+;; (if any) AND fundamental, each under its own heading. Listing only
+;; `fundamental` hid every vim/Helix key from the one command whose whole job is
+;; to show you what the keys do.
+(define (help--binding-rows km)
+  (map (lambda (l) (string-replace l "\t" "    "))
+       (sort-strings (keys-with-prefix km ""))))
+(define (help--binding-section km)
+  (join-lines (cons (string-append "Key bindings (" km "):") (cons "" (help--binding-rows km)))))
 (define (describe-bindings)
-  (let ((rows (map (lambda (l) (string-replace l "\t" "    "))
-                   (sort-strings (keys-with-prefix "fundamental" "")))))
-    (render-buffer "*bindings*" "help-mode"
-                   (string-append "Key bindings (fundamental):\n\n" (join-lines rows)) '())))
+  (render-buffer "*bindings*" "help-mode"
+                 (join-lines (map help--binding-section (active-keymaps)))
+                 '()))
 
 (define-key "help-mode" "q" 'kill-buffer)
 (define-key "help-mode" "n" 'next-line)
@@ -198,7 +215,9 @@
 (define-key "fundamental" "ctrl-h k" 'describe-key)
 (define-key "fundamental" "ctrl-h f" 'describe-function)
 (define-key "fundamental" "ctrl-h a" 'apropos)
-(define-key "fundamental" "ctrl-h b" 'describe-bindings)
+;; `C-h B`, NOT `C-h b` — which-key.scm binds that (and loads later, so this was
+;; dead). `C-h b` stays the which-key browser; `C-h B` is the plain dump.
+(define-key "fundamental" "ctrl-h shift-b" 'describe-bindings)
 (define-key "fundamental" "ctrl-h e" 'list-messages)   ; echo-area scrollback
 (define-key "fundamental" "ctrl-h l" 'list-lsp-log)    ; language-server stderr
 ;; C-h t (help-with-tutorial) is defined in tutorial.scm, loaded after this.

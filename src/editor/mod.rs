@@ -443,6 +443,12 @@ pub struct Editor {
     pending_keys: Vec<String>,
     /// Emacs universal-argument (`C-u` / `M-<digit>`) state — see [`UargState`].
     uarg: UargState,
+    /// Vim/Helix count prefix being typed in Normal/Visual state (`3` in `3dd`).
+    /// Accumulates digits until a binding resolves, which then runs that many
+    /// times. Distinct from [`UargState`]: the evil layer swallows plain keys
+    /// before the universal-argument layer ever sees them, and `C-u` is bound to
+    /// half-page scroll under evil, so Emacs's prefix arg can't serve here.
+    modal_count: Option<usize>,
     /// The active minibuffer prompt, if a read is in progress.
     minibuffer: Option<Minibuffer>,
     /// Candidates for an active `completing-read` minibuffer.
@@ -1217,6 +1223,7 @@ impl Editor {
             minibuffer_stash: String::new(),
             mb_dynamic: None,
             uarg: UargState::default(),
+            modal_count: None,
             autoscroll: AutoscrollState {
                 active: false,
                 dy: 0.0,
@@ -1619,15 +1626,8 @@ impl Editor {
         if target == line {
             return cursor;
         }
-        let line_start_char = self
-            .active
-            .buffer
-            .byte_to_char(self.active.buffer.line_range(line).start);
-        let goal = self.active.buffer.byte_to_char(cursor) - line_start_char;
-        let tr = self.active.buffer.line_range(target);
-        let ts = self.active.buffer.byte_to_char(tr.start);
-        let tlen = self.active.buffer.byte_to_char(tr.end) - ts;
-        self.active.buffer.char_to_byte(ts + goal.min(tlen))
+        let goal = self.active.buffer.char_column(cursor);
+        self.active.buffer.byte_at_char_column(target, goal)
     }
 
     /// The line `delta` *visible* lines from `line`, skipping folded lines and
@@ -2653,6 +2653,75 @@ impl Editor {
         cx.notify();
     }
 
+    /// Shift the lines spanned by the region (or, with no region, the current
+    /// line) one indent step right (`dir` +1) or left (`dir` -1) — vim `>>` /
+    /// `<<` and visual `>` / `<`, Helix `>` / `<`. Outdenting removes up to
+    /// `step` columns of leading whitespace, counting a tab as a full step, and
+    /// never touches a line that has none. The cursor lands on the first
+    /// non-blank of the first shifted line, the way vim leaves it.
+    ///
+    /// Unlike [`Self::indent_region`] (Emacs `indent-for-tab-command`'s
+    /// helper, which re-establishes the region) this drops the selection when
+    /// there wasn't one, so `>>` in Normal state doesn't leave a highlight.
+    fn shift_lines(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let step = self.structural_indent_width(cx).max(1);
+        let had_region = self.region().is_some();
+        let region = self
+            .region()
+            .unwrap_or_else(|| self.active.buffer.line_range_at(self.point()));
+        let first = self.active.buffer.line_index_at_byte(region.start);
+        // `region.end` is exclusive: a selection stopping at a line's start must
+        // not shift that line.
+        let last_byte = region.end.saturating_sub(1).max(region.start);
+        let last = self.active.buffer.line_index_at_byte(last_byte);
+        let pad = " ".repeat(step);
+        self.begin_undo_group();
+        // Bottom-up, so an earlier line's edit can't shift the offsets of the
+        // lines still to come.
+        for line in (first..=last).rev() {
+            let lr = self.active.buffer.line_range(line);
+            if lr.end <= lr.start {
+                continue; // blank line: vim leaves it alone
+            }
+            if dir >= 0 {
+                self.edit(lr.start..lr.start, &pad);
+            } else {
+                // Drop up to `step` columns of leading whitespace. A tab counts
+                // as the whole step, so it's removed outright.
+                let text = self.active.buffer.slice_to_string(lr.clone());
+                let mut cols = 0;
+                let mut bytes = 0;
+                for c in text.chars() {
+                    if cols >= step {
+                        break;
+                    }
+                    match c {
+                        ' ' => cols += 1,
+                        '\t' => cols = step,
+                        _ => break,
+                    }
+                    bytes += c.len_utf8();
+                }
+                if bytes > 0 {
+                    self.edit(lr.start..lr.start + bytes, "");
+                }
+            }
+        }
+        self.end_undo_group();
+        if had_region {
+            self.active.selected_range =
+                self.active.buffer.line_range(first).start..self.active.buffer.line_range(last).end;
+            self.active.selection_reversed = false;
+            self.active.marked_range = None;
+            self.active.mark_active = true;
+        } else {
+            let start = self.active.buffer.line_range(first).start;
+            self.collapse_to(self.first_non_blank(start));
+        }
+        self.ensure_cursor_visible();
+        cx.notify();
+    }
+
     fn set_mark(&mut self, cx: &mut Context<Self>) {
         let p = self.point();
         self.active.selected_range = p..p;
@@ -3044,6 +3113,7 @@ impl Editor {
             cursor_screen_row: self.cursor_screen_row(),
             evil_enabled: self.evil != EvilState::Disabled,
             helix_enabled: self.modal_helix,
+            kbd_macro_recording: self.macro_recording.is_some(),
         });
     }
 
@@ -4034,7 +4104,7 @@ fn load_inline_image(path: &Path) -> Option<CachedImage> {
     let mut rgba = decoded.into_rgba8();
     let (width, height) = rgba.dimensions();
     // GPUI's sprite atlas samples BGRA; swap the red/blue channels in place.
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     let frame = image::Frame::new(rgba);

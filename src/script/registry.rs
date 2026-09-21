@@ -23,6 +23,13 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("forward-word", ForwardWord),
         ("forward-word-start", ForwardWordStart),
         ("backward-word", BackwardWord),
+        ("backward-word-start", BackwardWordStart),
+        ("forward-word-end", ForwardWordEnd),
+        ("forward-bigword-start", ForwardBigwordStart),
+        ("backward-bigword-start", BackwardBigwordStart),
+        ("forward-bigword-end", ForwardBigwordEnd),
+        ("indent-region", IndentRegion),
+        ("outdent-region", OutdentRegion),
         ("move-beginning-of-line", BeginningOfLine),
         ("move-end-of-line", EndOfLine),
         ("beginning-of-buffer", BeginningOfBuffer),
@@ -130,6 +137,7 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("evil-block-insert", EvilBlockInsert),
         ("evil-block-append", EvilBlockAppend),
         ("evil-block-delete", EvilBlockDelete),
+        ("evil-block-change", EvilBlockChange),
         ("evil-block-yank", EvilBlockYank),
         ("evil-disable", EvilDisable),
         ("evil-scroll-down", EvilScrollDown),
@@ -995,7 +1003,7 @@ pub(crate) fn build_engine(
         let q = queue.clone();
         reg.register_fn("set-selections", move |flat: SteelVal| {
             let v = steel_usize_list(&flat);
-            let pairs = v.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+            let pairs = v.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect();
             q.lock().unwrap().push(EditorCommand::SetSelections(pairs));
         });
     }
@@ -1707,7 +1715,9 @@ pub(crate) fn build_engine(
                 let id = ids.next();
                 let flat = steel_string_list(&headers);
                 let headers = flat
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|kv| (kv[0].clone(), kv[1].clone()))
                     .collect();
                 let Callback(on_line) = on_line;
@@ -1756,7 +1766,9 @@ pub(crate) fn build_engine(
                       -> bool {
                     let flat = steel_string_list(&headers);
                     let headers = flat
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|kv| (kv[0].clone(), kv[1].clone()))
                         .collect();
                     let Callback(on_response) = on_response;
@@ -2521,6 +2533,10 @@ pub(crate) fn build_engine(
     register_snapshot_read(&mut reg, snapshot, "evil-enabled?", |s| s.evil_enabled);
     // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
     register_snapshot_read(&mut reg, snapshot, "helix-enabled?", |s| s.helix_enabled);
+    // `(kbd-macro-recording?)` → #t while a keyboard macro is being recorded.
+    register_snapshot_read(&mut reg, snapshot, "kbd-macro-recording?", |s| {
+        s.kbd_macro_recording
+    });
     // `(diagnostics)` → the active buffer's LSP diagnostics, each a record
     // "line\tcol\tseverity\tmessage" (line/col 0-based). The library splits it.
     register_snapshot_read(&mut reg, snapshot, "diagnostics", |s| s.diagnostics.clone());
@@ -2695,9 +2711,19 @@ pub(crate) fn build_engine(
     register_pos_fn!("word-forward", |b, p| b.forward_word(p));
     register_pos_fn!("word-forward-start", |b, p| b.forward_word_start(p));
     register_pos_fn!("word-backward", |b, p| b.backward_word(p));
+    register_pos_fn!("word-backward-start", |b, p| b.backward_word_start(p));
+    register_pos_fn!("word-forward-end", |b, p| b.forward_word_end(p));
+    register_pos_fn!("bigword-forward-start", |b, p| b.forward_bigword_start(p));
+    register_pos_fn!("bigword-backward-start", |b, p| b.backward_bigword_start(p));
+    register_pos_fn!("bigword-forward-end", |b, p| b.forward_bigword_end(p));
     register_pos_fn!("line-start-pos", |b, p| b.line_range_at(p).start);
     register_pos_fn!("line-end-pos", |b, p| b.line_range_at(p).end);
     register_pos_fn!("line-of-pos", |b, p| b.line_index_at_byte(p));
+    // `(char-column pos)` → the CHARACTER column of `pos` on its line. Vertical
+    // motion must carry a char column, never a byte one: a byte column landing
+    // on a line with multibyte text points inside a character, and the rope
+    // refuses to slice there. Paired with `pos-at-char-column` below.
+    register_pos_fn!("char-column", |b, p| b.char_column(p));
     {
         // `(line-start-of-line n)` → first byte of (0-based) line `n`, clamped.
         let shared = snapshot.clone();
@@ -2706,6 +2732,20 @@ pub(crate) fn build_engine(
             let last = buf.line_count().saturating_sub(1);
             buf.line_range(line.min(last)).start
         });
+    }
+    {
+        // `(pos-at-char-column line col)` → the byte offset of character column
+        // `col` on (0-based) `line`, clamped to that line's end. The inverse of
+        // `char-column`; together they are how Scheme does vertical motion
+        // without ever synthesising a mid-codepoint offset.
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "pos-at-char-column",
+            move |line: usize, col: usize| -> usize {
+                let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
+                buf.byte_at_char_column(line, col)
+            },
+        );
     }
     // --- Regexp (over strings, and over the buffer from point) ------------
     reg.register_fn("string-match", move |pattern: String, s: String| -> isize {

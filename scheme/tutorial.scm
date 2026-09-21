@@ -300,11 +300,22 @@ In Normal mode the home-row keys move point (the cursor):
 Jump by words and along the line:
 
    w   forward to next word     b   back a word     e   end of word
+   W   forward a WORD           B   back a WORD     E   end of WORD
    0   start of line            ^   first non-blank text     $   end of line
    gg  top of the buffer        G   bottom of the buffer
 
+A WORD (the shifted keys) is whitespace-delimited, so foo.bar counts as one;
+the lowercase ones stop at punctuation too.
+
 >> Try w and b across a sentence, then 0 and $ to snap to the ends of a line.
    Finish with gg and G to leap to the top and bottom (then come back here).
+
+COUNTS.  Type a number before a command and it repeats that many times:
+
+   3j   down three lines        2w   forward two words
+   5x   delete five characters  3dd  delete three lines
+
+>> Press 3j to drop three lines, then 3k to come back.
 
 
 * LESSON 2: ENTERING INSERT MODE
@@ -337,6 +348,14 @@ This is a throwaway practice line.  Delete it with dd and watch the text close u
 >> Put point on a word and press cw, type a replacement, and Esc.
 
 What you delete is not lost — it is saved, ready to put back (next lesson).
+
+
+Shift lines left and right with the indent operators:
+
+   >>  indent the current line       <<  outdent it
+   (in Visual mode, > and < shift every selected line)
+
+>> Press >> on this line to indent it, then << to put it back.
 
 
 * LESSON 4: YANK, PUT, AND UNDO
@@ -523,8 +542,8 @@ motion and verb acts on ALL of them together.
    ;   collapse every selection back to a single cursor
    v   toggle SELECT mode: motions now EXTEND the selection instead of replacing
 
->> Put point on the first 'x' below, then press C twice to drop a cursor on each
-   of the next two lines.  You now have three cursors:
+>> Put point on the first line below, then press C twice.  Each press drops a
+   cursor one line further down, so you now have three cursors:
 
      change me
      change me

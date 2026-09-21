@@ -351,7 +351,9 @@
 ;; xref family
 (define-key "fundamental" "alt-." 'lsp-find-definition)     ; M-.  xref-find-definitions
 (define-key "fundamental" "alt-?" 'lsp-find-references)     ; M-?  xref-find-references
-(define-key "fundamental" "ctrl-c ctrl-d" 'lsp-hover)       ; doc at point
+;; NOT `C-c C-d` — multiple-cursors.scm binds that (and loads later, so it won
+;; and this was dead). Hover lives on the lsp prefix, `C-c C-l h`, plus `C-c d`.
+(define-key "fundamental" "ctrl-c d" 'lsp-hover)           ; doc at point
 ;; eglot's C-c C-l prefix for the rest
 (define-key "fundamental" "ctrl-c ctrl-l d" 'lsp-find-definition)
 (define-key "fundamental" "ctrl-c ctrl-l D" 'lsp-find-declaration)

@@ -67,6 +67,8 @@
 (define (avy-pick key) (avy--pick key))
 
 (define-key "fundamental" "ctrl-c j" 'avy-goto-char)
+;; `g s` in evil. Helix binds avy on `g w` in helix.scm (its own `g s` is
+;; goto-first-nonblank), so nothing to add for it here.
 (define-key "evil-normal" "g s" 'avy-goto-char)
 
 (register-command 'avy-goto-char)

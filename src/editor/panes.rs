@@ -561,6 +561,38 @@ impl Editor {
             None => false,
         }
     }
+
+    /// Let the active modal keymap claim an OS-special key (Tab, Enter, the
+    /// arrows, Home/End, Backspace, Delete).
+    ///
+    /// Those keys are bound as gpui actions, which dispatch BEFORE the raw
+    /// key-down listener, so they never reach [`Editor::on_key_down`] and never
+    /// reach the evil/helix keymaps. Without this hook `(define-key
+    /// "evil-normal" "tab" …)` is silently dead: it resolves against a keymap
+    /// nothing consults. Called first from each `act_*` handler, so a modal
+    /// binding wins over the built-in behaviour; unbound falls through
+    /// untouched, which keeps every default intact.
+    ///
+    /// Only consulted while the modal layer is intercepting, so this is inert
+    /// under plain Emacs keys.
+    pub(super) fn modal_action_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if !self.evil_intercepts() || self.active.special.is_some() {
+            return false;
+        }
+        let state = self.evil_keymap();
+        let major: Option<String> = self.active.modes.names().last().map(|s| s.to_string());
+        match self
+            .keymap
+            .resolve_evil(state, major.as_deref(), key)
+            .map(str::to_string)
+        {
+            Some(expr) => {
+                self.dispatch_recorded(&expr, cx);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 #[cfg(test)]

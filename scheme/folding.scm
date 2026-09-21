@@ -152,7 +152,9 @@
 ;; Re-mark after a save: cheap, and picks up structural edits made since open.
 (add-hook "after-save-hook" "fold--setup")
 
-(define-key "fundamental" "ctrl-c ctrl-f" 'fold-toggle-at-point)
+;; `C-c f`, NOT `C-c C-f` — yasnippet.scm binds that for snippet-next-field and
+;; loads later, so this binding was silently dead.
+(define-key "fundamental" "ctrl-c f" 'fold-toggle-at-point)
 (register-command 'fold-toggle-at-point)
 (register-command 'fold-all)
 (register-command 'fold-show-all)

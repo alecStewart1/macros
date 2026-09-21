@@ -7,7 +7,14 @@
 ;; match yet — see the WHICH-KEY-AUTO note at the end. Until that exists this is
 ;; manual, but it covers the discovery use case (C-x ?, C-c ?, C-h b).
 
-(define *which-key-mode* "fundamental")
+;; The keymap which-key browses. Not a constant "fundamental": under evil-mode
+;; or helix-mode the plain keys resolve against the modal Normal map, so
+;; browsing only `fundamental` showed a modal user none of the keys they
+;; actually press. Resolved per call via `current-modal-keymap` (core.scm), so
+;; it tracks the style as the user switches. Set it explicitly to pin a keymap.
+(define *which-key-mode* #f)
+(define (which-key-mode)
+  (or *which-key-mode* (current-modal-keymap) "fundamental"))
 
 (define (which-key-pad s) (pad-right s 18))
 
@@ -39,12 +46,14 @@
 (define (which-key)
   (read-string "which-key prefix: " 'which-key-from-input ""))
 (define (which-key-from-input prefix)
-  (which-key-show *which-key-mode* prefix))
+  (which-key-show (which-key-mode) prefix))
 
-;; Convenience entry points for the common prefixes.
+;; Convenience entry points for the common prefixes. The C-x / C-c prefixes are
+;; Emacs chords, which survive into modal mode from `fundamental`, so those two
+;; stay pinned there; the top-level browser follows the active style.
 (define (which-key-cx)  (which-key-show "fundamental" "ctrl-x"))
 (define (which-key-cc)  (which-key-show "fundamental" "ctrl-c"))
-(define (which-key-top) (which-key-show "fundamental" ""))
+(define (which-key-top) (which-key-show (which-key-mode) ""))
 
 (define-key "fundamental" "ctrl-x ?" 'which-key-cx)
 (define-key "fundamental" "ctrl-c ?" 'which-key-cc)

@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{Context, SharedString, prelude::*, px};
+use gpui::{Context, SharedString, px};
 
 use crate::highlight::Highlighter;
 use crate::mode::{Mode, ModeStack};
@@ -135,6 +135,28 @@ impl Editor {
                 let o = self.active.buffer.backward_word(self.point());
                 self.goto(o, cx);
             }
+            BackwardWordStart => {
+                let o = self.active.buffer.backward_word_start(self.point());
+                self.goto(o, cx);
+            }
+            ForwardWordEnd => {
+                let o = self.active.buffer.forward_word_end(self.point());
+                self.goto(o, cx);
+            }
+            ForwardBigwordStart => {
+                let o = self.active.buffer.forward_bigword_start(self.point());
+                self.goto(o, cx);
+            }
+            BackwardBigwordStart => {
+                let o = self.active.buffer.backward_bigword_start(self.point());
+                self.goto(o, cx);
+            }
+            ForwardBigwordEnd => {
+                let o = self.active.buffer.forward_bigword_end(self.point());
+                self.goto(o, cx);
+            }
+            IndentRegion => self.shift_lines(1, cx),
+            OutdentRegion => self.shift_lines(-1, cx),
             BeginningOfLine => {
                 let o = self.active.buffer.line_range_at(self.point()).start;
                 self.goto(o, cx);
@@ -742,6 +764,7 @@ impl Editor {
             EvilBlockInsert => self.evil_block_insert(false, cx),
             EvilBlockAppend => self.evil_block_insert(true, cx),
             EvilBlockDelete => self.evil_block_delete(cx),
+            EvilBlockChange => self.evil_block_change(cx),
             EvilBlockYank => self.evil_block_yank(cx),
             EvilDisable => self.evil_disable(cx),
             EvilScrollDown => self.scroll_half(1, cx),

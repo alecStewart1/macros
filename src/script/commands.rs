@@ -93,6 +93,20 @@ pub enum EditorCommand {
     ForwardWord,
     ForwardWordStart,
     BackwardWord,
+    /// Vim `b` — the start of the previous word, class-aware (the exact mirror
+    /// of [`Self::ForwardWordStart`]). `BackwardWord` is Emacs `M-b`, which
+    /// treats punctuation as a separator and so is NOT vim's `b`.
+    BackwardWordStart,
+    /// Vim `e` — ON the last character of the next word, class-aware.
+    ForwardWordEnd,
+    /// Vim `W` / `B` / `E` — whitespace-delimited WORD motions.
+    ForwardBigwordStart,
+    BackwardBigwordStart,
+    ForwardBigwordEnd,
+    /// Shift the region (or the current line) one indent step right / left —
+    /// the primitive behind vim `>>` / `<<` and visual `>` / `<`.
+    IndentRegion,
+    OutdentRegion,
     BeginningOfLine,
     EndOfLine,
     BeginningOfBuffer,
@@ -376,6 +390,9 @@ pub enum EditorCommand {
     EvilBlockInsert,
     EvilBlockAppend,
     EvilBlockDelete,
+    /// Block-wise change (`c` in Visual Block): delete the rectangle, then drop a
+    /// cursor at its left column on every row and enter Insert.
+    EvilBlockChange,
     EvilBlockYank,
     EvilDisable,
     /// Scroll half a page down / up (evil `C-d` / `C-u`).

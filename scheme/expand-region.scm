@@ -72,6 +72,11 @@
 ;; if evil-mode is never enabled — it's just an unused keymap entry).
 (define-key "evil-visual" "+" 'er/expand)
 (define-key "evil-visual" "-" 'er/contract)
+;; Helix has no separate visual state — selections live in Normal — so its
+;; expand/shrink go on the Normal map, where Helix itself puts them (M-o / M-i).
+;; Without this, expand-region was unreachable under helix-mode.
+(define-key "helix-normal" "alt-o" 'er/expand)
+(define-key "helix-normal" "alt-i" 'er/contract)
 
 (register-command 'er/expand)
 (register-command 'er/contract)

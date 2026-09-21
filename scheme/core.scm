@@ -560,3 +560,26 @@
             (name (string-append "hook-fn-" id)))
        (eval-string (string-append "(define (" name ") (run-thunk \"" id "\"))"))
        name))))
+
+;; --- active keybinding style -------------------------------------------------
+;; The Normal-state keymap actually in effect: "helix-normal" under helix-mode,
+;; "evil-normal" under evil-mode, and #f under plain Emacs keys. Helix must be
+;; tested FIRST — `evil-enabled?` is also true under Helix, because the two
+;; styles share one Normal/Insert state machine and differ only in which keymaps
+;; the router consults.
+;;
+;; Lives here (loaded before everything but completion.scm) so the help and
+;; discovery commands can branch on the style without depending on evil.scm or
+;; helix.scm having loaded.
+(define (current-modal-keymap)
+  (cond ((helix-enabled?) "helix-normal")
+        ((evil-enabled?)  "evil-normal")
+        (else #f)))
+
+;; Every keymap a plain key could resolve against right now, most specific
+;; first. The modal Normal map shadows `fundamental`, and the Emacs chords stay
+;; reachable underneath it — so this is the list the help commands must search
+;; rather than assuming "fundamental".
+(define (active-keymaps)
+  (let ((m (current-modal-keymap)))
+    (if m (list m "fundamental") (list "fundamental"))))

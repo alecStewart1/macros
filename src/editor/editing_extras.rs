@@ -213,14 +213,28 @@ impl Editor {
     /// scheme/helix.scm drive every Normal-mode move through this.
     pub(super) fn set_selections(&mut self, sels: Vec<(usize, usize)>, cx: &mut Context<Self>) {
         self.clear_extra_selections();
-        let len = self.active.buffer.len();
-        let clamp = |x: usize| x.min(len);
+        // Clamp to the buffer AND snap to a char boundary, up front (the
+        // per-pair work borrows the buffer, the installation below needs `&mut
+        // self`). Scheme computes these offsets itself, so a byte-column motion
+        // can hand us an offset inside a multibyte character; the rope refuses
+        // to slice there, so normalise at the boundary rather than letting it
+        // reach `edit()`.
+        let sels: Vec<(usize, usize)> = sels
+            .into_iter()
+            .map(|(a, h)| {
+                let snap = |x: usize| {
+                    self.active
+                        .buffer
+                        .char_to_byte(self.active.buffer.byte_to_char(x))
+                };
+                (snap(a), snap(h))
+            })
+            .collect();
         let mut it = sels.into_iter();
         let Some((anchor, head)) = it.next() else {
             cx.notify();
             return;
         };
-        let (anchor, head) = (clamp(anchor), clamp(head));
         if anchor == head {
             self.collapse_to(head);
         } else {
@@ -230,7 +244,6 @@ impl Editor {
             self.active.mark_active = true;
         }
         for (anchor, head) in it {
-            let (anchor, head) = (clamp(anchor), clamp(head));
             self.extra_cursors.push(SelectionMarkers {
                 head: self.script.add_marker(head),
                 anchor: self.script.add_marker(anchor),
@@ -284,8 +297,19 @@ impl Editor {
     /// primary cursor's column (`dir` -1 = above, +1 = below).
     pub(super) fn mc_add_line(&mut self, dir: isize, cx: &mut Context<Self>) {
         let primary = self.active.selected_range.start;
-        let line = self.active.buffer.line_index_at_byte(primary);
-        let target = line as isize + dir;
+        // Grow from the FRONTIER, not from the primary: measuring the target
+        // line off the primary every time means a second press computes the
+        // same line, `mc_add_cursor_at` rejects it as a duplicate, and the key
+        // silently does nothing. Repeated `C` (Helix) / `C-c C-n` (Emacs) must
+        // keep marching away from the block.
+        let frontier = self
+            .all_cursor_positions()
+            .into_iter()
+            .map(|p| self.active.buffer.line_index_at_byte(p))
+            .fold(self.active.buffer.line_index_at_byte(primary), |acc, l| {
+                if dir >= 0 { acc.max(l) } else { acc.min(l) }
+            });
+        let target = frontier as isize + dir;
         if target < 0 || target as usize >= self.active.buffer.line_count() {
             self.echo("multiple-cursors: no line there", cx);
             return;
@@ -294,15 +318,15 @@ impl Editor {
         // `line_offset`). A byte column carried onto a line with multibyte text
         // lands mid-codepoint, and the marker it seeds then hands `edit()` an
         // offset the rope refuses to slice at.
-        let line_start = self.active.buffer.line_range(line).start;
-        let goal =
-            self.active.buffer.byte_to_char(primary) - self.active.buffer.byte_to_char(line_start);
-        let lr = self.active.buffer.line_range(target as usize);
-        let ts = self.active.buffer.byte_to_char(lr.start);
-        let tlen = self.active.buffer.byte_to_char(lr.end) - ts;
-        let pos = self.active.buffer.char_to_byte(ts + goal.min(tlen));
+        let goal = self.active.buffer.char_column(primary);
+        let pos = self
+            .active
+            .buffer
+            .byte_at_char_column(target as usize, goal);
         if self.mc_add_cursor_at(pos) {
             cx.notify();
+        } else {
+            self.echo("multiple-cursors: cursor already there", cx);
         }
     }
 

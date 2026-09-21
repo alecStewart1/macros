@@ -22,6 +22,24 @@
 ;; Sort the small selection lists by position (core's keyed `sort-by`).
 (define (helix-sort lst less?) (sort-by (lambda (x) x) less? lst))
 
+;; --- selection-wide character replace (`r`) --------------------------------
+;; Helix's `r` overwrites EVERY character of EVERY selection with the typed
+;; char (a bare cursor overwrites the grapheme under it). `evil-replace-char`
+;; is the vim one-grapheme-at-point version, so Helix needs its own. Edits run
+;; high→low so earlier offsets stay valid; newlines are preserved so a
+;; multi-line selection keeps its shape.
+(define (helix-replace-dispatch ch)
+  (let ((desc (helix-sort (helix-ranges-asc) (lambda (x y) (> (car x) (car y)))))
+        (c (car (string->list ch))))
+    (for-each
+     (lambda (r)
+       (replace-region (car r) (cdr r)
+         (list->string
+          (map (lambda (x) (if (equal? x #\newline) x c))
+               (string->list (buffer-substring (car r) (cdr r)))))))
+     desc)))
+(define (helix-replace-char) (read-char "r-" 'helix-replace-dispatch))
+
 ;; --- selection plumbing ----------------------------------------------------
 ;; `(selections)` → flat (a0 h0 a1 h1 …). Chunk it into ((a0 . h0) (a1 . h1) …).
 (define (helix-chunk-pairs lst)
@@ -67,19 +85,25 @@
 (define (helix-char-left)  (helix-move grapheme-backward #f))
 (define (helix-char-right) (helix-move grapheme-forward  #f))
 
-;; Vertical motion preserves the byte column on each selection's head.
+;; Vertical motion preserves the CHARACTER column on each selection's head —
+;; never the byte column. A byte column carried onto a line with multibyte text
+;; points *inside* a character, and the rope refuses to slice at such an offset
+;; (the same rule `line_offset` and `mc_add_line` follow on the Rust side).
+;; `char-column` / `pos-at-char-column` are the pure bridges for it.
 (define (helix-line-move dir)
-  (helix-move
-    (lambda (c)
-      (let* ((ln  (line-of-pos c))
-             (col (- c (line-start-pos c)))
-             (tgt (+ ln dir)))
-        (if (< tgt 0)
-            c
-            (let* ((ts (line-start-of-line tgt))
-                   (te (line-end-pos ts)))
-              (min (+ ts col) te)))))
-    #f))
+  (let ((last (- (line-count) 1)))
+    (helix-move
+      (lambda (c)
+        (let* ((ln  (line-of-pos c))
+               (col (char-column c))
+               (tgt (+ ln dir)))
+          ;; Clamp rather than wrap: `pos-at-char-column` clamps silently, so
+          ;; without this a `k` on line 0 would look like a no-op that still
+          ;; reset the column.
+          (if (or (< tgt 0) (> tgt last))
+              c
+              (pos-at-char-column tgt col))))
+      #f)))
 (define (helix-line-down) (helix-line-move 1))
 (define (helix-line-up)   (helix-line-move -1))
 
@@ -88,8 +112,16 @@
 
 ;; --- word motions (these select) -------------------------------------------
 (define (helix-word-next) (helix-move word-forward-start #t)) ; w
-(define (helix-word-end)  (helix-move word-forward       #t)) ; e
-(define (helix-word-prev) (helix-move word-backward      #t)) ; b
+;; `e` / `b` use the CLASS-AWARE primitives (the mirrors of `w`), not Emacs's
+;; `word-forward` / `word-backward` — those treat punctuation as a separator, so
+;; `e` sailed past a `);` run and `b` disagreed with `w` about where a word starts.
+(define (helix-word-end)  (helix-move word-forward-end   #t)) ; e
+(define (helix-word-prev) (helix-move word-backward-start #t)) ; b
+
+;; W / E / B — whitespace-delimited WORDs (`foo.bar` is one WORD).
+(define (helix-bigword-next) (helix-move bigword-forward-start  #t))
+(define (helix-bigword-end)  (helix-move bigword-forward-end    #t))
+(define (helix-bigword-prev) (helix-move bigword-backward-start #t))
 
 ;; --- line selection (x) ----------------------------------------------------
 ;; Extend each selection out to whole lines (incl. the trailing newline). Repeat
@@ -101,6 +133,22 @@
                   (lo (min a h)) (hi (max a h))
                   (ls (line-start-pos lo))
                   (le (grapheme-forward (line-end-pos hi))))
+             (cons ls le)))
+         (helix-selections))))
+
+;; `X` — round each selection out to whole lines, but do NOT reach for the next
+;; one. Unlike `x` this is idempotent: pressing it again leaves the selection
+;; where it is (Helix's extend_to_line_bounds).
+(define (helix-extend-to-line-bounds)
+  (helix-set!
+    (map (lambda (s)
+           (let* ((a (car s)) (h (cdr s))
+                  (lo (min a h)) (hi (max a h))
+                  ;; `hi` is exclusive: when it already sits on a line start the
+                  ;; selection ends at the previous line, so step back to find
+                  ;; the last line actually covered.
+                  (ls (line-start-pos lo))
+                  (le (line-end-pos (max lo (- hi 1)))))
              (cons ls le)))
          (helix-selections))))
 
@@ -330,7 +378,11 @@
 (define-key "helix-normal" "0" 'helix-goto-line-start)
 (define-key "helix-normal" "$" 'helix-goto-line-end)
 (define-key "helix-normal" "x" 'helix-select-line)
-(define-key "helix-normal" "shift-x" 'helix-select-line)   ; X — extend to line bounds
+;; X — extend to whole lines WITHOUT growing downward. `x` grows a line per
+;; press; `X` just rounds the current selection out to line bounds, so pressing
+;; it repeatedly is idempotent (Helix's extend_to_line_bounds). They were the
+;; same command, which made `X` a second `x`.
+(define-key "helix-normal" "shift-x" 'helix-extend-to-line-bounds)
 (define-key "helix-normal" "%" 'helix-select-all)          ; % — select whole buffer
 (define-key "helix-normal" "f" 'helix-find-char-forward)   ; f/t/F/T — char find (selects)
 (define-key "helix-normal" "shift-f" 'helix-find-char-backward)
@@ -355,7 +407,7 @@
 (define-key "helix-normal" "y" 'helix-yank)
 (define-key "helix-normal" "p" 'evil-paste-after)
 (define-key "helix-normal" "shift-p" 'evil-paste-before)
-(define-key "helix-normal" "r" 'evil-replace-char)    ; r<char> — replace
+(define-key "helix-normal" "r" 'helix-replace-char)   ; r<char> — replace EVERY selected char
 (define-key "helix-normal" "u" 'undo)
 (define-key "helix-normal" "shift-u" 'redo)           ; U — redo
 (define-key "helix-normal" "shift-j" 'helix-join-lines)   ; J — join selected lines
@@ -378,6 +430,28 @@
 ;; scrolling (shared with evil)
 (define-key "helix-normal" "ctrl-d" 'evil-scroll-down)
 (define-key "helix-normal" "ctrl-u" 'evil-scroll-up)
+(define-key "helix-normal" "ctrl-f" 'scroll-up)            ; full page forward
+(define-key "helix-normal" "ctrl-b" 'scroll-down)          ; full page back
+(define-key "helix-normal" "z z" 'recenter)                ; zz — center cursor line
+;; WORD motions (Helix's shifted trio) — whitespace-delimited, selecting.
+(define-key "helix-normal" "shift-w" 'helix-bigword-next)
+(define-key "helix-normal" "shift-e" 'helix-bigword-end)
+(define-key "helix-normal" "shift-b" 'helix-bigword-prev)
+;; indent / outdent the selected lines
+(define-key "helix-normal" ">" 'indent-region)
+(define-key "helix-normal" "<" 'outdent-region)
+;; LSP navigation — the evil map has had these since day one; Helix's own
+;; keymap uses the same `gd` and shows docs on `K`.
+(define-key "helix-normal" "g d" 'lsp-find-definition)
+(define-key "helix-normal" "g r" 'lsp-find-references)
+(define-key "helix-normal" "shift-k" 'lsp-hover)
+;; Same Emacs-chord shadowing as evil-normal: these four Emacs defaults EDIT the
+;; buffer, and `C-o` in particular silently inserted a newline in Normal state.
+(define-key "helix-normal" "ctrl-o" 'xref-pop-marker)
+(define-key "helix-normal" "ctrl-k" 'evil-undefined)
+(define-key "helix-normal" "ctrl-w" 'evil-undefined)
+(define-key "helix-normal" "ctrl-y" 'evil-undefined)
+(define-key "helix-normal" "ctrl-t" 'evil-undefined)
 
 ;; =====================================================================
 ;; Keymap — Insert. Plain keys self-insert; Escape returns to Normal,

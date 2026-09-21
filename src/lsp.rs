@@ -994,7 +994,7 @@ pub type SemanticToken = (usize, usize, usize, String);
 pub fn decode_semantic_data(data: &[i64], legend: &[String]) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     let (mut line, mut col) = (0usize, 0usize);
-    for group in data.chunks_exact(5) {
+    for group in data.as_chunks::<5>().0 {
         let delta_line = group[0].max(0) as usize;
         let delta_start = group[1].max(0) as usize;
         let length = group[2].max(0) as usize;

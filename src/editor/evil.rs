@@ -82,6 +82,15 @@ impl Editor {
     }
 
     pub(super) fn evil_enable(&mut self, cx: &mut Context<Self>) {
+        // Leaving Helix behind: `modal_helix` steers EVERY keymap lookup (see
+        // `evil_keymap`), so switching styles must clear it or `(evil-mode)`
+        // from Helix silently keeps the Helix keymaps (and the Helix banner).
+        if self.modal_helix {
+            self.modal_helix = false;
+            if self.has_extra_cursors() {
+                self.mc_clear(cx);
+            }
+        }
         self.evil = EvilState::Normal;
         self.active.mark_active = false;
         cx.notify();
@@ -260,6 +269,46 @@ impl Editor {
         self.evil_normal_state(cx);
     }
 
+    /// Block `c`: delete the rectangle (like [`Self::evil_block_delete`]), then
+    /// drop a cursor at the block's left column on every row and switch to
+    /// Insert, so the replacement text lands on all rows at once — vim's
+    /// block-wise change. Escape collapses the cursors back to one.
+    pub(super) fn evil_block_change(&mut self, cx: &mut Context<Self>) {
+        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+            return;
+        };
+        let killed = self.block_text(top, bottom, left, right);
+        self.set_clipboard(&killed, cx);
+        self.push_kill(killed);
+        self.begin_undo_group();
+        for row in (top..=bottom).rev() {
+            let lr = self.active.buffer.line_range(row);
+            let line = self.active.buffer.slice_to_string(lr.clone());
+            let s = char_col_byte(&line, left);
+            let e = char_col_byte(&line, right + 1);
+            if e > s {
+                self.edit(lr.start + s..lr.start + e, "");
+            }
+        }
+        self.end_undo_group();
+        self.evil_yank_linewise = false;
+        // Cursors are computed AFTER the deletes, so each row's left column is
+        // its post-delete position.
+        let mut positions = Vec::new();
+        for row in top..=bottom {
+            let lr = self.active.buffer.line_range(row);
+            let line = self.active.buffer.slice_to_string(lr.clone());
+            positions.push(lr.start + char_col_byte(&line, left));
+        }
+        if let Some((&first, rest)) = positions.split_first() {
+            self.collapse_to(first);
+            for &p in rest {
+                self.mc_add_cursor_at(p);
+            }
+        }
+        self.evil_insert_state(cx);
+    }
+
     /// Block `y`: copy the rectangle to the kill ring + system clipboard without
     /// removing it; the cursor returns to the block's top-left.
     pub(super) fn evil_block_yank(&mut self, cx: &mut Context<Self>) {
@@ -296,6 +345,16 @@ impl Editor {
     }
 
     pub(super) fn evil_disable(&mut self, cx: &mut Context<Self>) {
+        // Same contract as `evil_enable`: drop the Helix flag too, or
+        // `(helix-enabled?)` keeps reporting Helix with no modal mode on at all
+        // (which is how `C-h t` ended up opening the Helix tutorial in Emacs
+        // mode).
+        if self.modal_helix {
+            self.modal_helix = false;
+            if self.has_extra_cursors() {
+                self.mc_clear(cx);
+            }
+        }
         self.evil = EvilState::Disabled;
         cx.notify();
     }
@@ -376,7 +435,7 @@ impl Editor {
     /// The first non-whitespace byte on the line containing `offset` (or the
     /// line's end if it's all blank) — where vim parks the cursor after a
     /// line-wise paste or `^`.
-    fn first_non_blank(&self, offset: usize) -> usize {
+    pub(super) fn first_non_blank(&self, offset: usize) -> usize {
         let line = self.active.buffer.line_range_at(offset);
         let text = self.active.buffer.slice_to_string(line.clone());
         match text.find(|c: char| !c.is_whitespace()) {

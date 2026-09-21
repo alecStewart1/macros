@@ -177,7 +177,10 @@
 ;; grep-mode buffers (projectile-grep / occur-style) get the same RET jump.
 (define-key "grep-mode" "enter" 'compile-visit)
 
-(define-key "fundamental" "ctrl-c c" 'compile)
+;; `C-c b` (build), NOT `C-c c`: that is org-capture's chord, and org.scm binds
+;; it too. Whichever file loaded last silently won, so one of the two commands
+;; was unreachable by key. Split them.
+(define-key "fundamental" "ctrl-c b" 'compile)
 (register-command 'compile)
 (register-command 'recompile)
 (register-command 'compile-first-error)
