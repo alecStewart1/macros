@@ -982,10 +982,19 @@ impl Editor {
                 }
             }
             TermEvent::Exit => {
-                if let Some(t) = self.terminals.get_mut(&id) {
+                // alacritty reports a finished child twice (`ChildExit`, then
+                // `Exit`); act on the first only, or `terminal-exit-hook` runs
+                // twice and its second window dance targets a pane the first
+                // already closed.
+                if let Some(t) = self.terminals.get_mut(&id)
+                    && !t.exited
+                {
                     t.exited = true;
                     let name = t.buffer_name.clone();
                     self.echo(format!("Terminal {name} exited"), cx);
+                    // Let Scheme react (close the pane, restart, …) — called
+                    // with the terminal's buffer name.
+                    self.run_hook_arg("terminal-exit-hook", &name);
                 }
             }
         }

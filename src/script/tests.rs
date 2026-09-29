@@ -1563,6 +1563,34 @@ mod engine_tests {
                 if m == "evil-normal" && s == "space n n" && cmd == "next-buffer")),
             "default leader should expand to 'space n n': {cmds:?}"
         );
+        // …and the same chord lands in the "evil-leader" map (special buffers,
+        // terminals, Insert) under both the leader and the alt leader.
+        for (map, seq) in [
+            ("evil-leader", "space n n"),
+            ("evil-leader", "alt-space n n"),
+            ("evil-normal", "alt-space n n"),
+        ] {
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, EditorCommand::DefineKey(m, s, cmd)
+                    if m == map && s == seq && cmd == "next-buffer")),
+                "expected {seq} in {map}: {cmds:?}"
+            );
+        }
+
+        // Disabling the alt leader drops the alt sequences.
+        engine.eval(r#"(evil-set-leader-alt "")"#).expect("alt off");
+        let cmds = engine
+            .eval(r#"(evil-leader-set "n p" "previous-buffer")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DefineKey(_, s, _)
+                if s.starts_with("alt-space"))),
+            "no alt-leader bindings once disabled: {cmds:?}"
+        );
 
         // Changing the leader moves subsequent bindings to the new prefix; a
         // per-mode leader binding scopes to "evil-normal:<mode>".

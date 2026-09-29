@@ -9,6 +9,7 @@ use gpui::{
     Point, ScrollWheelEvent, SharedString, Window, px,
 };
 
+use crate::mode::{LEADER_KEYMAP, LeaderMatch};
 use crate::script::EditorCommand;
 
 use super::*;
@@ -137,9 +138,9 @@ impl Editor {
         self.reset_blink(cx);
 
         // Precedence: startup gate → transient → helm → minibuffer → completion
-        // popup → terminal → evil replace-pending → evil Normal/Visual → evil
-        // Insert → special-buffer chord overlay → special buffer → universal
-        // argument → Emacs dispatch.
+        // popup → terminal → evil replace-pending → evil Normal/Visual → modal
+        // leader → evil Insert → special-buffer chord overlay → special buffer →
+        // universal argument → Emacs dispatch.
         let layers = [
             Self::key_config_pending,
             Self::key_titlebar_dropdown,
@@ -151,6 +152,7 @@ impl Editor {
             Self::key_evil_replace,
             Self::key_read_char,
             Self::key_evil_modal,
+            Self::key_leader,
             Self::key_evil_insert,
             Self::key_special_chord_overlay,
             Self::key_special_buffer,
@@ -331,20 +333,26 @@ impl Editor {
     /// An embedded terminal grabs the keyboard: keys are translated to PTY
     /// bytes rather than editor commands. `C-x` stays the editor prefix (so
     /// window/buffer management still works), as does any in-progress prefix
-    /// sequence — everything else (including C-c, arrows, C-r…) goes to the shell.
-    /// Once the shell has exited the terminal is dead: it releases the keyboard
-    /// so normal editor dispatch (M-x, C-x k, …) resumes in the leftover buffer.
+    /// sequence, any chord listed in the `terminal-passthrough-keys` option, and
+    /// a Ctrl/Alt chord that starts a modal leader sequence (the alt leader,
+    /// `M-SPC` by default) — everything else (including C-c, arrows, C-r…) goes
+    /// to the shell. Once the shell has exited the terminal is dead: it releases
+    /// the keyboard so normal editor dispatch (M-x, C-x k, …) resumes in the
+    /// leftover buffer.
     fn key_terminal(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
         let Some(tid) = self.active_running_terminal_id() else {
             return Handled::No;
         };
-        // `C-x` is the editor prefix, an in-progress sequence continues, and
-        // platform (cmd) chords fall through to the editor — so cmd-c/cmd-v
-        // (terminal copy/paste) and cmd-q still work.
-        let editor_prefix = !self.pending_keys.is_empty()
-            || (ks.modifiers.control && ks.key == "x")
-            || ks.modifiers.platform;
-        if editor_prefix {
+        let passthrough = cx
+            .global::<crate::settings::Settings>()
+            .terminal_passthrough_keys()
+            .to_string();
+        if terminal_key_goes_to_editor(
+            ks,
+            !self.pending_keys.is_empty(),
+            &passthrough,
+            &self.keymap,
+        ) {
             return Handled::No;
         }
         if let Some(bytes) = keystroke_to_bytes(ks) {
@@ -515,6 +523,71 @@ impl Editor {
         }
         // Fall through to the Emacs dispatch with `pending_keys` intact.
         Handled::No
+    }
+
+    /// Modal leader chords where the `evil-normal` keymap never reaches:
+    /// special buffers (magit, dashboards, terminals — skipped by
+    /// [`key_evil_modal`](Self::key_evil_modal) so their own keymaps win) and
+    /// Insert state. Resolves against the `<style>-normal:<major>` overlay
+    /// first (so per-mode leader bindings shadow global ones), then the
+    /// [`LEADER_KEYMAP`](crate::mode::LEADER_KEYMAP) that `evil-leader-set`
+    /// fills. A plain key never STARTS a sequence in Insert state or a live
+    /// terminal — it types — so there only the Ctrl/Alt alt-leader (`M-SPC`)
+    /// opens one. Anything neither map knows falls through untouched, except
+    /// the dead end of a leader sequence, which is swallowed (not typed).
+    fn key_leader(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
+        let special = self.active.special.is_some();
+        let insert = self.evil == EvilState::Insert;
+        if self.evil == EvilState::Disabled || ks.modifiers.platform || !(special || insert) {
+            return Handled::No;
+        }
+        let chord = chord_string(ks);
+        let plain = !ks.modifiers.control && !ks.modifiers.alt;
+        let typing = insert || self.active_running_terminal_id().is_some();
+        if self.pending_keys.is_empty() && plain && typing {
+            return Handled::No;
+        }
+        let pending = self.pending_keys.join(" ");
+        let sequence = if pending.is_empty() {
+            chord.clone()
+        } else {
+            format!("{pending} {chord}")
+        };
+        let overlay: Option<String> = special
+            .then(|| {
+                self.active
+                    .modes
+                    .names()
+                    .last()
+                    .map(|m| format!("{}:{m}", self.modal_collection_prefix()))
+            })
+            .flatten();
+        match self.keymap.resolve_leader(overlay.as_deref(), &sequence) {
+            LeaderMatch::Bound(expr) => {
+                let expr = expr.to_string();
+                self.pending_keys.clear();
+                self.status = SharedString::default();
+                self.dispatch_recorded(&expr, cx);
+            }
+            LeaderMatch::Prefix => {
+                self.pending_keys.push(chord);
+                self.status = format!("{}-", pretty_sequence(&sequence)).into();
+                cx.notify();
+            }
+            LeaderMatch::Miss => {
+                // Only claim the dead end of a sequence the leader map started;
+                // anything else (an Emacs `C-x …` in progress, a plain key the
+                // buffer's own keymap binds) belongs to the later layers.
+                if pending.is_empty() || !self.keymap.is_prefix_mode(LEADER_KEYMAP, &pending) {
+                    return Handled::No;
+                }
+                self.pending_keys.clear();
+                self.status = format!("{} is undefined", pretty_sequence(&sequence)).into();
+                cx.notify();
+            }
+        }
+        cx.stop_propagation();
+        Handled::Yes
     }
 
     /// Evil Insert: a chord bound in `evil-insert` (e.g. Escape → normal) wins;
@@ -1255,5 +1328,63 @@ impl Editor {
         if self.minibuffer.is_none() && !self.titlebar_dropdown_open() {
             self.apply_command(EditorCommand::MarkWholeBuffer, cx);
         }
+    }
+}
+
+/// Whether a keystroke in a live terminal belongs to the editor instead of the
+/// shell: an in-progress editor sequence continues, `C-x` is the editor prefix,
+/// platform (cmd) chords stay the editor's (so cmd-c/cmd-v copy/paste and cmd-q
+/// work), a chord listed in the whitespace-separated `passthrough` option is
+/// the user's escape hatch, and a Ctrl/Alt chord that opens a leader sequence
+/// (the alt leader) is handed over. A plain key always types into the shell.
+fn terminal_key_goes_to_editor(
+    ks: &Keystroke,
+    pending: bool,
+    passthrough: &str,
+    keymap: &crate::mode::Keymap,
+) -> bool {
+    if pending || ks.modifiers.platform || (ks.modifiers.control && ks.key == "x") {
+        return true;
+    }
+    let chord = chord_string(ks);
+    if passthrough.split_whitespace().any(|k| k == chord) {
+        return true;
+    }
+    (ks.modifiers.control || ks.modifiers.alt) && keymap.is_prefix_mode(LEADER_KEYMAP, &chord)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_key_goes_to_editor;
+    use crate::mode::{Keymap, LEADER_KEYMAP};
+    use gpui::Keystroke;
+
+    fn key(s: &str) -> Keystroke {
+        Keystroke::parse(s).unwrap()
+    }
+
+    #[test]
+    fn terminal_routes_only_editor_chords_away_from_the_shell() {
+        let mut km = Keymap::default();
+        km.define(LEADER_KEYMAP, "space n o", "delete-other-windows");
+        km.define(LEADER_KEYMAP, "alt-space n o", "delete-other-windows");
+        let to_editor = |k: &str, pending: bool, pass: &str| {
+            terminal_key_goes_to_editor(&key(k), pending, pass, &km)
+        };
+
+        // The shell owns ordinary keys — including the plain leader (SPC types).
+        assert!(!to_editor("space", false, ""));
+        assert!(!to_editor("ctrl-c", false, ""));
+        assert!(!to_editor("alt-o", false, ""));
+        // Built-in editor chords.
+        assert!(to_editor("ctrl-x", false, ""));
+        assert!(to_editor("cmd-v", false, ""));
+        // An in-progress sequence keeps going to the editor.
+        assert!(to_editor("n", true, ""));
+        // The alt leader opens a leader sequence.
+        assert!(to_editor("alt-space", false, ""));
+        // User pass-through list.
+        assert!(to_editor("alt-o", false, "ctrl-] alt-o"));
+        assert!(!to_editor("alt-p", false, "ctrl-] alt-o"));
     }
 }

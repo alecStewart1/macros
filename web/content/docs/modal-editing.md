@@ -86,14 +86,30 @@ Press <kbd>:</kbd> to enter an Ex command. Substitution works as you'd expect:
 
 ## No leader key by default
 
-Like vanilla evil-mode in Emacs, Macros' evil has **no <kbd>Space</kbd> leader**. A leader menu is a Doom/Spacemacs convention, not part of evil itself, so it's left to you. Adding one is a few lines in your `init.scm`:
+Like vanilla evil-mode in Emacs, Macros' evil has **no <kbd>Space</kbd> leader bindings**. A leader menu is a Doom/Spacemacs convention, not part of evil itself, so it's left to you. Adding one is a few lines in your `init.scm`:
 
 ```scheme
-;; Roll your own Spacemacs-style leader. evil-bind-key takes the command name
-;; as a 'name symbol (a bare command identity or a string name work too).
-(evil-bind-key "evil-normal" "space space" 'helm-execute-command)
-(evil-bind-key "evil-normal" "space f f"   'helm-find-files)
-(evil-bind-key "evil-normal" "space b b"   'helm-buffers)
+;; Roll your own Spacemacs-style leader. Commands are 'name symbols (a bare
+;; command identity or a string name work too).
+(evil-set-leader "space")                    ; the default; set BEFORE binding
+(evil-leader-set "space" 'helm-execute-command) ; SPC SPC
+(evil-leader-set "f f" 'helm-find-files)
+(evil-leader-set "b b" 'helm-buffers)
+(evil-leader-set "n o" 'delete-other-windows)
+```
+
+Leader chords bound with `evil-leader-set` work **everywhere**, not only in file buffers:
+
+- **Special buffers** (magit, dired, package dashboards like `k8s-dashboard`) — <kbd>SPC</kbd> reaches your leader even though these buffers drive their own keymaps.
+- **Terminals and Insert state**, where <kbd>SPC</kbd> has to type a space — use the **alt leader** instead, <kbd>M-SPC</kbd> by default (Doom's `doom-leader-alt-key`): <kbd>M-SPC n o</kbd> in a terminal runs the same command as <kbd>SPC n o</kbd> in a file. Change it with `(evil-set-leader-alt "ctrl-space")`, or disable it with `(evil-set-leader-alt "")`, before your bindings.
+
+Per-mode leader bindings shadow the global ones in that mode, including special-buffer modes:
+
+```scheme
+(evil-leader-set-for-modes '("rust" "go")
+  (list (cons "g g" 'lsp-find-definition)))
+(evil-leader-set-for-modes '("k8s-mode")
+  (list (cons "k r" 'k8s-refresh)))
 ```
 
 ## Customizing

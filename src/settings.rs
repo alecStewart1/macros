@@ -118,6 +118,7 @@ const OPTIONS: &[OptionSpec] = &[
     opt("align-after", Kind::Str, None, None),
     opt("cursor-style", Kind::Str, None, None),
     opt("font-family", Kind::Str, None, None),
+    opt("terminal-passthrough-keys", Kind::Str, None, None),
     opt("completion-auto", Kind::Bool, None, None),
     opt("completion-show-detail", Kind::Bool, None, None),
     opt("completion-show-kind", Kind::Bool, None, None),
@@ -410,6 +411,13 @@ impl Settings {
 
     /// How completion candidates are presented: `"popup"` (corfu-style overlay)
     /// or `"minibuffer"`.
+    /// Chords (whitespace-separated, e.g. `"ctrl-] alt-o"`) that a focused
+    /// terminal hands to the editor instead of the shell — an escape hatch for
+    /// window/buffer keys beyond the built-in `C-x` prefix and the alt leader.
+    pub fn terminal_passthrough_keys(&self) -> &str {
+        self.str_or("terminal-passthrough-keys", "")
+    }
+
     pub fn completion_style(&self) -> &str {
         self.str_or("completion-style", "popup")
     }

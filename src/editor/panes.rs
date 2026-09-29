@@ -383,7 +383,10 @@ impl Editor {
     /// Make pane `id` the selected window: save the old pane, activate the
     /// target's buffer if different, and restore the target's point/scroll.
     pub(super) fn select_pane(&mut self, id: usize, cx: &mut Context<Self>) {
-        if id == self.selected_pane {
+        // An id that no longer names a pane (a stale `select-window` queued
+        // before its window was deleted) must not become the selection: no
+        // pane would then own the cursor or the keyboard.
+        if id == self.selected_pane || self.pane(id).is_none() {
             return;
         }
         self.save_selected_pane();

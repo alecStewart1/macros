@@ -428,17 +428,19 @@ impl Editor {
     /// a Scheme view (dired-sidebar/dired) can re-render if `dir` is the one it shows.
     /// No-op — and no thread hop — when nothing is registered on the hook.
     pub(super) fn dispatch_dir_changed(&mut self, dir: &Path) {
-        let Some(functions) = self.hooks.get("directory-changed-hook") else {
+        self.run_hook_arg("directory-changed-hook", &dir.to_string_lossy());
+    }
+
+    /// Call every function registered on `hook` with the single string `arg`
+    /// (`directory-changed-hook`'s dir, `terminal-exit-hook`'s buffer name).
+    /// No-op — and no thread hop — when nothing is registered on the hook.
+    pub(super) fn run_hook_arg(&mut self, hook: &str, arg: &str) {
+        let Some(functions) = self.hooks.get(hook).filter(|f| !f.is_empty()).cloned() else {
             return;
         };
-        if functions.is_empty() {
-            return;
-        }
-        let functions = functions.clone();
         self.publish_point();
-        let arg = dir.to_string_lossy();
         for function in functions {
-            self.script.dispatch_action(&function, Some(&arg));
+            self.script.dispatch_action(&function, Some(arg));
         }
     }
 

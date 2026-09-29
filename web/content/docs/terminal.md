@@ -29,6 +29,30 @@ The one exception is the editor prefix <kbd>C-x</kbd>, which is reserved so wind
 | <kbd>C-x k</kbd> | kill the terminal buffer |
 | <kbd>C-x 2</kbd> / <kbd>C-x 3</kbd> | split, e.g. to keep code and a terminal side by side |
 
+Two more ways out of the shell:
+
+- **The alt leader.** Under evil-mode, <kbd>M-SPC</kbd> starts any chord you bound with `evil-leader-set` — <kbd>M-SPC n o</kbd> runs your <kbd>SPC n o</kbd>. See [Modal editing](/docs/modal-editing).
+- **Pass-through keys.** List any other chords the terminal should hand to the editor:
+
+```scheme
+(set-option "terminal-passthrough-keys" "alt-o ctrl-]")
+(define-key "fundamental" "alt-o" 'other-window)
+```
+
+## When the shell exits
+
+A terminal whose program has exited releases the keyboard, so normal editor keys work in the leftover buffer. `terminal-exit-hook` runs with the terminal's buffer name, so you can clean up automatically:
+
+```scheme
+(define (my-close-dead-terminal name)
+  (let ((w (get-buffer-window name)))
+    (when (and (>= w 0) (> (length (window-list)) 1))
+      (select-window w)
+      (delete-window))
+    (kill-buffer-named name)))
+(add-hook "terminal-exit-hook" 'my-close-dead-terminal)
+```
+
 ## Multiple terminals
 
 Each terminal gets a distinct buffer name, so you can run several at once. `make-terminal` reuses an existing terminal buffer if the name is already taken, so binding a key to a named terminal gives you a toggle-style "pop to my terminal".

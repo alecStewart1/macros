@@ -861,6 +861,7 @@
 ;; leader afterward does not move bindings already made):
 ;;
 ;;   (evil-set-leader "comma")                    ; or "space" (default), "space space", …
+;;   (evil-set-leader-alt "ctrl-space")           ; or "alt-space" (default), "" for none
 ;;   (evil-leader-set "n n" 'next-buffer)         ; <leader> n n   (global, normal state)
 ;;   (evil-leader-set-for-modes '("rust" "go")    ; <leader> g g / g r in those modes only
 ;;     (list (cons "g g" 'lsp-find-definition)
@@ -869,24 +870,59 @@
 ;; Commands may be a 'name symbol (canonical), a "name" string, or a bare
 ;; procedure identifier (the latter lets editor tooling resolve the reference),
 ;; same as `evil-define-key`.
+;;
+;; Global leader chords work EVERYWHERE, not just in file buffers: each one is
+;; also bound in the "evil-leader" keymap, which the editor consults in special
+;; buffers (magit, dired, package dashboards — whose own keymaps otherwise hide
+;; the global evil-normal map) and terminals. Where a plain key must type — a
+;; terminal, Insert state — the ALT leader (Doom's `doom-leader-alt-key`, M-SPC
+;; by default) opens the same chords: `M-SPC n o` in a pod shell works like
+;; `SPC n o` in a file.
 (define *evil-leader* "space")
+(define *evil-leader-alt* "alt-space")
 
 ;; Set the leader to a chord string ("space", "comma", "space space", …).
 (define (evil-set-leader key) (set! *evil-leader* key))
+
+;; Set the alt leader (a Ctrl/Alt chord, so it can't collide with typing), or
+;; "" to disable it. Like the leader, set it BEFORE your bindings.
+(define (evil-set-leader-alt key) (set! *evil-leader-alt* key))
 
 ;; Prefix a chord with the current leader; "" yields the bare leader key.
 (define (evil-leader-chord chord)
   (if (equal? chord "") *evil-leader* (string-append *evil-leader* " " chord)))
 
-;; Bind one leader chord in the global normal-state map (`evil-leader/set-key`).
+;; Every full sequence a leader chord is reachable by: the leader, plus the alt
+;; leader when one is set.
+(define (evil-leader-sequences chord)
+  (let ((main (evil-leader-chord chord)))
+    (if (equal? *evil-leader-alt* "")
+        (list main)
+        (list main
+              (if (equal? chord "")
+                  *evil-leader-alt*
+                  (string-append *evil-leader-alt* " " chord))))))
+
+;; Bind one leader chord in the global normal-state map (`evil-leader/set-key`)
+;; and in the "evil-leader" map special buffers / terminals / Insert consult.
 (define (evil-leader-set chord command)
-  (evil-bind-key "evil-normal" (evil-leader-chord chord) command))
+  (for-each
+   (lambda (seq)
+     (evil-bind-key "evil-normal" seq command)
+     (evil-bind-key "evil-leader" seq command))
+   (evil-leader-sequences chord)))
 
 ;; Bind many (chord . command) leader pairs across major modes for normal state
-;; (`evil-leader/set-key-for-mode` over a list of modes).
+;; (`evil-leader/set-key-for-mode` over a list of modes). Works for special
+;; buffer modes too ("k8s-mode", "magit-status", …): their evil-normal:<mode>
+;; overlay shadows the global leader there.
 (define (evil-leader-set-for-modes modes bindings)
   (evil-define-keys-for-modes "normal" modes
-    (map (lambda (b) (cons (evil-leader-chord (car b)) (cdr b))) bindings)))
+    (apply append
+           (map (lambda (b)
+                  (map (lambda (seq) (cons seq (cdr b)))
+                       (evil-leader-sequences (car b))))
+                bindings))))
 
 ;; --- evil-collection: special read-only buffers -----------------------------
 ;; Macros' "special" buffers (magit, dired, dired-sidebar, grep, …) drive their own

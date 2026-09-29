@@ -52,6 +52,24 @@ impl ModeStack {
     }
 }
 
+/// The keymap holding modal leader chords (`evil-leader-set`). Normal state in
+/// file buffers resolves them from `evil-normal` like any other key; this copy
+/// is what the places `evil-normal` never reaches consult — special buffers
+/// (magit, dashboards, terminals) and Insert state (via the alt leader).
+pub const LEADER_KEYMAP: &str = "evil-leader";
+
+/// Where a key sequence lands in a special buffer's modal overlay plus the
+/// leader keymap (see [`Keymap::resolve_leader`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum LeaderMatch<'a> {
+    /// A complete binding: run this expression.
+    Bound(&'a str),
+    /// A strict prefix of a longer binding: wait for the next key.
+    Prefix,
+    /// Neither keymap knows the sequence.
+    Miss,
+}
+
 /// Global key bindings, keyed by mode name then by chord sequence (e.g.
 /// `"ctrl-x ctrl-f"`) → Steel expression. Shared across all buffers.
 #[derive(Debug, Default)]
@@ -129,11 +147,66 @@ impl Keymap {
         major.is_some_and(|m| self.is_prefix_mode(&format!("{state}:{m}"), sequence))
             || self.is_prefix_mode(state, sequence)
     }
+
+    /// Resolve `sequence` against the leader keymap, letting `overlay` (a
+    /// special buffer's `<style>-normal:<major>` map, when there is one) shadow
+    /// it — so `evil-leader-set-for-modes` beats the global leader in that mode.
+    /// Same precedence as the special-buffer layer: an exact overlay binding,
+    /// then a LONGER overlay binding (pend), then the leader map's.
+    pub fn resolve_leader(&self, overlay: Option<&str>, sequence: &str) -> LeaderMatch<'_> {
+        if let Some(o) = overlay {
+            if let Some(expr) = self.resolve_mode(o, sequence) {
+                return LeaderMatch::Bound(expr);
+            }
+            if self.is_prefix_mode(o, sequence) {
+                return LeaderMatch::Prefix;
+            }
+        }
+        if let Some(expr) = self.resolve_mode(LEADER_KEYMAP, sequence) {
+            LeaderMatch::Bound(expr)
+        } else if self.is_prefix_mode(LEADER_KEYMAP, sequence) {
+            LeaderMatch::Prefix
+        } else {
+            LeaderMatch::Miss
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Keymap;
+    use super::{Keymap, LEADER_KEYMAP, LeaderMatch};
+
+    #[test]
+    fn leader_keymap_resolves_under_mode_overlay() {
+        let mut km = Keymap::default();
+        km.define(LEADER_KEYMAP, "space n o", "delete-other-windows");
+        km.define(LEADER_KEYMAP, "alt-space n o", "delete-other-windows");
+        km.define("evil-normal:k8s-mode", "j", "next-line");
+        km.define("evil-normal:k8s-mode", "space n d", "k8s-describe");
+
+        let ov = Some("evil-normal:k8s-mode");
+        assert_eq!(km.resolve_leader(ov, "space"), LeaderMatch::Prefix);
+        assert_eq!(km.resolve_leader(ov, "space n"), LeaderMatch::Prefix);
+        assert_eq!(
+            km.resolve_leader(ov, "space n o"),
+            LeaderMatch::Bound("delete-other-windows")
+        );
+        // A per-mode binding shadows the global leader in that mode only.
+        assert_eq!(
+            km.resolve_leader(ov, "space n d"),
+            LeaderMatch::Bound("k8s-describe")
+        );
+        assert_eq!(km.resolve_leader(None, "space n d"), LeaderMatch::Miss);
+        // The overlay's own plain keys still resolve (it runs first).
+        assert_eq!(km.resolve_leader(ov, "j"), LeaderMatch::Bound("next-line"));
+        // The alt leader works without any overlay (Insert state, terminals).
+        assert_eq!(km.resolve_leader(None, "alt-space"), LeaderMatch::Prefix);
+        assert_eq!(
+            km.resolve_leader(None, "alt-space n o"),
+            LeaderMatch::Bound("delete-other-windows")
+        );
+        assert_eq!(km.resolve_leader(ov, "space x"), LeaderMatch::Miss);
+    }
 
     #[test]
     fn evil_mode_scoped_keymaps_shadow_global() {
