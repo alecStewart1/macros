@@ -326,6 +326,112 @@ impl Editor {
         self.evil_normal_state(cx);
     }
 
+    /// Block `r<char>`: overwrite every char inside the rectangle (only the
+    /// `[left, right]` columns of each row, rows shorter than `left` untouched),
+    /// then return to Normal at the block's top-left.
+    pub(super) fn evil_block_replace(&mut self, ch: &str, cx: &mut Context<Self>) {
+        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+            return;
+        };
+        self.begin_undo_group();
+        for row in (top..=bottom).rev() {
+            let lr = self.active.buffer.line_range(row);
+            let line = self.active.buffer.slice_to_string(lr.clone());
+            let s = char_col_byte(&line, left);
+            let e = char_col_byte(&line, right + 1);
+            if e > s {
+                let n = line[s..e].chars().count();
+                self.edit(lr.start + s..lr.start + e, &ch.repeat(n));
+            }
+        }
+        self.end_undo_group();
+        let top_line = self.active.buffer.line_range(top);
+        let line = self.active.buffer.slice_to_string(top_line.clone());
+        let cursor = top_line.start + char_col_byte(&line, left);
+        self.collapse_to(cursor);
+        self.evil_normal_state(cx);
+    }
+
+    /// Helix `p` (after) / `P` (before): paste the clipboard/kill-ring text at
+    /// the end (start) of EVERY selection — a bare cursor counts as the char
+    /// under it — and select what was pasted. Text ending in a newline pastes
+    /// line-wise: on the line below (above) the selection.
+    pub(super) fn helix_paste(&mut self, after: bool, cx: &mut Context<Self>) {
+        self.sync_clipboard_into_kill_ring(cx);
+        let Some(text) = self.kill_ring.last().cloned() else {
+            self.echo("Kill ring is empty", cx);
+            return;
+        };
+        let linewise = text.ends_with('\n');
+        let buf = &self.active.buffer;
+        let mut inserts: Vec<usize> = self
+            .all_selections()
+            .into_iter()
+            .map(|(a, h)| {
+                let (lo, hi) = if a == h {
+                    let eol = buf.line_range_at(h).end;
+                    (h, buf.next_grapheme(h).min(eol.max(h)))
+                } else {
+                    (a.min(h), a.max(h))
+                };
+                if linewise {
+                    if after {
+                        // Start of the line after the selection's last line
+                        // (`hi` is exclusive, so a whole-line `x` selection
+                        // already ends on that line start).
+                        let last = if hi > lo && hi > 0 { hi - 1 } else { hi };
+                        let lr = buf.line_range_at(last);
+                        if lr.end < buf.len() {
+                            lr.end + 1
+                        } else {
+                            lr.end
+                        }
+                    } else {
+                        buf.line_range_at(lo).start
+                    }
+                } else if after {
+                    hi
+                } else {
+                    lo
+                }
+            })
+            .collect();
+        inserts.sort_unstable();
+        inserts.dedup();
+        let len = self.active.buffer.len();
+        let ends_in_newline = len > 0 && self.active.buffer.slice_to_string(len - 1..len) == "\n";
+        // Pasting line-wise after the last line of a file with no trailing
+        // newline: add the break before the text instead.
+        let piece = |at: usize| -> String {
+            if linewise && after && at == len && len > 0 && !ends_in_newline {
+                format!("\n{}", text.strip_suffix('\n').unwrap_or(&text))
+            } else {
+                text.clone()
+            }
+        };
+        let pieces: Vec<(usize, String)> = inserts.iter().map(|&at| (at, piece(at))).collect();
+        self.begin_undo_group();
+        for (at, t) in pieces.iter().rev() {
+            self.edit(*at..*at, t);
+        }
+        self.end_undo_group();
+        // Select each pasted piece, shifting by the text inserted before it.
+        let mut shift = 0;
+        let mut sels = Vec::new();
+        for (at, t) in &pieces {
+            let s = at + shift;
+            let e = s + t.len();
+            let s = if t.starts_with('\n') && linewise {
+                s + 1
+            } else {
+                s
+            };
+            sels.push((s, e));
+            shift += t.len();
+        }
+        self.set_selections(sels, cx);
+    }
+
     /// The text inside a block rectangle: columns `[left, right]` of rows
     /// `[top, bottom]`, one buffer line per row joined by newlines (rows shorter
     /// than `left` contribute an empty string).
@@ -386,11 +492,12 @@ impl Editor {
     /// under the cursor, leaving the cursor on the last grapheme pasted.
     fn evil_paste_charwise(&mut self, text: &str, after: bool, cx: &mut Context<Self>) {
         let p = self.point();
+        // After the char under the cursor — but never past the line end: on an
+        // empty line `next_grapheme` would step over the break and paste onto
+        // the NEXT line.
         let at = if after {
-            self.active
-                .buffer
-                .next_grapheme(p)
-                .min(self.active.buffer.len())
+            let eol = self.active.buffer.line_range_at(p).end;
+            self.active.buffer.next_grapheme(p).min(eol)
         } else {
             p
         };
@@ -408,6 +515,15 @@ impl Editor {
     /// Line-wise paste: drop the killed line(s) on a fresh line below (vim `p`)
     /// or above (`P`) the current one, cursor at the first non-blank.
     fn evil_paste_linewise(&mut self, text: &str, after: bool, cx: &mut Context<Self>) {
+        // A line yanked from the last line of a file with no trailing newline
+        // has none; supply it so the paste still lands on a line of its own.
+        let owned;
+        let text = if text.ends_with('\n') {
+            text
+        } else {
+            owned = format!("{text}\n");
+            &owned
+        };
         let line = self.active.buffer.line_range_at(self.point());
         let line_start = if after {
             if line.end < self.active.buffer.len() {

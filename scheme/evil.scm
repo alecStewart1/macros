@@ -7,18 +7,58 @@
 ;; you want a Doom/Spacemacs-style menu.
 
 ;; --- composite operators (commands enqueue in order when a fn is called) ----
-(define (evil-append)      (forward-char) (evil-insert-state))
+;; a — insert after the char under the cursor, but never past the line end: on
+;; an empty line `forward-char` would step over the break onto the next line.
+(define (evil-append)
+  (when (< (point) (line-end-pos (point))) (forward-char))
+  (evil-insert-state))
 (define (evil-append-line) (move-end-of-line) (evil-insert-state))
 (define (evil-insert-line) (evil-first-non-blank) (evil-insert-state)) ; I — first non-blank
 (define (evil-open-below)  (move-end-of-line) (newline) (evil-insert-state))
 (define (evil-open-above)  (move-beginning-of-line) (open-line) (evil-insert-state))
-;; dd — delete the whole line linewise (including its trailing newline) and
-;; copy it to the kill ring. Selecting BOL→start-of-next-line and killing the
-;; region handles empty lines correctly; the old `kill-line` + `delete-char`
-;; form swallowed the first character of the *next* line on an empty line.
+;; The typed count for a count-aware command (see `set-count-aware!` below),
+;; at least 1. `(prefix-count)` itself is 0 when no count was typed.
+(define (evil-count) (max 1 (prefix-count)))
+
+;; The last line a linewise op can reach: a buffer ending in "\n" has a phantom
+;; empty line after it that Vim doesn't count.
+(define (evil-last-line)
+  (let ((mx (point-max)) (n (line-count)))
+    (if (and (> mx 0) (equal? (buffer-substring (- mx 1) mx) "\n") (> n 1))
+        (- n 2)
+        (- n 1))))
+
+;; The `n` whole lines from point's line down (clamped at the last line), as
+;; (start end eof?): `end` is past the last line's newline, or — when that line
+;; is the buffer's last and has no newline — the buffer end, with eof? #t.
+(define (evil-lines-range n)
+  (let* ((p (point))
+         (ln2 (min (evil-last-line) (+ (line-of-pos p) (- n 1))))
+         (s (line-start-pos p))
+         (le (line-end-pos (pos-at-char-column ln2 0))))
+    (if (< le (point-max))
+        (list s (+ le 1) #f)
+        (list s le #t))))
+
+;; dd / 3dd — delete whole lines linewise (with their newlines) into the
+;; register. On the buffer's last line (no newline after it) the newline BEFORE
+;; the lines goes instead, so no phantom empty line is left behind; the
+;; register still gets plain "line" text and linewise paste adds the break.
 (define (evil-delete-line)
-  (move-beginning-of-line) (set-mark) (move-end-of-line) (forward-char)
-  (kill-region) (evil-set-linewise))
+  (let* ((r (evil-lines-range (evil-count))) (s (car r)) (e (cadr r)))
+    (kill-region-between s e)
+    (evil-set-linewise)
+    (if (and (list-ref r 2) (> s 0))
+        ;; the lines were the last ones: drop the newline before them too and
+        ;; land on the (new) last line's first non-blank
+        (let ((ls (line-start-pos (- s 1))))
+          (delete-region (- s 1) s)
+          (goto-char (evil-skip-blanks-to ls (- s 1))))
+        (if (and (= e (point-max)) (> s 0))
+            ;; deleted through the end: land on the line above
+            (goto-char (evil-skip-blanks-to (line-start-pos (- s 1)) (- s 1)))
+            ;; the next line slides up to `s`: its first non-blank, pre-computed
+            (goto-char (+ s (- (evil-skip-blanks-to e (line-end-pos e)) e)))))))
 ;; Visual-mode delete/yank are character-wise (the selection's exact range).
 (define (evil-visual-delete) (kill-region) (evil-set-charwise) (evil-normal-state))
 (define (evil-visual-yank)
@@ -31,7 +71,19 @@
   (evil-normal-state))
 ;; Visual-LINE delete/yank are line-wise: the visual region already covers whole
 ;; lines (incl. the trailing newline), so a following `p`/`P` pastes the vim way.
-(define (evil-visual-line-delete) (kill-region) (evil-set-linewise) (evil-normal-state))
+;; On the buffer's last line (no newline after it) the region stops at the
+;; buffer end; drop the newline BEFORE it too, like `dd` there, so no empty
+;; line is left behind.
+(define (evil-visual-line-eof-start)   ; region start when the region hits EOF, else #f
+  (let ((rb (region-beginning)) (re (region-end)) (mx (point-max)))
+    (and (>= rb 0) (= re mx) (> rb 0)
+         (not (equal? (buffer-substring (- re 1) re) "\n"))
+         rb)))
+(define (evil-visual-line-delete)
+  (let ((eof (evil-visual-line-eof-start)))
+    (kill-region) (evil-set-linewise)
+    (when eof (delete-region (- eof 1) eof)))
+  (evil-normal-state))
 (define (evil-visual-line-yank)
   (let ((rb (region-beginning)))
     (kill-ring-save) (evil-set-linewise)
@@ -42,10 +94,11 @@
 ;; to where the yank started, vim-style. Each marks the yank line- or char-wise
 ;; so a following `p`/`P` pastes the vim way.
 (define (evil-yank-line)
-  ;; yy — line-wise: grab the whole line *including* its trailing newline, so
-  ;; `p` drops it on a fresh line below.
-  (move-beginning-of-line) (set-mark) (move-end-of-line) (forward-char)
-  (kill-ring-save) (evil-set-linewise) (move-beginning-of-line))
+  ;; yy / 3yy — line-wise: grab whole lines *including* their trailing newline,
+  ;; so `p` drops them on fresh lines below. The cursor stays put (Vim).
+  (let* ((p (point)) (r (evil-lines-range (evil-count))))
+    (set-region (car r) (cadr r)) (kill-ring-save) (evil-set-linewise)
+    (goto-char p)))
 (define (evil-yank-to-eol)
   (let ((p (point)))
     (set-mark) (move-end-of-line) (kill-ring-save) (evil-set-charwise)
@@ -53,8 +106,9 @@
 (define (evil-yank-word)
   ;; yw — character-wise, using the vim `w` motion (to the start of the next
   ;; word) so the trailing whitespace is included, matching `w`.
-  (let ((p (point)))
-    (set-mark) (forward-word-start) (kill-ring-save) (evil-set-charwise)
+  (let ((p (point)) (e (evil-word-op-end (point))))
+    (when (< p e)
+      (set-region p e) (kill-ring-save) (evil-set-charwise))
     (goto-char p)))
 
 ;; --- more operators & motions (the rest of the common Vim verbs) -------------
@@ -80,14 +134,23 @@
 
 ;; gg / G — first / last line, on its first non-blank. Scanned directly: point
 ;; reads are a pre-command snapshot, so we can't jump-then-read-the-new-line.
+;; `5G` / `5gg` — line 5 (1-based), on its first non-blank.
+(define (evil-goto-line-count n)
+  (let* ((ln (min (evil-last-line) (max 0 (- n 1))))
+         (s (pos-at-char-column ln 0)))
+    (goto-char (evil-skip-blanks-to s (line-end-pos s)))))
 (define (evil-goto-first-line)
+  (if (> (prefix-count) 0) (evil-goto-line-count (prefix-count)) (evil-goto-first-line-0)))
+(define (evil-goto-last-line)
+  (if (> (prefix-count) 0) (evil-goto-line-count (prefix-count)) (evil-goto-last-line-0)))
+(define (evil-goto-first-line-0)
   (let* ((mx (point-max))
          (end (let loop ((i 0))
                 (cond ((>= i mx) mx)
                       ((equal? (buffer-substring i (+ i 1)) "\n") i)
                       (else (loop (+ i 1)))))))
     (goto-char (evil-skip-blanks-to 0 end))))
-(define (evil-goto-last-line)
+(define (evil-goto-last-line-0)
   (let* ((mx (point-max))
          ;; ignore one trailing newline so a file ending in "\n" doesn't land us
          ;; on a phantom empty line below the text.
@@ -109,9 +172,12 @@
 ;; x — delete the char under the cursor INTO the register (Vim `x` = `dl`), so a
 ;; following `p` can put it back. Char-wise; a no-op on an empty line.
 (define (evil-delete-char)
-  (let* ((b (line-bounds)) (eol (cadr b)) (p (point)))
-    (when (< p eol)
-      (set-mark) (forward-char) (kill-region) (evil-set-charwise))))
+  ;; 3x deletes up to 3 chars, never past the line end.
+  (let* ((b (line-bounds)) (eol (cadr b)) (p (point))
+         (e (let loop ((i p) (n (evil-count)))
+              (if (or (<= n 0) (>= i eol)) i (loop (grapheme-forward i) (- n 1))))))
+    (when (< p e)
+      (kill-region-between p e) (evil-set-charwise))))
 
 ;; D / d$ — delete to end of line.  C / c$ — change to end of line.
 (define (evil-delete-to-eol)
@@ -119,18 +185,38 @@
 (define (evil-change-to-eol)
   (set-mark) (move-end-of-line) (kill-region) (evil-insert-state))
 
-;; cc / S — change the whole line: clear its text and insert (the line stays).
+;; cc / S / 3cc — change whole lines: clear their text (keeping one line) and
+;; insert on it.
 (define (evil-change-line)
-  (move-beginning-of-line) (set-mark) (move-end-of-line) (kill-region) (evil-insert-state))
+  (let* ((r (evil-lines-range (evil-count))) (s (car r))
+         (e (if (list-ref r 2) (cadr r) (- (cadr r) 1))))
+    (when (< s e) (kill-region-between s e) (evil-set-linewise))
+    (goto-char s)
+    (evil-insert-state)))
 
 ;; s — substitute the char under the cursor (delete it, then insert).
 (define (evil-substitute-char) (evil-delete-char) (evil-insert-state))
 
 ;; dw / db, cw / cb — word operators. `dw` runs to the next word start (Vim `w`,
 ;; trailing space included); `cw` stops at the word end (Vim treats `cw` as `ce`).
-(define (evil-delete-word)      (set-mark) (forward-word-start) (kill-region) (evil-set-charwise))
+;; Where a `w` operator stops: the next word start, but clamped to the line end
+;; when that start is on a later line (Vim: `dw` on a line's last word deletes
+;; to the end of the line; it never joins the next one).
+(define (evil-word-op-end p)
+  (let ((nx (word-forward-start p)) (le (line-end-pos p)))
+    (if (and (> nx le) (< p le)) le nx)))
+(define (evil-delete-word)
+  (let ((p (point)))
+    (kill-region-between p (evil-word-op-end p)) (evil-set-charwise)))
 (define (evil-delete-word-back) (set-mark) (backward-word-start) (kill-region) (evil-set-charwise))
-(define (evil-change-word)      (set-mark) (forward-word-end)   (kill-region) (evil-insert-state))
+;; cw — Vim treats it as `ce`, but from INSIDE a word it stops at that word's
+;; end (on its last char, `ce` would jump to the next word). So: kill to the end
+;; of the char run under point (word, punctuation, or blanks).
+(define (evil-change-word)
+  (let ((p (point)) (r (evil-object-word #t)))
+    (when (and r (< p (cdr r)))
+      (kill-region-between p (cdr r)) (evil-set-charwise))
+    (evil-insert-state)))
 (define (evil-change-word-back) (set-mark) (backward-word-start) (kill-region) (evil-insert-state))
 
 ;; ~ — toggle the case of the char under the cursor; the replace leaves the
@@ -145,14 +231,39 @@
 ;; J — join the next line onto this one, collapsing its leading indentation to a
 ;; single space (Vim `J`). Kept self-contained here (evil.scm must not depend on
 ;; editing.scm: load order isn't guaranteed and the tests load evil.scm alone).
+;; With a count, `3J` joins 3 lines (2 joins). Like Vim, no space is added when
+;; the next line is empty (after its indent), starts with `)`, or the line
+;; already ends in a blank. Edits run bottom-up so earlier offsets stay valid.
+(define (evil-join-sep e i mx)
+  (let ((next (if (< i mx) (buffer-substring i (+ i 1)) "\n")))
+    (if (or (equal? next "\n") (equal? next ")")
+            (and (> e (line-start-pos e)) (evil-blank-pos? (- e 1))))
+        ""
+        " ")))
 (define (evil-join-line)
-  (let* ((b (line-bounds)) (e (cadr b)) (mx (point-max)))
-    (when (< e mx)
-      (let loop ((i (+ e 1)))
-        (if (and (< i mx)
-                 (let ((c (buffer-substring i (+ i 1)))) (or (equal? c " ") (equal? c "\t"))))
-            (loop (+ i 1))
-            (replace-region e i " "))))))
+  (let* ((mx (point-max))
+         (joins (max 1 (- (evil-count) 1)))
+         ;; each join, top-down: (eol first-non-blank-of-next-line separator)
+         (spots (let loop ((pos (point)) (k joins) (acc '()))
+                  (let ((e (line-end-pos pos)))
+                    (if (or (<= k 0) (>= e mx))
+                        (reverse acc)
+                        (let ((i (let skip ((i (+ e 1)))
+                                   (if (and (< i mx) (evil-blank-pos? i)) (skip (+ i 1)) i))))
+                          (loop (+ e 1) (- k 1)
+                                (cons (list e i (evil-join-sep e i mx)) acc))))))))
+    (when (not (null? spots))
+      (for-each (lambda (sp) (replace-region (car sp) (cadr sp) (list-ref sp 2)))
+                (reverse spots))
+      ;; Vim leaves the cursor at the last join point: its eol, shifted left by
+      ;; what the earlier joins removed.
+      (let loop ((ss spots) (removed 0))
+        (let ((sp (car ss)))
+          (if (null? (cdr ss))
+              (goto-char (- (car sp) removed))
+              (loop (cdr ss)
+                    (+ removed (- (- (cadr sp) (car sp))
+                                (string-length (list-ref sp 2)))))))))))
 
 ;; gq / gw — Vim's format operator: re-wrap text at *fill-column* (80 by
 ;; default), continuing indentation and comment leaders. The wrap engine
@@ -233,6 +344,7 @@
 (define *evil-find-char* #f)     ; last sought char, for ; and ,
 (define *evil-find-till* #f)     ; t/T (stop short) vs f/F (land on it)
 (define *evil-find-forward* #t)
+(define *evil-find-count* 1)     ; `2fx` — the count, captured when armed
 
 ;; Byte offset the find lands on, scanning the line of `pos`, or #f. `till`
 ;; stops one grapheme before (after, when backward) the match. Steps by
@@ -254,17 +366,28 @@
                 ((<= i ls) #f)
                 (else (loop (grapheme-backward i))))))))
 
+;; The `n`th match from `pos`, or #f when there are fewer (Vim then doesn't
+;; move). A repeated `t` would re-find the char it's parked before, so each
+;; further step searches from one grapheme on.
+(define (evil-find-nth pos ch till forward n)
+  (let loop ((p pos) (k n))
+    (let ((tgt (evil-find-target-at p ch till forward)))
+      (cond ((not tgt) #f)
+            ((<= k 1) tgt)
+            (else (loop (if till (if forward (grapheme-forward tgt) (grapheme-backward tgt)) tgt)
+                        (- k 1)))))))
 (define (evil-find-go tgt extend)
   (when tgt (if extend (select-to tgt) (goto-char tgt))))
 (define (evil-find-dispatch ch)         ; armed from normal state
   (set! *evil-find-char* ch)
-  (evil-find-go (evil-find-target-at (point) ch *evil-find-till* *evil-find-forward*) #f))
+  (evil-find-go (evil-find-nth (point) ch *evil-find-till* *evil-find-forward* *evil-find-count*) #f))
 (define (evil-find-dispatch-visual ch)  ; armed from visual states — extends
   (set! *evil-find-char* ch)
-  (evil-find-go (evil-find-target-at (point) ch *evil-find-till* *evil-find-forward*) #t))
+  (evil-find-go (evil-find-nth (point) ch *evil-find-till* *evil-find-forward* *evil-find-count*) #t))
 (define (evil-find-arm till forward callback prompt)
   (set! *evil-find-till* till)
   (set! *evil-find-forward* forward)
+  (set! *evil-find-count* (evil-count))
   (read-char prompt callback))
 (define (evil-find-char-forward)         (evil-find-arm #f #t 'evil-find-dispatch "f-"))
 (define (evil-find-char-backward)        (evil-find-arm #f #f 'evil-find-dispatch "F-"))
@@ -278,7 +401,7 @@
 ;; stored direction (vim: two `,` in a row go the same way, not back and forth).
 (define (evil-find-repeat-dir forward extend)
   (when *evil-find-char*
-    (evil-find-go (evil-find-target-at (point) *evil-find-char* *evil-find-till* forward)
+    (evil-find-go (evil-find-nth (point) *evil-find-char* *evil-find-till* forward (evil-count))
                   extend)))
 (define (evil-find-repeat)                (evil-find-repeat-dir *evil-find-forward* #f))
 (define (evil-find-repeat-reverse)        (evil-find-repeat-dir (not *evil-find-forward*) #f))
@@ -316,6 +439,9 @@
       (set-search-query
        (string-append "\\b" (regexp-quote (buffer-substring (car w) (cdr w))) "\\b")
        forward)
+      ;; `#` searches back from the word's START, or mid-word it would just
+      ;; find the word under the cursor.
+      (when (not forward) (goto-char (car w)))
       (evil-search-next))))
 (define (evil-search-word-forward)  (evil-search-word #t))
 (define (evil-search-word-backward) (evil-search-word #f))
@@ -324,7 +450,9 @@
 ;; Jump between a bracket and its match, nesting-aware. The bracket is the char
 ;; under the cursor, or the first one to the right on the current line (vim).
 ;; A plain char scan: strings and comments are not understood.
-(define (evil-matchit)
+(define (evil-matchit)        (let ((tg (evil-matchit-target))) (when tg (goto-char tg))))
+(define (evil-matchit-visual) (let ((tg (evil-matchit-target))) (when tg (select-to tg))))
+(define (evil-matchit-target)
   (let* ((b (line-bounds)) (le (cadr b)) (mx (point-max))
          (brackets (list "(" ")" "[" "]" "{" "}"))
          (start (let loop ((i (point)))
@@ -365,7 +493,7 @@
                                     ((equal? cs open)
                                      (if (= d 1) j (loop (cdr chars) j (- d 1))))
                                     (else (loop (cdr chars) j d)))))))))
-        (when tgt (goto-char tgt))))))
+        tgt))))
 
 ;; --- text objects (iw/aw, quotes, pairs, ip/ap) ----------------------------------
 ;; `d i w`, `c a (`, `y i "` , visual `i w`, … — each object computes a byte
@@ -473,7 +601,9 @@
         (cond ((equal? op "delete") (kill-region-between s e))
               ((equal? op "change") (kill-region-between s e) (evil-insert-state))
               ((equal? op "yank")   (set-region s e) (kill-ring-save) (goto-char s))
-              ((equal? op "select") (set-region s e)))))))
+              ;; Visual is inclusive of the char under the cursor, so park the
+              ;; cursor ON the object's last char, not just past it.
+              ((equal? op "select") (set-region s (grapheme-backward e))))))))
 
 ;; Object keys → object names; every (c/d/y) × (i/a) × key chord is generated
 ;; below, plus visual-mode `i <key>` / `a <key>` selection. b/B are the vim
@@ -520,7 +650,12 @@
 (define (evil-visual-toggle-case) (evil-visual-fold-case string-toggle-case)) ; ~
 ;; Visual-LINE change: drop the whole-line selection, then open a fresh line in
 ;; its place and insert (the selection already spans entire lines).
-(define (evil-visual-line-change) (kill-region) (evil-set-linewise) (evil-open-above))
+(define (evil-visual-line-change)
+  ;; At EOF the kill already leaves an empty last line: insert there instead of
+  ;; opening another one above it.
+  (let ((eof (evil-visual-line-eof-start)))
+    (kill-region) (evil-set-linewise)
+    (if eof (evil-insert-state) (evil-open-above))))
 
 ;; Visual `>` / `<` — shift the selected lines one indent step. Vim drops back to
 ;; Normal after a single shift (`3>` repeats instead, which the count prefix now
@@ -555,6 +690,16 @@
       (goto-char rb)))
   (evil-normal-state))
 (define (evil-visual-replace-char) (read-char "r-" 'evil-visual-replace-dispatch))
+;; Block-wise `r` overwrites only the rectangle, not the stream between its
+;; corners (the core walks the block's columns).
+(define (evil-block-replace-dispatch ch) (evil-block-replace ch))
+(define (evil-block-replace-char) (read-char "r-" 'evil-block-replace-dispatch))
+
+;; Visual `l` stops on the line's last char (Vim), so repeated `l` can't creep
+;; onto the line break and make `d` join lines. `$` still reaches it.
+(define (evil-visual-forward-char)
+  (let ((p (point)))
+    (when (< (grapheme-forward p) (line-end-pos p)) (forward-char))))
 
 ;; --- normal state -----------------------------------------------------------
 ;; motion
@@ -686,7 +831,7 @@
 
 ;; --- visual state (motions extend; the mark is active) ----------------------
 (define-key "evil-visual" "h" 'backward-char)
-(define-key "evil-visual" "l" 'forward-char)
+(define-key "evil-visual" "l" 'evil-visual-forward-char)
 (define-key "evil-visual" "j" 'next-line)
 (define-key "evil-visual" "k" 'previous-line)
 (define-key "evil-visual" "w" 'forward-word-start)
@@ -723,9 +868,12 @@
 (define-key "evil-visual" "shift-w" 'forward-bigword-start)   ; W / B / E — WORD motions
 (define-key "evil-visual" "shift-b" 'backward-bigword-start)
 (define-key "evil-visual" "shift-e" 'forward-bigword-end)
-(define-key "evil-visual" "%" 'evil-matchit)                  ; % — matching bracket
+(define-key "evil-visual" "%" 'evil-matchit-visual)           ; % — extend to matching bracket
 (define-key "evil-visual" "ctrl-d" 'evil-scroll-down)         ; half-page, extending
 (define-key "evil-visual" "ctrl-u" 'evil-scroll-up)
+(define-key "evil-visual" "v" 'evil-normal-state)             ; v again exits
+(define-key "evil-visual" "shift-v" 'evil-visual-line-state)  ; switch to line-wise
+(define-key "evil-visual" "ctrl-v" 'evil-visual-block-state)  ; switch to block-wise
 (define-key "evil-visual" "escape" 'evil-normal-state)
 
 ;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
@@ -793,7 +941,7 @@
 (define-key "evil-visual-block" "c" 'evil-block-change)        ; c — change the rectangle
 (define-key "evil-visual-block" "s" 'evil-block-change)
 (define-key "evil-visual-block" "o" 'exchange-point-and-mark)  ; o — swap block corners
-(define-key "evil-visual-block" "r" 'evil-visual-replace-char) ; r<char> — replace every char
+(define-key "evil-visual-block" "r" 'evil-block-replace-char)  ; r<char> — replace the rectangle
 (define-key "evil-visual-block" "shift-w" 'forward-bigword-start)
 (define-key "evil-visual-block" "shift-e" 'forward-bigword-end)
 (define-key "evil-visual-block" "shift-i" 'evil-block-insert)  ; I — insert down the left column
@@ -993,3 +1141,18 @@
 
 (for-each evil-collection-bind-readonly-motion
           (list "compile-mode" "grep-mode" "occur-mode"))
+
+;; --- counts ------------------------------------------------------------------
+;; These take their count as `(prefix-count)` and run once (`5G` = line 5,
+;; `3yy` = three lines, `2fx` = second x). Everything else under a count simply
+;; repeats (`3w`, `3dw`, …), squashed into one undo step by the core.
+(for-each set-count-aware!
+          '(evil-delete-line evil-yank-line evil-change-line evil-delete-char
+            evil-join-line evil-goto-first-line evil-goto-last-line
+            evil-replace-char indent-region outdent-region
+            evil-find-char-forward evil-find-char-backward
+            evil-till-char-forward evil-till-char-backward
+            evil-find-char-forward-visual evil-find-char-backward-visual
+            evil-till-char-forward-visual evil-till-char-backward-visual
+            evil-find-repeat evil-find-repeat-reverse
+            evil-find-repeat-visual evil-find-repeat-reverse-visual))

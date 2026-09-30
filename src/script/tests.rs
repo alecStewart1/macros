@@ -2641,8 +2641,208 @@ mod magit_tests {
             .commands;
         assert!(
             cmds.iter()
-                .any(|c| matches!(c, EditorCommand::SetSelections(p) if p == &[(0, 4)])),
-            "f o should select up to the o: {cmds:?}"
+                .any(|c| matches!(c, EditorCommand::SetSelections(p) if p == &[(0, 5)])),
+            "f o should select through the o (Helix includes the target): {cmds:?}"
+        );
+    }
+
+    /// Regression tests for the Vim/Helix audit: operator ranges, counts
+    /// (`(prefix-count)`), EOF linewise deletes, and Helix's cursor-on-last-char
+    /// model. Each case checks the commands a Scheme command queues against a
+    /// snapshot.
+    #[test]
+    fn modal_audit_operator_ranges_and_counts() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        let run = |text: &str, point: usize, count: usize, src: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                selections: vec![(point, point)],
+                prefix_count: count,
+                ..Default::default()
+            });
+            engine.eval(src).unwrap().commands
+        };
+        let has =
+            |cmds: &[EditorCommand], want: &dyn Fn(&EditorCommand) -> bool| cmds.iter().any(want);
+
+        // cw changes the whole word — also from its last char.
+        let c = run("hello world", 0, 0, "(evil-change-word)");
+        assert!(
+            has(&c, &|c| matches!(
+                c,
+                C::KillRegionBetween { start: 0, end: 5 }
+            )),
+            "{c:?}"
+        );
+        let c = run("hello world", 4, 0, "(evil-change-word)");
+        assert!(
+            has(&c, &|c| matches!(
+                c,
+                C::KillRegionBetween { start: 4, end: 5 }
+            )),
+            "{c:?}"
+        );
+
+        // dw on a line's last word stops at the line end (no join).
+        let c = run("foo bar\n  baz", 4, 0, "(evil-delete-word)");
+        assert!(
+            has(&c, &|c| matches!(
+                c,
+                C::KillRegionBetween { start: 4, end: 7 }
+            )),
+            "{c:?}"
+        );
+
+        // dd on a last line with no newline takes the newline before it.
+        let c = run("a\nb", 2, 0, "(evil-delete-line)");
+        assert!(
+            has(&c, &|c| matches!(
+                c,
+                C::KillRegionBetween { start: 2, end: 3 }
+            )),
+            "{c:?}"
+        );
+        assert!(
+            has(&c, &|c| matches!(c, C::DeleteRegion { start: 1, end: 2 })),
+            "{c:?}"
+        );
+
+        // 3dd / 2yy cover several lines in ONE kill.
+        let c = run("a\nb\nc\nd\n", 0, 3, "(evil-delete-line)");
+        assert!(
+            has(&c, &|c| matches!(
+                c,
+                C::KillRegionBetween { start: 0, end: 6 }
+            )),
+            "{c:?}"
+        );
+        let c = run("a\nb\nc", 0, 2, "(evil-yank-line)");
+        assert!(
+            has(&c, &|c| matches!(c, C::SetRegion { start: 0, end: 4 })),
+            "{c:?}"
+        );
+        assert!(
+            has(&c, &|c| matches!(c, C::GotoChar(0))),
+            "yy keeps the cursor: {c:?}"
+        );
+
+        // 2G — line 2's first non-blank; plain G still means the last line.
+        let c = run("a\n  b\nc\n", 0, 2, "(evil-goto-last-line)");
+        assert!(has(&c, &|c| matches!(c, C::GotoChar(4))), "{c:?}");
+        let c = run("a\n  b\nc\n", 0, 0, "(evil-goto-last-line)");
+        assert!(has(&c, &|c| matches!(c, C::GotoChar(6))), "{c:?}");
+
+        // 3x — three chars, clamped to the line.
+        let c = run("abcd\n", 2, 3, "(evil-delete-char)");
+        assert!(
+            has(&c, &|c| matches!(
+                c,
+                C::KillRegionBetween { start: 2, end: 4 }
+            )),
+            "{c:?}"
+        );
+
+        // J adds no space before `)`; normally one.
+        let c = run("foo\n  )bar\n", 0, 0, "(evil-join-line)");
+        assert!(
+            has(
+                &c,
+                &|c| matches!(c, C::ReplaceRegion { start: 3, end: 6, text } if text.is_empty())
+            ),
+            "{c:?}"
+        );
+        let c = run("foo\nbar\nbaz\n", 0, 3, "(evil-join-line)");
+        assert_eq!(
+            c.iter()
+                .filter(|c| matches!(c, C::ReplaceRegion { text, .. } if text == " "))
+                .count(),
+            2,
+            "3J joins three lines: {c:?}"
+        );
+
+        // viw selects the word, cursor ON its last char (Visual is inclusive).
+        let c = run("foo bar", 1, 0, r#"(evil-object-cmd "select" "i" "word")"#);
+        assert!(
+            has(&c, &|c| matches!(c, C::SetRegion { start: 0, end: 2 })),
+            "{c:?}"
+        );
+
+        // `#` mid-word searches back from the word start.
+        let c = run("foo bar foo", 9, 0, "(evil-search-word-backward)");
+        assert!(has(&c, &|c| matches!(c, C::GotoChar(8))), "{c:?}");
+
+        // 2f. — the second match.
+        run("a.b.c", 0, 2, "(set! *evil-find-count* (evil-count))");
+        engine
+            .eval("(set! *evil-find-till* #f) (set! *evil-find-forward* #t)")
+            .unwrap();
+        let c = engine.eval(r#"(evil-find-dispatch ".")"#).unwrap().commands;
+        assert!(has(&c, &|c| matches!(c, C::GotoChar(3))), "{c:?}");
+
+        // --- Helix: the cursor is ON a selection's last char -----------------
+        let sel = |text: &str, sels: Vec<(usize, usize)>, src: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                selections: sels,
+                ..Default::default()
+            });
+            engine.eval(src).unwrap().commands
+        };
+        let sels_of = |c: &[EditorCommand]| {
+            c.iter()
+                .find_map(|c| match c {
+                    C::SetSelections(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no SetSelections in {c:?}"))
+        };
+        let text = "hello world\nsecond line\n";
+        // e includes the word's last char.
+        assert_eq!(
+            sels_of(&sel(text, vec![(0, 0)], "(helix-word-end)")),
+            vec![(0, 5)]
+        );
+        // b from a bare cursor mid-word keeps the cursor char.
+        assert_eq!(
+            sels_of(&sel(text, vec![(13, 13)], "(helix-word-prev)")),
+            vec![(14, 12)]
+        );
+        // gl lands on the last char, not the newline.
+        assert_eq!(
+            sels_of(&sel(text, vec![(0, 0)], "(helix-goto-line-end)")),
+            vec![(10, 10)]
+        );
+        // a on a bare cursor appends AFTER the char.
+        assert_eq!(
+            sels_of(&sel(text, vec![(0, 0)], "(helix-append-after)")),
+            vec![(1, 1)]
+        );
+        // x then A appends on the SELECTED line, not the next one.
+        assert_eq!(
+            sels_of(&sel(text, vec![(0, 12)], "(helix-append-line-end)")),
+            vec![(11, 11)]
+        );
+        // x then o collapses to a bare cursor before opening the line (no delete).
+        let c = sel(text, vec![(0, 12)], "(helix-open-below)");
+        assert_eq!(sels_of(&c), vec![(11, 11)]);
+        assert!(has(&c, &|c| matches!(c, C::Newline)), "{c:?}");
+        // x then j moves from the selected line, landing on the next one.
+        let j = sels_of(&sel(text, vec![(0, 12)], "(helix-line-down)"));
+        assert!(
+            (12..=23).contains(&j[0].1),
+            "xj should land on line 2: {j:?}"
+        );
+        // d leaves select mode.
+        engine.eval("(set! *helix-extend* #t)").unwrap();
+        sel(text, vec![(0, 5)], "(helix-delete)");
+        assert_eq!(
+            engine.eval("*helix-extend*").unwrap().value.as_deref(),
+            Some("#false")
         );
     }
 

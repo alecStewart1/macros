@@ -475,14 +475,9 @@ impl Editor {
         {
             self.pending_keys.clear();
             self.status = SharedString::default();
-            // Consume any count prefix: run the binding that many times. Each
-            // run is a full dispatch, so a motion repeats and an operator (`3dd`)
-            // applies three times — vim's semantics for everything except the
-            // insert commands, which vim replays the typed text for.
-            let count = self.modal_count.take().unwrap_or(1).max(1);
-            for _ in 0..count {
-                self.dispatch_recorded(&expr, cx);
-            }
+            // Consume any count prefix (`3dd`, `5G`); see `dispatch_counted`.
+            let count = self.modal_count.take();
+            self.dispatch_counted(&expr, count, cx);
             cx.stop_propagation();
             return Handled::Yes;
         }
@@ -885,7 +880,12 @@ impl Editor {
             self.select_to(offset, cx);
             self.evil_sync_mouse_selection();
         } else {
+            // Helix: a click replaces ALL selections with one cursor.
+            if self.modal_helix && self.has_extra_cursors() {
+                self.mc_clear(cx);
+            }
             self.move_to(offset, cx);
+            self.evil_clamp_cursor();
         }
     }
 
@@ -894,6 +894,9 @@ impl Editor {
     /// plain (exclusive) selection of the word or the whole line + newline.
     fn select_by_click(&mut self, offset: usize, line: bool, cx: &mut Context<Self>) {
         let evil_visual = !self.modal_helix && matches!(self.evil, EvilState::Normal);
+        if self.modal_helix && self.has_extra_cursors() {
+            self.mc_clear(cx);
+        }
         let buf = &self.active.buffer;
         let range = if line {
             let lr = buf.line_range_at(offset);
@@ -928,6 +931,9 @@ impl Editor {
             } else {
                 EvilState::Visual
             };
+        }
+        // Visual needs the mark active; so do Helix verbs (`all_selections`).
+        if evil_visual || self.modal_helix {
             self.active.mark_active = true;
         }
         cx.notify();
@@ -938,13 +944,15 @@ impl Editor {
     /// a Normal-state operator (`dd` would otherwise delete the cursor's line).
     /// Helix keeps selections in Normal, so it's left alone there.
     fn evil_sync_mouse_selection(&mut self) {
-        if !self.modal_helix
-            && matches!(self.evil, EvilState::Normal)
-            && !self.active.selected_range.is_empty()
-        {
-            self.evil = EvilState::Visual;
-            self.active.mark_active = true;
+        if !matches!(self.evil, EvilState::Normal) || self.active.selected_range.is_empty() {
+            return;
         }
+        // Helix has no Visual state, but its verbs only see a selection whose
+        // mark is active (`all_selections`), so a drag must activate it.
+        if !self.modal_helix {
+            self.evil = EvilState::Visual;
+        }
+        self.active.mark_active = true;
     }
 
     pub(super) fn on_mouse_move(

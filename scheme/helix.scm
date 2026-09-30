@@ -68,17 +68,51 @@
   (set! *helix-extend* (not *helix-extend*))
   (message (if *helix-extend* "-- SELECT (extend) --" "")))
 
-;; The generic motion driver. `head->new` maps a selection's current head to its
+;; Selections are stored exclusive — a forward selection's head sits one PAST
+;; its last char — but in Helix the cursor is ON that last char. This is the
+;; char the cursor is on: what cursor-relative commands (h/l/j/k, A, o, gl, …)
+;; must start from, or after `x`/`e`/`f` they'd act one char (or line) late.
+(define (helix-cursor s)
+  (let ((a (car s)) (h (cdr s)))
+    (if (> h a) (grapheme-backward h) h)))
+
+;; The generic motion driver. `head->new` maps a selection's position to its
 ;; new head. `select?` #t means a non-extend move still leaves a visible
 ;; selection from the old head to the new (word/object motions); #f collapses to
-;; a bare cursor at the new head (plain h/j/k/l moves).
+;; a bare cursor at the new position (plain h/j/k/l moves), which moves from
+;; the cursor char (see `helix-cursor`).
 (define (helix-move head->new select?)
   (helix-set!
     (map (lambda (s)
-           (let* ((a (car s)) (h (cdr s)) (nh (head->new h)))
-             (cond (*helix-extend* (cons a nh))
-                   (select?        (cons h nh))
-                   (else           (cons nh nh)))))
+           (let* ((a (car s)) (h (cdr s)))
+             (cond (*helix-extend* (cons a (head->new h)))
+                   (select?        (cons h (head->new h)))
+                   (else (let ((nh (head->new (helix-cursor s)))) (cons nh nh))))))
+         (helix-selections))))
+
+;; Forward motions whose target char is INCLUDED (e/E, f, t): `cursor->target`
+;; maps the cursor char to the target char (or #f: no match, stay put); the new
+;; head goes one past it. The selection starts just after the old one.
+(define (helix-move-inclusive cursor->target)
+  (helix-set!
+    (map (lambda (s)
+           (let* ((a (car s)) (h (cdr s)) (tg (cursor->target (helix-cursor s))))
+             (if (not tg)
+                 s
+                 (let ((nh (grapheme-forward tg)))
+                   (if *helix-extend* (cons a nh) (cons h nh))))))
+         (helix-selections))))
+
+;; Backward motions (b/B, F, T): head lands ON the target; the selection keeps
+;; the cursor char (a bare cursor's own char is included — `b` mid-word
+;; selects the whole word back to its start).
+(define (helix-move-backward cursor->target)
+  (helix-set!
+    (map (lambda (s)
+           (let* ((a (car s)) (h (cdr s)) (tg (cursor->target (helix-cursor s))))
+             (cond ((not tg) s)
+                   (*helix-extend* (cons a tg))
+                   (else (cons (if (= a h) (grapheme-forward h) h) tg)))))
          (helix-selections))))
 
 ;; --- character / line motions ----------------------------------------------
@@ -108,20 +142,25 @@
 (define (helix-line-up)   (helix-line-move -1))
 
 (define (helix-goto-line-start) (helix-move line-start-pos #f))
-(define (helix-goto-line-end)   (helix-move line-end-pos   #f))
+;; gl / $ — ON the line's last char, not the line break (so `gl d` deletes that
+;; char instead of joining lines). An empty line has only the break.
+(define (helix-line-last-char p)
+  (let ((ls (line-start-pos p)) (le (line-end-pos p)))
+    (if (> le ls) (grapheme-backward le) le)))
+(define (helix-goto-line-end)   (helix-move helix-line-last-char #f))
 
 ;; --- word motions (these select) -------------------------------------------
 (define (helix-word-next) (helix-move word-forward-start #t)) ; w
 ;; `e` / `b` use the CLASS-AWARE primitives (the mirrors of `w`), not Emacs's
 ;; `word-forward` / `word-backward` — those treat punctuation as a separator, so
 ;; `e` sailed past a `);` run and `b` disagreed with `w` about where a word starts.
-(define (helix-word-end)  (helix-move word-forward-end   #t)) ; e
-(define (helix-word-prev) (helix-move word-backward-start #t)) ; b
+(define (helix-word-end)  (helix-move-inclusive word-forward-end))  ; e
+(define (helix-word-prev) (helix-move-backward word-backward-start)) ; b
 
 ;; W / E / B — whitespace-delimited WORDs (`foo.bar` is one WORD).
 (define (helix-bigword-next) (helix-move bigword-forward-start  #t))
-(define (helix-bigword-end)  (helix-move bigword-forward-end    #t))
-(define (helix-bigword-prev) (helix-move bigword-backward-start #t))
+(define (helix-bigword-end)  (helix-move-inclusive bigword-forward-end))
+(define (helix-bigword-prev) (helix-move-backward bigword-backward-start))
 
 ;; --- line selection (x) ----------------------------------------------------
 ;; Extend each selection out to whole lines (incl. the trailing newline). Repeat
@@ -162,21 +201,21 @@
         (cons a (grapheme-forward a))
         (cons (min a h) (max a h)))))
 
-;; `;` — collapse every selection to a bare cursor at its head.
+;; `;` — collapse every selection to a bare cursor.
+;; On the cursor char, not the exclusive head (which is past the selection).
 (define (helix-collapse)
-  (helix-set! (map (lambda (s) (let ((h (cdr s))) (cons h h))) (helix-selections))))
+  (helix-set! (map (lambda (s) (let ((c (helix-cursor s))) (cons c c))) (helix-selections))))
 
 ;; `,` — drop all but the primary selection.
 (define (helix-keep-primary)
   (let ((sels (helix-selections)))
     (when (not (null? sels)) (helix-set! (list (car sels))))))
 
-;; Escape — leave extend, collapse to a single bare cursor at the primary head.
+;; Escape — leave select (extend) mode. Like Helix it keeps the selections:
+;; `;` collapses them, `,` drops all but the primary.
 (define (helix-escape)
-  (set! *helix-extend* #f)
-  (let ((sels (helix-selections)))
-    (when (not (null? sels))
-      (let ((h (cdr (car sels)))) (helix-set! (list (cons h h)))))))
+  (when *helix-extend* (message ""))
+  (set! *helix-extend* #f))
 
 ;; --- yank / delete / change ------------------------------------------------
 ;; Selection ranges in document order, deduped trivially by sort.
@@ -192,6 +231,7 @@
 
 ;; `y` — copy every selection and report how many.
 (define (helix-yank)
+  (set! *helix-extend* #f)          ; d / c / y leave select mode, as in Helix
   (let ((ranges (helix-ranges-asc)))
     (helix-copy-ranges ranges)
     (message (string-append (number->string (length ranges)) " selection(s) yanked"))))
@@ -209,6 +249,7 @@
 ;; deletion. Deletes run high-offset-first so earlier edits don't shift later
 ;; ranges; the resulting cursors are computed up front from the snapshot.
 (define (helix-delete-core)
+  (set! *helix-extend* #f)
   (let* ((asc  (helix-ranges-asc))
          (desc (helix-sort asc (lambda (x y) (> (car x) (car y))))))
     (when (not (null? asc))
@@ -222,32 +263,55 @@
 ;; --- entering insert -------------------------------------------------------
 ;; Collapse each selection to a bare cursor at its start (`i`) or end (`a`), then
 ;; switch to Insert. Typed text replicates to every cursor (multiple-cursors).
+;; Entering Insert always leaves select mode.
 (define (helix-insert-before)
+  (set! *helix-extend* #f)
   (helix-set! (map (lambda (s) (let ((m (min (car s) (cdr s)))) (cons m m))) (helix-selections)))
   (evil-insert-state))
+;; `a` — after the selection; a bare cursor appends after the char under it
+;; (but not past the line end).
 (define (helix-append-after)
-  (helix-set! (map (lambda (s) (let ((m (max (car s) (cdr s)))) (cons m m))) (helix-selections)))
+  (set! *helix-extend* #f)
+  (helix-set!
+   (map (lambda (s)
+          (let* ((a (car s)) (h (cdr s))
+                 (m (if (= a h)
+                        (min (grapheme-forward h) (max h (line-end-pos h)))
+                        (max a h))))
+            (cons m m)))
+        (helix-selections)))
   (evil-insert-state))
 
-;; `o` / `O` — open a line below / above (single cursor) and insert.
+;; `o` / `O` — open a line below / above the primary cursor's line and insert.
+;; The selection is collapsed to a bare cursor FIRST: `newline` replaces an
+;; active selection, so after `w`/`x` a plain move-end-of-line + newline would
+;; delete the selected text (and `x o` wiped two lines).
 (define (helix-open-below)
-  (helix-keep-primary) (move-end-of-line) (newline) (evil-insert-state))
+  (set! *helix-extend* #f)
+  (let* ((s (car (helix-selections))) (le (line-end-pos (helix-cursor s))))
+    (helix-set! (list (cons le le))))
+  (newline) (evil-insert-state))
 (define (helix-open-above)
-  (helix-keep-primary) (move-beginning-of-line) (open-line) (evil-insert-state))
+  (set! *helix-extend* #f)
+  (let* ((s (car (helix-selections))) (ls (line-start-pos (min (car s) (cdr s)))))
+    (helix-set! (list (cons ls ls))))
+  (open-line) (evil-insert-state))
 
 ;; `I` / `A` — collapse each selection to its line's first non-blank / end,
 ;; then insert; typed text lands on every line at once (multiple-cursors).
 (define (helix-insert-line-start)
+  (set! *helix-extend* #f)
   (helix-set!
    (map (lambda (s)
-          (let* ((h (cdr s))
-                 (fnb (evil-skip-blanks-to (line-start-pos h) (line-end-pos h))))
+          (let* ((c (min (car s) (cdr s)))
+                 (fnb (evil-skip-blanks-to (line-start-pos c) (line-end-pos c))))
             (cons fnb fnb)))
         (helix-selections)))
   (evil-insert-state))
 (define (helix-append-line-end)
+  (set! *helix-extend* #f)
   (helix-set!
-   (map (lambda (s) (let ((le (line-end-pos (cdr s)))) (cons le le)))
+   (map (lambda (s) (let ((le (line-end-pos (helix-cursor s)))) (cons le le)))
         (helix-selections)))
   (evil-insert-state))
 
@@ -280,9 +344,11 @@
 (define *helix-find-till* #f)
 (define *helix-find-forward* #t)
 (define (helix-find-dispatch ch)
-  (helix-move
-   (lambda (h) (or (evil-find-target-at h ch *helix-find-till* *helix-find-forward*) h))
-   #t))
+  ;; f/t include the target (t: the char before it); F/T land ON it.
+  (let ((tgt (lambda (c) (evil-find-target-at c ch *helix-find-till* *helix-find-forward*))))
+    (if *helix-find-forward*
+        (helix-move-inclusive tgt)
+        (helix-move-backward tgt))))
 (define (helix-find-arm till forward prompt)
   (set! *helix-find-till* till)
   (set! *helix-find-forward* forward)
@@ -300,8 +366,16 @@
 
 ;; --- goto (g …) ------------------------------------------------------------
 (define (helix-goto-top)    (helix-set! (list (cons 0 0))))
+;; ge — the start of the LAST LINE (not the buffer end; a trailing newline's
+;; phantom empty line doesn't count).
 (define (helix-goto-bottom)
-  (let ((mx (point-max))) (helix-set! (list (cons mx mx)))))
+  (let ((s (pos-at-char-column (evil-last-line) 0))) (helix-set! (list (cons s s)))))
+
+;; Scrolling moves the cursor; collapse first so it doesn't drag a selection.
+(define (helix-half-page-down) (helix-collapse) (evil-scroll-down))
+(define (helix-half-page-up)   (helix-collapse) (evil-scroll-up))
+(define (helix-page-down)      (helix-collapse) (scroll-up))
+(define (helix-page-up)        (helix-collapse) (scroll-down))
 
 ;; --- whole-line block edits (gq reflow, J join) --------------------------------
 ;; Shared bookkeeping: expand each selection to whole lines (a bare cursor =
@@ -405,8 +479,8 @@
 (define-key "helix-normal" "d" 'helix-delete)
 (define-key "helix-normal" "c" 'helix-change)
 (define-key "helix-normal" "y" 'helix-yank)
-(define-key "helix-normal" "p" 'evil-paste-after)
-(define-key "helix-normal" "shift-p" 'evil-paste-before)
+(define-key "helix-normal" "p" 'helix-paste-after)       ; p / P — paste after/before each selection
+(define-key "helix-normal" "shift-p" 'helix-paste-before)
 (define-key "helix-normal" "r" 'helix-replace-char)   ; r<char> — replace EVERY selected char
 (define-key "helix-normal" "u" 'undo)
 (define-key "helix-normal" "shift-u" 'redo)           ; U — redo
@@ -428,10 +502,19 @@
 (define-key "helix-normal" "shift-n" 'evil-search-previous)
 (define-key "helix-normal" ":" 'evil-ex-command)
 ;; scrolling (shared with evil)
-(define-key "helix-normal" "ctrl-d" 'evil-scroll-down)
-(define-key "helix-normal" "ctrl-u" 'evil-scroll-up)
-(define-key "helix-normal" "ctrl-f" 'scroll-up)            ; full page forward
-(define-key "helix-normal" "ctrl-b" 'scroll-down)          ; full page back
+(define-key "helix-normal" "ctrl-d" 'helix-half-page-down)
+(define-key "helix-normal" "ctrl-u" 'helix-half-page-up)
+(define-key "helix-normal" "ctrl-f" 'helix-page-down)      ; full page forward
+(define-key "helix-normal" "ctrl-b" 'helix-page-up)        ; full page back
+;; Arrow/editing keys move like h/j/k/l. Unbound, they'd fall through to the
+;; Emacs motions, which EXTEND the active selection instead of moving.
+(define-key "helix-normal" "left" 'helix-char-left)
+(define-key "helix-normal" "right" 'helix-char-right)
+(define-key "helix-normal" "up" 'helix-line-up)
+(define-key "helix-normal" "down" 'helix-line-down)
+(define-key "helix-normal" "backspace" 'helix-char-left)
+(define-key "helix-normal" "home" 'helix-goto-line-start)
+(define-key "helix-normal" "end" 'helix-goto-line-end)
 (define-key "helix-normal" "z z" 'recenter)                ; zz — center cursor line
 ;; WORD motions (Helix's shifted trio) — whitespace-delimited, selecting.
 (define-key "helix-normal" "shift-w" 'helix-bigword-next)

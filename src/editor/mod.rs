@@ -550,6 +550,21 @@ pub struct Editor {
     /// next printable keystroke overwrite the character under the cursor instead
     /// of being dispatched as a command. Cleared by that keystroke or `Escape`.
     evil_replace_pending: bool,
+    /// How many chars the pending `r` overwrites (`3rx`).
+    evil_replace_count: usize,
+    /// The count published to Scheme as `(prefix-count)` while a count-aware
+    /// command is dispatched (0 otherwise).
+    prefix_count: usize,
+    /// Command names that take their count via `(prefix-count)` instead of
+    /// being run N times (`set-count-aware!`).
+    count_aware: HashSet<String>,
+    /// A counted Scheme command still repeating (see `dispatch_counted`).
+    count_repeat: Option<CountRepeat>,
+    /// While applying repetition 2..N of a counted command: kills append to the
+    /// newest kill-ring entry so `3dd` then `p` puts back all three lines.
+    kill_append: bool,
+    /// Set when a kill was appended, so the combined text reaches the clipboard.
+    kill_appended: bool,
     /// A `read-char` capture in flight: the Scheme callback the very next
     /// printable keystroke is passed to (vim `f`/`t`/`F`/`T` char-find and
     /// friends). Cleared by that keystroke; any non-text chord cancels.
@@ -767,6 +782,8 @@ struct TermGeom {
 #[derive(Clone)]
 enum MacroEvent {
     Command(String),
+    /// A modal command run under a count (`3dd`), replayed with that count.
+    Counted(String, usize),
     Text(String),
 }
 
@@ -1035,6 +1052,28 @@ pub struct FoldHitbox {
     pub line: usize,
 }
 
+/// A counted Scheme command mid-repetition (`3w` under Helix, `3dw`, …). Each
+/// run is dispatched only after the previous one's commands have applied, so it
+/// reads a fresh snapshot — dispatching all N up front would hand every run the
+/// same stale pre-command snapshot and the command would act once.
+struct CountRepeat {
+    /// The expr wrapped with a trailing `(count-repeat-step)`.
+    source: String,
+    total: usize,
+    done: usize,
+    /// Undo-tree state when the chain began, so the runs squash into one undo.
+    undo_base: UndoBase,
+}
+
+/// Where the undo tree stood before a multi-run command, for
+/// [`Editor::squash_undo_since`].
+#[derive(Clone)]
+struct UndoBase {
+    buffer: String,
+    len: usize,
+    current: usize,
+}
+
 /// Evil (modal editing) state. `Normal`/`Visual` intercept plain keys as
 /// commands; `Insert` is ordinary self-inserting editing; `Disabled` is plain
 /// Emacs behaviour.
@@ -1262,6 +1301,12 @@ impl Editor {
             helm_action_context: None,
             evil: EvilState::Disabled,
             evil_replace_pending: false,
+            evil_replace_count: 1,
+            prefix_count: 0,
+            count_aware: HashSet::new(),
+            count_repeat: None,
+            kill_append: false,
+            kill_appended: false,
             read_char_pending: None,
             config_pending: true,
             search_query: None,
@@ -1416,12 +1461,21 @@ impl Editor {
                 // after it: the script computed those commands against text the
                 // user has since edited, so their byte offsets are stale.
                 self.script_batch_stale = false;
+                // Repetition 2..N of a counted command: its kills extend the
+                // first run's kill-ring entry (see `dispatch_counted`).
+                self.kill_append = self.count_repeat.as_ref().is_some_and(|r| r.done > 0)
+                    && commands
+                        .iter()
+                        .any(|c| matches!(c, EditorCommand::CountRepeatStep));
                 for command in commands {
                     if self.script_batch_stale {
                         break;
                     }
                     self.apply_command(command, cx);
                 }
+                self.kill_append = false;
+                self.sync_appended_kill(cx);
+                self.evil_clamp_cursor();
                 self.script_batch_stale = false;
                 // `render-buffer` may have redirected icon/overlay writes to a
                 // sidebar buffer for this batch; that scope ends here.
@@ -2136,18 +2190,19 @@ impl Editor {
     /// The byte range an operation acts on and the renderer highlights. In evil
     /// Visual state this is *inclusive* of the grapheme under the block cursor
     /// (vim semantics), so the emacs-exclusive `selected_range` is extended one
-    /// grapheme to the right — but never past the end of the line, so a charwise
-    /// visual delete at EOL doesn't swallow the newline and join lines.
+    /// grapheme to the right. With the cursor ON the line end (after `$`, or on
+    /// an empty line) that grapheme is the line break, as in Vim: `v$d` joins
+    /// the lines and `vd` on an empty line deletes it. Normal state never rests
+    /// there (see `evil_clamp_cursor`), so a plain `vd` can't join by accident.
     fn visual_region(&self) -> Range<usize> {
         let r = self.active.selected_range.clone();
         match self.evil {
             EvilState::Visual => {
-                let at_eol = self.active.buffer.line_range_at(r.end).end == r.end;
-                let end = if at_eol {
-                    r.end
-                } else {
-                    self.active.buffer.next_grapheme(r.end)
-                };
+                let end = self
+                    .active
+                    .buffer
+                    .next_grapheme(r.end)
+                    .min(self.active.buffer.len());
                 r.start..end.max(r.start)
             }
             // Line-wise Visual (`V`): round the raw selection out to whole lines —
@@ -2219,9 +2274,26 @@ impl Editor {
         if p >= line.end {
             return;
         }
-        let end = self.active.buffer.next_grapheme(p);
-        self.replace_region(p, end, ch, cx);
-        self.move_to(p, cx);
+        // `3rx` overwrites 3 chars — but, like vim, nothing when the line has
+        // fewer than that many left.
+        let n = std::mem::replace(&mut self.evil_replace_count, 1).max(1);
+        let mut end = p;
+        for _ in 0..n {
+            if end >= line.end {
+                return;
+            }
+            end = self.active.buffer.next_grapheme(end);
+        }
+        let graphemes = self
+            .active
+            .buffer
+            .slice_to_string(p..end)
+            .graphemes(true)
+            .count();
+        self.replace_region(p, end, &ch.repeat(graphemes), cx);
+        // Vim leaves the cursor on the last replaced char.
+        let last = self.active.buffer.prev_grapheme(p + ch.len() * graphemes);
+        self.move_to(last.max(p), cx);
     }
 
     fn delete_char_backward(&mut self, cx: &mut Context<Self>) {
@@ -2673,7 +2745,12 @@ impl Editor {
         // `region.end` is exclusive: a selection stopping at a line's start must
         // not shift that line.
         let last_byte = region.end.saturating_sub(1).max(region.start);
-        let last = self.active.buffer.line_index_at_byte(last_byte);
+        let mut last = self.active.buffer.line_index_at_byte(last_byte);
+        // `3>>`: a count (count-aware dispatch) shifts that many lines.
+        if !had_region && self.prefix_count > 1 {
+            last = (first + self.prefix_count - 1)
+                .min(self.active.buffer.line_count().saturating_sub(1));
+        }
         let pad = " ".repeat(step);
         self.begin_undo_group();
         // Bottom-up, so an earlier line's edit can't shift the offsets of the
@@ -2792,7 +2869,8 @@ impl Editor {
         } else {
             ((f32::from(self.viewport_height) / lh).floor() as isize / 2).max(1)
         };
-        self.move_to(self.line_offset(dir * half), cx);
+        // `goto` extends an active selection, so Visual `C-d`/`C-u` grow it.
+        self.goto(self.line_offset(dir * half), cx);
     }
 
     /// `C-l` — Emacs `recenter-top-bottom`. Successive presses cycle the line at
@@ -3114,6 +3192,7 @@ impl Editor {
             evil_enabled: self.evil != EvilState::Disabled,
             helix_enabled: self.modal_helix,
             kbd_macro_recording: self.macro_recording.is_some(),
+            prefix_count: self.prefix_count,
         });
     }
 
@@ -3947,6 +4026,7 @@ impl Editor {
                 }
                 self.end_undo_group();
             }
+            self.evil_clamp_cursor();
         } else {
             // Publish point so a command reading `(buffer-line)` /
             // `(current-buffer)` sees it as of this invocation.
@@ -3964,6 +4044,156 @@ impl Editor {
             events.push(MacroEvent::Command(expr.to_string()));
         }
         self.run_script(expr, cx);
+    }
+
+    /// Run a modal binding under a typed count (`3dd`, `5G`, `3w`). Three cases:
+    /// - a count-aware command (`set-count-aware!`) runs ONCE and reads the
+    ///   count as `(prefix-count)` — `5G` means line 5, not "G five times";
+    /// - a builtin repeats synchronously (each run sees the last one's result);
+    /// - any other Scheme command repeats as a chain, each run dispatched after
+    ///   the previous one applied (see [`CountRepeat`]).
+    ///
+    /// Either repeat form squashes its edits into ONE undo step, and kills
+    /// after the first append, so `3dd` then `p` / `u` restore all three lines.
+    fn dispatch_counted(&mut self, expr: &str, count: Option<usize>, cx: &mut Context<Self>) {
+        let Some(n) = count else {
+            self.dispatch_recorded(expr, cx);
+            return;
+        };
+        // Record the count with the command, so replay re-runs `3dd`, not `dd`.
+        if let Some(events) = self.macro_recording.as_mut()
+            && !expr.contains("kbd-macro")
+        {
+            events.push(MacroEvent::Counted(expr.to_string(), n));
+        }
+        self.run_counted(expr, n, cx);
+    }
+
+    /// The unrecorded body of [`Self::dispatch_counted`] (macro replay calls
+    /// it directly).
+    fn run_counted(&mut self, expr: &str, n: usize, cx: &mut Context<Self>) {
+        let name = expr
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        if self.count_aware.contains(name) {
+            self.prefix_count = n;
+            self.run_script(expr, cx);
+            self.prefix_count = 0;
+            return;
+        }
+        if n <= 1 {
+            self.run_script(expr, cx);
+            return;
+        }
+        let base = self.undo_base();
+        if self.script.builtins_for(expr).is_some() {
+            for i in 0..n {
+                self.kill_append = i > 0;
+                self.run_script(expr, cx);
+            }
+            self.kill_append = false;
+            self.sync_appended_kill(cx);
+            self.squash_undo_since(&base);
+            return;
+        }
+        let source = format!("(begin {expr} (count-repeat-step))");
+        self.count_repeat = Some(CountRepeat {
+            source: source.clone(),
+            total: n,
+            done: 0,
+            undo_base: base,
+        });
+        self.run_script(&source, cx);
+    }
+
+    /// `(count-repeat-step)` — the tail of each chained run: dispatch the next
+    /// run against a fresh snapshot, or finish the chain.
+    fn count_repeat_step(&mut self, _cx: &mut Context<Self>) {
+        let Some(r) = self.count_repeat.as_mut() else {
+            return;
+        };
+        r.done += 1;
+        if r.done >= r.total {
+            let base = r.undo_base.clone();
+            self.count_repeat = None;
+            self.squash_undo_since(&base);
+            return;
+        }
+        let source = r.source.clone();
+        self.publish_point();
+        self.script.dispatch(&source, false);
+    }
+
+    fn undo_base(&self) -> UndoBase {
+        UndoBase {
+            buffer: self.active.name.clone(),
+            len: self.active.undo_tree.len(),
+            current: self.active.undo_current,
+        }
+    }
+
+    /// Fold every undo node added since `base` into the first of them, so a
+    /// multi-run command (`3dd`) undoes in one step. Only when the new nodes
+    /// form a straight chain off `base.current` in the same buffer — anything
+    /// else (an undo mid-way, a buffer switch) is left untouched.
+    fn squash_undo_since(&mut self, base: &UndoBase) {
+        if self.active.name != base.buffer {
+            return;
+        }
+        let tree = &mut self.active.undo_tree;
+        if tree.len() <= base.len + 1 {
+            return;
+        }
+        let chain = (base.len..tree.len()).all(|i| {
+            let parent = if i == base.len { base.current } else { i - 1 };
+            tree[i].parent == Some(parent)
+        });
+        if !chain || self.active.undo_current != tree.len() - 1 {
+            return;
+        }
+        let rest: Vec<UndoRecord> = tree
+            .drain(base.len + 1..)
+            .flat_map(|node| node.edit)
+            .collect();
+        let first = &mut tree[base.len];
+        first.edit.extend(rest);
+        first.children.clear();
+        self.active.undo_current = base.len;
+    }
+
+    /// After kills were appended (`kill_append`), push the combined kill to the
+    /// OS clipboard — otherwise the clipboard holds only the last piece, and
+    /// the next `p` would adopt that piece as an "external" copy.
+    fn sync_appended_kill(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.kill_appended)
+            && let Some(text) = self.kill_ring.last().cloned()
+        {
+            self.set_clipboard(&text, cx);
+        }
+    }
+
+    /// Vim Normal state never rests the cursor past the last char of a line
+    /// (only an empty line puts it on the line end). Motions like `$`/`l` and
+    /// deletes at EOL can leave it there; pull it back one grapheme, so `$x`,
+    /// `$a`, `p` act on the line's last char instead of the line break.
+    fn evil_clamp_cursor(&mut self) {
+        if self.evil != EvilState::Normal
+            || self.modal_helix
+            || self.active.special.is_some()
+            || self.active.mark_active
+            || !self.active.selected_range.is_empty()
+            || self.has_extra_cursors()
+        {
+            return;
+        }
+        let p = self.point();
+        let line = self.active.buffer.line_range_at(p);
+        if p == line.end && line.start < line.end {
+            let prev = self.active.buffer.prev_grapheme(p);
+            self.collapse_to(prev);
+        }
     }
 
     // --- Keyboard macros --------------------------------------------------
@@ -3988,6 +4218,7 @@ impl Editor {
         for event in self.last_macro.clone() {
             match event {
                 MacroEvent::Command(expr) => self.run_script(&expr, cx),
+                MacroEvent::Counted(expr, n) => self.run_counted(&expr, n, cx),
                 MacroEvent::Text(text) => self.insert_text(&text, cx),
             }
         }

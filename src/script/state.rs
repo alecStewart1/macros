@@ -86,6 +86,9 @@ pub struct EditorSnapshot {
     /// state, not a Scheme-side mirror that desyncs the moment the user reaches
     /// for the Emacs chords (`C-x (` / `C-x )`) instead.
     pub kbd_macro_recording: bool,
+    /// The Vim/Helix count typed before a count-aware command (`3` in `3dd`),
+    /// or 0 when none was typed. For `(prefix-count)`; see `set-count-aware!`.
+    pub prefix_count: usize,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the

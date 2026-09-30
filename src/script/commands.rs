@@ -432,6 +432,17 @@ pub enum EditorCommand {
     /// next `p`/`P` knows whether to open a new line or insert inline.
     EvilSetLinewise,
     EvilSetCharwise,
+    /// Register a command name as count-aware (see `set-count-aware!`).
+    SetCountAware(String),
+    /// Appended by the editor to each run of a counted Scheme command: marks
+    /// the batch as one repetition and triggers the next (with a fresh
+    /// snapshot), so `3w`/`3dd` see the previous run's result.
+    CountRepeatStep,
+    /// Visual-block `r<char>`: overwrite every char of the rectangle.
+    EvilBlockReplace(String),
+    /// Helix `p` / `P`: paste after / before every selection.
+    HelixPasteAfter,
+    HelixPasteBefore,
     /// Emacs incremental search (`C-s` / `C-r`).
     IsearchForward,
     IsearchBackward,

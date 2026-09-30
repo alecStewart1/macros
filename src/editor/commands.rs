@@ -778,6 +778,7 @@ impl Editor {
             EvilReplaceChar => {
                 // Arm replace-pending; the dispatcher captures the next key.
                 self.evil_replace_pending = true;
+                self.evil_replace_count = self.prefix_count.max(1);
                 self.status = "r-".into();
                 cx.notify();
             }
@@ -800,6 +801,13 @@ impl Editor {
                 self.search_query = Some(query);
                 self.evil_search_forward = forward;
             }
+            SetCountAware(name) => {
+                self.count_aware.insert(name);
+            }
+            CountRepeatStep => self.count_repeat_step(cx),
+            EvilBlockReplace(ch) => self.evil_block_replace(&ch, cx),
+            HelixPasteAfter => self.helix_paste(true, cx),
+            HelixPasteBefore => self.helix_paste(false, cx),
             EvilSetLinewise => self.evil_yank_linewise = true,
             EvilSetCharwise => self.evil_yank_linewise = false,
             EvilExCommand => {

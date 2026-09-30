@@ -17,6 +17,18 @@ impl Editor {
     /// syncs to the OS clipboard stays per-site policy — callers that mirror it
     /// call `set_clipboard` themselves.
     pub(super) fn push_kill(&mut self, text: String) {
+        // Any new kill/copy is charwise until an evil op says otherwise (evil's
+        // linewise ops queue `evil-set-linewise` AFTER their kill), so a later
+        // cmd-c / C-k can't be pasted with a stale `yy` line-wise flag.
+        self.evil_yank_linewise = false;
+        if self.kill_append
+            && let Some(last) = self.kill_ring.last_mut()
+        {
+            last.push_str(&text);
+            self.kill_appended = true;
+            self.kill_index = self.kill_ring.len() - 1;
+            return;
+        }
         self.kill_ring.push(text);
         if self.kill_ring.len() > KILL_RING_MAX {
             self.kill_ring.remove(0);

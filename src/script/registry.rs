@@ -152,6 +152,9 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("evil-replace-char", EvilReplaceChar),
         ("evil-set-linewise", EvilSetLinewise),
         ("evil-set-charwise", EvilSetCharwise),
+        ("count-repeat-step", CountRepeatStep),
+        ("helix-paste-after", HelixPasteAfter),
+        ("helix-paste-before", HelixPasteBefore),
         ("isearch-forward", IsearchForward),
         ("isearch-backward", IsearchBackward),
         ("split-window-below", SplitWindowBelow),
@@ -500,6 +503,22 @@ pub(crate) fn build_engine(
         queue,
         "clipboard-set",
         EditorCommand::ClipboardSet,
+    );
+    {
+        // `(set-count-aware! 'name)` — the modal count loop dispatches `name`
+        // ONCE with `(prefix-count)` published instead of running it N times.
+        // Accepts a symbol or a string (symbol-name references, like keymaps).
+        let q = queue.clone();
+        reg.register_fn("set-count-aware!", move |value: SteelVal| {
+            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
+            q.lock().unwrap().push(EditorCommand::SetCountAware(name));
+        });
+    }
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-block-replace",
+        EditorCommand::EvilBlockReplace,
     );
     {
         // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
@@ -2533,6 +2552,9 @@ pub(crate) fn build_engine(
     register_snapshot_read(&mut reg, snapshot, "evil-enabled?", |s| s.evil_enabled);
     // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
     register_snapshot_read(&mut reg, snapshot, "helix-enabled?", |s| s.helix_enabled);
+    // `(prefix-count)` → the count typed before a count-aware modal command, 0
+    // when none (so a command can tell `G` from `1G`).
+    register_snapshot_read(&mut reg, snapshot, "prefix-count", |s| s.prefix_count);
     // `(kbd-macro-recording?)` → #t while a keyboard macro is being recorded.
     register_snapshot_read(&mut reg, snapshot, "kbd-macro-recording?", |s| {
         s.kbd_macro_recording
