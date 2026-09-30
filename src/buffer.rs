@@ -372,6 +372,31 @@ impl Buffer {
         self.rope.char_to_byte(ci)
     }
 
+    /// The run of same-class characters (word / punctuation / blanks — see
+    /// [`CharClass`]) containing the char at `offset`, clamped to its line.
+    /// What a double-click selects. Empty when `offset` is at the line's end.
+    pub fn word_range_at(&self, offset: usize) -> Range<usize> {
+        let line = self.line_range_at(offset);
+        let (lo, hi) = (
+            self.rope.byte_to_char(line.start),
+            self.rope.byte_to_char(line.end),
+        );
+        let ci = self.rope.byte_to_char(offset.clamp(line.start, line.end));
+        if ci >= hi {
+            return line.end..line.end;
+        }
+        let class = char_class(self.rope.char(ci));
+        let mut start = ci;
+        while start > lo && char_class(self.rope.char(start - 1)) == class {
+            start -= 1;
+        }
+        let mut end = ci + 1;
+        while end < hi && char_class(self.rope.char(end)) == class {
+            end += 1;
+        }
+        self.rope.char_to_byte(start)..self.rope.char_to_byte(end)
+    }
+
     /// The start of the Lisp symbol ending at `from` — walks back over symbol
     /// constituents (see [`is_symbol_char`]) so a whole token like
     /// `string->number` is returned, not just its last hyphen-delimited piece.
@@ -499,6 +524,16 @@ mod tests {
         );
         // Right after a delimiter → empty prefix (complete everything).
         assert_eq!(buffer.backward_symbol(1), 1); // just after '('
+    }
+
+    #[test]
+    fn word_range_at_selects_the_class_run_on_its_line() {
+        let b = Buffer::new("foo.bar  baz\nqux");
+        assert_eq!(b.word_range_at(1), 0..3); // foo
+        assert_eq!(b.word_range_at(3), 3..4); // .
+        assert_eq!(b.word_range_at(7), 7..9); // blank run
+        assert_eq!(b.word_range_at(12), 12..12); // end of line
+        assert_eq!(b.word_range_at(13), 13..16); // qux, next line
     }
 
     #[test]

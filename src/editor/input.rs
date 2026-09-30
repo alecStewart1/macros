@@ -817,6 +817,18 @@ impl Editor {
         // for a normal buffer the cursor is positioned by a *subsequent* click.
         // Special buffers (dired-sidebar/dired/…) act on the first click, so fall
         // through to position the cursor and run their `mouse-1` binding below.
+        // A plain click drops any Visual selection back to Normal, as in Vim.
+        // Done before the pane-switch return below: the evil state is shared
+        // across panes, so leaving it Visual would make the next `d` act on
+        // whatever the newly focused pane has selected.
+        if !event.modifiers.shift
+            && matches!(
+                self.evil,
+                EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
+            )
+        {
+            self.evil = EvilState::Normal;
+        }
         if let Some(pane) = self.pane_at_position(event.position)
             && pane != self.selected_pane
         {
@@ -861,12 +873,77 @@ impl Editor {
         // return above; leaving `is_selecting` set there would let the click's
         // mouse-up jitter extend a selection into whatever pane the `mouse-1`
         // binding just switched to (e.g. the file dired-sidebar just opened).
-        self.is_selecting = true;
         let offset = self.offset_for_position(event.position);
+        if !event.modifiers.shift && event.click_count >= 2 {
+            // Double-click selects the word, triple-click the line. No drag
+            // after these: pointer jitter would otherwise shrink the selection.
+            self.select_by_click(offset, event.click_count >= 3, cx);
+            return;
+        }
+        self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(offset, cx);
+            self.evil_sync_mouse_selection();
         } else {
             self.move_to(offset, cx);
+        }
+    }
+
+    /// Double-click (`line` false) / triple-click (`line` true) selection. In
+    /// evil Normal this enters Visual / Visual Line like Vim; elsewhere it's a
+    /// plain (exclusive) selection of the word or the whole line + newline.
+    fn select_by_click(&mut self, offset: usize, line: bool, cx: &mut Context<Self>) {
+        let evil_visual = !self.modal_helix && matches!(self.evil, EvilState::Normal);
+        let buf = &self.active.buffer;
+        let range = if line {
+            let lr = buf.line_range_at(offset);
+            if evil_visual {
+                // Visual Line rounds out to whole lines itself.
+                lr.start..lr.start
+            } else if lr.end < buf.len() {
+                lr.start..buf.next_grapheme(lr.end)
+            } else {
+                lr
+            }
+        } else {
+            let wr = buf.word_range_at(offset);
+            if wr.is_empty() {
+                // Past the end of the line: nothing to select, just a click.
+                self.move_to(offset, cx);
+                return;
+            }
+            if evil_visual {
+                // Visual is inclusive of the char under the cursor: park the
+                // cursor ON the word's last char, not past it.
+                wr.start..buf.prev_grapheme(wr.end).max(wr.start)
+            } else {
+                wr
+            }
+        };
+        self.move_to(range.start, cx);
+        self.select_to(range.end, cx);
+        if evil_visual {
+            self.evil = if line {
+                EvilState::VisualLine
+            } else {
+                EvilState::Visual
+            };
+            self.active.mark_active = true;
+        }
+        cx.notify();
+    }
+
+    /// Vim (`mouse=a`): a mouse-made selection in Normal state enters charwise
+    /// Visual, so `d`/`y`/`c`/… act on the highlighted text instead of starting
+    /// a Normal-state operator (`dd` would otherwise delete the cursor's line).
+    /// Helix keeps selections in Normal, so it's left alone there.
+    fn evil_sync_mouse_selection(&mut self) {
+        if !self.modal_helix
+            && matches!(self.evil, EvilState::Normal)
+            && !self.active.selected_range.is_empty()
+        {
+            self.evil = EvilState::Visual;
+            self.active.mark_active = true;
         }
     }
 
@@ -914,6 +991,7 @@ impl Editor {
         if self.is_selecting {
             let offset = self.offset_for_position(event.position);
             self.select_to(offset, cx);
+            self.evil_sync_mouse_selection();
             // If the pointer is near/past the top or bottom edge, keep scrolling
             // (and extending the selection) until it comes back inside or the
             // drag ends — driven by a self-rescheduling timer so it continues
