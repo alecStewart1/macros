@@ -109,3 +109,10 @@
 ;; re-declared here: load-theme wipes attributes along with colors).
 (set-face "spell-error" "#f14c4c")
 (set-face-wavy "spell-error" #t)
+
+;; occur.scm — *occur* / *grep* result buffers (header, dimmed file:line
+;; prefixes, bold match highlight; bold re-declared like the wavy above).
+(set-face "occur-header" "#87c3ff")
+(set-face "occur-prefix" "#6d6d6d")
+(set-face "occur-match" "#ebc88d")
+(set-face-bold "occur-match" #t)

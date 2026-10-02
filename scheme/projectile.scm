@@ -80,20 +80,43 @@
                         'projectile-grep-goto)))
       (message "Not in a project")))
 
-;; One-shot buffer grep — the previous behaviour, kept for next-error walking.
+;; One-shot buffer grep: a *grep* results buffer (occur.scm's results engine)
+;; with one `relative/path:line:text` line per hit. RET / mouse visits a hit,
+;; n / p step, `g` greps again, and `e` / C-c C-p (`i` under evil/helix) makes
+;; it editable wgrep-style — C-c C-c writes the edited lines back to the files.
 (define (projectile-grep-buffer)
   (read-string "Grep project (regexp): " 'projectile-grep-buffer-run))
+
+;; `path:line:text` (as grep-files reports it) -> a results record, with the
+;; path shown relative to `root`. Paths are absolute and colon-free (the same
+;; assumption compile-match makes), so the first two fields are path and line.
+(define (projectile-grep-record root hit)
+  (let* ((parts (split-many hit ":"))
+         (path (car parts))
+         (line (string->number (cadr parts)))
+         (prefix-len (+ (string-length path) (string-length (cadr parts)) 2))
+         (text (substring hit prefix-len (string-length hit)))
+         (rel (if (starts-with? path (path-join root ""))
+                  (substring path (string-length (path-join root "")) (string-length path))
+                  path)))
+    (results-record "" path (- line 1) (string-append rel ":" (cadr parts) ":") text)))
 
 (define (projectile-grep-buffer-run pattern)
   (let ((root (project-root (buffer-directory))))
     (if (not root)
         (message "Not in a project")
         (let ((matches (grep-files root pattern)))
-          (render-buffer "*grep*" "grep-mode"
-                         (if (null? matches)
-                             (string-append "No matches for " pattern)
-                             (join-lines matches))
-                         '())))))
+          (if (null? matches)
+              (message (string-append "No matches for " pattern))
+              (begin
+                (results-set! "*grep*"
+                              (string-append (int->string (length matches)) " match"
+                                             (if (= (length matches) 1) "" "es")
+                                             " for \"" pattern "\" in " root)
+                              "grep-mode" pattern
+                              (map (lambda (hit) (projectile-grep-record root hit)) matches))
+                (results-render "*grep*")
+                (goto-line 1)))))))
 
 ;; --- recent projects (persisted) --------------------------------------------
 ;; A ring of project roots, newest-first, written through to
@@ -182,8 +205,9 @@
 (define-key "fundamental" "ctrl-c p g" 'projectile-grep)
 (define-key "fundamental" "ctrl-c p G" 'projectile-grep-buffer)
 
-;; grep results buffer: q to close, g to grep again.
-(define-key "grep-mode" "q" 'kill-buffer)
+;; grep results buffer: occur's view keys (RET/mouse visit, n/p, e / C-c C-p
+;; to edit, q to close) plus g to grep again.
+(results-bind-view-keys "grep-mode")
 (define-key "grep-mode" "g" 'projectile-grep-buffer)
 
 ;; M-x discoverability for the projectile entry points.

@@ -174,8 +174,8 @@
 (define-key "compile-mode" "ctrl-g" 'compile-keyboard-quit)
 (define-key "evil-normal:compile-mode" "escape" 'compile-keyboard-quit)
 (define-key "helix-normal:compile-mode" "escape" 'compile-keyboard-quit)
-;; grep-mode buffers (projectile-grep / occur-style) get the same RET jump.
-(define-key "grep-mode" "enter" 'compile-visit)
+;; grep-mode's RET (results-visit) is bound with the rest of its keys by
+;; projectile.scm / occur.scm.
 
 ;; `C-c b` (build), NOT `C-c c`: that is org-capture's chord, and org.scm binds
 ;; it too. Whichever file loaded last silently won, so one of the two commands
