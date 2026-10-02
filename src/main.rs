@@ -9,6 +9,7 @@ mod highlight;
 mod lsp;
 mod mode;
 mod runtime;
+mod save;
 mod script;
 mod settings;
 mod spell;

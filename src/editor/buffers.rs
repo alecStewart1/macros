@@ -284,7 +284,10 @@ impl Editor {
     /// buffer keeps its own file; this just drops a copy.
     pub(super) fn write_buffer_to(&mut self, path: &str, cx: &mut Context<Self>) {
         let target = expand_path(path.trim());
-        match std::fs::write(&target, self.active.buffer.full_text()) {
+        match crate::save::write_now(
+            Path::new(&target),
+            self.active.buffer.full_text().as_bytes(),
+        ) {
             Ok(()) => self.echo(format!("Wrote {target}"), cx),
             Err(err) => self.echo(format!("Save failed: {err}"), cx),
         }
@@ -559,18 +562,23 @@ impl Editor {
         // Failed inactive writes are reported (and keep `modified` set) rather
         // than being silently dropped from the count.
         let mut failed: Vec<String> = Vec::new();
+        let mut written: Vec<PathBuf> = Vec::new();
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
-                match std::fs::write(&path, doc.buffer.full_text()) {
+                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
                     Ok(()) => {
                         doc.modified = false;
                         saved += 1;
+                        written.push(path);
                     }
                     Err(err) => failed.push(format!("{}: {err}", doc.name)),
                 }
             }
+        }
+        for path in written {
+            self.rewatch_file(&path, cx);
         }
         if self.active.path.is_some() && self.active.modified {
             // Async; reports its own failure (and restores `modified`) later.
@@ -590,6 +598,10 @@ impl Editor {
 
     /// Write the active buffer to its file off the UI thread. Optimistically
     /// clears `modified`; restores it (and reports) if the write fails.
+    ///
+    /// The write is atomic and ordered per file (see [`crate::save`]): the
+    /// ticket taken here, with the text snapshot, guarantees an older save
+    /// still in flight can't land after this one.
     pub(super) fn write_active_to_disk(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.active.path.clone() else {
             return;
@@ -597,24 +609,59 @@ impl Editor {
         let text = self.active.buffer.full_text();
         let name = self.active.name.clone();
         self.active.modified = false;
-        let write = cx
-            .background_executor()
-            .spawn(async move { std::fs::write(&path, text) });
+        let ticket = crate::save::ticket(&path);
+        let write_path = path.clone();
+        let write = cx.background_executor().spawn(async move {
+            let outcome = crate::save::write_sequenced(&ticket, &write_path, text.as_bytes());
+            (ticket, outcome)
+        });
         cx.spawn(async move |this, cx| {
-            let result = write.await;
+            let (ticket, result) = write.await;
             this.update(cx, |editor, cx| match result {
-                Ok(()) => {
+                Ok(crate::save::SaveOutcome::Written) => {
+                    editor.rewatch_file(&path, cx);
                     editor.echo(format!("Wrote {name}"), cx);
                     editor.run_hook("after-save-hook"); // Emacs after-save-hook
                 }
+                // A newer save of this file already landed and reported.
+                Ok(crate::save::SaveOutcome::Superseded) => {}
                 Err(err) => {
-                    editor.active.modified = true;
-                    editor.echo(format!("Save failed: {err}"), cx);
+                    // Re-dirty the buffer that was SAVED (by its file), not
+                    // whatever happens to be active now — and only if no newer
+                    // save owns its state.
+                    if crate::save::is_latest(&ticket) {
+                        editor.mark_path_modified(&path);
+                    }
+                    editor.echo(format!("Save failed: {name}: {err}"), cx);
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Re-arm the auto-revert watch on `path` after we saved it. An atomic save
+    /// renames a new inode over the file; inode-based backends (inotify) drop
+    /// the old watch with it, which would silently end auto-revert for this
+    /// file. (Path-based FSEvents doesn't need it, but re-arming is harmless.)
+    fn rewatch_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !self.fs.watched.remove(path) {
+            return;
+        }
+        if let Some(debouncer) = self.fs.debouncer.as_mut() {
+            let _ = debouncer.watcher().unwatch(path);
+        }
+        self.reconcile_watches(cx);
+    }
+
+    /// Mark whichever buffer visits `path` (active or not) as modified.
+    fn mark_path_modified(&mut self, path: &Path) {
+        if let Some(doc) = std::iter::once(&mut self.active)
+            .chain(self.inactive.iter_mut())
+            .find(|d| d.path.as_deref() == Some(path))
+        {
+            doc.modified = true;
+        }
     }
 
     /// If the active buffer's language formats via LSP on save and a server is
@@ -741,7 +788,7 @@ impl Editor {
         if self.active.modified
             && let Some(path) = self.active.path.clone()
         {
-            match std::fs::write(&path, self.active.buffer.full_text()) {
+            match crate::save::write_now(&path, self.active.buffer.full_text().as_bytes()) {
                 Ok(()) => self.active.modified = false,
                 Err(err) => failed.push(format!("{}: {err}", self.active.name)),
             }
@@ -750,7 +797,7 @@ impl Editor {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
-                match std::fs::write(&path, doc.buffer.full_text()) {
+                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
                     Ok(()) => doc.modified = false,
                     Err(err) => failed.push(format!("{}: {err}", doc.name)),
                 }
@@ -776,7 +823,7 @@ impl Editor {
             return false;
         };
         self.run_hook_blocking("before-save-hook", cx);
-        match std::fs::write(&path, self.active.buffer.full_text()) {
+        match crate::save::write_now(&path, self.active.buffer.full_text().as_bytes()) {
             Ok(()) => {
                 self.active.modified = false;
                 self.echo(format!("Wrote {}", self.active.name), cx);
