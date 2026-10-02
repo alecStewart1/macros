@@ -626,6 +626,8 @@ pub struct Editor {
     layout: WindowLayout,
     /// The selected pane's id — where editing and the cursor live.
     selected_pane: usize,
+    /// The previously selected pane, for `C-w p`.
+    last_pane: Option<usize>,
     /// Monotonic id source for new panes.
     next_pane_id: usize,
     /// Each pane's last painted screen bounds, for click-to-focus routing.
@@ -1337,6 +1339,7 @@ impl Editor {
             }],
             layout: WindowLayout::Leaf(0),
             selected_pane: 0,
+            last_pane: None,
             next_pane_id: 1,
             pane_bounds: Vec::new(),
             completion_popup_hit: None,

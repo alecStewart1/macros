@@ -2049,6 +2049,16 @@ mod engine_tests {
         // The jump list: C-o back, C-i forward (TAB falls back to it in Rust).
         assert!(bound("evil-normal", "ctrl-o", "evil-jump-backward"));
         assert!(bound("evil-normal", "ctrl-i", "evil-jump-forward"));
+        // C-w window commands.
+        assert!(bound("evil-normal", "ctrl-w h", "windmove-left"));
+        assert!(bound("evil-normal", "ctrl-w ctrl-l", "windmove-right"));
+        assert!(bound("evil-normal", "ctrl-w =", "balance-windows"));
+        assert!(bound(
+            "evil-normal",
+            "ctrl-w shift-k",
+            "evil-window-move-very-top"
+        ));
+        assert!(bound("evil-normal", "ctrl-w o", "delete-other-windows"));
         for jump in [
             "evil-goto-last-line",
             "evil-search-next",

@@ -464,6 +464,33 @@ pub enum EditorCommand {
     /// C-o / C-i — older / newer jump-list position.
     EvilJumpBackward,
     EvilJumpForward,
+    /// windmove / `C-w h/j/k/l`: select the window in a direction.
+    WindmoveLeft,
+    WindmoveDown,
+    WindmoveUp,
+    WindmoveRight,
+    /// `C-w W` / `C-w p` / `C-w t` / `C-w b`.
+    PreviousWindow,
+    LastWindow,
+    TopLeftWindow,
+    BottomRightWindow,
+    /// `C-w =` (Emacs `C-x +`).
+    BalanceWindows,
+    /// `C-w _` / `C-w |`.
+    MaximizeWindowHeight,
+    MaximizeWindowWidth,
+    /// `C-w H/J/K/L`: move the window to the far side.
+    MoveWindowFarLeft,
+    MoveWindowFarDown,
+    MoveWindowFarUp,
+    MoveWindowFarRight,
+    /// `C-w x` / `C-w r` / `C-w R`.
+    ExchangeWindow,
+    RotateWindowsDown,
+    RotateWindowsUp,
+    /// `C-w n` / `:new` (stacked) and `:vnew` (side by side).
+    NewWindowBelow,
+    NewWindowRight,
     /// Visual-block `r<char>`: overwrite every char of the rectangle.
     EvilBlockReplace(String),
     /// Helix `p` / `P`: paste after / before every selection.

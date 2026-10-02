@@ -1275,7 +1275,41 @@
 (define-key "evil-normal" "ctrl-o" 'evil-jump-backward) ; C-o — older jump position
 (define-key "evil-normal" "ctrl-i" 'evil-jump-forward)  ; C-i — newer (TAB too, unless a mode binds it)
 (define-key "evil-normal" "ctrl-k" 'evil-undefined)     ; was kill-line
-(define-key "evil-normal" "ctrl-w" 'evil-undefined)     ; was kill-region
+
+;; --- windows: C-w … (Vim's window commands) -----------------------------------
+;; h/j/k/l move by direction (also C-h/C-j/C-k/C-l after C-w), w/W cycle, p the
+;; previous window, t/b top-left/bottom-right; s/v split, n new buffer, c/q
+;; close, o only; = balance, +/- height, </> width, _/| maximize; H/J/K/L move
+;; the window to the far side, x exchange, r/R rotate. Counts repeat (3 C-w +).
+;; Emacs users get the same as M-x windmove-left/… and balance-windows (C-x +).
+(for-each
+ (lambda (b)
+   (define-key "evil-normal" (string-append "ctrl-w " (car b)) (cdr b)))
+ (list (cons "h" "windmove-left") (cons "j" "windmove-down")
+       (cons "k" "windmove-up") (cons "l" "windmove-right")
+       (cons "ctrl-h" "windmove-left") (cons "ctrl-j" "windmove-down")
+       (cons "ctrl-k" "windmove-up") (cons "ctrl-l" "windmove-right")
+       (cons "left" "windmove-left") (cons "down" "windmove-down")
+       (cons "up" "windmove-up") (cons "right" "windmove-right")
+       (cons "w" "other-window") (cons "ctrl-w" "other-window")
+       (cons "shift-w" "previous-window-any-frame")
+       (cons "p" "evil-window-mru") (cons "ctrl-p" "evil-window-mru")
+       (cons "t" "evil-window-top-left") (cons "b" "evil-window-bottom-right")
+       (cons "s" "split-window-below") (cons "shift-s" "split-window-below")
+       (cons "ctrl-s" "split-window-below")
+       (cons "v" "split-window-right") (cons "ctrl-v" "split-window-right")
+       (cons "n" "evil-window-new") (cons "ctrl-n" "evil-window-new")
+       (cons "c" "delete-window") (cons "q" "delete-window") (cons "ctrl-q" "delete-window")
+       (cons "o" "delete-other-windows") (cons "ctrl-o" "delete-other-windows")
+       (cons "=" "balance-windows")
+       (cons "+" "enlarge-window") (cons "-" "shrink-window")
+       (cons ">" "enlarge-window-horizontally") (cons "<" "shrink-window-horizontally")
+       (cons "_" "evil-window-set-height") (cons "|" "evil-window-set-width")
+       (cons "shift-h" "evil-window-move-far-left") (cons "shift-j" "evil-window-move-very-bottom")
+       (cons "shift-k" "evil-window-move-very-top") (cons "shift-l" "evil-window-move-far-right")
+       (cons "x" "evil-window-exchange") (cons "ctrl-x" "evil-window-exchange")
+       (cons "r" "evil-window-rotate-downwards") (cons "ctrl-r" "evil-window-rotate-downwards")
+       (cons "shift-r" "evil-window-rotate-upwards")))
 (define-key "evil-normal" "ctrl-y" 'evil-undefined)     ; was yank
 (define-key "evil-normal" "ctrl-t" 'evil-undefined)     ; was transpose-chars
 
