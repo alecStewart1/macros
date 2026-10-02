@@ -618,6 +618,24 @@ impl Editor {
         self.move_to(target, cx);
     }
 
+    /// Vim's quit guard for the non-`!` quit commands: when any buffer has
+    /// unsaved changes, echo E37 (this buffer) or E162 (another one) and return
+    /// `true` — the caller must not quit.
+    fn refuse_quit_if_modified(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(name) = self.modified_buffer_names().into_iter().next() else {
+            return false;
+        };
+        if name == self.active.name {
+            self.echo("E37: No write since last change (add ! to override)", cx);
+        } else {
+            self.echo(
+                format!("E162: No write since last change for buffer \"{name}\""),
+                cx,
+            );
+        }
+        true
+    }
+
     /// Run an ex command line (the text after `:`): `%s/…/…/`, `s/…/…/`, `w`,
     /// `q`, `wq`/`x`, `q!`.
     pub(super) fn run_ex_command(&mut self, input: &str, cx: &mut Context<Self>) {
@@ -645,19 +663,38 @@ impl Editor {
                 // Write / quit.
                 "w" | "write" if !arg.is_empty() => self.write_buffer_to(arg, cx),
                 "w" | "write" => self.save_buffer(cx),
-                "q" | "quit" => self.quit(cx),
-                "q!" | "quit!" => cx.quit(),
+                // Every quit here ends the APP (vim's would close one window),
+                // so the non-`!` forms refuse while ANY buffer is unsaved —
+                // vim's E37/E162 — and `!` is the explicit discard.
+                "q" | "quit" | "qa" | "qall" | "quitall" => {
+                    if !self.refuse_quit_if_modified(cx) {
+                        cx.quit();
+                    }
+                }
+                "q!" | "quit!" | "qa!" | "qall!" | "quitall!" => cx.quit(),
                 // Write-then-quit must save *synchronously*: `save_buffer` spawns
                 // a background write that `cx.quit()` would cancel mid-flight
                 // (see `save_all_modified`'s quit-path contract). A failed write
                 // aborts the quit so the error stays visible and no work is lost.
-                "wq" | "wq!" | "x" | "xit" => {
+                "wq" | "x" | "xit" => {
+                    if self.save_active_sync(cx) && !self.refuse_quit_if_modified(cx) {
+                        cx.quit();
+                    }
+                }
+                // `:wq!` writes this buffer, then quits discarding the others.
+                "wq!" | "x!" | "xit!" => {
                     if self.save_active_sync(cx) {
                         cx.quit();
                     }
                 }
-                "qa" | "qall" | "quitall" | "qa!" | "qall!" => cx.quit(),
+                // Still refuses if something couldn't be written (a modified
+                // buffer with no file, e.g. an edited *scratch*-like buffer).
                 "wqa" | "wqall" | "xa" | "xall" => {
+                    if self.save_all_modified(cx) && !self.refuse_quit_if_modified(cx) {
+                        cx.quit();
+                    }
+                }
+                "wqa!" | "wqall!" | "xa!" | "xall!" => {
                     if self.save_all_modified(cx) {
                         cx.quit();
                     }

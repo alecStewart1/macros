@@ -148,9 +148,11 @@ impl Workspace {
             }
             // A download is in flight; ignore clicks until it resolves.
             UpdatePhase::Downloading { .. } => {}
+            // Same unsaved-buffer prompt as any other quit; the relaunch helper
+            // is only spawned once the quit is confirmed.
             UpdatePhase::Ready => {
-                let _ = crate::update::relaunch();
-                cx.quit();
+                self.editor
+                    .update(cx, |editor, cx| editor.confirm_quit_and_relaunch(cx));
             }
         }
     }

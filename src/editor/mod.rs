@@ -130,8 +130,10 @@ enum MinibufferPurpose {
     /// A yes/no confirmation gating `action`.
     Confirm(PendingAction),
     /// Quit-time save offer: `yes` saves all modified buffers then quits, `no`
-    /// quits discarding changes, `C-g` cancels the quit.
-    QuitSave,
+    /// quits discarding changes, `C-g` cancels the quit. `relaunch`: the quit
+    /// was requested by the update pill, so relaunch into the staged build
+    /// once (and only once) the quit actually goes ahead.
+    QuitSave { relaunch: bool },
     /// LSP completion: replace the word at `completion_range` with the choice.
     CompleteAtPoint,
     /// evil `/` — regex search forward.

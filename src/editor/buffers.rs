@@ -680,28 +680,52 @@ impl Editor {
     /// tears the whole app down rather than leaving a windowless process on
     /// macOS.
     pub fn confirm_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        self.confirm_quit_ex(false, cx)
+    }
+
+    /// The update pill's "relaunch into the staged build": the same unsaved-
+    /// buffer prompt as a normal quit, relaunching only if the quit goes ahead
+    /// (a cancelled prompt leaves no relaunch helper behind).
+    pub fn confirm_quit_and_relaunch(&mut self, cx: &mut Context<Self>) {
+        self.confirm_quit_ex(true, cx);
+    }
+
+    fn confirm_quit_ex(&mut self, relaunch: bool, cx: &mut Context<Self>) -> bool {
         if self.any_modified() {
-            let mut dirty: Vec<&str> = Vec::new();
-            if self.active.modified && !is_special_buffer_name(&self.active.name) {
-                dirty.push(&self.active.name);
-            }
-            for doc in &self.inactive {
-                if doc.modified && !is_special_buffer_name(&doc.name) {
-                    dirty.push(&doc.name);
-                }
-            }
-            let listing = dirty.join(", ");
+            let listing = self.modified_buffer_names().join(", ");
             self.echo(format!("Modified buffers: {listing}"), cx);
             self.open_minibuffer(
                 "Save modified buffers before quitting? (yes/no, C-g to cancel) ",
-                MinibufferPurpose::QuitSave,
+                MinibufferPurpose::QuitSave { relaunch },
                 "",
                 cx,
             );
         } else {
-            cx.quit();
+            self.finish_quit(relaunch, cx);
         }
         false
+    }
+
+    /// Names of the buffers [`any_modified`](Self::any_modified) counts as
+    /// unsaved, active first.
+    pub(super) fn modified_buffer_names(&self) -> Vec<String> {
+        std::iter::once(&self.active)
+            .chain(&self.inactive)
+            .filter(|d| d.modified && !is_special_buffer_name(&d.name))
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    /// Actually quit (the user has confirmed, or nothing was unsaved). With
+    /// `relaunch`, first spawn the helper that reopens the staged update once
+    /// this process exits; if that fails, stay running and say so rather than
+    /// quitting into nothing.
+    pub(super) fn finish_quit(&mut self, relaunch: bool, cx: &mut Context<Self>) {
+        if relaunch && let Err(err) = crate::update::relaunch() {
+            self.echo(format!("Relaunch failed: {err}"), cx);
+            return;
+        }
+        cx.quit();
     }
 
     /// Write every modified, file-visiting buffer (active + inactive) to disk

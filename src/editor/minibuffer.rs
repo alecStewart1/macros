@@ -279,7 +279,7 @@ impl Editor {
                 .collect(),
             Some(MinibufferPurpose::FindFile) => file_completions(input),
             Some(MinibufferPurpose::Confirm(_))
-            | Some(MinibufferPurpose::QuitSave)
+            | Some(MinibufferPurpose::QuitSave { .. })
             | Some(MinibufferPurpose::ConfirmGrammarInstall) => ["yes", "no"]
                 .iter()
                 .map(|s| s.to_string())
@@ -414,7 +414,7 @@ impl Editor {
         if !matches!(
             mb.purpose,
             MinibufferPurpose::Confirm(_)
-                | MinibufferPurpose::QuitSave
+                | MinibufferPurpose::QuitSave { .. }
                 | MinibufferPurpose::SchemeYesNo(_)
                 | MinibufferPurpose::ConfirmGrammarInstall
         ) {
@@ -447,15 +447,15 @@ impl Editor {
                     self.echo("Cancelled", cx);
                 }
             }
-            MinibufferPurpose::QuitSave => match input.as_str() {
+            MinibufferPurpose::QuitSave { relaunch } => match input.as_str() {
                 "yes" | "y" => {
                     // A failed write aborts the quit — the error echo would never
                     // be seen otherwise, and the unsaved buffer would be lost.
                     if self.save_all_modified(cx) {
-                        cx.quit();
+                        self.finish_quit(relaunch, cx);
                     }
                 }
-                "no" | "n" => cx.quit(),
+                "no" | "n" => self.finish_quit(relaunch, cx),
                 _ => self.echo("Cancelled", cx),
             },
             MinibufferPurpose::CompleteAtPoint => {
