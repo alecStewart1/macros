@@ -69,9 +69,8 @@
   (let* ((parts (split-many sel ":"))
          (ln (and (>= (length parts) 2) (string->number (nth parts 1)))))
     (when ln
-      (open-file (car parts))
-      ;; grep-files reports 1-based line numbers; goto-line is 0-based.
-      (goto-line (max 0 (- ln 1))))))
+      ;; grep-files reports 1-based line numbers; the jump is 0-based.
+      (find-file-goto-line (car parts) (max 0 (- ln 1))))))
 
 (define (projectile-grep)
   (if (project-root (buffer-directory))

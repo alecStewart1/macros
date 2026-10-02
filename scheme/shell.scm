@@ -180,7 +180,8 @@
         (let ((path (compile-resolve (nth m 0)))
               (ln (nth m 1)))
           (if (file-exists? path)
-              (begin (open-file-other-window path) (goto-line (max 0 (- ln 1))))
+              (begin (open-file-other-window path)
+                     (goto-when-visiting "" path (max 0 (- ln 1)) 0))
               (message (string-append "No such file: " path))))
         (message "No error on this line"))))
 

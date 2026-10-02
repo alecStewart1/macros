@@ -7343,7 +7343,9 @@ mod compile_lib {
             engine.eval(src).unwrap();
         }
         // grep-files emits 1-based `path:line:text`; selecting a match must open
-        // the file and land on the 0-based line (line 12 -> GotoLine(11)).
+        // the file and, once it has loaded (open-file is async), land on the
+        // 0-based line 11. The jump is deferred, not queued behind the open —
+        // a GotoLine in the same batch would move point in the OLD buffer.
         let cmds = engine
             .eval(r#"(projectile-grep-goto "/proj/src/main.rs:12:    let x = 1;")"#)
             .unwrap();
@@ -7355,11 +7357,23 @@ mod compile_lib {
             cmds.commands
         );
         assert!(
-            cmds.commands
+            !cmds
+                .commands
                 .iter()
-                .any(|c| matches!(c, EditorCommand::GotoLine(11))),
-            "expected GotoLine(11), got {:?}",
+                .any(|c| matches!(c, EditorCommand::GotoLine(_))),
+            "goto must wait for the file to load, got {:?}",
             cmds.commands
+        );
+        let pending = engine.eval("*visit-pending*").unwrap();
+        assert_eq!(
+            format!("{:?}", pending.value),
+            format!(
+                "{:?}",
+                engine
+                    .eval(r#"(list "" "/proj/src/main.rs" 11 0 0)"#)
+                    .unwrap()
+                    .value
+            )
         );
     }
 }

@@ -583,3 +583,47 @@
 (define (active-keymaps)
   (let ((m (current-modal-keymap)))
     (if m (list m "fundamental") (list "fundamental"))))
+
+;; --- deferred jump into a buffer that is still loading --------------------
+;; Opening a file that isn't visited yet is ASYNC, so a goto queued in the same
+;; batch would move point in the OLD buffer. Instead record the target and poll
+;; on a timer until it is the current buffer, then jump against its fresh
+;; snapshot. Pending: (bufname path line0 byte-col tries); a newer jump replaces
+;; an older one, and it gives up after ~2s.
+(define *visit-pending* #f)
+
+;; Whether two paths name the same file (spelled differently: relative vs
+;; absolute, through a symlink, /var vs /private/var, ...).
+(define (same-file? a b)
+  (or (equal? a b)
+      (and (string? a) (not (equal? a ""))
+           (equal? (file-truename a) (file-truename b)))))
+
+;; Put point on 0-based `line0`, byte column `col`, once buffer `bufname` (or
+;; the buffer visiting `path`; either may be "") is current.
+(define (goto-when-visiting bufname path line0 col)
+  (set! *visit-pending* (list bufname path line0 col 0))
+  (run-with-timer 0 'visit-location-step))
+
+(define (visit-location-step)
+  (let ((v *visit-pending*))
+    (when v
+      (let ((here? (or (and (not (equal? (list-ref v 1) ""))
+                            (same-file? (buffer-file-name) (list-ref v 1)))
+                       (equal? (current-buffer) (list-ref v 0)))))
+        (cond
+          (here?
+           (set! *visit-pending* #f)
+           (let ((ls (position->byte (list-ref v 2) 0)))
+             (goto-char (min (+ ls (list-ref v 3)) (line-end-pos ls)))
+             (recenter)))
+          ((< (list-ref v 4) 100)
+           (set! *visit-pending* (list (list-ref v 0) (list-ref v 1) (list-ref v 2)
+                                       (list-ref v 3) (+ (list-ref v 4) 1)))
+           (run-with-timer 20 'visit-location-step))
+          (else (set! *visit-pending* #f)))))))
+
+;; Open `path` in the selected window and land on 0-based `line0` once loaded.
+(define (find-file-goto-line path line0)
+  (open-file path)
+  (goto-when-visiting "" path line0 0))

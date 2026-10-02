@@ -140,12 +140,6 @@
                         ((equal? (buffer-file-name-of (car ns)) path) (car ns))
                         (else (loop (cdr ns)))))))))
 
-;; Pending jump: (bufname path line0 byte-col tries). Opening a file that isn't
-;; loaded yet is ASYNC, so a goto queued in the same batch would land in the
-;; old buffer; instead poll on a timer until the target is active, then jump
-;; against its fresh snapshot.
-(define *visit-pending* #f)
-
 ;; Show `bufname` (or the file `path`) in another window and put point on
 ;; 0-based `line0`, byte column `col`.
 (define (visit-location bufname path line0 col)
@@ -159,26 +153,7 @@
        (switch-to-buffer live))
       (else (message (string-append "Buffer " bufname " no longer exists"))))
     (when (or live (not (equal? path "")))
-      (set! *visit-pending* (list bufname path line0 col 0))
-      (run-with-timer 0 'visit-location-step))))
-
-(define (visit-location-step)
-  (let ((v *visit-pending*))
-    (when v
-      (let ((here? (or (and (not (equal? (list-ref v 1) ""))
-                            (equal? (buffer-file-name) (list-ref v 1)))
-                       (equal? (current-buffer) (list-ref v 0)))))
-        (cond
-          (here?
-           (set! *visit-pending* #f)
-           (let ((ls (position->byte (list-ref v 2) 0)))
-             (goto-char (min (+ ls (list-ref v 3)) (line-end-pos ls)))
-             (recenter)))
-          ((< (list-ref v 4) 100)
-           (set! *visit-pending* (list (list-ref v 0) (list-ref v 1) (list-ref v 2)
-                                       (list-ref v 3) (+ (list-ref v 4) 1)))
-           (run-with-timer 20 'visit-location-step))
-          (else (set! *visit-pending* #f)))))))
+      (goto-when-visiting bufname path line0 col))))
 
 ;; RET / mouse-1 / o in a results buffer: jump to the hit (first match column).
 (define-command (results-visit)
