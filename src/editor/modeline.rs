@@ -69,6 +69,7 @@ pub(super) fn default_mode_line_format() -> Vec<MlSeg> {
         MlSeg::new(Slot("project".into()), None, "  [", "]"),
         MlSeg::new(Slot("git".into()), Some("magit-branch"), "  git:", ""),
         MlSeg::new(Lsp, None, "  lsp ", ""),
+        MlSeg::new(Slot("lsp-progress".into()), None, "  [", "]"),
         MlSeg::new(Diagnostics, None, "  ", ""),
     ]
 }

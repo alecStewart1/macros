@@ -165,52 +165,7 @@ impl LspClient {
             json!({
                 "processId": std::process::id(),
                 "rootUri": root,
-                "capabilities": {
-                    "workspace": {
-                        "applyEdit": false,
-                        "symbol": {},
-                        "workspaceEdit": { "documentChanges": true },
-                        "executeCommand": {}
-                    },
-                    "textDocument": {
-                        "synchronization": { "didSave": false },
-                        "publishDiagnostics": {},
-                        "completion": {
-                            "completionItem": {
-                                "snippetSupport": false,
-                                "documentationFormat": ["plaintext", "markdown"],
-                                "resolveSupport": {
-                                    "properties": ["documentation", "detail", "additionalTextEdits"]
-                                }
-                            }
-                        },
-                        "hover": { "contentFormat": ["plaintext", "markdown"] },
-                        "definition": { "linkSupport": true },
-                        "declaration": { "linkSupport": true },
-                        "typeDefinition": { "linkSupport": true },
-                        "implementation": { "linkSupport": true },
-                        "references": {},
-                        "documentHighlight": {},
-                        "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                        "formatting": {},
-                        "rangeFormatting": {},
-                        "rename": { "prepareSupport": false },
-                        "signatureHelp": {},
-                        "codeAction": {},
-                        "semanticTokens": {
-                            "requests": { "full": true },
-                            "tokenTypes": [
-                                "namespace", "type", "class", "enum", "interface",
-                                "struct", "typeParameter", "parameter", "variable",
-                                "property", "enumMember", "event", "function",
-                                "method", "macro", "keyword", "modifier", "comment",
-                                "string", "number", "regexp", "operator", "decorator"
-                            ],
-                            "tokenModifiers": [],
-                            "formats": ["relative"]
-                        }
-                    }
-                }
+                "capabilities": client_capabilities(),
             }),
         );
     }
@@ -290,8 +245,168 @@ impl LspClient {
 
     /// Reply to a server→client request with a null result (keeps servers that
     /// expect a response, e.g. `client/registerCapability`, unblocked).
-    pub fn respond_null(&mut self, id: Value) {
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null }));
+    /// Reply to a server→client request with `result`.
+    pub fn respond(&mut self, id: Value, result: Value) {
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    }
+
+    /// Reply to a server→client request with a JSON-RPC error.
+    pub fn respond_error(&mut self, id: Value, code: i64, message: &str) {
+        self.send(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": code, "message": message }
+        }));
+    }
+
+    pub fn did_close(&mut self, uri: &str) {
+        self.notify(
+            "textDocument/didClose",
+            json!({ "textDocument": { "uri": uri } }),
+        );
+    }
+
+    /// `textDocument/didSave`; `text` is included only when the server asked.
+    pub fn did_save(&mut self, uri: &str, text: Option<&str>) {
+        let mut params = json!({ "textDocument": { "uri": uri } });
+        if let Some(text) = text {
+            params["text"] = json!(text);
+        }
+        self.notify("textDocument/didSave", params);
+    }
+
+    /// `$/cancelRequest` for an in-flight request we no longer want.
+    pub fn cancel(&mut self, id: i64) {
+        self.notify("$/cancelRequest", json!({ "id": id }));
+    }
+}
+
+/// The `ClientCapabilities` we advertise in `initialize`. Everything here must
+/// be backed by real handling: `didSave` is sent after each successful save,
+/// `workspace/applyEdit` / `workspace/configuration` requests are answered, and
+/// code actions arrive as literals (resolved lazily via `codeAction/resolve`
+/// when the server leaves out the edit).
+pub fn client_capabilities() -> Value {
+    json!({
+        "workspace": {
+            "applyEdit": true,
+            "configuration": true,
+            "symbol": {},
+            "workspaceEdit": { "documentChanges": true },
+            "executeCommand": {}
+        },
+        "textDocument": {
+            "synchronization": { "didSave": true, "willSave": false, "willSaveWaitUntil": false },
+            "publishDiagnostics": {},
+            "completion": {
+                "completionItem": {
+                    "snippetSupport": false,
+                    "documentationFormat": ["plaintext", "markdown"],
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"]
+                    }
+                }
+            },
+            "hover": { "contentFormat": ["plaintext", "markdown"] },
+            "definition": { "linkSupport": true },
+            "declaration": { "linkSupport": true },
+            "typeDefinition": { "linkSupport": true },
+            "implementation": { "linkSupport": true },
+            "references": {},
+            "documentHighlight": {},
+            "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
+            "formatting": {},
+            "rangeFormatting": {},
+            "rename": { "prepareSupport": false },
+            "signatureHelp": {},
+            "codeAction": {
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": [
+                            "", "quickfix", "refactor", "refactor.extract",
+                            "refactor.inline", "refactor.rewrite", "source",
+                            "source.organizeImports", "source.fixAll"
+                        ]
+                    }
+                },
+                "isPreferredSupport": true,
+                "dataSupport": true,
+                "resolveSupport": { "properties": ["edit"] }
+            },
+            "semanticTokens": {
+                "requests": { "full": true },
+                "tokenTypes": [
+                    "namespace", "type", "class", "enum", "interface",
+                    "struct", "typeParameter", "parameter", "variable",
+                    "property", "enumMember", "event", "function",
+                    "method", "macro", "keyword", "modifier", "comment",
+                    "string", "number", "regexp", "operator", "decorator"
+                ],
+                "tokenModifiers": [],
+                "formats": ["relative"]
+            }
+        }
+    })
+}
+
+/// JSON-RPC `MethodNotFound`, for server→client requests we don't implement.
+pub const METHOD_NOT_FOUND: i64 = -32601;
+
+/// The reply to a server→client request that needs no editor state:
+/// `Ok(result)` to answer, or `Err((code, message))` for an error response.
+/// `workspace/applyEdit` is NOT handled here — it edits buffers, so the editor
+/// answers it itself.
+pub fn default_server_reply(method: &str, params: &Value) -> Result<Value, (i64, String)> {
+    match method {
+        // One `null` per requested item = "no client-side setting", which every
+        // server treats as "use your defaults".
+        "workspace/configuration" => {
+            let n = params["items"].as_array().map_or(0, Vec::len);
+            Ok(Value::Array(vec![Value::Null; n]))
+        }
+        // Void-result (or "no answer") requests: `null` is the correct reply.
+        "window/workDoneProgress/create"
+        | "client/registerCapability"
+        | "client/unregisterCapability"
+        | "window/showMessageRequest"
+        | "workspace/workspaceFolders"
+        | "workspace/semanticTokens/refresh"
+        | "workspace/codeLens/refresh"
+        | "workspace/inlayHint/refresh"
+        | "workspace/inlineValue/refresh"
+        | "workspace/diagnostic/refresh" => Ok(Value::Null),
+        _ => Err((METHOD_NOT_FOUND, format!("unhandled method: {method}"))),
+    }
+}
+
+/// The mode-line text for a `$/progress` begin/report `value` of a task
+/// titled `title` (reports don't repeat the title), e.g.
+/// `rust: Indexing 3/10 30%`.
+pub fn progress_text(language: &str, title: &str, value: &Value) -> String {
+    let mut text = format!("{language}: {title}");
+    if let Some(message) = value["message"].as_str().filter(|m| !m.is_empty()) {
+        text.push(' ');
+        text.push_str(&crate::util::single_line(message));
+    }
+    if let Some(pct) = value["percentage"].as_u64() {
+        text.push_str(&format!(" {pct}%"));
+    }
+    text
+}
+
+/// Whether (and how) the server wants `textDocument/didSave`, from its
+/// `initialize` result: `None` = don't send, `Some(include_text)` = send. A
+/// bare-number `textDocumentSync` predates the `save` option and gets text-less
+/// notifications (matching vscode-languageclient's resolution).
+pub fn parse_save_option(result: &Value) -> Option<bool> {
+    let sync = &result["capabilities"]["textDocumentSync"];
+    if sync.is_number() {
+        return Some(false);
+    }
+    match &sync["save"] {
+        Value::Bool(true) => Some(false),
+        Value::Object(o) => Some(o.get("includeText").and_then(Value::as_bool) == Some(true)),
+        _ => None,
     }
 }
 
@@ -303,6 +418,10 @@ pub struct RawDiagnostic {
     pub end: (usize, usize),
     pub severity: Severity,
     pub message: String,
+    /// The diagnostic exactly as the server published it (`code`, `source`,
+    /// `data`, … included), echoed back verbatim in a `codeAction` request's
+    /// context so the server can match its quick fixes to it.
+    pub raw: Value,
 }
 
 /// How a server wants document changes synced, from its `initialize` result.
@@ -397,6 +516,7 @@ pub fn parse_diagnostics(params: &Value) -> (String, Vec<RawDiagnostic>) {
                         end,
                         severity: wire.severity.map_or(Severity::Error, Severity::from_wire),
                         message: wire.message,
+                        raw: d.clone(),
                     }
                 })
                 .collect()
@@ -923,6 +1043,11 @@ pub struct CodeAction {
     pub edit: Option<WorkspaceEdit>,
     /// `(command, arguments)` for `workspace/executeCommand`.
     pub command: Option<(String, Value)>,
+    /// The raw `CodeAction` literal when it arrived without an `edit`: the
+    /// server may fill the edit in lazily, so applying it first round-trips
+    /// this through `codeAction/resolve`. `None` for bare `Command`s and for
+    /// actions that already carry their edit.
+    pub resolve: Option<Value>,
 }
 
 /// A `Command | CodeAction` on the wire. `edit` (a `WorkspaceEdit`, itself two
@@ -951,19 +1076,21 @@ pub fn parse_code_actions(result: &Value) -> Vec<CodeAction> {
             let title = wire.title?;
             // A bare `Command` has a string `command`; a `CodeAction` may have an
             // `edit` and/or a nested `command` object.
-            let (edit, command) = if let Value::String(cmd) = &wire.command {
-                (None, Some((cmd.clone(), wire.arguments)))
+            let (edit, command, resolve) = if let Value::String(cmd) = &wire.command {
+                (None, Some((cmd.clone(), wire.arguments)), None)
             } else {
                 let edit = (!wire.edit.is_null()).then(|| parse_workspace_edit(&wire.edit));
                 let command = wire.command["command"]
                     .as_str()
                     .map(|c| (c.to_string(), wire.command["arguments"].clone()));
-                (edit, command)
+                let resolve = edit.is_none().then(|| item.clone());
+                (edit, command, resolve)
             };
             Some(CodeAction {
                 title,
                 edit,
                 command,
+                resolve,
             })
         })
         .collect()
@@ -1246,10 +1373,38 @@ impl LspBackend {
         }
     }
 
-    pub fn respond_null(&mut self, id: Value) {
+    pub fn respond(&mut self, id: Value, result: Value) {
         match self {
-            LspBackend::External(c) => c.respond_null(id),
+            LspBackend::External(c) => c.respond(id, result),
             LspBackend::Builtin(_) => {} // never sends server→client requests
+        }
+    }
+
+    pub fn respond_error(&mut self, id: Value, code: i64, message: &str) {
+        match self {
+            LspBackend::External(c) => c.respond_error(id, code, message),
+            LspBackend::Builtin(_) => {}
+        }
+    }
+
+    pub fn did_close(&mut self, uri: &str) {
+        match self {
+            LspBackend::External(c) => c.did_close(uri),
+            LspBackend::Builtin(b) => b.did_close(uri),
+        }
+    }
+
+    pub fn did_save(&mut self, uri: &str, text: Option<&str>) {
+        match self {
+            LspBackend::External(c) => c.did_save(uri, text),
+            LspBackend::Builtin(_) => {} // re-checks on every change already
+        }
+    }
+
+    pub fn cancel(&mut self, id: i64) {
+        match self {
+            LspBackend::External(c) => c.cancel(id),
+            LspBackend::Builtin(_) => {} // answers synchronously; nothing in flight
         }
     }
 }
@@ -1352,6 +1507,10 @@ impl SteelLsp {
     fn did_change(&mut self, uri: &str, text: &str) {
         self.docs.insert(uri.to_string(), text.to_string());
         self.publish_diagnostics(uri);
+    }
+
+    fn did_close(&mut self, uri: &str) {
+        self.docs.remove(uri);
     }
 
     /// Queue a response carrying `result` under a fresh request id, returning
@@ -1952,13 +2111,27 @@ fn collect_identifiers(text: &str) -> HashSet<String> {
     set
 }
 
-/// Read Content-Length-framed JSON-RPC messages until EOF, forwarding each.
+/// Synthetic notification the reader thread sends once the server's stdout
+/// is gone (process exit, crash, or a protocol error), so the editor can fail
+/// in-flight requests and allow a restart. Independent of stderr, which may
+/// stay open (or never have been piped) after stdout closes.
+pub const EXITED_METHOD: &str = "$/macros/exited";
+
+/// Read Content-Length-framed JSON-RPC messages until EOF, forwarding each,
+/// then report the exit.
 fn read_loop(stdout: std::process::ChildStdout, tx: UnboundedSender<Value>) {
-    read_frames(BufReader::new(stdout), tx);
+    read_frames(BufReader::new(stdout), &tx);
+    let _ = tx.unbounded_send(json!({ "method": EXITED_METHOD }));
 }
 
+/// Largest message body we'll allocate for. `Content-Length` comes straight
+/// from the server, so a garbage header must not make us allocate gigabytes;
+/// anything bigger is treated as a protocol error (the stream is abandoned,
+/// which the editor then handles exactly like the server exiting).
+const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
 /// The framing loop, generic over the reader so it's testable with a `Cursor`.
-fn read_frames<R: BufRead>(mut reader: R, tx: UnboundedSender<Value>) {
+fn read_frames<R: BufRead>(mut reader: R, tx: &UnboundedSender<Value>) {
     loop {
         let mut content_length = 0usize;
         loop {
@@ -1977,6 +2150,11 @@ fn read_frames<R: BufRead>(mut reader: R, tx: UnboundedSender<Value>) {
         }
         if content_length == 0 {
             continue;
+        }
+        if content_length > MAX_FRAME_BYTES {
+            let line = format!("protocol error: Content-Length {content_length} exceeds limit");
+            let _ = tx.unbounded_send(json!({ "method": "$/stderr", "params": { "line": line } }));
+            return; // the stream is unsynchronised now; treat it as dead
         }
         let mut buf = vec![0u8; content_length];
         if reader.read_exact(&mut buf).is_err() {
@@ -2033,13 +2211,152 @@ mod tests {
         );
 
         let (tx, mut rx) = unbounded();
-        read_frames(Cursor::new(stream.into_bytes()), tx); // runs to EOF, drops tx
+        read_frames(Cursor::new(stream.into_bytes()), &tx); // runs to EOF
+        drop(tx);
 
         let first = futures::executor::block_on(rx.next()).unwrap();
         assert_eq!(first["id"], json!(1));
         let second = futures::executor::block_on(rx.next()).unwrap();
         assert_eq!(second["method"], json!("textDocument/publishDiagnostics"));
         assert!(futures::executor::block_on(rx.next()).is_none()); // closed, drained
+    }
+
+    #[test]
+    fn oversized_frame_is_a_protocol_error_not_an_allocation() {
+        // A bogus multi-gigabyte Content-Length must not be allocated; the
+        // reader reports it and abandons the stream (= the server is dead).
+        let ok = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+        let stream = format!(
+            "Content-Length: 99999999999\r\n\r\n{{}}Content-Length: {}\r\n\r\n{ok}",
+            ok.len()
+        );
+        let (tx, mut rx) = unbounded();
+        read_frames(Cursor::new(stream.into_bytes()), &tx);
+        drop(tx);
+        let report = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(report["method"], json!("$/stderr"));
+        assert!(
+            report["params"]["line"]
+                .as_str()
+                .unwrap()
+                .contains("exceeds")
+        );
+        assert!(futures::executor::block_on(rx.next()).is_none()); // nothing after it
+    }
+
+    #[test]
+    fn client_capabilities_advertise_what_we_handle() {
+        let caps = client_capabilities();
+        assert_eq!(caps["workspace"]["applyEdit"], json!(true));
+        assert_eq!(caps["workspace"]["configuration"], json!(true));
+        assert_eq!(
+            caps["textDocument"]["synchronization"]["didSave"],
+            json!(true)
+        );
+        let code_action = &caps["textDocument"]["codeAction"];
+        let kinds = code_action["codeActionLiteralSupport"]["codeActionKind"]["valueSet"]
+            .as_array()
+            .unwrap();
+        for kind in ["quickfix", "refactor", "source", "source.organizeImports"] {
+            assert!(kinds.contains(&json!(kind)), "missing kind {kind}");
+        }
+        assert_eq!(code_action["isPreferredSupport"], json!(true));
+        assert_eq!(code_action["resolveSupport"]["properties"], json!(["edit"]));
+    }
+
+    #[test]
+    fn default_server_replies() {
+        let config = json!({ "items": [{ "section": "a" }, { "section": "b" }] });
+        assert_eq!(
+            default_server_reply("workspace/configuration", &config),
+            Ok(json!([null, null]))
+        );
+        for method in [
+            "window/workDoneProgress/create",
+            "client/registerCapability",
+            "workspace/semanticTokens/refresh",
+        ] {
+            assert_eq!(default_server_reply(method, &json!({})), Ok(Value::Null));
+        }
+        let err = default_server_reply("some/unknownThing", &json!({})).unwrap_err();
+        assert_eq!(err.0, METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn save_option_shapes() {
+        let caps = |sync: Value| json!({ "capabilities": { "textDocumentSync": sync } });
+        assert_eq!(parse_save_option(&caps(json!(2))), Some(false));
+        assert_eq!(parse_save_option(&caps(json!({ "change": 2 }))), None);
+        assert_eq!(
+            parse_save_option(&caps(json!({ "save": true }))),
+            Some(false)
+        );
+        assert_eq!(parse_save_option(&caps(json!({ "save": false }))), None);
+        assert_eq!(
+            parse_save_option(&caps(json!({ "save": { "includeText": true } }))),
+            Some(true)
+        );
+        assert_eq!(parse_save_option(&caps(json!({ "save": {} }))), Some(false));
+        assert_eq!(parse_save_option(&json!({ "capabilities": {} })), None);
+    }
+
+    #[test]
+    fn diagnostics_keep_their_raw_json() {
+        let params = json!({ "uri": "file:///a.rs", "diagnostics": [{
+            "range": { "start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 5} },
+            "severity": 2, "message": "unused", "code": "E0001", "source": "rustc",
+            "data": { "fix": 7 }
+        }] });
+        let (_, diags) = parse_diagnostics(&params);
+        assert_eq!(diags[0].raw["code"], json!("E0001"));
+        assert_eq!(diags[0].raw["source"], json!("rustc"));
+        assert_eq!(diags[0].raw["data"], json!({ "fix": 7 }));
+        assert_eq!(diags[0].raw, params["diagnostics"][0]);
+    }
+
+    #[test]
+    fn edit_less_code_actions_are_marked_for_resolve() {
+        let result = json!([
+            { "title": "Lazy", "kind": "quickfix", "data": { "id": 3 } },
+            { "title": "Eager", "edit": { "changes": {} } },
+            { "title": "Bare", "command": "do.thing" }
+        ]);
+        let actions = parse_code_actions(&result);
+        assert_eq!(actions[0].resolve.as_ref(), Some(&result[0]));
+        assert!(actions[1].resolve.is_none());
+        assert!(actions[2].resolve.is_none());
+    }
+
+    #[test]
+    fn progress_text_formats_begin_and_report() {
+        let begin = json!({ "kind": "begin", "title": "Indexing", "percentage": 0 });
+        assert_eq!(
+            progress_text("rust", "Indexing", &begin),
+            "rust: Indexing 0%"
+        );
+        let report = json!({ "kind": "report", "message": "3/10", "percentage": 30 });
+        assert_eq!(
+            progress_text("rust", "Indexing", &report),
+            "rust: Indexing 3/10 30%"
+        );
+    }
+
+    #[test]
+    fn text_edits_past_line_end_do_not_eat_the_newline() {
+        // A server's "end of line" (a large character) must clamp before the
+        // terminator, not swallow it and join the next line.
+        let edits = [TextEdit {
+            start: (0, 3),
+            end: (0, 999),
+            new_text: "!".into(),
+        }];
+        assert_eq!(apply_edits_to_text("abc\r\ndef\n", &edits), "abc!\r\ndef\n");
+        let past_eof = [TextEdit {
+            start: (9, 0),
+            end: (9, 0),
+            new_text: "tail".into(),
+        }];
+        assert_eq!(apply_edits_to_text("ab\ncd", &past_eof), "ab\ncdtail");
     }
 
     use futures::StreamExt as _;

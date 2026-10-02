@@ -106,6 +106,20 @@ impl Editor {
         // Any buffer switch/create/kill flows through here — keep Scheme's view
         // of the buffer list current.
         self.sync_buffers();
+        // An in-flight completion was for the buffer we just left; its answer
+        // must not pop up (with that buffer's byte range) in this one.
+        for server in self.servers.values_mut() {
+            if let Some((id, _)) = server.pending_completion.take() {
+                server.client.cancel(id);
+            }
+        }
+        // A buffer shown again after its server (re)started — or after it was
+        // closed in it — needs a fresh `didOpen` (no-op when already open).
+        if let Some(language) = self.active_language()
+            && self.servers.contains_key(&language)
+        {
+            self.lsp_open_active(&language);
+        }
     }
 
     /// Make the buffer `name` active, snapshotting the current one.
@@ -420,6 +434,9 @@ impl Editor {
             // wholesale — this also refreshes its mode/highlighter for the new text.
             let doc_path = doc.path.clone();
             self.inactive[idx] = make_document(name.clone(), doc_path, &disk);
+            // Its servers still hold the old text under this URI.
+            let uri = document_uri(&self.inactive[idx]);
+            self.lsp_sync_document(&uri, &disk);
             self.echo(format!("Reverted {name} (changed on disk)"), cx);
         }
     }
@@ -536,17 +553,20 @@ impl Editor {
             self.echo("Buffer is not visiting a file", cx);
             return;
         }
-        if self.formatting_for_save {
-            // Re-entry after an LSP format-on-save completed: just write now.
-            self.formatting_for_save = false;
-        } else {
-            // First entry: run synchronous before-save hooks (e.g. a shell
-            // formatter), then — if this language formats via LSP on save —
-            // kick off the (async) format and defer the write to its response.
-            self.run_hook_blocking("before-save-hook", cx);
-            if self.start_lsp_format_on_save(cx) {
-                return;
-            }
+        if self
+            .active_uri()
+            .is_some_and(|uri| self.formatting_for_save.contains_key(&uri))
+        {
+            // The format's response (or its timeout) writes this buffer.
+            self.echo("Save pending (waiting on formatting)", cx);
+            return;
+        }
+        // Run synchronous before-save hooks (e.g. a shell formatter), then — if
+        // this language formats via LSP on save — kick off the (async) format
+        // and defer the write to its response.
+        self.run_hook_blocking("before-save-hook", cx);
+        if self.start_lsp_format_on_save(cx) {
+            return;
         }
         self.write_active_to_disk(cx);
     }
@@ -559,6 +579,7 @@ impl Editor {
         // Failed inactive writes are reported (and keep `modified` set) rather
         // than being silently dropped from the count.
         let mut failed: Vec<String> = Vec::new();
+        let mut saved_uris = Vec::new();
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
@@ -567,10 +588,14 @@ impl Editor {
                     Ok(()) => {
                         doc.modified = false;
                         saved += 1;
+                        saved_uris.push(document_uri(doc));
                     }
                     Err(err) => failed.push(format!("{}: {err}", doc.name)),
                 }
             }
+        }
+        for uri in saved_uris {
+            self.lsp_did_save(&uri);
         }
         if self.active.path.is_some() && self.active.modified {
             // Async; reports its own failure (and restores `modified`) later.
@@ -596,6 +621,7 @@ impl Editor {
         };
         let text = self.active.buffer.full_text();
         let name = self.active.name.clone();
+        let uri = document_uri(&self.active);
         self.active.modified = false;
         let write = cx
             .background_executor()
@@ -605,6 +631,7 @@ impl Editor {
             this.update(cx, |editor, cx| match result {
                 Ok(()) => {
                     editor.echo(format!("Wrote {name}"), cx);
+                    editor.lsp_did_save(&uri);
                     editor.run_hook("after-save-hook"); // Emacs after-save-hook
                 }
                 Err(err) => {
@@ -637,8 +664,27 @@ impl Editor {
         if !ready {
             return false;
         }
-        self.formatting_for_save = true;
-        self.lsp_format(cx);
+        self.format_save_seq += 1;
+        let token = self.format_save_seq;
+        self.formatting_for_save.insert(uri.clone(), token);
+        if !self.lsp_format_request(Some(token), cx) {
+            self.formatting_for_save.remove(&uri);
+            return false;
+        }
+        // A server that never answers must not wedge the save: after the
+        // timeout, write this document unformatted (unless the response or a
+        // server exit already completed this save — the token tells).
+        let timer = cx.background_executor().timer(FORMAT_ON_SAVE_TIMEOUT);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            this.update(cx, |editor, cx| {
+                if editor.finish_format_on_save(&uri, token, cx) {
+                    editor.echo("Formatting timed out; saved unformatted", cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
         true
     }
 
@@ -756,6 +802,8 @@ impl Editor {
             Ok(()) => {
                 self.active.modified = false;
                 self.echo(format!("Wrote {}", self.active.name), cx);
+                let uri = document_uri(&self.active);
+                self.lsp_did_save(&uri);
                 self.run_hook("after-save-hook");
                 true
             }
@@ -806,6 +854,11 @@ impl Editor {
 
     pub(super) fn kill_active_buffer(&mut self, cx: &mut Context<Self>) {
         let killed = self.active.name.clone();
+        // `didClose` it — which also discards any pending full-sync for it, so
+        // the replacement's text is never flushed under the killed URI (this
+        // path swaps buffers without `snapshot_active`'s flush).
+        let killed_uri = document_uri(&self.active);
+        self.lsp_close_document(&killed_uri);
         let replacement = self
             .inactive
             .pop()
@@ -841,7 +894,8 @@ impl Editor {
         if name == self.active.name {
             self.kill_active_buffer(cx);
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
-            self.inactive.remove(idx);
+            let doc = self.inactive.remove(idx);
+            self.lsp_close_document(&document_uri(&doc));
             self.drop_terminal_for_buffer(name);
             self.sync_buffers();
             self.echo(format!("Killed {name}"), cx);

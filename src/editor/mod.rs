@@ -209,6 +209,16 @@ struct Document {
     ghost: Option<GhostText>,
 }
 
+/// The URI identifying `doc` for LSP. File buffers use a `file://` URI;
+/// unsaved buffers (e.g. `*scratch*`) get a stable `untitled:` URI so they can
+/// still be served (the built-in Steel LSP just uses it as a key).
+fn document_uri(doc: &Document) -> String {
+    match doc.path.as_deref() {
+        Some(path) => lsp::path_to_uri(path),
+        None => format!("untitled:{}", doc.name),
+    }
+}
+
 /// A copilot-style inline suggestion: display-only text rendered dim at point.
 /// It occupies no buffer bytes (offsets, search, undo, and save are untouched)
 /// and is deliberately ephemeral — any edit clears it (see [`Editor::edit`]),
@@ -261,6 +271,10 @@ const LOG_BUFFER_LINES_CAP: usize = 5000;
 /// The shared "this buffer has no ready language server" echo, used by every
 /// LSP entry point that can't dispatch.
 pub(super) const NO_LSP_FOR_BUFFER: &str = "No language server for this buffer";
+
+/// How long a save waits on the server's format-on-save response before
+/// writing the buffer unformatted.
+const FORMAT_ON_SAVE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// An active minibuffer prompt: a single-line input read in the echo area.
 struct Minibuffer {
@@ -526,9 +540,17 @@ pub struct Editor {
     /// Languages whose buffers are LSP-formatted on save (set via the Scheme
     /// `lsp-language` config / `(set-lsp-format-on-save …)`).
     lsp_format_on_save: HashSet<String>,
-    /// True while a save is waiting on an LSP format response (so the format's
-    /// applied edits trigger the actual write, and we don't re-run hooks).
-    formatting_for_save: bool,
+    /// Saves waiting on an LSP format response, keyed by the formatted
+    /// document's URI → the token its `Format` request carries. The response
+    /// (or the timeout, or the server dying) writes THAT document — not
+    /// whichever buffer happens to be active by then.
+    formatting_for_save: HashMap<String, u64>,
+    /// Source of `formatting_for_save` tokens, so a stale timeout or a late
+    /// response can't complete a newer save of the same file.
+    format_save_seq: u64,
+    /// In-flight `$/progress` reports, `(language:token, title, text)` in
+    /// begin order; the newest is shown in the `lsp-progress` mode-line slot.
+    lsp_progress: Vec<(String, String, String)>,
     /// Candidates + replacement range for the active completion minibuffer.
     completion_items: Vec<String>,
     completion_range: Option<Range<usize>>,
@@ -1098,14 +1120,24 @@ struct LspServer {
     ready: bool,
     /// Server's preferred sync kind (full, incremental, or none).
     sync_kind: lsp::SyncKind,
+    /// The process is gone (stdout closed). Kept in the map — not ready, no
+    /// open documents — until the next `maybe_start_lsp` / `lsp-restart`
+    /// replaces it with a fresh spawn.
+    exited: bool,
+    /// Whether the server wants `textDocument/didSave` (`Some(include_text)`).
+    save: Option<bool>,
+    /// `codeActionProvider.resolveProvider`: edit-less code actions are
+    /// completed via `codeAction/resolve` before applying.
+    code_action_resolve: bool,
     /// URIs we've sent `didOpen` for to this server.
     open: HashSet<String>,
     versions: HashMap<String, i32>,
     /// Pending completion request: (id, word range being completed).
     pending_completion: Option<(i64, Range<usize>)>,
     /// In-flight non-completion requests (definition, references, rename, …),
-    /// keyed by request id so the response can be routed to the right handler.
-    pending: HashMap<i64, PendingRequest>,
+    /// keyed by request id so the response can be routed to the right handler,
+    /// with the document each was issued against.
+    pending: HashMap<i64, (PendingRequest, RequestTarget)>,
     /// `semanticTokens` legend (token-type names by id) from `initialize`.
     semantic_legend: Vec<String>,
     /// Whether the server supports `prepareRename` (gates the pre-check).
@@ -1118,6 +1150,18 @@ struct LspServer {
     semantic_state: HashMap<String, (Option<String>, Vec<i64>)>,
     /// The reader task forwarding this server's messages; dropped on removal.
     _task: Task<()>,
+}
+
+/// The document an LSP request was issued against: its URI plus the buffer's
+/// edit tick at send time ([`Buffer::tick`] — a document version that, unlike
+/// the LSP one, also covers edits still waiting in the full-sync debounce).
+/// Responses that edit or decorate a buffer resolve their target through this
+/// rather than "whatever is active now", and drop themselves when the text has
+/// changed since (their positions would be stale).
+#[derive(Clone, Debug)]
+struct RequestTarget {
+    uri: String,
+    tick: u64,
 }
 
 /// What a pending LSP request was for — picked up in `on_lsp_message` to route
@@ -1142,10 +1186,14 @@ enum PendingRequest {
     SignatureHelp,
     /// Rename → apply the resulting workspace edit.
     Rename,
-    /// Formatting → apply the resulting text edits to the active buffer.
-    Format,
+    /// Formatting → apply the resulting text edits to the requesting buffer.
+    /// `save` is the `formatting_for_save` token when this is format-on-save.
+    Format { save: Option<u64> },
     /// Code actions → the `*lsp-actions*` buffer.
     CodeAction,
+    /// `codeAction/resolve` result → apply the now-complete action (or, if the
+    /// server returns nothing usable, the original one as-is).
+    ResolveCodeAction(Box<lsp::CodeAction>),
     /// `prepareCallHierarchy` done → send the incoming/outgoing-calls request
     /// (true = incoming). The prepared item is echoed back verbatim.
     CallHierarchyPrepare(bool),
@@ -1291,7 +1339,9 @@ impl Editor {
             xref_marker_stack: Vec::new(),
             code_actions: Vec::new(),
             lsp_format_on_save: HashSet::new(),
-            formatting_for_save: false,
+            formatting_for_save: HashMap::new(),
+            format_save_seq: 0,
+            lsp_progress: Vec::new(),
             completion_items: Vec::new(),
             completion_range: None,
             completion_popup: None,
@@ -3676,15 +3726,9 @@ impl Editor {
 
     // --- LSP --------------------------------------------------------------
 
-    /// The URI identifying the active buffer for LSP. File buffers use a
-    /// `file://` URI; unsaved buffers (e.g. `*scratch*`) get a stable
-    /// `untitled:` URI so they can still be served (the built-in Steel LSP just
-    /// uses it as a key).
+    /// The URI identifying the active buffer for LSP (see [`document_uri`]).
     fn active_uri(&self) -> Option<String> {
-        match self.active.path.as_deref() {
-            Some(path) => Some(lsp::path_to_uri(path)),
-            None => Some(format!("untitled:{}", self.active.name)),
-        }
+        Some(document_uri(&self.active))
     }
 
     /// The LSP language id for the active buffer: the Scheme-configured mapping
@@ -3875,6 +3919,11 @@ impl Editor {
         let word_range = self.active.buffer.word_start(point)..point;
         let sent = if let Some(server) = self.servers.get_mut(&language) {
             if server.ready && server.open.contains(&uri) {
+                // A newer request supersedes the in-flight one: its response
+                // would be dropped anyway, so let the server stop working on it.
+                if let Some((old, _)) = server.pending_completion.take() {
+                    server.client.cancel(old);
+                }
                 let id = server.client.completion(&uri, line, character);
                 server.pending_completion = Some((id, word_range));
                 true

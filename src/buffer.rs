@@ -123,11 +123,34 @@ impl Buffer {
     }
 
     /// Byte offset for an LSP position (`line`, UTF-16 column from line start).
+    ///
+    /// Out-of-range positions clamp per the LSP spec: a `character` past the
+    /// end of its line lands at the line's end (before the line terminator —
+    /// never on the next line), and a `line` at or past the line count lands at
+    /// the end of the document.
     pub fn position_to_byte(&self, line: usize, utf16_col: usize) -> usize {
-        let line = line.min(self.line_count().saturating_sub(1));
+        if line >= self.line_count() {
+            return self.len();
+        }
         let line_start_char = self.rope.line_to_char(line);
+        // Every line but the last ends in a terminator (whatever ropey counts
+        // as one); strip it, treating `\r\n` as a single break. The last line
+        // never has one — a trailing break yields a final empty line instead.
+        let mut content_end_char = if line + 1 < self.line_count() {
+            self.rope.line_to_char(line + 1) - 1
+        } else {
+            self.rope.len_chars()
+        };
+        if line + 1 < self.line_count()
+            && content_end_char > line_start_char
+            && self.rope.char(content_end_char) == '\n'
+            && self.rope.char(content_end_char - 1) == '\r'
+        {
+            content_end_char -= 1;
+        }
         let line_start_u16 = self.rope.char_to_utf16_cu(line_start_char);
-        let target_u16 = (line_start_u16 + utf16_col).min(self.rope.len_utf16_cu());
+        let line_end_u16 = self.rope.char_to_utf16_cu(content_end_char);
+        let target_u16 = (line_start_u16 + utf16_col).min(line_end_u16);
         self.rope
             .char_to_byte(self.rope.utf16_cu_to_char(target_u16))
     }
@@ -504,6 +527,25 @@ mod tests {
         assert_eq!(buffer.position_to_byte(1, 1), 5);
         assert_eq!(buffer.position_to_byte(1, 2), 7);
         assert_eq!(buffer.position_to_byte(2, 0), 9);
+    }
+
+    #[test]
+    fn lsp_position_clamps_per_spec() {
+        let buffer = Buffer::new("abc\r\nde\nxy");
+        // A column past the line's end stops before the terminator — never on
+        // the `\r`, the `\n`, or the next line.
+        assert_eq!(buffer.position_to_byte(0, 3), 3);
+        assert_eq!(buffer.position_to_byte(0, 99), 3);
+        assert_eq!(buffer.position_to_byte(1, 99), 7); // "de" ends at byte 7
+        assert_eq!(buffer.position_to_byte(2, 99), buffer.len());
+        // A line at/past the line count is the end of the document.
+        assert_eq!(buffer.position_to_byte(3, 0), buffer.len());
+        assert_eq!(buffer.position_to_byte(99, 5), buffer.len());
+        // A trailing newline's final empty line is a real (empty) line.
+        let trailing = Buffer::new("ab\n");
+        assert_eq!(trailing.position_to_byte(0, 9), 2);
+        assert_eq!(trailing.position_to_byte(1, 9), 3);
+        assert_eq!(Buffer::new("").position_to_byte(0, 4), 0);
     }
 
     #[test]

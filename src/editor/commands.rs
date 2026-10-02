@@ -650,6 +650,7 @@ impl Editor {
             LspDocumentSymbols => self.lsp_document_symbols(cx),
             LspCodeAction => self.lsp_code_action(cx),
             LspFormatBuffer => self.lsp_format(cx),
+            LspRestart => self.lsp_restart(cx),
             LspCallHierarchyIncoming => self.lsp_call_hierarchy(true, cx),
             LspCallHierarchyOutgoing => self.lsp_call_hierarchy(false, cx),
             LspPrepareRename => self.lsp_prepare_rename(cx),
