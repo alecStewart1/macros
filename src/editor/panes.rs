@@ -173,6 +173,189 @@ pub(super) fn layout_remove(layout: WindowLayout, id: usize) -> Option<WindowLay
     }
 }
 
+/// A direction for window motion (`C-w h/j/k/l`, `windmove-*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Dir {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
+/// A pane's rectangle in layout units: `(left, top, right, bottom)` within the
+/// unit square — computed from the split tree alone, so it never depends on
+/// what was last painted.
+pub(super) type URect = (f32, f32, f32, f32);
+
+/// Every leaf's rectangle, in-order.
+pub(super) fn layout_rects(layout: &WindowLayout, r: URect, out: &mut Vec<(usize, URect)>) {
+    match layout {
+        WindowLayout::Leaf(id) => out.push((*id, r)),
+        WindowLayout::Split {
+            vertical,
+            ratio,
+            a,
+            b,
+        } => {
+            let (l, t, rt, bt) = r;
+            if *vertical {
+                let mid = t + (bt - t) * ratio;
+                layout_rects(a, (l, t, rt, mid), out);
+                layout_rects(b, (l, mid, rt, bt), out);
+            } else {
+                let mid = l + (rt - l) * ratio;
+                layout_rects(a, (l, t, mid, bt), out);
+                layout_rects(b, (mid, t, rt, bt), out);
+            }
+        }
+    }
+}
+
+/// The pane adjacent to `cur` in direction `dir`: one sharing the edge and
+/// overlapping on the other axis — preferring the one level with `cur`'s
+/// top-left corner (Vim uses the cursor; the corner is a stable proxy).
+pub(super) fn neighbor_in_direction(layout: &WindowLayout, cur: usize, dir: Dir) -> Option<usize> {
+    const EPS: f32 = 1e-4;
+    let mut rects = Vec::new();
+    layout_rects(layout, (0.0, 0.0, 1.0, 1.0), &mut rects);
+    let &(_, (cl, ct, cr, cb)) = rects.iter().find(|(id, _)| *id == cur)?;
+    // The reference point on the other axis: just inside the top-left corner,
+    // so moving right from a tall window lands on the top-most neighbor.
+    let (cx, cy) = (cl + 1e-3, ct + 1e-3);
+    let overlap = |a0: f32, a1: f32, b0: f32, b1: f32| (a1.min(b1) - a0.max(b0)).max(0.0);
+    rects
+        .iter()
+        .filter(|(id, _)| *id != cur)
+        .filter_map(|&(id, (l, t, r, b))| {
+            let (adjacent, ov, center_hit) = match dir {
+                Dir::Left => (
+                    (r - cl).abs() < EPS,
+                    overlap(t, b, ct, cb),
+                    t <= cy && cy <= b,
+                ),
+                Dir::Right => (
+                    (l - cr).abs() < EPS,
+                    overlap(t, b, ct, cb),
+                    t <= cy && cy <= b,
+                ),
+                Dir::Up => (
+                    (b - ct).abs() < EPS,
+                    overlap(l, r, cl, cr),
+                    l <= cx && cx <= r,
+                ),
+                Dir::Down => (
+                    (t - cb).abs() < EPS,
+                    overlap(l, r, cl, cr),
+                    l <= cx && cx <= r,
+                ),
+            };
+            (adjacent && ov > EPS).then_some((id, center_hit, ov))
+        })
+        .max_by(|a, b| {
+            (a.1, a.2)
+                .partial_cmp(&(b.1, b.2))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(id, _, _)| id)
+}
+
+/// How many windows a subtree stacks along `vertical`'s axis — a nested split
+/// of the same orientation adds its children, anything else counts once.
+fn count_along(layout: &WindowLayout, vertical: bool) -> usize {
+    match layout {
+        WindowLayout::Split {
+            vertical: v, a, b, ..
+        } if *v == vertical => count_along(a, vertical) + count_along(b, vertical),
+        _ => 1,
+    }
+}
+
+/// `C-w =` / `balance-windows`: make every window in a row/column the same
+/// size.
+pub(super) fn layout_balance(layout: &mut WindowLayout) {
+    if let WindowLayout::Split {
+        vertical,
+        ratio,
+        a,
+        b,
+    } = layout
+    {
+        let na = count_along(a, *vertical) as f32;
+        let nb = count_along(b, *vertical) as f32;
+        *ratio = na / (na + nb);
+        layout_balance(a);
+        layout_balance(b);
+    }
+}
+
+/// `C-w _` / `C-w |`: give `cur` as much of the `vertical` axis as allowed.
+pub(super) fn layout_maximize(layout: &mut WindowLayout, cur: usize, vertical: bool) {
+    if let WindowLayout::Split {
+        vertical: v,
+        ratio,
+        a,
+        b,
+    } = layout
+    {
+        let in_a = subtree_contains(a, cur);
+        if *v == vertical {
+            *ratio = if in_a { 0.9 } else { 0.1 };
+        }
+        layout_maximize(if in_a { a } else { b }, cur, vertical);
+    }
+}
+
+/// `C-w H/J/K/L`: move `cur` to be a full-height/width window at the far
+/// side of everything else.
+pub(super) fn layout_move_far(layout: WindowLayout, cur: usize, dir: Dir) -> WindowLayout {
+    let Some(rest) = layout_remove(layout, cur) else {
+        return WindowLayout::Leaf(cur);
+    };
+    let me = Box::new(WindowLayout::Leaf(cur));
+    let rest = Box::new(rest);
+    match dir {
+        Dir::Left => WindowLayout::Split {
+            vertical: false,
+            ratio: 0.5,
+            a: me,
+            b: rest,
+        },
+        Dir::Right => WindowLayout::Split {
+            vertical: false,
+            ratio: 0.5,
+            a: rest,
+            b: me,
+        },
+        Dir::Up => WindowLayout::Split {
+            vertical: true,
+            ratio: 0.5,
+            a: me,
+            b: rest,
+        },
+        Dir::Down => WindowLayout::Split {
+            vertical: true,
+            ratio: 0.5,
+            a: rest,
+            b: me,
+        },
+    }
+}
+
+/// Rename leaves by `map` (old id → new id) — swap / rotate window places.
+pub(super) fn layout_relabel(layout: &mut WindowLayout, map: &HashMap<usize, usize>) {
+    match layout {
+        WindowLayout::Leaf(id) => {
+            if let Some(&n) = map.get(id) {
+                *id = n;
+            }
+        }
+        WindowLayout::Split { a, b, .. } => {
+            layout_relabel(a, map);
+            layout_relabel(b, map);
+        }
+    }
+}
+
 impl Editor {
     pub(super) fn pane(&self, id: usize) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
@@ -397,6 +580,7 @@ impl Editor {
             return;
         }
         self.save_selected_pane();
+        self.last_pane = Some(self.selected_pane);
         let target_buffer = self.pane(id).map(|p| p.buffer.clone()).unwrap_or_default();
         let restore = self.pane(id).map(|p| (p.point, p.scroll));
         self.selected_pane = id;
@@ -411,6 +595,168 @@ impl Editor {
             self.active.scroll_offset = scroll;
         }
         cx.notify();
+    }
+
+    /// `C-w h/j/k/l`, `windmove-*`: select the window in a direction.
+    pub(super) fn window_move(&mut self, dir: Dir, cx: &mut Context<Self>) {
+        match neighbor_in_direction(&self.layout, self.selected_pane, dir) {
+            Some(id) => self.select_pane(id, cx),
+            None => self.echo("No window in that direction", cx),
+        }
+    }
+
+    /// `C-w W`: the previous window in cycle order.
+    pub(super) fn previous_window(&mut self, cx: &mut Context<Self>) {
+        let mut leaves = Vec::new();
+        layout_leaves(&self.layout, &mut leaves);
+        if leaves.len() < 2 {
+            return;
+        }
+        let pos = leaves
+            .iter()
+            .position(|&id| id == self.selected_pane)
+            .unwrap_or(0);
+        let prev = leaves[(pos + leaves.len() - 1) % leaves.len()];
+        self.select_pane(prev, cx);
+    }
+
+    /// `C-w p`: the previously selected window.
+    pub(super) fn last_window(&mut self, cx: &mut Context<Self>) {
+        match self.last_pane.filter(|id| self.pane(*id).is_some()) {
+            Some(id) => self.select_pane(id, cx),
+            None => self.echo("No previous window", cx),
+        }
+    }
+
+    /// `C-w t` / `C-w b`: the top-left / bottom-right window.
+    pub(super) fn window_corner(&mut self, last: bool, cx: &mut Context<Self>) {
+        let mut leaves = Vec::new();
+        layout_leaves(&self.layout, &mut leaves);
+        let target = if last { leaves.last() } else { leaves.first() };
+        if let Some(&id) = target {
+            self.select_pane(id, cx);
+        }
+    }
+
+    /// `C-w =` / `balance-windows`.
+    pub(super) fn balance_windows(&mut self, cx: &mut Context<Self>) {
+        layout_balance(&mut self.layout);
+        cx.notify();
+    }
+
+    /// `C-w _` (height) / `C-w |` (width).
+    pub(super) fn maximize_window(&mut self, vertical: bool, cx: &mut Context<Self>) {
+        layout_maximize(&mut self.layout, self.selected_pane, vertical);
+        cx.notify();
+    }
+
+    /// `C-w H/J/K/L`: move the window to the far left/bottom/top/right.
+    pub(super) fn move_window_far(&mut self, dir: Dir, cx: &mut Context<Self>) {
+        let cur = self.selected_pane;
+        let layout = std::mem::replace(&mut self.layout, WindowLayout::Leaf(cur));
+        self.layout = layout_move_far(layout, cur, dir);
+        cx.notify();
+    }
+
+    /// `C-w x`: exchange this window with the next one (the cursor stays with
+    /// its buffer, which moves to the other place).
+    pub(super) fn exchange_window(&mut self, cx: &mut Context<Self>) {
+        let mut leaves = Vec::new();
+        layout_leaves(&self.layout, &mut leaves);
+        if leaves.len() < 2 {
+            return;
+        }
+        let cur = self.selected_pane;
+        let pos = leaves.iter().position(|&id| id == cur).unwrap_or(0);
+        let other = leaves[(pos + 1) % leaves.len()];
+        let map = HashMap::from([(cur, other), (other, cur)]);
+        layout_relabel(&mut self.layout, &map);
+        cx.notify();
+    }
+
+    /// `C-w r` / `C-w R`: rotate the windows (their places shift by one).
+    pub(super) fn rotate_windows(&mut self, downward: bool, cx: &mut Context<Self>) {
+        let mut leaves = Vec::new();
+        layout_leaves(&self.layout, &mut leaves);
+        let n = leaves.len();
+        if n < 2 {
+            return;
+        }
+        // The window at place i moves to place i+1 (downward) or i-1.
+        let map: HashMap<usize, usize> = (0..n)
+            .map(|i| {
+                let from = if downward {
+                    (i + n - 1) % n
+                } else {
+                    (i + 1) % n
+                };
+                (leaves[i], leaves[from])
+            })
+            .collect();
+        layout_relabel(&mut self.layout, &map);
+        cx.notify();
+    }
+
+    /// `C-w n` / `:new`: split and edit a new, empty buffer.
+    pub(super) fn new_window_buffer(&mut self, vertical: bool, cx: &mut Context<Self>) {
+        self.split_window(vertical, cx);
+        let mut n = 1;
+        let name = loop {
+            let candidate = if n == 1 {
+                "[No Name]".to_string()
+            } else {
+                format!("[No Name]<{n}>")
+            };
+            if candidate != self.active.name && !self.inactive.iter().any(|d| d.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        // Show the new buffer in the NEW pane (the split's second half).
+        let mut leaves = Vec::new();
+        layout_leaves(&self.layout, &mut leaves);
+        if let Some(&newest) = leaves.iter().max() {
+            self.select_pane(newest, cx);
+        }
+        let current = self.snapshot_active();
+        self.inactive.push(current);
+        self.install_active(make_document(name, None, ""));
+        cx.notify();
+    }
+
+    /// `:wincmd {c}` — the `C-w {c}` window command, by letter.
+    pub(super) fn run_wincmd(&mut self, arg: &str, cx: &mut Context<Self>) {
+        match arg.trim() {
+            "h" => self.window_move(Dir::Left, cx),
+            "j" => self.window_move(Dir::Down, cx),
+            "k" => self.window_move(Dir::Up, cx),
+            "l" => self.window_move(Dir::Right, cx),
+            "w" => self.other_window(cx),
+            "W" => self.previous_window(cx),
+            "p" => self.last_window(cx),
+            "t" => self.window_corner(false, cx),
+            "b" => self.window_corner(true, cx),
+            "s" | "S" => self.split_window(true, cx),
+            "v" => self.split_window(false, cx),
+            "n" => self.new_window_buffer(true, cx),
+            "c" | "q" => self.delete_window(cx),
+            "o" => self.delete_other_windows(cx),
+            "=" => self.balance_windows(cx),
+            "_" => self.maximize_window(true, cx),
+            "|" => self.maximize_window(false, cx),
+            "+" => self.resize_window(true, 0.05, cx),
+            "-" => self.resize_window(true, -0.05, cx),
+            ">" => self.resize_window(false, 0.05, cx),
+            "<" => self.resize_window(false, -0.05, cx),
+            "H" => self.move_window_far(Dir::Left, cx),
+            "J" => self.move_window_far(Dir::Down, cx),
+            "K" => self.move_window_far(Dir::Up, cx),
+            "L" => self.move_window_far(Dir::Right, cx),
+            "x" => self.exchange_window(cx),
+            "r" => self.rotate_windows(true, cx),
+            "R" => self.rotate_windows(false, cx),
+            other => self.echo(format!("Unknown wincmd: {other}"), cx),
+        }
     }
 
     /// `C-x 0`: delete the selected window, selecting a neighbor.
@@ -608,10 +954,12 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::{
-        WindowLayout, layout_leaves, layout_remove, layout_resize, layout_split, node_at,
+        Dir, WindowLayout, layout_balance, layout_leaves, layout_move_far, layout_rects,
+        layout_relabel, layout_remove, layout_resize, layout_split, neighbor_in_direction, node_at,
         set_ratio_at, union_bounds,
     };
     use gpui::{Bounds, point, px};
+    use std::collections::HashMap;
 
     #[test]
     fn window_layout_resize_nudges_nearest_matching_split() {
@@ -690,6 +1038,67 @@ mod tests {
         }
         // A path into a leaf isn't a split.
         assert!(!set_ratio_at(&mut l, &[false], 0.5));
+    }
+
+    #[test]
+    fn window_directions_balance_and_moves() {
+        use WindowLayout::*;
+        // [1 | [2 / 3]]
+        let mut l = Split {
+            vertical: false,
+            ratio: 0.3,
+            a: Box::new(Leaf(1)),
+            b: Box::new(Split {
+                vertical: true,
+                ratio: 0.5,
+                a: Box::new(Leaf(2)),
+                b: Box::new(Leaf(3)),
+            }),
+        };
+        assert_eq!(neighbor_in_direction(&l, 1, Dir::Right), Some(2));
+        assert_eq!(neighbor_in_direction(&l, 2, Dir::Left), Some(1));
+        assert_eq!(neighbor_in_direction(&l, 3, Dir::Left), Some(1));
+        assert_eq!(neighbor_in_direction(&l, 2, Dir::Down), Some(3));
+        assert_eq!(neighbor_in_direction(&l, 3, Dir::Up), Some(2));
+        assert_eq!(neighbor_in_direction(&l, 1, Dir::Left), None);
+        assert_eq!(neighbor_in_direction(&l, 1, Dir::Up), None);
+        layout_balance(&mut l);
+        if let Split { ratio, .. } = &l {
+            assert!((ratio - 0.5).abs() < 1e-6);
+        }
+        // Three side by side balance to thirds.
+        let mut three = Split {
+            vertical: false,
+            ratio: 0.8,
+            a: Box::new(Leaf(1)),
+            b: Box::new(Split {
+                vertical: false,
+                ratio: 0.2,
+                a: Box::new(Leaf(2)),
+                b: Box::new(Leaf(3)),
+            }),
+        };
+        layout_balance(&mut three);
+        let mut rects = Vec::new();
+        layout_rects(&three, (0.0, 0.0, 1.0, 1.0), &mut rects);
+        for (_, (l, _, r, _)) in &rects {
+            assert!(((r - l) - 1.0 / 3.0).abs() < 1e-5, "{rects:?}");
+        }
+        // Move 3 to the far left: it spans the full height there.
+        let moved = layout_move_far(l, 3, Dir::Left);
+        let mut rects = Vec::new();
+        layout_rects(&moved, (0.0, 0.0, 1.0, 1.0), &mut rects);
+        let r3 = rects.iter().find(|(id, _)| *id == 3).unwrap().1;
+        assert_eq!((r3.0, r3.1, r3.3), (0.0, 0.0, 1.0));
+        let mut leaves = Vec::new();
+        layout_leaves(&moved, &mut leaves);
+        assert_eq!(leaves, vec![3, 1, 2]);
+        // Relabel swaps places.
+        let mut sw = moved;
+        layout_relabel(&mut sw, &HashMap::from([(3, 1), (1, 3)]));
+        let mut leaves = Vec::new();
+        layout_leaves(&sw, &mut leaves);
+        assert_eq!(leaves, vec![1, 3, 2]);
     }
 
     #[test]

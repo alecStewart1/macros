@@ -475,6 +475,68 @@ pub enum EditorCommand {
     /// the batch as one repetition and triggers the next (with a fresh
     /// snapshot), so `3w`/`3dd` see the previous run's result.
     CountRepeatStep,
+    /// Sentinel queued behind each async command of a replay (macro, `.`):
+    /// the previous command's batch has applied, so the next may run.
+    ReplayStep,
+    /// Vim `.` — repeat the last change (count-aware: `3.`).
+    EvilRepeat,
+    /// `"x` — the next yank/delete/paste uses register x.
+    EvilUseRegister(String),
+    /// Insert-state `C-r x` — insert register x's text.
+    EvilInsertRegister(String),
+    /// `qx` — start recording a keyboard macro into register x.
+    EvilMacroRecord(String),
+    /// `@x` — replay the macro in register x (`@@` the last one, `@:` the
+    /// last ex command); count-aware.
+    EvilMacroPlay(String),
+    /// `mx` — set mark x at point.
+    EvilSetMark(String),
+    /// `` `x `` (exact = true) / `'x` (line) — jump to mark x.
+    EvilGotoMark(String, bool),
+    /// Mark a command name as a jump (`set-jump-command!`): running it from a
+    /// key records the jump list and the `''` mark first.
+    SetJumpCommand(String),
+    /// `gv` — reselect the last Visual area.
+    EvilReselectVisual,
+    /// `r x` resolved: overwrite `(prefix-count)` chars with x (what a macro or
+    /// `.` replays for `r`).
+    EvilReplaceWith(String),
+    /// Vim `=`: reindent (0-based) lines first..=last.
+    ReindentLines(usize, usize),
+    /// Run an ex command line (`(evil-ex "%s/a/b/g")`; `&` / `g&` use it).
+    EvilEx(String),
+    /// Move to the start of (1-based) line N — a `:normal` replay step.
+    EvilExGotoLine(String),
+    /// C-o / C-i — older / newer jump-list position.
+    EvilJumpBackward,
+    EvilJumpForward,
+    /// windmove / `C-w h/j/k/l`: select the window in a direction.
+    WindmoveLeft,
+    WindmoveDown,
+    WindmoveUp,
+    WindmoveRight,
+    /// `C-w W` / `C-w p` / `C-w t` / `C-w b`.
+    PreviousWindow,
+    LastWindow,
+    TopLeftWindow,
+    BottomRightWindow,
+    /// `C-w =` (Emacs `C-x +`).
+    BalanceWindows,
+    /// `C-w _` / `C-w |`.
+    MaximizeWindowHeight,
+    MaximizeWindowWidth,
+    /// `C-w H/J/K/L`: move the window to the far side.
+    MoveWindowFarLeft,
+    MoveWindowFarDown,
+    MoveWindowFarUp,
+    MoveWindowFarRight,
+    /// `C-w x` / `C-w r` / `C-w R`.
+    ExchangeWindow,
+    RotateWindowsDown,
+    RotateWindowsUp,
+    /// `C-w n` / `:new` (stacked) and `:vnew` (side by side).
+    NewWindowBelow,
+    NewWindowRight,
     /// Visual-block `r<char>`: overwrite every char of the rectangle.
     EvilBlockReplace(String),
     /// Helix `p` / `P`: paste after / before every selection.

@@ -215,3 +215,7 @@ winresource = "0.1"
 # enough that we reuse cc's logic — mirroring how Helix builds grammars.
 [target.'cfg(windows)'.dependencies]
 cc = "1"
+
+# Headless gpui (TestAppContext) for end-to-end editor tests.
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }

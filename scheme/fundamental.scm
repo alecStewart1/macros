@@ -68,6 +68,7 @@
 (define-key "fundamental" "ctrl-x 2" 'split-window-below)
 (define-key "fundamental" "ctrl-x 3" 'split-window-right)
 (define-key "fundamental" "ctrl-x o" 'other-window)
+(define-key "fundamental" "ctrl-x +" 'balance-windows)   ; equalize window sizes
 (define-key "fundamental" "ctrl-x 0" 'delete-window)
 (define-key "fundamental" "ctrl-x 1" 'delete-other-windows)
 ;; Resize (Emacs C-x ^ taller, C-x } / C-x { wider/narrower).

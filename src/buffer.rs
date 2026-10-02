@@ -325,6 +325,41 @@ impl Buffer {
         self.rope.char_to_byte(ci)
     }
 
+    /// Vim `ge` — ON the last character of the previous word: walk back out of
+    /// the class run under `from` (when on one), over any whitespace, and land
+    /// on the char before. 0 when there is no earlier word.
+    pub fn backward_word_end(&self, from: usize) -> usize {
+        self.backward_end_by(from, char_class)
+    }
+
+    /// Vim `gE` — like [`Self::backward_word_end`] over WORDs.
+    pub fn backward_bigword_end(&self, from: usize) -> usize {
+        self.backward_end_by(from, |c| {
+            if c.is_whitespace() {
+                CharClass::Space
+            } else {
+                CharClass::Word
+            }
+        })
+    }
+
+    fn backward_end_by(&self, from: usize, class: impl Fn(char) -> CharClass) -> usize {
+        let total = self.rope.len_chars();
+        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        if ci < total {
+            let here = class(self.rope.char(ci));
+            if here != CharClass::Space {
+                while ci > 0 && class(self.rope.char(ci - 1)) == here {
+                    ci -= 1;
+                }
+            }
+        }
+        while ci > 0 && class(self.rope.char(ci - 1)) == CharClass::Space {
+            ci -= 1;
+        }
+        self.rope.char_to_byte(ci.saturating_sub(1))
+    }
+
     /// Vim `W` — the start of the next whitespace-delimited WORD (every
     /// non-blank character is one class, so `foo.bar` is a single WORD).
     pub fn forward_bigword_start(&self, from: usize) -> usize {

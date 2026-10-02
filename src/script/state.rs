@@ -89,6 +89,23 @@ pub struct EditorSnapshot {
     /// The Vim/Helix count typed before a count-aware command (`3` in `3dd`),
     /// or 0 when none was typed. For `(prefix-count)`; see `set-count-aware!`.
     pub prefix_count: usize,
+    /// The modal state name ("normal", "insert", "visual", "visual-line",
+    /// "visual-block"; "" when modal editing is off), for `(evil-state)`.
+    pub evil_state: String,
+    /// The active `/` search regex ("" when none) and its direction, for
+    /// `(search-query)` / `(search-forward?)` — the `n`/`N` motions.
+    pub search_query: String,
+    pub search_forward: bool,
+    /// The buffer's major mode (top of its mode stack), for `(major-mode)`.
+    pub major_mode: String,
+    /// The buffer's Vim marks `(name, byte)`, for `(mark-position "a")`.
+    pub marks: Vec<(String, usize)>,
+    /// The buffer's highlighting language ("rust", "python", …; "" when none),
+    /// for `(buffer-language)`.
+    pub language: String,
+    /// The buffer's current syntax tree (a refcounted copy), for the
+    /// synchronous `ts-*` reads behind tree-sitter text objects and motions.
+    pub tree: Option<tree_sitter::Tree>,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the

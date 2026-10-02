@@ -136,13 +136,19 @@ impl Editor {
         // Any keystroke is cursor activity: keep the cursor solid and restart the
         // blink cycle (no-op timer when `cursor-blink` is off).
         self.reset_blink(cx);
+        self.dispatch_keystroke(ks, cx);
+    }
 
+    /// Route one keystroke through the modal layers (see [`Self::on_key_down`]);
+    /// also how `:normal` feeds its keys.
+    pub(super) fn dispatch_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
         // Precedence: startup gate → transient → helm → minibuffer → completion
         // popup → terminal → evil replace-pending → evil Normal/Visual → modal
         // leader → evil Insert → special-buffer chord overlay → special buffer →
         // universal argument → Emacs dispatch.
         let layers = [
             Self::key_config_pending,
+            Self::key_sub_confirm,
             Self::key_titlebar_dropdown,
             Self::key_transient,
             Self::key_helm,
@@ -152,6 +158,7 @@ impl Editor {
             Self::key_evil_replace,
             Self::key_read_char,
             Self::key_read_key,
+            Self::key_evil_capture,
             Self::key_evil_modal,
             Self::key_leader,
             Self::key_evil_insert,
@@ -380,6 +387,13 @@ impl Editor {
             && !ks.modifiers.alt
             && !ks.modifiers.platform;
         if is_text && let Some(ch) = ks.key_char.clone() {
+            let n = self.evil_replace_count;
+            let expr = format!("(evil-replace-with {})", super::vim::steel_quote(&ch));
+            self.record_event(if n > 1 {
+                MacroEvent::Counted(expr, n)
+            } else {
+                MacroEvent::Command(expr)
+            });
             self.evil_replace_char(&ch, cx);
         }
         cx.notify();
@@ -406,10 +420,8 @@ impl Editor {
             // dropped when ReadChar applied (see the ReadChar dispatch), so
             // replay runs `(callback "<char>")` directly instead of re-arming
             // a capture that playback could never satisfy.
-            if let Some(events) = self.macro_recording.as_mut() {
-                let escaped = ch.replace('\\', "\\\\").replace('"', "\\\"");
-                events.push(MacroEvent::Command(format!("({callback} \"{escaped}\")")));
-            }
+            let escaped = ch.replace('\\', "\\\\").replace('"', "\\\"");
+            self.record_event(MacroEvent::Command(format!("({callback} \"{escaped}\")")));
             // The engine passes `ch` as the callback's argument verbatim (no
             // source-string interpolation), so quotes/backslashes are safe.
             self.script.dispatch_action(&callback, Some(&ch));
@@ -492,6 +504,9 @@ impl Editor {
         if !self.evil_intercepts() || self.active.special.is_some() || ks.modifiers.platform {
             return Handled::No;
         }
+        if self.vim.op.is_some() {
+            return self.key_operator_pending(ks, cx);
+        }
         let chord = chord_string(ks);
         // Vim/Helix count prefix: at the start of a command, a digit is a
         // repeat count, not a command — `3j`, `2dd`, `5w`. `0` keeps its
@@ -531,7 +546,28 @@ impl Editor {
             self.status = SharedString::default();
             // Consume any count prefix (`3dd`, `5G`); see `dispatch_counted`.
             let count = self.modal_count.take();
-            self.dispatch_counted(&expr, count, cx);
+            // A new Normal-state command: the previous one is done (and, if
+            // it changed the buffer, becomes what `.` repeats).
+            if self.evil == EvilState::Normal {
+                self.dot_boundary(&expr);
+                self.register_boundary(&expr);
+            }
+            // Visual keys keep `'<` / `'>` (and `gv`) current before they act.
+            if matches!(
+                self.evil,
+                EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
+            ) {
+                self.note_visual_exit();
+            }
+            // Jump commands (G, %, n, …) remember where they started.
+            if self.evil_intercepts() && self.is_jump_expr(&expr) {
+                self.record_jump();
+            }
+            // An operator (`d`) or a `%c` binding (`m`, `"`) waits for more
+            // input instead of running now.
+            if !self.evil_route_binding(&expr, &candidate, count, cx) {
+                self.dispatch_counted(&expr, count, cx);
+            }
             cx.stop_propagation();
             return Handled::Yes;
         }
@@ -649,7 +685,10 @@ impl Editor {
                 .resolve_mode(self.evil_insert_keymap(), &chord_string(ks))
                 .map(str::to_string)
         {
-            self.run_script(&expr, cx);
+            // `C-r a` (insert register a): wait for the register key.
+            if !self.evil_route_binding(&expr, &chord_string(ks), None, cx) {
+                self.dispatch_recorded(&expr, cx);
+            }
             cx.stop_propagation();
             return Handled::Yes;
         }
@@ -1005,6 +1044,7 @@ impl Editor {
         // mark is active (`all_selections`), so a drag must activate it.
         if !self.modal_helix {
             self.evil = EvilState::Visual;
+            self.dot_unrepeatable();
         }
         self.active.mark_active = true;
     }
@@ -1247,6 +1287,7 @@ impl Editor {
         } else if self.evil_intercepts() {
             self.apply_command(EditorCommand::BackwardChar, cx); // vim: move left
         } else {
+            self.record_event(MacroEvent::Command("(delete-backward-char)".into()));
             self.apply_command(EditorCommand::DeleteBackwardChar, cx);
             if self.completion_popup.is_some() {
                 self.popup_refilter(cx);
@@ -1276,6 +1317,9 @@ impl Editor {
             // No `evil_intercepts` branch on purpose: in vim, Del in Normal mode
             // deletes the char under the cursor (like `x`), unlike Backspace
             // which only moves left — see act_backspace.
+            if !self.evil_intercepts() {
+                self.record_event(MacroEvent::Command("(delete-char)".into()));
+            }
             self.apply_command(EditorCommand::DeleteChar, cx);
         }
     }
@@ -1430,6 +1474,7 @@ impl Editor {
             // an evil/helix keymap binding for RET wins
         } else if !self.evil_intercepts() && !self.mode_key("enter", cx) {
             // a mode may rebind RET (comint send-input); else insert a newline
+            self.record_event(MacroEvent::Command("(newline)".into()));
             self.apply_command(EditorCommand::Newline, cx);
         }
     }
@@ -1465,13 +1510,22 @@ impl Editor {
         } else if self.modal_action_key("tab", cx) {
             // an evil/helix keymap binding for TAB wins (before the mode map,
             // so a modal user's explicit binding isn't shadowed by org-tab)
-        } else if !self.mode_key("tab", cx) && !self.evil_intercepts() {
+        } else if !self.mode_key("tab", cx) {
             // A mode binding (e.g. org-mode's `org-tab` heading cycle) wins in
             // every state, including evil Normal/Visual — TAB is a gpui action
             // key that never reaches the evil keymap, so consult the mode map
             // here or modal users lose it. The plain indent fallback still only
-            // runs when evil isn't intercepting.
-            self.apply_command(EditorCommand::IndentForTab, cx);
+            // runs when evil isn't intercepting; in evil Normal, TAB is Vim's
+            // C-i (jump forward) — the same key on a terminal.
+            if !self.evil_intercepts() {
+                self.record_event(MacroEvent::Command("(indent-for-tab-command)".into()));
+                self.apply_command(EditorCommand::IndentForTab, cx);
+            } else if self.evil == EvilState::Normal
+                && !self.modal_helix
+                && self.active.special.is_none()
+            {
+                self.evil_jump(true, cx);
+            }
         }
     }
     pub(super) fn act_select_left(

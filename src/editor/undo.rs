@@ -71,6 +71,7 @@ impl Editor {
             let start_line = self.active.buffer.byte_to_position(record.at).0;
             self.adjust_overlays(record.at, old_end, new.len(), line_delta, start_line);
             self.script.adjust_markers(record.at, old_end, new.len());
+            self.shift_vim_positions(record.at, old_end, new.len());
             cursor = record.at + new.len();
         }
         (cursor, true)

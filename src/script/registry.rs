@@ -154,6 +154,31 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("evil-set-linewise", EvilSetLinewise),
         ("evil-set-charwise", EvilSetCharwise),
         ("count-repeat-step", CountRepeatStep),
+        ("replay-step", ReplayStep),
+        ("evil-repeat", EvilRepeat),
+        ("evil-reselect-visual", EvilReselectVisual),
+        ("evil-jump-backward", EvilJumpBackward),
+        ("evil-jump-forward", EvilJumpForward),
+        ("windmove-left", WindmoveLeft),
+        ("windmove-down", WindmoveDown),
+        ("windmove-up", WindmoveUp),
+        ("windmove-right", WindmoveRight),
+        ("previous-window-any-frame", PreviousWindow),
+        ("evil-window-mru", LastWindow),
+        ("evil-window-top-left", TopLeftWindow),
+        ("evil-window-bottom-right", BottomRightWindow),
+        ("balance-windows", BalanceWindows),
+        ("evil-window-set-height", MaximizeWindowHeight),
+        ("evil-window-set-width", MaximizeWindowWidth),
+        ("evil-window-move-far-left", MoveWindowFarLeft),
+        ("evil-window-move-very-bottom", MoveWindowFarDown),
+        ("evil-window-move-very-top", MoveWindowFarUp),
+        ("evil-window-move-far-right", MoveWindowFarRight),
+        ("evil-window-exchange", ExchangeWindow),
+        ("evil-window-rotate-downwards", RotateWindowsDown),
+        ("evil-window-rotate-upwards", RotateWindowsUp),
+        ("evil-window-new", NewWindowBelow),
+        ("evil-window-vnew", NewWindowRight),
         ("helix-paste-after", HelixPasteAfter),
         ("helix-paste-before", HelixPasteBefore),
         ("isearch-forward", IsearchForward),
@@ -522,6 +547,145 @@ pub(crate) fn build_engine(
         "evil-block-replace",
         EditorCommand::EvilBlockReplace,
     );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-use-register",
+        EditorCommand::EvilUseRegister,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-insert-register",
+        EditorCommand::EvilInsertRegister,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-macro-record",
+        EditorCommand::EvilMacroRecord,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-macro-play",
+        EditorCommand::EvilMacroPlay,
+    );
+    register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
+    register_unary(&mut reg, queue, "evil-ex", EditorCommand::EvilEx);
+    // `(reindent-lines first last)` — Vim `=` over 0-based lines.
+    register_binary(
+        &mut reg,
+        queue,
+        "reindent-lines",
+        EditorCommand::ReindentLines,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-replace-with",
+        EditorCommand::EvilReplaceWith,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-ex-goto-line",
+        EditorCommand::EvilExGotoLine,
+    );
+    register_unary(&mut reg, queue, "evil-goto-mark", |m: String| {
+        EditorCommand::EvilGotoMark(m, true)
+    });
+    register_unary(&mut reg, queue, "evil-goto-mark-line", |m: String| {
+        EditorCommand::EvilGotoMark(m, false)
+    });
+    {
+        // `(set-jump-command! 'name)` — running `name` from a key is a jump:
+        // the jump list and `''` record where it started (G, /, %, gd, …).
+        let q = queue.clone();
+        reg.register_fn("set-jump-command!", move |value: SteelVal| {
+            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
+            q.lock().unwrap().push(EditorCommand::SetJumpCommand(name));
+        });
+    }
+    // `(buffer-language)` → the highlighting language ("" when none).
+    register_snapshot_read(&mut reg, snapshot, "buffer-language", |s| {
+        s.language.clone()
+    });
+    {
+        // `(ts-ancestors pos)` → flat `(kind start end …)` of every syntax node
+        // containing pos, innermost first; `()` without a tree. Synchronous —
+        // the published snapshot carries the tree.
+        let shared = snapshot.clone();
+        reg.register_fn("ts-ancestors", move |pos: usize| -> Vec<SteelVal> {
+            let snap = shared.load();
+            let Some(tree) = snap.tree.as_ref() else {
+                return Vec::new();
+            };
+            crate::highlight::tree_ancestors(tree, pos)
+                .into_iter()
+                .flat_map(|(k, s, e)| {
+                    [
+                        SteelVal::StringV(k.into()),
+                        SteelVal::IntV(s as isize),
+                        SteelVal::IntV(e as isize),
+                    ]
+                })
+                .collect()
+        });
+    }
+    {
+        // `(ts-children start end)` → flat `(kind start end named? …)` of the
+        // children of the node spanning exactly [start, end).
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "ts-children",
+            move |start: usize, end: usize| -> Vec<SteelVal> {
+                let snap = shared.load();
+                let Some(tree) = snap.tree.as_ref() else {
+                    return Vec::new();
+                };
+                crate::highlight::tree_children(tree, start, end)
+                    .into_iter()
+                    .flat_map(|(k, s, e, named)| {
+                        [
+                            SteelVal::StringV(k.into()),
+                            SteelVal::IntV(s as isize),
+                            SteelVal::IntV(e as isize),
+                            SteelVal::BoolV(named),
+                        ]
+                    })
+                    .collect()
+            },
+        );
+    }
+    {
+        // `(ts-ranges-of-kinds '("function_item" …))` → flat `(start end …)` of
+        // every node of those kinds, in document order.
+        let shared = snapshot.clone();
+        reg.register_fn("ts-ranges-of-kinds", move |kinds: SteelVal| -> Vec<usize> {
+            let kinds = steel_string_list(&kinds);
+            let snap = shared.load();
+            let Some(tree) = snap.tree.as_ref() else {
+                return Vec::new();
+            };
+            crate::highlight::tree_ranges_of_kinds(tree, &kinds)
+                .into_iter()
+                .flat_map(|(s, e)| [s, e])
+                .collect()
+        });
+    }
+    {
+        // `(mark-position "a")` → byte offset of mark a in this buffer, or -1.
+        let shared = snapshot.clone();
+        reg.register_fn("mark-position", move |m: String| -> isize {
+            shared
+                .load()
+                .marks
+                .iter()
+                .find(|(c, _)| *c == m)
+                .map_or(-1, |(_, p)| *p as isize)
+        });
+    }
     {
         // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
         // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
@@ -2737,6 +2901,17 @@ pub(crate) fn build_engine(
     register_snapshot_read(&mut reg, snapshot, "lsp-server-ready?", |s| s.lsp_ready);
     // `(evil-enabled?)` → #t when modal (evil) editing is active.
     register_snapshot_read(&mut reg, snapshot, "evil-enabled?", |s| s.evil_enabled);
+    // `(evil-state)` → "normal" / "insert" / "visual" / "visual-line" /
+    // "visual-block", or "" when modal editing is off.
+    register_snapshot_read(&mut reg, snapshot, "evil-state", |s| s.evil_state.clone());
+    // `(search-query)` → the active `/` regex ("" if none); `(search-forward?)`
+    // → whether it was a forward (`/`) search. For the `n`/`N` motions.
+    register_snapshot_read(&mut reg, snapshot, "search-query", |s| {
+        s.search_query.clone()
+    });
+    register_snapshot_read(&mut reg, snapshot, "search-forward?", |s| s.search_forward);
+    // `(major-mode)` → the buffer's major mode name ("rust", "org-mode", …).
+    register_snapshot_read(&mut reg, snapshot, "major-mode", |s| s.major_mode.clone());
     // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
     register_snapshot_read(&mut reg, snapshot, "helix-enabled?", |s| s.helix_enabled);
     // `(prefix-count)` → the count typed before a count-aware modal command, 0
@@ -2927,6 +3102,54 @@ pub(crate) fn build_engine(
     register_pos_fn!("bigword-forward-start", |b, p| b.forward_bigword_start(p));
     register_pos_fn!("bigword-backward-start", |b, p| b.backward_bigword_start(p));
     register_pos_fn!("bigword-forward-end", |b, p| b.forward_bigword_end(p));
+    register_pos_fn!("word-backward-end", |b, p| b.backward_word_end(p));
+    register_pos_fn!("bigword-backward-end", |b, p| b.backward_bigword_end(p));
+    {
+        // `(buffer-regex-matches pattern start end)` → a flat list
+        // `(s0 e0 s1 e1 …)` of the BUFFER byte ranges of every match inside
+        // [start, end). Offsets are buffer bytes, so callers never mix the
+        // char-indexed string accessors with regex byte offsets.
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "buffer-regex-matches",
+            move |pattern: String, start: usize, end: usize| -> Vec<usize> {
+                let Ok(re) = Regex::new(&pattern) else {
+                    return Vec::new();
+                };
+                let rope = shared.load().text.clone();
+                let (a, b) = (snap_byte(&rope, start), snap_byte(&rope, end));
+                if a >= b {
+                    return Vec::new();
+                }
+                let text = rope.byte_slice(a..b).to_string();
+                re.find_iter(&text)
+                    .flat_map(|m| [a + m.start(), a + m.end()])
+                    .collect()
+            },
+        );
+    }
+    {
+        // `(regex-search-pos pattern from forward?)` → byte offset of the next
+        // match strictly after (forward) / before (backward) `from`, wrapping
+        // around the buffer like `n`/`N`; -1 when none (or a bad regex).
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "regex-search-pos",
+            move |pattern: String, from: usize, forward: bool| -> isize {
+                let Ok(re) = Regex::new(&pattern) else {
+                    return -1;
+                };
+                let text = shared.load().text.to_string();
+                let starts: Vec<usize> = re.find_iter(&text).map(|m| m.start()).collect();
+                let hit = if forward {
+                    starts.iter().find(|&&s| s > from).or(starts.first())
+                } else {
+                    starts.iter().rev().find(|&&s| s < from).or(starts.last())
+                };
+                hit.map_or(-1, |&h| h as isize)
+            },
+        );
+    }
     register_pos_fn!("line-start-pos", |b, p| b.line_range_at(p).start);
     register_pos_fn!("line-end-pos", |b, p| b.line_range_at(p).end);
     register_pos_fn!("line-of-pos", |b, p| b.line_index_at_byte(p));
