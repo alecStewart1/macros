@@ -15,6 +15,7 @@ Macros follows the **projectile.el** pattern: a project is the directory tree ab
 | <kbd>C-c p p</kbd> | `projectile-switch-project` | Switch to another known project |
 | <kbd>C-c p g</kbd> | `projectile-grep` | Live grep across the project (Helm) |
 | <kbd>C-c p G</kbd> | `projectile-grep-buffer` | Grep into a `grep-mode` results buffer |
+| <kbd>C-c p r</kbd> | `projectile-replace` | Query-replace across the project |
 | <kbd>C-c p s</kbd> | `perspective-switch` | Switch perspective — reopen a project at its last file (Helm) |
 
 The project root is shown in the mode line.
@@ -35,11 +36,15 @@ When you'd rather keep a persistent, walkable result set, `projectile-grep-buffe
 
 | Key | Action |
 | --- | --- |
-| <kbd>Enter</kbd> | jump to the match |
+| <kbd>Enter</kbd> / <kbd>o</kbd> / click | jump to the match |
+| <kbd>n</kbd> / <kbd>p</kbd> | next / previous match |
+| <kbd>e</kbd> / <kbd>C-c C-p</kbd> (<kbd>i</kbd> under evil/helix) | edit the results in place (wgrep) — <kbd>C-c C-c</kbd> writes them back, <kbd>C-c C-k</kbd> aborts; see [Editing results](/docs/editing-commands) |
 | <kbd>g</kbd> | re-run the grep |
 | <kbd>q</kbd> | close |
 
-Those buffer results also feed `next-error` / `previous-error` (<kbd>M-g n</kbd> / <kbd>M-g p</kbd>) — see [Diagnostics](/docs/diagnostics).
+### Replace across the project
+
+`projectile-replace` (<kbd>C-c p r</kbd>, alias `project-query-replace`) and `projectile-replace-regexp` (<kbd>C-c p %</kbd>) find every project file containing a match, then run a [query-replace](/docs/editing-commands) session through each in turn — <kbd>!</kbd> does the rest of a file, <kbd>Y</kbd> the rest of all files, <kbd>N</kbd> skips a file — and finally offer to save the changed files.
 
 ## Perspectives
 

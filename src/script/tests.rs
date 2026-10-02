@@ -8376,3 +8376,332 @@ mod modal_keys {
         );
     }
 }
+
+/// query-replace / replace-string (replace.scm), occur + editable results
+/// (occur.scm), and the `buffer-search-all` / `regexp-search-lines` bridges.
+#[cfg(test)]
+mod search_replace_tests {
+    use super::*;
+
+    fn engine_with(text: &str, point: usize) -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        // The receiver is dropped: these tests only read eval results.
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine.set_snapshot(EditorSnapshot {
+            name: "src.txt".into(),
+            text: Rope::from_str(text),
+            point,
+            ..Default::default()
+        });
+        engine
+    }
+
+    fn value(engine: &ScriptEngine, q: &str) -> String {
+        engine.eval(q).unwrap().value.unwrap_or_default()
+    }
+
+    fn commands(engine: &ScriptEngine, q: &str) -> Vec<EditorCommand> {
+        engine.eval(q).unwrap().commands
+    }
+
+    fn replacements(cmds: &[EditorCommand]) -> Vec<(usize, usize, String)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                EditorCommand::ReplaceRegion { start, end, text } => {
+                    Some((*start, *end, text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Apply ReplaceRegion commands (byte offsets) to `text`, in order — what
+    /// the editor does — so tests can check the resulting buffer.
+    fn apply(text: &str, reps: &[(usize, usize, String)]) -> String {
+        let mut s = text.to_string();
+        for (a, b, t) in reps {
+            s.replace_range(*a..*b, t);
+        }
+        s
+    }
+
+    #[test]
+    fn replacement_expansion_backrefs_and_case() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            value(
+                &e,
+                r#"(qr-expand-replacement "<\\1|\\2|\\&|\\\\|\\9>" (list "ab" "a" "b"))"#
+            ),
+            r#""<a|b|ab|\\|>""#
+        );
+        // Multibyte groups and literal text survive the char walk.
+        assert_eq!(
+            value(&e, r#"(qr-expand-replacement "é\\1ü\\n" (list "x" "ö"))"#),
+            "\"éöü\\n\""
+        );
+        // Emacs case-replace: a lower-case replacement copies the match's case.
+        assert_eq!(value(&e, r#"(qr-case-adjust "bar" "FOO")"#), r#""BAR""#);
+        assert_eq!(value(&e, r#"(qr-case-adjust "bar" "Foo")"#), r#""Bar""#);
+        assert_eq!(value(&e, r#"(qr-case-adjust "bar" "foo")"#), r#""bar""#);
+        assert_eq!(
+            value(&e, r#"(qr-case-adjust "émile" "ÉCOLE")"#),
+            r#""ÉMILE""#
+        );
+        // …but not when the user typed an upper-case replacement or FROM.
+        assert_eq!(
+            value(&e, r#"(qr-replacement-for (list 0 3 "FOO") "Bar" #f #t)"#),
+            r#""Bar""#
+        );
+        assert_eq!(
+            value(&e, r#"(qr-replacement-for (list 0 3 "FOO") "bar" #f #f)"#),
+            r#""bar""#
+        );
+        // Smart case + literal quoting.
+        assert_eq!(value(&e, r#"(qr-pattern "a.b" #f #t)"#), r#""(?i)a\\.b""#);
+        assert_eq!(
+            value(&e, r#"(qr-pattern "A.b" #t (qr-fold? "A.b"))"#),
+            r#""A.b""#
+        );
+    }
+
+    #[test]
+    fn buffer_search_all_reports_byte_offsets_and_groups() {
+        let e = engine_with("héllo wörld\nfoo bar foo\n", 0);
+        assert_eq!(
+            value(&e, r#"(buffer-search-all "(f)(o)o" 0 100)"#),
+            r#"((14 17 "foo" "f" "o") (22 25 "foo" "f" "o"))"#
+        );
+        // `^` is a real line anchor even when the window starts mid-line, and
+        // matches must lie wholly inside the window.
+        assert_eq!(value(&e, r#"(buffer-search-all "^foo" 15 100)"#), "()");
+        assert_eq!(
+            value(&e, r#"(buffer-search-all "foo" 0 24)"#),
+            r#"((14 17 "foo"))"#
+        );
+        assert!(value(&e, r#"(buffer-search-all "(" 0 10)"#).contains("unclosed group"));
+        assert_eq!(
+            value(&e, r#"(regexp-search-lines "o" (list "wö o" "x"))"#),
+            "(((4 5)) ())"
+        );
+    }
+
+    #[test]
+    fn query_replace_session_over_multibyte_text() {
+        let text = "héllo Foo wörld\nfoo bar FOO — foo\n";
+        let e = engine_with(text, 0);
+        let start = commands(&e, r#"(qr-start "foo" "bar" #f 0 (point-max) #f #f #f)"#);
+        assert!(
+            start
+                .iter()
+                .any(|c| matches!(c, EditorCommand::UndoAmalgamateBegin))
+        );
+        assert!(start.iter().any(
+            |c| matches!(c, EditorCommand::ReadKeyStart { callback, .. } if callback == "qr-key")
+        ));
+        assert!(
+            start
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetRegion { start: 7, end: 10 }))
+        );
+        let mut reps = Vec::new();
+        reps.extend(replacements(&commands(&e, r#"(qr-key "y")"#))); // Foo -> Bar
+        reps.extend(replacements(&commands(&e, r#"(qr-key "n")"#))); // skip foo
+        reps.extend(replacements(&commands(&e, r#"(qr-key "!")"#))); // FOO, foo
+        assert_eq!(apply(text, &reps), "héllo Bar wörld\nfoo bar BAR — bar\n");
+        // The session already ended at `!`: a stray key only disarms.
+        let done = commands(&e, r#"(qr-key "q")"#);
+        assert!(replacements(&done).is_empty(), "{done:?}");
+        assert_eq!(value(&e, "*qr-count*"), "3");
+    }
+
+    #[test]
+    fn query_replace_undo_back_and_finish() {
+        let text = "a1 a2 a3";
+        let e = engine_with(text, 0);
+        commands(
+            &e,
+            r#"(qr-start "a([0-9])" "<\\1>" #t 0 (point-max) #f #f #f)"#,
+        );
+        let mut reps = Vec::new();
+        reps.extend(replacements(&commands(&e, r#"(qr-key " ")"#)));
+        reps.extend(replacements(&commands(&e, r#"(qr-key "y")"#)));
+        assert_eq!(apply(text, &reps), "<1> <2> a3");
+        reps.extend(replacements(&commands(&e, r#"(qr-key "u")"#))); // a2 back
+        assert_eq!(apply(text, &reps), "<1> a2 a3");
+        reps.extend(replacements(&commands(&e, r#"(qr-key "^")"#)));
+        reps.extend(replacements(&commands(&e, r#"(qr-key "U")"#)));
+        assert_eq!(apply(text, &reps), text);
+        reps.extend(replacements(&commands(&e, r#"(qr-key ".")"#)));
+        assert_eq!(apply(text, &reps), "<1> a2 a3");
+        assert_eq!(value(&e, "*qr-active?*"), "#false");
+    }
+
+    #[test]
+    fn query_replace_quits_on_escape_and_stray_keys() {
+        let e = engine_with("x x", 0);
+        commands(&e, r#"(qr-start "x" "y" #f 0 (point-max) #f #f #f)"#);
+        let cmds = commands(&e, r#"(qr-key "escape")"#);
+        assert!(cmds.iter().any(|c| matches!(c, EditorCommand::ReadKeyStop)));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::UndoAmalgamateEnd))
+        );
+        assert!(replacements(&cmds).is_empty());
+        // A key after the session ended just disarms the capture.
+        let cmds = commands(&e, r#"(qr-key "y")"#);
+        assert!(replacements(&cmds).is_empty());
+    }
+
+    #[test]
+    fn replace_string_from_point_and_in_region() {
+        let text = "ö-ab ab ab";
+        // From point (byte 6, the 2nd "ab" — after the 2-byte ö) to the end.
+        let e = engine_with(text, 6);
+        let cmds = commands(
+            &e,
+            r#"(qr-replace-all-in "ab" "ÿÿ" #f (point) (point-max))"#,
+        );
+        assert_eq!(apply(text, &replacements(&cmds)), "ö-ab ÿÿ ÿÿ");
+        // Within a region [3, 9): only the first two.
+        let cmds = commands(&e, r#"(qr-replace-all-in "a(b)" "\\1\\1" #t 3 9)"#);
+        assert_eq!(apply(text, &replacements(&cmds)), "ö-bb bb ab");
+    }
+
+    #[test]
+    fn occur_collects_lines_and_lays_out_byte_offsets() {
+        let e = engine_with("héllo Foo wörld\nnothing\nfoo bar FOO\n", 0);
+        assert_eq!(
+            value(&e, r#"(occur-collect (occur-fold-pattern "foo"))"#),
+            r#"(3 ("src.txt" "" 0 "      1:" "héllo Foo wörld") ("src.txt" "" 2 "      3:" "foo bar FOO"))"#
+        );
+        // Header "é\n" is 3 bytes; the match after a multibyte char lands on
+        // byte, not char, offsets; read-only ranges cover header+prefixes.
+        assert_eq!(
+            value(
+                &e,
+                r#"(results-layout (list "é" "occur-mode" "(?i)foo"
+                     (list->vector (list (results-record "b" "" 0 "1:" "é foo")
+                                         (results-record "b" "" 1 "2:" "FOO")))))"#
+            ),
+            r#"("é\n1:é foo\n2:FOO" ((12 14 "occur-prefix") (14 17 "occur-match") (3 5 "occur-prefix") (8 11 "occur-match")) ((0 5) (12 14)))"#
+        );
+    }
+
+    #[test]
+    fn results_parse_edits_detects_changes_and_broken_lines() {
+        let e = engine_with("", 0);
+        let spec = r#"(list "hdr" "occur-mode" "foo"
+            (list->vector (list (results-record "b" "" 1 "     2:" "foo é")
+                                (results-record "b" "" 3 "     4:" "zz"))))"#;
+        assert_eq!(
+            value(
+                &e,
+                &format!(r#"(results-parse-edits {spec} "hdr\n     2:FOO é\n     4:zz")"#)
+            ),
+            r#"((0 "FOO é"))"#
+        );
+        assert!(
+            value(
+                &e,
+                &format!(r#"(results-parse-edits {spec} "hdr\n     2:x\nnew\n     4:zz")"#)
+            )
+            .contains("number of result lines changed")
+        );
+        assert!(
+            value(
+                &e,
+                &format!(r#"(results-parse-edits {spec} "hdr\n  2:x\n     4:zz")"#)
+            )
+            .contains("Line 2 lost its prefix")
+        );
+    }
+
+    #[test]
+    fn results_apply_file_patches_lines_on_disk() {
+        let dir = std::env::temp_dir().join(format!("macros-wgrep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.txt");
+        // Line 1 has trailing spaces + CR (grep shows it trimmed); line 2 is
+        // multibyte; line 3 changed since the search and must be skipped.
+        std::fs::write(&path, "keep\nfoo é  \r\nbär\nstale\n").unwrap();
+        let e = engine_with("", 0);
+        let p = path.to_str().unwrap();
+        let res = value(
+            &e,
+            &format!(
+                r#"(results-apply-file "{p}" (list (list 0 1 "foo é" "FOO É")
+                                                  (list 1 2 "bär" "baz")
+                                                  (list 2 3 "fresh" "x")))"#
+            ),
+        );
+        assert_eq!(res, "((1 0) . 1)");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "keep\nFOO É  \r\nbaz\nstale\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn results_patch_buffer_line_uses_byte_offsets() {
+        // Line 1 = "é foo  " (trailing spaces kept for a grep-trimmed view).
+        let e = engine_with("ab\né foo  \nz", 0);
+        let cmds = commands(&e, r#"(results-patch-buffer-line (list 0 1 "é foo" "ü"))"#);
+        assert_eq!(replacements(&cmds), vec![(3, 9, "ü".to_string())]);
+        // A line that no longer matches is left alone.
+        let cmds = commands(&e, r#"(results-patch-buffer-line (list 0 2 "y" "q"))"#);
+        assert!(replacements(&cmds).is_empty());
+        // Records stay mutable so applied edits can be folded back in.
+        assert_eq!(
+            value(
+                &e,
+                r#"(begin (results-set! "*t*" "h" "occur-mode" "x" (list 1 2))
+                          (vector-set! (results-records (results-spec "*t*")) 0 9)
+                          (vector-ref (results-records (results-spec "*t*")) 0))"#
+            ),
+            "9"
+        );
+    }
+
+    #[test]
+    fn grep_records_use_relative_prefixes() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            value(
+                &e,
+                r#"(projectile-grep-record "/proj" "/proj/src/é.rs:12:  x: é")"#
+            ),
+            r#"("" "/proj/src/é.rs" 11 "src/é.rs:12:" "  x: é")"#
+        );
+    }
+
+    #[test]
+    fn replace_keys_are_bound() {
+        let e = engine_with("", 0);
+        let cmds = commands(&e, include_str!("../../scheme/replace.scm"));
+        let bound = |chord: &str, cmd: &str| {
+            cmds.iter().any(|c| {
+                matches!(c, EditorCommand::DefineKey(m, k, v)
+                    if m == "fundamental" && k == chord && v == cmd)
+            })
+        };
+        assert!(bound("alt-%", "query-replace"));
+        assert!(bound("ctrl-alt-%", "query-replace-regexp"));
+        assert!(bound("ctrl-c p r", "projectile-replace"));
+        for cmd in [
+            "query-replace",
+            "query-replace-regexp",
+            "replace-string",
+            "replace-regexp",
+            "project-query-replace",
+            "projectile-replace",
+            "results-edit",
+        ] {
+            let q = format!(r#"(if (member "{cmd}" *interactive-commands*) "y" "n")"#);
+            assert_eq!(value(&e, &q), r#""y""#, "{cmd} not registered");
+        }
+    }
+}
