@@ -8718,3 +8718,307 @@ mod session_lib {
         assert!(hooks.contains(&"kill-emacs-hook".to_string()), "{hooks:?}");
     }
 }
+
+#[cfg(test)]
+mod test_runner_lib {
+    use super::*;
+
+    fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
+        let (engine, rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/diagnostics.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/test-runner.scm"))
+            .expect("test-runner.scm loads");
+        (engine, rx)
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    /// Evaluate `(f text line)` for a source text given as a Rust string.
+    fn at(engine: &ScriptEngine, f: &str, text: &str, line: usize) -> String {
+        engine.eval(&format!("(define src {text:?})")).unwrap();
+        v(engine, &format!("({f} src {line})"))
+    }
+
+    const RUST: &str = r#"use std::fmt;
+
+fn helper() -> u32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds_numbers() {
+        let s = "{ not a brace }";
+        assert_eq!(helper(), 1); // }
+    }
+
+    mod nested {
+        #[tokio::test]
+        #[should_panic]
+        async fn deep_one() {
+            if true {
+                panic!();
+            }
+        }
+    }
+
+    fn not_a_test() {
+        let x = 1;
+    }
+}
+"#;
+
+    #[test]
+    fn rust_enclosing_test_and_module_path() {
+        let (engine, _rx) = engine();
+        // Inside adds_numbers (brace in a string/comment doesn't confuse depth).
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 11),
+            r#"(("tests") "adds_numbers")"#
+        );
+        // On the fn line itself, and on its closing brace.
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 9),
+            r#"(("tests") "adds_numbers")"#
+        );
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 12),
+            r#"(("tests") "adds_numbers")"#
+        );
+        // Nested module, attribute stack with #[should_panic] between.
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 19),
+            r#"(("tests" "nested") "deep_one")"#
+        );
+        // A non-test fn, the space between tests, and non-test code: none.
+        assert_eq!(at(&engine, "test-rust-point", RUST, 25), "#false");
+        assert_eq!(at(&engine, "test-rust-point", RUST, 13), "#false");
+        assert_eq!(at(&engine, "test-rust-point", RUST, 2), "#false");
+    }
+
+    #[test]
+    fn rust_file_targets() {
+        let (engine, _rx) = engine();
+        for (rel, want) in [
+            ("src/script/tests.rs", r#"("" . "script::tests")"#),
+            ("src/editor/mod.rs", r#"("" . "editor")"#),
+            ("src/main.rs", r#"("" . "")"#),
+            ("tests/integration.rs", r#"("--test integration " . "")"#),
+            ("src/bin/tool.rs", r#"("--bin tool " . "")"#),
+        ] {
+            assert_eq!(
+                v(&engine, &format!("(test-rust-file-target {rel:?})")),
+                want,
+                "{rel}"
+            );
+        }
+        engine.eval(&format!("(define src {RUST:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'point "rust" "src/calc.rs" src 19)"#
+            ),
+            r#"("cargo test calc::tests::nested::deep_one" . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'file "rust" "tests/it.rs" src 0)"#
+            ),
+            r#"("cargo test --test it " . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'file "rust" "src/calc.rs" src 0)"#
+            ),
+            r#"("cargo test calc::" . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(cdr (test-command 'point "rust" "src/calc.rs" src 2))"#
+            ),
+            r#""Point is not inside a #[test] function""#
+        );
+    }
+
+    const PY: &str = "import pytest\n\nclass TestMath:\n    def setup_method(self):\n        pass\n\n    def test_add(self):\n        x = 1\n\n        assert x == 1\n\n@pytest.mark.slow\ndef test_top():\n    def inner():\n        pass\n    inner()\n";
+
+    #[test]
+    fn python_pytest_node_ids() {
+        let (engine, _rx) = engine();
+        assert_eq!(
+            at(&engine, "test-python-point", PY, 9),
+            r#""TestMath::test_add""#
+        );
+        // A blank line inside the method still belongs to it.
+        assert_eq!(
+            at(&engine, "test-python-point", PY, 8),
+            r#""TestMath::test_add""#
+        );
+        // In the class but not in a test → the class.
+        assert_eq!(at(&engine, "test-python-point", PY, 4), r#""TestMath""#);
+        // A nested helper inside a top-level test → the test.
+        assert_eq!(at(&engine, "test-python-point", PY, 14), r#""test_top""#);
+        assert_eq!(at(&engine, "test-python-point", PY, 0), "#false");
+        engine.eval(&format!("(define src {PY:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "python" "tests/test_m.py" src 9))"#
+            ),
+            r#""python -m pytest 'tests/test_m.py::TestMath::test_add'""#
+        );
+    }
+
+    const GO: &str = "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n\nfunc helper() int { return 1 }\n\nfunc TestSub(t *testing.T) {}\n";
+
+    #[test]
+    fn go_test_names() {
+        let (engine, _rx) = engine();
+        assert_eq!(at(&engine, "test-go-point", GO, 6), r#""TestAdd""#);
+        assert_eq!(at(&engine, "test-go-point", GO, 10), "#false");
+        assert_eq!(at(&engine, "test-go-point", GO, 2), "#false");
+        engine.eval(&format!("(define src {GO:?})")).unwrap();
+        assert_eq!(
+            v(&engine, "(test-go-file-names src)"),
+            r#"("TestAdd" "TestSub")"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "go" "calc_test.go" src 6))"#
+            ),
+            r#""go test -run '^TestAdd$' .""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'file "go" "calc_test.go" src 6))"#
+            ),
+            r#""go test -run '^(TestAdd|TestSub)$' .""#
+        );
+    }
+
+    const JS: &str = "import { sum } from './sum';\n\ndescribe('sum', () => {\n  it(\"adds (1+2)\", () => {\n    expect(sum(1, 2)).toBe(3);\n  });\n\n  test.only(`it's fine`, () => {});\n});\n";
+
+    #[test]
+    fn js_test_names_and_runner_detection() {
+        let (engine, _rx) = engine();
+        assert_eq!(at(&engine, "test-js-point", JS, 4), r#""adds (1+2)""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 7), r#""it's fine""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 2), r#""sum""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 0), "#false");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-js-runner "{\"devDependencies\": {\"vitest\": \"1\"}}")"#
+            ),
+            r#""vitest""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-js-runner "{\"scripts\": {\"test\": \"jest\"}}")"#
+            ),
+            r#""jest""#
+        );
+        assert_eq!(v(&engine, r#"(test-js-runner "{}")"#), r#""npm""#);
+        engine.eval(&format!("(define src {JS:?})")).unwrap();
+        // The -t pattern is regex-escaped and shell-quoted.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "jest" "src/sum.test.ts" src 4))"#
+            ),
+            r#""npx jest 'src/sum.test.ts' -t 'adds \\(1\\+2\\)'""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "vitest" "a.test.ts" src 7))"#
+            ),
+            r#""npx vitest run 'a.test.ts' -t 'it'\\''s fine'""#
+        );
+    }
+
+    #[test]
+    fn zig_and_custom_templates() {
+        let (engine, _rx) = engine();
+        let zig = "const std = @import(\"std\");\n\ntest \"adds\" {\n    try std.testing.expect(true);\n}\n";
+        assert_eq!(at(&engine, "test-zig-point", zig, 3), r#""adds""#);
+        engine
+            .eval(r#"(test-runner-set-command "rust" 'point "cargo nextest run {filter}")"#)
+            .unwrap();
+        engine.eval(&format!("(define src {RUST:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "rust" "src/lib.rs" src 11))"#
+            ),
+            r#""cargo nextest run tests::adds_numbers""#
+        );
+        // The other kinds are untouched.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'project "rust" "src/lib.rs" src 11))"#
+            ),
+            r#""cargo test""#
+        );
+    }
+
+    /// End to end: point in a Rust test in a real temp crate → `test-at-point`
+    /// launches cargo in the crate root through compile-mode, and
+    /// `test-rerun-last` repeats it there.
+    #[test]
+    fn test_at_point_runs_in_crate_root_and_reruns() {
+        let (engine, _rx) = engine();
+        let root = fresh_persistence_dir();
+        std::fs::write(format!("{root}/Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(format!("{root}/src")).unwrap();
+        let file = format!("{root}/src/calc.rs");
+        std::fs::write(&file, RUST).unwrap();
+        engine.set_snapshot(EditorSnapshot {
+            path: file.clone(),
+            directory: format!("{root}/src"),
+            text: Rope::from_str(RUST),
+            line: 11,
+            ..Default::default()
+        });
+        let ran = |out: &EvalResult| {
+            out.commands.iter().any(|c| match c {
+                EditorCommand::MakeProcess { args, .. } => args.iter().any(|a| {
+                    a.contains(&format!(
+                        "cd {root} && cargo test calc::tests::adds_numbers"
+                    ))
+                }),
+                _ => false,
+            })
+        };
+        let out = engine.eval("(test-at-point)").unwrap();
+        assert!(ran(&out), "{:?}", out.commands);
+        // Finish the run so the compile lane is free again, then rerun.
+        engine.eval(r#"(compile-done "0")"#).unwrap();
+        let out = engine.eval("(test-rerun-last)").unwrap();
+        assert!(ran(&out), "{:?}", out.commands);
+        // recompile (`g` in *compilation*) stays pinned to the crate root.
+        assert_eq!(v(&engine, "*compile-fixed-dir*"), format!("{root:?}"));
+    }
+}
