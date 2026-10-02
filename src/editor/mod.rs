@@ -499,6 +499,10 @@ pub struct Editor {
     /// the fallback `default-directory` for fileless buffers so `publish_point`
     /// doesn't make a `current_dir` syscall on every snapshot publish.
     process_cwd: String,
+    /// Files whose async `find_file` read is in flight, by canonical path — a
+    /// second visit of the same file meanwhile is dropped instead of racing
+    /// to create a duplicate buffer.
+    pending_opens: HashSet<PathBuf>,
     /// Other open buffers (snapshots), most-recently-used last.
     inactive: Vec<Document>,
 
@@ -1283,6 +1287,7 @@ impl Editor {
             process_cwd: std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            pending_opens: HashSet::new(),
             inactive: Vec::new(),
             lsp_commands: HashMap::new(),
             extensions: HashMap::new(),

@@ -18,6 +18,23 @@ fn is_special_buffer_name(name: &str) -> bool {
     name.starts_with('*') && name.ends_with('*') && name.len() > 1
 }
 
+/// The identity of the file at `path` for "is it already open?" checks: the
+/// canonical path (symlinks, `.`/`..`, and relative spellings resolved). A file
+/// that doesn't exist yet canonicalizes its directory and keeps its name; a
+/// relative path resolves against the process cwd (the editor never `chdir`s).
+pub(super) fn file_identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let absolute = || std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir)
+            .map(|dir| dir.join(name))
+            .unwrap_or_else(|_| absolute()),
+        _ => absolute(),
+    }
+}
+
 impl Editor {
     /// Names of all open buffers (active first).
     pub(super) fn buffer_names(&self) -> Vec<String> {
@@ -185,23 +202,22 @@ impl Editor {
     }
 
     /// `C-x C-f`: visit a file, reusing its buffer if already open.
+    ///
+    /// "Already open" compares canonical paths ([`file_identity`]), so
+    /// `./src/main.rs`, an absolute spelling, and a symlink to it all reuse one
+    /// buffer, and a visit while the same file's read is still in flight is
+    /// dropped rather than racing to create a second buffer.
     pub(super) fn find_file(&mut self, input: &str, cx: &mut Context<Self>) {
         let path = PathBuf::from(expand_path(input.trim()));
         if path.as_os_str().is_empty() {
             return;
         }
-        if self.active.path.as_deref() == Some(path.as_path()) {
-            self.echo(format!("Already in {}", self.active.name), cx);
+        let identity = file_identity(&path);
+        if self.switch_to_visiting(&identity, cx) {
             return;
         }
-        if let Some(index) = self
-            .inactive
-            .iter()
-            .position(|d| d.path.as_deref() == Some(path.as_path()))
-        {
-            self.activate(index, true, cx);
-            self.echo(format!("Switched to {}", self.active.name), cx);
-            return;
+        if !self.pending_opens.insert(identity.clone()) {
+            return; // the first visit's read will install (and show) it
         }
 
         let name = path.file_name().map_or_else(
@@ -217,25 +233,50 @@ impl Editor {
             .spawn(async move { std::fs::read_to_string(&read_path) });
         cx.spawn(async move |this, cx| {
             let result = read.await;
-            this.update(cx, |editor, cx| match result {
-                Ok(contents) => editor.open_file(name, path, contents, cx),
-                // A missing file is the ordinary "visit a new file" flow: an
-                // empty buffer that creates the file on first save.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    editor.open_file(name, path, String::new(), cx)
+            this.update(cx, |editor, cx| {
+                editor.pending_opens.remove(&identity);
+                match result {
+                    Ok(contents) => editor.open_file(name, path, contents, cx),
+                    // A missing file is the ordinary "visit a new file" flow: an
+                    // empty buffer that creates the file on first save.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        editor.open_file(name, path, String::new(), cx)
+                    }
+                    // Anything else (permissions, non-UTF-8 data, …) must NOT open
+                    // an empty file-visiting buffer — saving that buffer would
+                    // truncate the file on disk. Report and leave the editor as-is.
+                    Err(err) => editor.echo(format!("Could not open {name}: {err}"), cx),
                 }
-                // Anything else (permissions, non-UTF-8 data, …) must NOT open
-                // an empty file-visiting buffer — saving that buffer would
-                // truncate the file on disk. Report and leave the editor as-is.
-                Err(err) => editor.echo(format!("Could not open {name}: {err}"), cx),
             })
             .ok();
         })
         .detach();
     }
 
+    /// If some buffer already visits the file `identity` (a [`file_identity`]),
+    /// show it and return `true`.
+    fn switch_to_visiting(&mut self, identity: &Path, cx: &mut Context<Self>) -> bool {
+        let visits = |doc: &Document| {
+            doc.path
+                .as_deref()
+                .is_some_and(|p| file_identity(p) == identity)
+        };
+        if visits(&self.active) {
+            self.echo(format!("Already in {}", self.active.name), cx);
+            return true;
+        }
+        if let Some(index) = self.inactive.iter().position(visits) {
+            self.activate(index, true, cx);
+            self.echo(format!("Switched to {}", self.active.name), cx);
+            return true;
+        }
+        false
+    }
+
     /// Install a freshly-read file as the active buffer (foreground half of the
-    /// async `find_file`).
+    /// async `find_file`, and of LSP's `visit_path`). Re-checks for an existing
+    /// buffer on the file — another route may have opened it meanwhile — and
+    /// gives the new buffer a unique name (see [`Self::unique_buffer_name`]).
     pub(super) fn open_file(
         &mut self,
         name: String,
@@ -243,6 +284,10 @@ impl Editor {
         contents: String,
         cx: &mut Context<Self>,
     ) {
+        if self.switch_to_visiting(&file_identity(&path), cx) {
+            return;
+        }
+        let name = self.unique_buffer_name(&name, &path);
         let doc = make_document(name.clone(), Some(path), &contents);
         let current = self.snapshot_active();
         self.inactive.push(current);
@@ -255,6 +300,79 @@ impl Editor {
         self.reconcile_watches(cx); // watch the newly-visited file (auto-revert)
     }
 
+    /// A buffer name for visiting `path` that no open buffer uses. `base` (the
+    /// file name) when free; otherwise Emacs uniquify's `post-forward-angle-
+    /// brackets` style — `mod.rs<editor>`, adding parent directories until the
+    /// suffix tells this file apart from every other open file of that name
+    /// (`mod.rs<a/src>`), with a numeric `mod.rs<2>` as the last resort.
+    ///
+    /// Only the NEW buffer is named this way; existing buffers keep their
+    /// names, since Scheme state (perspectives, buffer-locals, pane lists) is
+    /// keyed by buffer name and a rename would orphan it.
+    pub(super) fn unique_buffer_name(&self, base: &str, path: &Path) -> String {
+        let taken = |n: &str| self.active.name == n || self.inactive.iter().any(|d| d.name == n);
+        if !taken(base) {
+            return base.to_string();
+        }
+        let identity = file_identity(path);
+        // Other open files with the same file name, as canonical paths.
+        let others: Vec<PathBuf> = std::iter::once(&self.active)
+            .chain(&self.inactive)
+            .filter_map(|d| d.path.as_deref())
+            .map(file_identity)
+            .filter(|p| *p != identity && p.file_name() == identity.file_name())
+            .collect();
+        uniquified_name(base, &identity, &others, taken)
+    }
+}
+
+/// The naming rule behind [`Editor::unique_buffer_name`], pure for testing:
+/// `base<dir>` with the fewest trailing parent directories of `path` that no
+/// path in `others` shares, skipping names `taken` reports in use; numeric
+/// `base<N>` when no directory suffix works.
+fn uniquified_name(
+    base: &str,
+    path: &Path,
+    others: &[PathBuf],
+    taken: impl Fn(&str) -> bool,
+) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    let dirs = |p: &Path| -> Vec<String> {
+        p.parent()
+            .map(|d| {
+                d.components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let suffix = |parts: &[String], depth: usize| -> Option<String> {
+        (depth <= parts.len()).then(|| parts[parts.len() - depth..].join("/"))
+    };
+    let mine = dirs(path);
+    let theirs: Vec<Vec<String>> = others.iter().map(|p| dirs(p)).collect();
+    for depth in 1..=mine.len() {
+        let Some(s) = suffix(&mine, depth) else { break };
+        let candidate = format!("{base}<{s}>");
+        let distinct = theirs
+            .iter()
+            .all(|t| suffix(t, depth).as_deref() != Some(s.as_str()));
+        if distinct && !taken(&candidate) {
+            return candidate;
+        }
+    }
+    (2..)
+        .map(|n| format!("{base}<{n}>"))
+        .find(|c| !taken(c))
+        .expect("an unused numeric suffix exists")
+}
+
+impl Editor {
     /// Open files dropped onto the window from the OS (Finder, a terminal, etc.).
     /// Each dropped file is visited in its own buffer; the last one ends up
     /// active. Directories are skipped — `find_file` only reads regular files.
@@ -1262,4 +1380,73 @@ impl Editor {
     }
 
     // --- yasnippet session ------------------------------------------------
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_identity, uniquified_name};
+    use std::path::PathBuf;
+
+    #[test]
+    fn duplicate_file_names_get_distinguishing_dir_suffixes() {
+        let p = PathBuf::from;
+        let taken = |names: &'static [&'static str]| move |n: &str| names.contains(&n);
+        // Free name → as-is.
+        assert_eq!(
+            uniquified_name("mod.rs", &p("/x/src/script/mod.rs"), &[], taken(&[])),
+            "mod.rs"
+        );
+        // The nearest differing parent dir.
+        assert_eq!(
+            uniquified_name(
+                "mod.rs",
+                &p("/x/src/script/mod.rs"),
+                &[p("/x/src/editor/mod.rs")],
+                taken(&["mod.rs"]),
+            ),
+            "mod.rs<script>"
+        );
+        // Same immediate parent → go up until they differ.
+        assert_eq!(
+            uniquified_name(
+                "lib.rs",
+                &p("/w/b/src/lib.rs"),
+                &[p("/w/a/src/lib.rs")],
+                taken(&["lib.rs"]),
+            ),
+            "lib.rs<b/src>"
+        );
+        // A non-file buffer holding the name (no path to compare) still gets
+        // a dir suffix; an occupied suffixed name falls through to numbers.
+        assert_eq!(
+            uniquified_name("notes", &p("/n/notes"), &[], taken(&["notes"])),
+            "notes<n>"
+        );
+        assert_eq!(
+            uniquified_name("notes", &p("/notes"), &[], taken(&["notes"])),
+            "notes<2>"
+        );
+    }
+
+    #[test]
+    fn file_identity_unifies_spellings_of_one_file() {
+        let dir = std::env::temp_dir().join(format!("macros-identity-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("sub/f.txt");
+        std::fs::write(&file, "x").unwrap();
+        let dotted = dir.join("sub/../sub/./f.txt");
+        assert_eq!(file_identity(&dotted), file_identity(&file));
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.txt");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(file_identity(&link), file_identity(&file));
+        }
+        // Not yet on disk: canonical dir + name, still matching other spellings.
+        assert_eq!(
+            file_identity(&dir.join("sub/../new.txt")),
+            file_identity(&dir.join("new.txt"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
