@@ -4,11 +4,14 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use gpui::{Context, Pixels, Point};
 
+use crate::script::DapStartArgs;
 use crate::terminal::{TermEvent, Terminal};
 
 use super::*;
@@ -78,7 +81,133 @@ pub(super) fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// A message from a [`make_process`](Editor::make_process) worker: one stdout
+/// line, or the exit code once the worker has reaped the child.
+enum ChildMsg {
+    Line(String),
+    Exited(i32),
+}
+
+/// How long a terminated process group gets to exit on SIGTERM before SIGKILL.
+const TERM_GRACE: Duration = Duration::from_millis(500);
+
+/// A live `make-process` child kept so Scheme can write to its stdin or kill
+/// it. The `Child` is shared with the worker thread that reaps it (so the UI
+/// never blocks in `wait`); stdin writes go through a dedicated writer thread
+/// (so a full pipe never blocks the UI). Dropping the handle — the owning
+/// buffer is killed, the editor goes away — terminates the process group.
+pub(super) struct ProcessHandle {
+    child: Arc<Mutex<Child>>,
+    stdin: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    /// Buffer whose kill also kills this process (`set-process-buffer`).
+    buffer: Option<String>,
+}
+
+/// Lock a shared child, ignoring poison (a panicked holder can't corrupt it).
+fn lock_child(child: &Mutex<Child>) -> std::sync::MutexGuard<'_, Child> {
+    child.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Signal `child`'s whole process group (it leads its own group, see
+/// [`Editor::make_process`]) if it hasn't been reaped; true if it was still
+/// running. Holding the lock across the check and the kill means the reaper
+/// can't free the pid/pgid in between, so we never signal a recycled group.
+fn signal_group(child: &Mutex<Child>, #[allow(unused)] sig: i32) -> bool {
+    let mut c = lock_child(child);
+    if !matches!(c.try_wait(), Ok(None)) {
+        return false;
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(c.id() as i32), sig);
+    }
+    #[cfg(not(unix))]
+    let _ = c.kill();
+    true
+}
+
+#[cfg(unix)]
+const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(unix)]
+const SIGKILL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const SIGTERM: i32 = 15;
+#[cfg(not(unix))]
+const SIGKILL: i32 = 9;
+
+impl ProcessHandle {
+    /// SIGKILL the group now (Emacs `kill-process`).
+    fn kill_now(&self) {
+        signal_group(&self.child, SIGKILL);
+    }
+
+    /// Has the child exited (polling, never blocking)?
+    fn exited(&self) -> bool {
+        !matches!(lock_child(&self.child).try_wait(), Ok(None))
+    }
+}
+
+impl Drop for ProcessHandle {
+    /// SIGTERM the group, then SIGKILL it after [`TERM_GRACE`] if it lingers —
+    /// on a background thread, so dropping never blocks the UI. No-op for a
+    /// process that already exited (the normal exit path drops it too).
+    fn drop(&mut self) {
+        if signal_group(&self.child, SIGTERM) {
+            let child = self.child.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(TERM_GRACE);
+                signal_group(&child, SIGKILL);
+            });
+        }
+    }
+}
+
 impl Editor {
+    /// Bind process `id` to buffer `name`: killing that buffer terminates the
+    /// process (Emacs `set-process-buffer`). Unbound processes live until they
+    /// exit, are killed, or the app quits.
+    pub(super) fn set_process_buffer(&mut self, id: u64, name: String) {
+        if let Some(h) = self.processes.get_mut(&id) {
+            h.buffer = Some(name);
+        }
+    }
+
+    /// Terminate every process bound to buffer `name` (it's being killed). The
+    /// exit callbacks still fire as each one is reaped.
+    pub(super) fn kill_processes_for_buffer(&mut self, name: &str) {
+        for h in self.processes.values() {
+            if h.buffer.as_deref() == Some(name) && signal_group(&h.child, SIGTERM) {
+                let child = h.child.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(TERM_GRACE);
+                    signal_group(&child, SIGKILL);
+                });
+            }
+        }
+    }
+
+    /// App quit: SIGTERM every `make-process` group, give them a brief grace
+    /// to exit, SIGKILL the stragglers; and drop embedded terminals (their PTY
+    /// teardown SIGHUPs the shell). Synchronous — the app is exiting, so a
+    /// background "kill later" thread would never run.
+    pub(super) fn shutdown_processes(&mut self) {
+        let handles: Vec<ProcessHandle> = self.processes.drain().map(|(_, h)| h).collect();
+        let live: Vec<&ProcessHandle> = handles
+            .iter()
+            .filter(|h| signal_group(&h.child, SIGTERM))
+            .collect();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline && live.iter().any(|h| !h.exited()) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for h in &live {
+            h.kill_now();
+        }
+        drop(handles);
+        self.terminals.clear();
+        self.terminal_geom.clear();
+    }
+
     /// Spawn `program` asynchronously (Emacs `make-process`): a worker thread
     /// reads its stdout line by line and forwards each line to the foreground,
     /// which calls the Steel `on_output` fn with it; `on_exit` runs when the
@@ -114,27 +243,59 @@ impl Editor {
             }
         };
         let stdout = child.stdout.take();
-        let stdin = child.stdin.take();
-        self.processes.insert(id, ProcessHandle { child, stdin });
+        // stdin writes go through their own thread: a child that stops reading
+        // would otherwise block `write_all` — and the UI — once the pipe fills.
+        let stdin = child.stdin.take().map(|mut pipe| {
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            std::thread::spawn(move || {
+                for chunk in rx {
+                    if pipe.write_all(&chunk).and_then(|_| pipe.flush()).is_err() {
+                        break;
+                    }
+                }
+                // Sender dropped (handle gone) or broken pipe → stdin closes.
+            });
+            tx
+        });
+        let child = Arc::new(Mutex::new(child));
+        let reaper = child.clone();
+        self.processes.insert(
+            id,
+            ProcessHandle {
+                child,
+                stdin,
+                buffer: None,
+            },
+        );
 
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ProcMsg>();
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ChildMsg>();
         std::thread::spawn(move || {
             if let Some(out) = stdout {
                 for line in BufReader::new(out).lines() {
                     let Ok(l) = line else { break };
-                    if tx.unbounded_send(ProcMsg::Line(l)).is_err() {
+                    if tx.unbounded_send(ChildMsg::Line(l)).is_err() {
                         break;
                     }
                 }
             }
-            // The editor wait()s for the exit code on Exit.
-            let _ = tx.unbounded_send(ProcMsg::Exit);
+            // stdout closed; reap here, never on the UI thread. Poll with
+            // try_wait (not a blocking wait) so the lock is free between polls
+            // for kill-process / buffer-kill signalling.
+            let code = loop {
+                match lock_child(&reaper).try_wait() {
+                    Ok(Some(status)) => break status.code().unwrap_or(-1),
+                    Ok(None) => {}
+                    Err(_) => break -1,
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let _ = tx.unbounded_send(ChildMsg::Exited(code));
         });
         cx.spawn(async move |this, cx| {
             while let Some(msg) = rx.next().await {
                 let alive = this
                     .update(cx, |editor, _| match &msg {
-                        ProcMsg::Line(line) => {
+                        ChildMsg::Line(line) => {
                             // Publish the active buffer first, so a callback
                             // reading `(current-buffer)` sees the buffer the user
                             // is actually in — not a stale snapshot. Without this,
@@ -144,20 +305,17 @@ impl Editor {
                             editor.publish_point();
                             editor.script.dispatch_action(&on_output, Some(line))
                         }
-                        ProcMsg::Exit => {
-                            let code = editor
-                                .processes
-                                .remove(&id)
-                                .and_then(|mut h| h.child.wait().ok())
-                                .and_then(|status| status.code())
-                                .unwrap_or(-1);
+                        ChildMsg::Exited(code) => {
+                            // Already reaped by the worker: dropping the handle
+                            // is a no-op signal-wise.
+                            editor.processes.remove(&id);
                             if let Some(cb) = &on_exit {
                                 editor.script.dispatch_action(cb, Some(&code.to_string()));
                             }
                         }
                     })
                     .is_ok();
-                if !alive || matches!(msg, ProcMsg::Exit) {
+                if !alive || matches!(msg, ChildMsg::Exited(_)) {
                     break;
                 }
             }
@@ -167,24 +325,147 @@ impl Editor {
 
     /// Write `text` to a live process's stdin (Emacs `process-send-string`).
     pub(super) fn send_to_process(&mut self, id: u64, text: &str, cx: &mut Context<Self>) {
-        if let Some(handle) = self.processes.get_mut(&id)
-            && let Some(stdin) = handle.stdin.as_mut()
-            && let Err(e) = stdin.write_all(text.as_bytes())
+        // Queued to the writer thread — never blocks on a full pipe.
+        if let Some(handle) = self.processes.get(&id)
+            && let Some(stdin) = handle.stdin.as_ref()
+            && stdin.send(text.as_bytes().to_vec()).is_err()
         {
-            self.echo(format!("process-send-string: {e}"), cx);
+            self.echo(
+                "process-send-string: process stdin is closed".to_string(),
+                cx,
+            );
         }
     }
 
     /// Kill a live process; its reader thread then reports exit (Emacs `kill-process`).
     pub(super) fn kill_process(&mut self, id: u64) {
-        if let Some(handle) = self.processes.get_mut(&id) {
+        if let Some(handle) = self.processes.get(&id) {
             // The child got its own process group at spawn — signal the group,
             // so a wrapper shell's children die too (not just the shell).
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(-(handle.child.id() as i32), libc::SIGKILL);
+            handle.kill_now();
+        }
+    }
+
+    // --- DAP sessions (`dap-start` / `dap-connect` / `dap-send` / `dap-kill`) ---
+    // The [`crate::dap::DapClient`] transport is protocol-free; these methods
+    // only pump its framed messages to the Steel callbacks, exactly like
+    // [`make_process`](Self::make_process) pumps stdout lines.
+
+    /// Start a stdio DAP session: spawn the adapter and forward every framed
+    /// message to Steel fn `on_message` as raw JSON text.
+    pub(super) fn dap_start(&mut self, args: DapStartArgs, cx: &mut Context<Self>) {
+        let dir = if args.cwd.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+        } else {
+            std::path::PathBuf::from(&args.cwd)
+        };
+        match crate::dap::DapClient::start(&args.program, &args.args, &dir) {
+            Ok((client, rx)) => {
+                self.dap_sessions.insert(args.id, client);
+                self.dap_pump(args.id, rx, args.on_message, args.on_exit, cx);
             }
-            let _ = handle.child.kill();
+            Err(e) => self.dap_failed(&format!("dap-start: {e}"), &args.on_exit, cx),
+        }
+    }
+
+    /// Start a TCP DAP session (adapters that serve on a socket, e.g. delve).
+    /// The connect itself happens off the UI thread (see
+    /// [`DapClient::connect`](crate::dap::DapClient::connect)); messages sent
+    /// before it completes are queued, and a failed connect surfaces through
+    /// the pump's exit path like an adapter crash.
+    pub(super) fn dap_connect(
+        &mut self,
+        id: u64,
+        host: String,
+        port: u16,
+        on_message: String,
+        on_exit: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let (client, rx) = crate::dap::DapClient::connect(&host, port);
+        self.dap_sessions.insert(id, client);
+        self.dap_pump(id, rx, on_message, on_exit, cx);
+    }
+
+    /// A session that never came up: echo why and still fire `on_exit` so the
+    /// Scheme state machine resets instead of waiting forever.
+    fn dap_failed(&mut self, error: &str, on_exit: &Option<String>, cx: &mut Context<Self>) {
+        self.echo(error.to_string(), cx);
+        if let Some(cb) = on_exit {
+            self.script.dispatch_action(cb, Some("-1"));
+        }
+    }
+
+    /// Drain a session's incoming messages on the foreground, calling the
+    /// Steel `on_message` per message; when the channel closes (adapter died,
+    /// was killed, or never connected) reap it OFF the UI thread and call
+    /// `on_exit` with the exit code. Also kills the adapter if the app quits
+    /// mid-session, so no adapter/debuggee outlives the editor.
+    fn dap_pump(
+        &mut self,
+        id: u64,
+        mut rx: futures::channel::mpsc::UnboundedReceiver<serde_json::Value>,
+        on_message: String,
+        on_exit: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.on_app_quit(move |editor, _| {
+            // Dropping the client kills its process group / socket.
+            editor.dap_sessions.remove(&id);
+            async {}
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            while let Some(message) = rx.next().await {
+                let alive = this
+                    .update(cx, |editor, _| {
+                        // Publish the active buffer first, so a callback reading
+                        // `(current-buffer)` sees where the user actually is
+                        // (mirrors `make_process`).
+                        editor.publish_point();
+                        let text = message.to_string();
+                        editor.script.dispatch_action(&on_message, Some(&text));
+                    })
+                    .is_ok();
+                if !alive {
+                    return;
+                }
+            }
+            let Ok(Some(client)) = this.update(cx, |editor, _| editor.dap_sessions.remove(&id))
+            else {
+                return;
+            };
+            // Reaping can wait on a lingering adapter — never on the UI thread.
+            let (code, error) = cx
+                .background_executor()
+                .spawn(async move { client.finish() })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                if let Some(why) = error {
+                    editor.echo(format!("dap: {why}"), cx);
+                }
+                if let Some(cb) = &on_exit {
+                    editor.script.dispatch_action(cb, Some(&code.to_string()));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Frame one complete DAP JSON message to a live session's adapter. A
+    /// send to a session that already died (or failed to start) is dropped
+    /// silently: its `on_exit` already reports why, and an echo here would
+    /// overwrite that more useful message.
+    pub(super) fn dap_send(&mut self, id: u64, message: &str) {
+        if let Some(client) = self.dap_sessions.get(&id) {
+            client.send(message);
+        }
+    }
+
+    /// Kill a live session's adapter; the pump then reports its exit.
+    pub(super) fn dap_kill(&mut self, id: u64) {
+        if let Some(client) = self.dap_sessions.get_mut(&id) {
+            client.kill();
         }
     }
 
@@ -1091,4 +1372,55 @@ fn ws_run(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod process_tests {
+    use super::*;
+
+    /// Is any process left in group `pgid`?
+    fn group_alive(pgid: i32) -> bool {
+        unsafe { libc::kill(-pgid, 0) == 0 }
+    }
+
+    fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// Dropping a handle (buffer killed / editor gone) takes the whole process
+    /// group down — the wrapper shell *and* its background child.
+    #[test]
+    fn dropping_handle_kills_process_group() {
+        use std::os::unix::process::CommandExt;
+        let child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & sleep 30"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = child.id() as i32;
+        let child = Arc::new(Mutex::new(child));
+        let handle = ProcessHandle {
+            child: child.clone(),
+            stdin: None,
+            buffer: Some("*shell*".into()),
+        };
+        assert!(!handle.exited());
+        drop(handle);
+        // The leader exits (we reap it, as the worker thread would)…
+        assert!(wait_until(|| matches!(
+            lock_child(&child).try_wait(),
+            Ok(Some(_))
+        )));
+        // …and so does the backgrounded `sleep` in its group.
+        assert!(wait_until(|| !group_alive(pgid)));
+        // Signalling an already-reaped child is a no-op, not a stray kill.
+        assert!(!signal_group(&child, SIGKILL));
+    }
 }

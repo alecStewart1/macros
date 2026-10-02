@@ -109,3 +109,19 @@
 ;; re-declared here: load-theme wipes attributes along with colors).
 (set-face "spell-error" "#f14c4c")
 (set-face-wavy "spell-error" #t)
+
+;; dap.scm / ui-dap.scm — debugger faces (breakpoint gutter dots, the stopped
+;; line, inline locals, the *dap* panel).
+(set-face "dap-breakpoint"         "#f14c4c")  ; verified breakpoint dot
+(set-face "dap-breakpoint-pending" "#8a6a6a")  ; not (yet) bound by the adapter
+(set-face "dap-stopped-line"       "#efb080")  ; line execution stopped on
+(set-face "dap-inline"             "#8a8a72")  ; inline locals after the stopped line
+(set-face "dap-heading"            "#87c3ff")  ; panel section headings
+(set-face "dap-dim"                "#707070")  ; panel de-emphasis
+
+;; occur.scm — *occur* / *grep* result buffers (header, dimmed file:line
+;; prefixes, bold match highlight; bold re-declared like the wavy above).
+(set-face "occur-header" "#87c3ff")
+(set-face "occur-prefix" "#6d6d6d")
+(set-face "occur-match" "#ebc88d")
+(set-face-bold "occur-match" #t)

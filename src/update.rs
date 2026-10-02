@@ -37,13 +37,19 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Where the latest-version manifest lives. Overridable via
-/// `MACROS_UPDATE_MANIFEST` to point at a local `next dev` server during
-/// development.
+/// Where the latest-version manifest lives. Debug builds only: overridable via
+/// `MACROS_UPDATE_MANIFEST` to point at a local `next dev` server. Release
+/// builds ignore it, so the environment can't redirect the updater.
 fn manifest_url() -> String {
-    std::env::var("MACROS_UPDATE_MANIFEST")
-        .ok()
-        .filter(|s| !s.is_empty())
+    manifest_url_from(
+        std::env::var("MACROS_UPDATE_MANIFEST").ok(),
+        cfg!(debug_assertions),
+    )
+}
+
+fn manifest_url_from(env_override: Option<String>, allow_override: bool) -> String {
+    env_override
+        .filter(|s| allow_override && !s.is_empty())
         .unwrap_or_else(|| "https://macros.dev/latest.json".to_string())
 }
 
@@ -89,9 +95,9 @@ pub enum InstallOutcome {
     /// [`relaunch`] and quit. Only constructed on macOS.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Staged,
-    /// Windows/Linux: the downloads page was opened in the browser; nothing to
-    /// relaunch. Never constructed on macOS (which stages in place).
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    /// The downloads page was opened in the browser; nothing to relaunch.
+    /// Windows/Linux always; macOS when the running build is unsigned (no team
+    /// to verify the update's signature against).
     OpenedDownloadPage,
 }
 
@@ -134,7 +140,10 @@ pub fn check_gated() -> Result<Option<UpdateAvailable>, String> {
 /// Download + install the update for this platform.
 ///
 /// macOS: download the artifact, verify its SHA-256 against the `<url>.sha256`
-/// sidecar, swap the `.app` bundle in place, and return [`InstallOutcome::Staged`].
+/// sidecar, verify the extracted bundle's code signature and that its Team ID
+/// matches the running app's, swap the `.app` bundle in place, and return
+/// [`InstallOutcome::Staged`]. An unsigned running app (dev build) never
+/// auto-installs: it opens the downloads page instead.
 /// Windows/Linux: open the downloads page and return
 /// [`InstallOutcome::OpenedDownloadPage`].
 ///
@@ -153,12 +162,23 @@ pub fn install(
         .as_deref()
         .ok_or("the update manifest lists no macOS download")?;
 
+    // The new bundle must be signed by the same team as this one. With no
+    // team to pin to (unsigned dev build, not a bundle), there is nothing to
+    // verify an update against — hand the user the download page instead.
+    let Some(team_id) = macos::current_app_path()
+        .ok()
+        .and_then(|app| macos::team_id(&app))
+    else {
+        open_url("https://macros.dev/download/")?;
+        return Ok(InstallOutcome::OpenedDownloadPage);
+    };
+
     let dir = macos::cache_dir()?;
     let dest = dir.join(format!("Macros-{}-{}.zip", platform_key(), update.version));
 
     let expected = fetch_sha256(url)?;
     download_verified(url, &expected, &dest, on_progress)?;
-    macos::stage_in_place(&dest)?;
+    macos::stage_in_place(&dest, &team_id)?;
     Ok(InstallOutcome::Staged)
 }
 
@@ -455,9 +475,59 @@ mod macos {
         Ok(d)
     }
 
-    /// Extract the verified `downloaded` zip and atomically swap its `Macros.app`
-    /// into the running bundle's location.
-    pub fn stage_in_place(downloaded: &Path) -> Result<(), String> {
+    /// The Team ID a bundle is signed with, via `codesign -dv`; `None` when it
+    /// is unsigned, ad-hoc signed, or codesign fails.
+    pub fn team_id(app: &Path) -> Option<String> {
+        let out = Command::new("/usr/bin/codesign")
+            .arg("-dv")
+            .arg(app)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // codesign prints its display info on stderr.
+        parse_team_id(&String::from_utf8_lossy(&out.stderr))
+    }
+
+    /// Pull `TeamIdentifier=<id>` out of `codesign -dv` output (`not set` for
+    /// ad-hoc signatures → `None`).
+    pub(super) fn parse_team_id(display: &str) -> Option<String> {
+        display
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("TeamIdentifier="))
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && *id != "not set")
+            .map(str::to_string)
+    }
+
+    /// Refuse `app` unless its signature verifies (deep, strict) and it is
+    /// signed by `expected_team`.
+    fn verify_signature(app: &Path, expected_team: &str) -> Result<(), String> {
+        let out = Command::new("/usr/bin/codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(app)
+            .output()
+            .map_err(|e| format!("codesign: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "the update's code signature is invalid: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        match team_id(app) {
+            Some(team) if team == expected_team => Ok(()),
+            Some(team) => Err(format!(
+                "the update is signed by team {team}, expected {expected_team}"
+            )),
+            None => Err("the update has no signing team".to_string()),
+        }
+    }
+
+    /// Extract the verified `downloaded` zip, check the bundle is signed by
+    /// `team_id`, and atomically swap its `Macros.app` into the running
+    /// bundle's location.
+    pub fn stage_in_place(downloaded: &Path, team_id: &str) -> Result<(), String> {
         let app_path = current_app_path()?;
         // A bundle on a read-only volume (DMG / App Translocation mount) can't be
         // swapped in place — fail with an actionable message up front.
@@ -495,14 +565,21 @@ mod macos {
             return Err("update archive escaped the staging directory".to_string());
         }
 
-        // 2. Strip quarantine BEFORE swap so an early relaunch from Finder
-        //    doesn't trip Gatekeeper.
+        // 2. Verify the code signature and signing team. The SHA-256 only ties
+        //    the archive to the manifest host; this ties it to our identity.
+        if let Err(e) = verify_signature(&new_app, team_id) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+
+        // 3. Only now strip quarantine — BEFORE the swap so an early relaunch
+        //    from Finder doesn't trip Gatekeeper.
         let _ = Command::new("/usr/bin/xattr")
             .args(["-dr", "com.apple.quarantine"])
             .arg(&new_app)
             .status();
 
-        // 3. Swap the bundle in place. Destroying the old inode after the swap
+        // 4. Swap the bundle in place. Destroying the old inode after the swap
         //    lets a pinned Dock alias re-bind to the new bundle at the same path
         //    instead of chasing the old inode (the "duplicate Dock icon" bug).
         let needs_admin = app_path.starts_with("/Applications") && !writable_by_me(&app_path);
@@ -712,5 +789,38 @@ mod macos {
         }
         out.push('"');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_override_only_when_allowed() {
+        let default = "https://macros.dev/latest.json";
+        let local = Some("http://localhost:3000/latest.json".to_string());
+        assert_eq!(manifest_url_from(local.clone(), false), default);
+        assert_eq!(
+            manifest_url_from(local, true),
+            "http://localhost:3000/latest.json"
+        );
+        assert_eq!(manifest_url_from(Some(String::new()), true), default);
+        assert_eq!(manifest_url_from(None, true), default);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_codesign_team_id() {
+        let signed = "Executable=/Applications/Macros.app/Contents/MacOS/macros\n\
+                      Identifier=dev.macros\nFormat=app bundle with Mach-O thin (arm64)\n\
+                      TeamIdentifier=ABCDE12345\nSealed Resources version=2\n";
+        assert_eq!(macos::parse_team_id(signed).as_deref(), Some("ABCDE12345"));
+        let adhoc = "Signature=adhoc\nTeamIdentifier=not set\n";
+        assert_eq!(macos::parse_team_id(adhoc), None);
+        assert_eq!(
+            macos::parse_team_id("code object is not signed at all"),
+            None
+        );
     }
 }

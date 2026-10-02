@@ -463,7 +463,8 @@ pub struct Highlighter {
     capture_faces: Vec<Option<usize>>,
     /// Language injection (e.g. fenced code blocks in markdown): a query that
     /// finds `(language, content)` regions, plus a lazily-built, per-language
-    /// cache of sub-highlighters that color those regions. `None` for grammars
+    /// cache of sub-highlighters that color those regions and a per-block span
+    /// cache (keyed by block content) so paints don't reparse. `None` for grammars
     /// that don't inject. Interior-mutable so it can warm during `spans_in`.
     injection: Option<Injection>,
     /// Structural auto-indent query (the `@indent`/`@outdent`/`@extend` captures
@@ -506,6 +507,40 @@ struct Injection {
     lang_capture: u32,
     content_capture: u32,
     cache: RefCell<HashMap<String, Option<Box<Highlighter>>>>,
+    /// Highlighted spans of each injected block, keyed by its content, so a
+    /// paint doesn't reparse every visible block from scratch.
+    spans: RefCell<HashMap<InjectionKey, InjectedSpans>>,
+}
+
+/// `(language id, content hash, content length)` of one injected block.
+type InjectionKey = (&'static str, u64, usize);
+
+/// A block's spans relative to its content start, plus whether a paint used
+/// it since the last buffer change (unused entries are pruned on the next).
+struct InjectedSpans {
+    spans: Vec<(Range<usize>, usize)>,
+    used: bool,
+}
+
+impl Injection {
+    /// The buffer changed: drop cached blocks no paint has asked for since the
+    /// previous change (edited blocks hash to a new key, so their old entry is
+    /// garbage), keeping on-screen untouched blocks warm.
+    fn prune_spans(&self) {
+        self.spans
+            .borrow_mut()
+            .retain(|_, e| std::mem::take(&mut e.used));
+    }
+}
+
+/// Hash `range` of `rope` without copying it out.
+fn hash_rope_range(rope: &Rope, range: Range<usize>) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for chunk in rope.byte_slice(range).chunks() {
+        h.write(chunk.as_bytes());
+    }
+    h.finish()
 }
 
 impl Highlighter {
@@ -596,6 +631,7 @@ fn build_injection(language: &Language, src: &str) -> Option<Injection> {
         content_capture: idx("injection.content")?,
         query,
         cache: RefCell::new(HashMap::new()),
+        spans: RefCell::new(HashMap::new()),
     })
 }
 
@@ -660,6 +696,9 @@ impl Highlighter {
     /// edit deltas aren't tracked.
     pub fn set_text(&mut self, rope: &Rope) {
         self.tree = parse(&mut self.parser, rope, None);
+        if let Some(inj) = &self.injection {
+            inj.prune_spans();
+        }
     }
 
     /// Apply an edit to the current tree. Call this (with the pre-edit byte/point
@@ -680,6 +719,9 @@ impl Highlighter {
     /// Incrementally reparse, reusing the edited tree.
     pub fn reparse(&mut self, rope: &Rope) {
         self.tree = parse(&mut self.parser, rope, self.tree.as_ref());
+        if let Some(inj) = &self.injection {
+            inj.prune_spans();
+        }
     }
 
     /// Highlight spans tiling `range`, computed on demand by querying just that
@@ -745,6 +787,7 @@ impl Highlighter {
                 .map(str::as_bytes)
         };
         let mut cache = inj.cache.borrow_mut();
+        let mut spans_cache = inj.spans.borrow_mut();
         let mut matches = cursor.matches(&inj.query, tree.root_node(), provider);
         while let Some(m) = matches.next() {
             let mut tag: Option<String> = None;
@@ -762,29 +805,42 @@ impl Highlighter {
             let Some(lang_id) = injection_lang_id(&tag) else {
                 continue;
             };
-            // Lazily build (and cache) the sub-highlighter for this language.
-            let entry = cache
-                .entry(lang_id.to_string())
-                .or_insert_with(|| Highlighter::for_language(lang_id).map(Box::new));
-            let Some(sub) = entry.as_mut() else {
-                continue;
-            };
-            // Parse the whole block as a standalone document (so the sub-grammar
-            // never sees a truncated fragment), then shift its spans to absolute
-            // offsets and clip to the requested range. `set_byte_range` above
-            // already limited us to blocks intersecting the viewport.
             let cr = content.byte_range();
             let cs = cr.start;
-            let text: String = rope.byte_slice(cs..cr.end).to_string();
-            let sub_rope = Rope::from_str(&text);
-            sub.set_text(&sub_rope);
-            for s in sub.spans_in(&sub_rope, 0..text.len()) {
-                if let Some(face) = s.face {
-                    let start = (s.range.start + cs).max(range.start);
-                    let end = (s.range.end + cs).min(range.end);
-                    if end > start {
-                        captures.push((start, end, face));
-                    }
+            let key = (lang_id, hash_rope_range(rope, cr.clone()), cr.len());
+            let entry = match spans_cache.entry(key) {
+                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    // Lazily build (and cache) the sub-highlighter for this language.
+                    let sub = cache
+                        .entry(lang_id.to_string())
+                        .or_insert_with(|| Highlighter::for_language(lang_id).map(Box::new));
+                    let Some(sub) = sub.as_mut() else {
+                        continue;
+                    };
+                    // Parse the whole block as a standalone document (so the
+                    // sub-grammar never sees a truncated fragment); spans are
+                    // stored relative to the block and reused until it changes.
+                    let text: String = rope.byte_slice(cr.clone()).to_string();
+                    let sub_rope = Rope::from_str(&text);
+                    sub.set_text(&sub_rope);
+                    let spans = sub
+                        .spans_in(&sub_rope, 0..text.len())
+                        .into_iter()
+                        .filter_map(|s| s.face.map(|f| (s.range, f)))
+                        .collect();
+                    v.insert(InjectedSpans { spans, used: false })
+                }
+            };
+            entry.used = true;
+            // Shift to absolute offsets and clip to the requested range.
+            // `set_byte_range` above already limited us to blocks intersecting
+            // the viewport.
+            for (r, face) in &entry.spans {
+                let start = (r.start + cs).max(range.start);
+                let end = (r.end + cs).min(range.end);
+                if end > start {
+                    captures.push((start, end, *face));
                 }
             }
         }
@@ -794,6 +850,12 @@ impl Highlighter {
     /// `(kind, start_byte, end_byte)`. Empty when there's no tree yet. Lets a
     /// script ask "what am I inside?" — e.g. skip a bracket that sits in a string
     /// or comment node.
+    /// The current syntax tree (a cheap refcounted copy is published to
+    /// Scheme for the synchronous `ts-*` reads).
+    pub fn tree(&self) -> Option<&Tree> {
+        self.tree.as_ref()
+    }
+
     pub fn node_at(&self, byte: usize) -> Vec<(String, usize, usize)> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
@@ -1058,6 +1120,80 @@ impl Highlighter {
 
 /// Parse `rope` by feeding tree-sitter chunks straight from the rope (no
 /// whole-buffer string allocation), reusing `old_tree` for incremental reparse.
+/// Parse `text` as `language` from scratch (tests drive the `ts-*` reads with
+/// a real tree).
+#[cfg(test)]
+pub fn parse_for_test(language: &str, text: &str) -> Option<Tree> {
+    let (lang, _) = grammar(language)?;
+    let mut parser = Parser::new();
+    parser.set_language(&lang.into()).ok()?;
+    parser.parse(text, None)
+}
+
+/// `(kind, start, end)` of every node containing `byte`, innermost first —
+/// the chain behind `(ts-ancestors pos)`.
+pub fn tree_ancestors(tree: &Tree, byte: usize) -> Vec<(String, usize, usize)> {
+    let mut node = tree.root_node().descendant_for_byte_range(byte, byte);
+    let mut chain = Vec::new();
+    while let Some(n) = node {
+        chain.push((n.kind().to_string(), n.start_byte(), n.end_byte()));
+        node = n.parent();
+    }
+    chain
+}
+
+/// The children `(kind, start, end, named)` of the innermost node spanning
+/// exactly `[start, end)` — `(ts-children s e)`.
+pub fn tree_children(tree: &Tree, start: usize, end: usize) -> Vec<(String, usize, usize, bool)> {
+    let mut node = tree.root_node().descendant_for_byte_range(start, end);
+    while let Some(n) = node {
+        if n.start_byte() == start && n.end_byte() == end {
+            let mut cursor = n.walk();
+            return n
+                .children(&mut cursor)
+                .map(|c| {
+                    (
+                        c.kind().to_string(),
+                        c.start_byte(),
+                        c.end_byte(),
+                        c.is_named(),
+                    )
+                })
+                .collect();
+        }
+        if n.start_byte() < start || n.end_byte() > end {
+            break;
+        }
+        node = n.parent();
+    }
+    Vec::new()
+}
+
+/// `(start, end)` of every node whose kind is in `kinds`, in document order —
+/// `(ts-ranges-of-kinds kinds)`, behind `]m` / `[[` style motions.
+pub fn tree_ranges_of_kinds(tree: &Tree, kinds: &[String]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    'walk: loop {
+        let n = cursor.node();
+        if kinds.iter().any(|k| k == n.kind()) {
+            out.push((n.start_byte(), n.end_byte()));
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                continue 'walk;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    out
+}
+
 fn parse(parser: &mut Parser, rope: &Rope, old_tree: Option<&Tree>) -> Option<Tree> {
     let mut callback = |byte: usize, _: Point| -> &[u8] {
         if byte >= rope.len_bytes() {
@@ -1867,6 +2003,39 @@ mod tests {
             "expected Rust keyword highlighting inside the fenced block, got {:?}",
             shape(&spans)
         );
+    }
+
+    /// Injected blocks are parsed once and reused across paints; editing the
+    /// buffer prunes entries for blocks whose content changed.
+    #[test]
+    fn markdown_injection_spans_are_cached_per_block_content() {
+        let mut h = Highlighter::for_language("markdown").unwrap();
+        let src = "```rust\nfn a() {}\n```\n\n```python\ndef b(): pass\n```\n";
+        let rope = Rope::from_str(src);
+        h.set_text(&rope);
+        let cached = |h: &Highlighter| h.injection.as_ref().unwrap().spans.borrow().len();
+        let first = shape(&h.spans_in(&rope, 0..rope.len_bytes()));
+        assert_eq!(cached(&h), 2);
+        // A repaint hits the cache and yields identical spans.
+        assert_eq!(shape(&h.spans_in(&rope, 0..rope.len_bytes())), first);
+        assert_eq!(cached(&h), 2);
+
+        // Edit the rust block: its new content is a new entry; the stale one is
+        // pruned on the next change, while the untouched python block survives.
+        let edited = src.replace("fn a() {}", "fn a() { let x = 1; }");
+        let rope2 = Rope::from_str(&edited);
+        h.set_text(&rope2);
+        let spans = h.spans_in(&rope2, 0..rope2.len_bytes());
+        let in_block = edited.find("let").unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.face.map(face_name) == Some("keyword") && s.range.start == in_block),
+            "edited block must be re-highlighted, got {:?}",
+            shape(&spans)
+        );
+        h.set_text(&rope2);
+        assert_eq!(cached(&h), 2, "stale rust entry pruned, live ones kept");
     }
 
     /// An unknown / untagged fence is left to the markdown grammar (no panic, no

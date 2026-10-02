@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://codeberg.org/macros-app/macros"
@@ -28,7 +28,15 @@ futures = "0.3"
 # atomic store; the Scheme read bridges load it without ever blocking the UI.
 arc-swap = "1"
 # Rope text storage: O(log n) edits, line indexing, and UTF-16 conversion.
-ropey = "1.6"
+#
+# Default features are OFF on purpose: ropey's default `unicode_lines` treats
+# U+2028/U+2029/NEL/VT/FF (and `cr_lines` a lone CR) as line breaks, while the
+# rest of the editor — tree-sitter rows, overlay line deltas (`matches('\n')`),
+# Scheme's line splitting — counts only `\n`. A disagreeing line model put
+# cursor arithmetic mid-character (backspace after U+2028 aborted the process).
+# With no line feature, a line ends at `\n` (a CRLF pair is `\r` + that `\n`;
+# `Buffer` treats the pair as one unit for motion and deletion).
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
 # Syntax highlighting: tree-sitter + the Scheme grammar (for highlighting Steel).
 # We drive tree-sitter directly (not tree-sitter-highlight) for incremental
 # reparsing. `streaming-iterator` is needed to iterate QueryCursor matches.
@@ -207,3 +215,7 @@ winresource = "0.1"
 # enough that we reuse cc's logic — mirroring how Helix builds grammars.
 [target.'cfg(windows)'.dependencies]
 cc = "1"
+
+# Headless gpui (TestAppContext) for end-to-end editor tests.
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }

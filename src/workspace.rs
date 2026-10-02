@@ -148,9 +148,11 @@ impl Workspace {
             }
             // A download is in flight; ignore clicks until it resolves.
             UpdatePhase::Downloading { .. } => {}
+            // Same unsaved-buffer prompt as any other quit; the relaunch helper
+            // is only spawned once the quit is confirmed.
             UpdatePhase::Ready => {
-                let _ = crate::update::relaunch();
-                cx.quit();
+                self.editor
+                    .update(cx, |editor, cx| editor.confirm_quit_and_relaunch(cx));
             }
         }
     }
@@ -193,8 +195,15 @@ impl Workspace {
                     ws.log_message("Update downloaded — restart Macros to finish.", cx);
                     ws.set_update_phase(UpdatePhase::Ready, cx);
                 }
-                // Not reachable on macOS (always stages), but keep the pill sane.
-                Ok(_) => ws.set_update_phase(UpdatePhase::Ready, cx),
+                // Unsigned (dev) build: no team to verify an update against,
+                // so the download page was opened instead of auto-installing.
+                Ok(crate::update::InstallOutcome::OpenedDownloadPage) => {
+                    ws.log_message(
+                        "This build is unsigned — opened the download page instead.",
+                        cx,
+                    );
+                    ws.set_update_phase(UpdatePhase::Available, cx);
+                }
                 Err(err) => {
                     ws.log_message(format!("Update download failed: {err}"), cx);
                     ws.set_update_phase(UpdatePhase::Available, cx);
@@ -226,6 +235,13 @@ impl Workspace {
     pub fn mark_config_loaded(&self, cx: &mut Context<Self>) {
         self.editor
             .update(cx, |editor, cx| editor.mark_config_loaded(cx));
+    }
+
+    /// Run `after-init-hook` once startup + user config have loaded — where
+    /// session restore (desktop / savehist, scheme/session.scm) runs.
+    pub fn run_after_init(&self, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.run_after_init(cx));
     }
 
     /// Run the initial buffer's mode hooks, after the startup + user scripts have

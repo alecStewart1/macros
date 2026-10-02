@@ -95,6 +95,10 @@ impl Editor {
             Ok(()) => return,
             Err(c) => c,
         };
+        let command = match self.cmd_session(command, cx) {
+            Ok(()) => return,
+            Err(c) => c,
+        };
         debug_assert!(false, "unhandled editor command: {command:?}");
         let _ = command;
     }
@@ -187,19 +191,23 @@ impl Editor {
                 self.move_to(offset, cx);
             }
             ScrollCursorToRow(row) => self.scroll_cursor_to_row(row, cx),
+            // Scheme-supplied offsets: clamp AND floor to a char boundary, so a
+            // byte-arithmetic position inside a multibyte char can't become a
+            // point the rope later refuses to slice at.
             GotoChar(n) => {
-                let offset = n.min(self.active.buffer.len());
+                let offset = self.active.buffer.snap(n);
                 self.move_to(offset, cx);
             }
             SelectTo(n) => {
-                let offset = n.min(self.active.buffer.len());
+                let offset = self.active.buffer.snap(n);
                 self.select_to(offset, cx);
             }
             SetRegion { start, end } => {
-                let len = self.active.buffer.len();
+                // Inverted ends are a backwards region: point at `end`.
+                let range = self.active.buffer.clamp_range(start..end);
                 self.active.mark_active = true;
-                self.active.selected_range = start.min(len)..end.min(len);
-                self.active.selection_reversed = false;
+                self.active.selected_range = range;
+                self.active.selection_reversed = end < start;
                 self.ensure_cursor_visible();
                 cx.notify();
             }
@@ -261,10 +269,19 @@ impl Editor {
                 self.script.dispatch_action(&callback, Some(&dump));
             }
             DeleteRegion { start, end } => self.delete_region(start, end, cx),
-            KillRegionBetween { start, end } => self.kill_range(start.min(end)..start.max(end), cx),
+            KillRegionBetween { start, end } => {
+                let range = self.active.buffer.clamp_range(start..end);
+                self.kill_range(range, cx)
+            }
             ReplaceRegion { start, end, text } => self.replace_region(start, end, &text, cx),
             InsertAt { pos, text } => self.insert_at(pos, &text, cx),
             UndoBoundary => self.undo_boundary(),
+            UndoAmalgamateBegin => self.undo_amalgamate = Some(self.undo_base()),
+            UndoAmalgamateEnd => {
+                if let Some(base) = self.undo_amalgamate.take() {
+                    self.squash_undo_since(&base);
+                }
+            }
             other => return Err(other),
         }
         Ok(())
@@ -289,6 +306,16 @@ impl Editor {
             }
             ClearLineIcons => {
                 self.redirect_target().line_icons.clear();
+                cx.notify();
+            }
+            SetGutterDot(line, face) => {
+                self.redirect_target()
+                    .gutter_dots
+                    .insert(line, SharedString::from(face));
+                cx.notify();
+            }
+            ClearGutterDots => {
+                self.redirect_target().gutter_dots.clear();
                 cx.notify();
             }
             SetLineImage {
@@ -514,6 +541,19 @@ impl Editor {
                 self.run_mode_hooks_once(cx);
                 cx.notify();
             }
+            SetSpecialMode(mode) => {
+                if mode.is_empty() {
+                    self.active.special = None;
+                } else {
+                    let mut modes = ModeStack::default();
+                    modes.push(Mode::new("fundamental"));
+                    modes.push(Mode::new(&mode));
+                    self.active.modes = modes;
+                    self.active.special = Some(mode);
+                    self.active.modified = false;
+                }
+                cx.notify();
+            }
             NextBuffer => self.next_buffer(cx),
             PreviousBuffer => self.previous_buffer(cx),
             SaveBuffer => self.save_buffer(cx),
@@ -650,6 +690,7 @@ impl Editor {
             LspDocumentSymbols => self.lsp_document_symbols(cx),
             LspCodeAction => self.lsp_code_action(cx),
             LspFormatBuffer => self.lsp_format(cx),
+            LspRestart => self.lsp_restart(cx),
             LspCallHierarchyIncoming => self.lsp_call_hierarchy(true, cx),
             LspCallHierarchyOutgoing => self.lsp_call_hierarchy(false, cx),
             LspPrepareRename => self.lsp_prepare_rename(cx),
@@ -777,10 +818,18 @@ impl Editor {
             EvilPasteBefore => self.evil_paste(false, cx),
             EvilReplaceChar => {
                 // Arm replace-pending; the dispatcher captures the next key.
+                // The arming command isn't what a macro / `.` should replay
+                // (it would wait for a key) — key_evil_replace records the
+                // resolved `(evil-replace-with "x")` in its place.
+                self.unrecord_last_event();
                 self.evil_replace_pending = true;
                 self.evil_replace_count = self.prefix_count.max(1);
                 self.status = "r-".into();
                 cx.notify();
+            }
+            EvilReplaceWith(ch) => {
+                self.evil_replace_count = self.prefix_count.max(1);
+                self.evil_replace_char(&ch, cx);
             }
             ReadChar { prompt, callback } => {
                 // Arm the capture; the key dispatcher feeds the next key to it.
@@ -790,11 +839,18 @@ impl Editor {
                 // playback can never provide. key_read_char records the
                 // RESOLVED callback call in its place, so `f o` replays as one
                 // self-contained command.
-                if let Some(events) = self.macro_recording.as_mut() {
-                    events.pop();
-                }
+                self.unrecord_last_event();
                 self.read_char_pending = Some(callback);
                 self.status = prompt.into();
+                cx.notify();
+            }
+            ReadKeyStart { prompt, callback } => {
+                self.read_key_pending = Some(callback);
+                self.status = prompt.into();
+                cx.notify();
+            }
+            ReadKeyStop => {
+                self.read_key_pending = None;
                 cx.notify();
             }
             SetSearchQuery { query, forward } => {
@@ -805,13 +861,67 @@ impl Editor {
                 self.count_aware.insert(name);
             }
             CountRepeatStep => self.count_repeat_step(cx),
+            ReplayStep => self.replay_step(cx),
+            EvilRepeat => self.evil_repeat(cx),
             EvilBlockReplace(ch) => self.evil_block_replace(&ch, cx),
             HelixPasteAfter => self.helix_paste(true, cx),
             HelixPasteBefore => self.helix_paste(false, cx),
-            EvilSetLinewise => self.evil_yank_linewise = true,
-            EvilSetCharwise => self.evil_yank_linewise = false,
+            EvilSetLinewise => {
+                self.evil_yank_linewise = true;
+                self.vim.registers.set_linewise_last(true);
+            }
+            EvilSetCharwise => {
+                self.evil_yank_linewise = false;
+                self.vim.registers.set_linewise_last(false);
+            }
+            EvilUseRegister(r) => self.evil_use_register(&r, cx),
+            EvilInsertRegister(r) => self.evil_insert_register(&r, cx),
+            EvilMacroRecord(r) => self.evil_macro_record(&r, cx),
+            EvilMacroPlay(r) => self.evil_macro_play(&r, cx),
+            EvilSetMark(r) => self.evil_set_mark(&r, cx),
+            EvilGotoMark(r, exact) => self.evil_goto_mark(&r, exact, cx),
+            SetJumpCommand(name) => {
+                self.vim.jump_commands.insert(name);
+            }
+            EvilReselectVisual => self.evil_reselect_visual(cx),
+            EvilEx(line) => self.run_ex_command(&line, cx),
+            ReindentLines(first, last) => self.reindent_lines(first, last, cx),
+            EvilExGotoLine(n) => self.evil_ex_goto_line(&n, cx),
+            EvilJumpBackward => self.evil_jump(false, cx),
+            EvilJumpForward => self.evil_jump(true, cx),
+            WindmoveLeft => self.window_move(panes::Dir::Left, cx),
+            WindmoveDown => self.window_move(panes::Dir::Down, cx),
+            WindmoveUp => self.window_move(panes::Dir::Up, cx),
+            WindmoveRight => self.window_move(panes::Dir::Right, cx),
+            PreviousWindow => self.previous_window(cx),
+            LastWindow => self.last_window(cx),
+            TopLeftWindow => self.window_corner(false, cx),
+            BottomRightWindow => self.window_corner(true, cx),
+            BalanceWindows => self.balance_windows(cx),
+            MaximizeWindowHeight => self.maximize_window(true, cx),
+            MaximizeWindowWidth => self.maximize_window(false, cx),
+            MoveWindowFarLeft => self.move_window_far(panes::Dir::Left, cx),
+            MoveWindowFarDown => self.move_window_far(panes::Dir::Down, cx),
+            MoveWindowFarUp => self.move_window_far(panes::Dir::Up, cx),
+            MoveWindowFarRight => self.move_window_far(panes::Dir::Right, cx),
+            ExchangeWindow => self.exchange_window(cx),
+            RotateWindowsDown => self.rotate_windows(true, cx),
+            RotateWindowsUp => self.rotate_windows(false, cx),
+            NewWindowBelow => self.new_window_buffer(true, cx),
+            NewWindowRight => self.new_window_buffer(false, cx),
             EvilExCommand => {
-                self.open_minibuffer(":", MinibufferPurpose::ExCommand, "", cx);
+                // From Visual, the command line starts on the selected lines
+                // (`:'<,'>`), and Visual ends — as in Vim.
+                let visual = matches!(
+                    self.evil,
+                    EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
+                ) && !self.modal_helix;
+                if visual {
+                    self.note_visual_exit();
+                    self.evil_normal_state(cx);
+                }
+                let initial = if visual { "'<,'>" } else { "" };
+                self.open_minibuffer(":", MinibufferPurpose::ExCommand, initial, cx);
             }
             IsearchForward => self.isearch_start(true, cx),
             IsearchBackward => self.isearch_start(false, cx),
@@ -927,6 +1037,17 @@ impl Editor {
             }
             SendProcess { id, text } => self.send_to_process(id, &text, cx),
             KillProcess { id } => self.kill_process(id),
+            SetProcessBuffer { id, name } => self.set_process_buffer(id, name),
+            DapStart(args) => self.dap_start(*args, cx),
+            DapConnect {
+                id,
+                host,
+                port,
+                on_message,
+                on_exit,
+            } => self.dap_connect(id, host, port, on_message, on_exit, cx),
+            DapSend { id, message } => self.dap_send(id, &message),
+            DapKill { id } => self.dap_kill(id),
             HttpStream(args) => self.http_stream(*args, cx),
             HttpStreamCancel { id } => self.http_stream_cancel(id),
             HttpRequest(args) => self.http_request(*args, cx),

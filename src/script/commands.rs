@@ -19,6 +19,22 @@ pub struct GrammarInstall {
     pub subdir: String,
 }
 
+/// Payload of [`EditorCommand::DapStart`]: spawn a debug adapter under `id`.
+/// Every incoming message (response, event, or reverse request) is delivered
+/// to Steel fn `on_message` as raw JSON text; `on_exit` (if present) gets the
+/// exit code as a string. The transport is protocol-free — Scheme stamps
+/// `seq`, correlates responses, and owns the session state machine (dap.scm).
+#[derive(Debug, Clone)]
+pub struct DapStartArgs {
+    pub id: u64,
+    pub program: String,
+    pub args: Vec<String>,
+    /// Working directory; "" = inherit the editor's.
+    pub cwd: String,
+    pub on_message: String,
+    pub on_exit: Option<String>,
+}
+
 /// Payload for [`EditorCommand::HttpStream`]. Boxed in the enum because it's the
 /// largest variant by far (a `Vec` plus several `String`s); see the variant doc.
 #[derive(Debug, Clone)]
@@ -207,6 +223,11 @@ pub enum EditorCommand {
     OpenFileOtherWindow(String),
     SetLineIcon(usize, usize, String),
     ClearLineIcons,
+    /// Put a colored dot (the diagnostic-dot shape) in the gutter of 0-based
+    /// `line` of the active buffer, tinted by theme face `String` — breakpoint
+    /// signs (dap.scm). Mirrors `SetLineIcon`'s per-buffer storage.
+    SetGutterDot(usize, String),
+    ClearGutterDots,
     /// Display a raster image (decoded from `path`) on rows reserved below buffer
     /// `line` — the Org inline-image primitive.
     SetLineImage {
@@ -268,6 +289,8 @@ pub enum EditorCommand {
     LspDocumentSymbols,
     LspCodeAction,
     LspFormatBuffer,
+    /// Kill the active buffer's language server (if any) and spawn a fresh one.
+    LspRestart,
     LspCallHierarchyIncoming,
     LspCallHierarchyOutgoing,
     /// Validate + prompt rename (`prepareRename` then `rename`).
@@ -419,6 +442,20 @@ pub enum EditorCommand {
         prompt: String,
         callback: String,
     },
+    /// Arm a STICKY key capture (`read-key-start`): every keystroke — printable
+    /// keys as their character, everything else (RET, DEL, Escape, chords) as
+    /// its chord name (`"enter"`, `"backspace"`, `"ctrl-g"`, …) — is passed to
+    /// the Scheme `callback` until `ReadKeyStop`. Unlike `ReadChar` it stays
+    /// armed across keys, so a multi-key Scheme dialog (query-replace's
+    /// y/n/!/q loop) can't lose a fast keystroke to the normal keymap between
+    /// callbacks. Escape / C-g are delivered and ALSO disarm, so a Scheme error
+    /// can never strand the capture. Re-arming just updates the prompt.
+    ReadKeyStart {
+        prompt: String,
+        callback: String,
+    },
+    /// Disarm the `ReadKeyStart` capture.
+    ReadKeyStop,
     /// Extend the selection to byte `pos` — the extend-flavored `goto-char`,
     /// for visual-mode motion targets computed in Scheme.
     SelectTo(usize),
@@ -438,6 +475,68 @@ pub enum EditorCommand {
     /// the batch as one repetition and triggers the next (with a fresh
     /// snapshot), so `3w`/`3dd` see the previous run's result.
     CountRepeatStep,
+    /// Sentinel queued behind each async command of a replay (macro, `.`):
+    /// the previous command's batch has applied, so the next may run.
+    ReplayStep,
+    /// Vim `.` — repeat the last change (count-aware: `3.`).
+    EvilRepeat,
+    /// `"x` — the next yank/delete/paste uses register x.
+    EvilUseRegister(String),
+    /// Insert-state `C-r x` — insert register x's text.
+    EvilInsertRegister(String),
+    /// `qx` — start recording a keyboard macro into register x.
+    EvilMacroRecord(String),
+    /// `@x` — replay the macro in register x (`@@` the last one, `@:` the
+    /// last ex command); count-aware.
+    EvilMacroPlay(String),
+    /// `mx` — set mark x at point.
+    EvilSetMark(String),
+    /// `` `x `` (exact = true) / `'x` (line) — jump to mark x.
+    EvilGotoMark(String, bool),
+    /// Mark a command name as a jump (`set-jump-command!`): running it from a
+    /// key records the jump list and the `''` mark first.
+    SetJumpCommand(String),
+    /// `gv` — reselect the last Visual area.
+    EvilReselectVisual,
+    /// `r x` resolved: overwrite `(prefix-count)` chars with x (what a macro or
+    /// `.` replays for `r`).
+    EvilReplaceWith(String),
+    /// Vim `=`: reindent (0-based) lines first..=last.
+    ReindentLines(usize, usize),
+    /// Run an ex command line (`(evil-ex "%s/a/b/g")`; `&` / `g&` use it).
+    EvilEx(String),
+    /// Move to the start of (1-based) line N — a `:normal` replay step.
+    EvilExGotoLine(String),
+    /// C-o / C-i — older / newer jump-list position.
+    EvilJumpBackward,
+    EvilJumpForward,
+    /// windmove / `C-w h/j/k/l`: select the window in a direction.
+    WindmoveLeft,
+    WindmoveDown,
+    WindmoveUp,
+    WindmoveRight,
+    /// `C-w W` / `C-w p` / `C-w t` / `C-w b`.
+    PreviousWindow,
+    LastWindow,
+    TopLeftWindow,
+    BottomRightWindow,
+    /// `C-w =` (Emacs `C-x +`).
+    BalanceWindows,
+    /// `C-w _` / `C-w |`.
+    MaximizeWindowHeight,
+    MaximizeWindowWidth,
+    /// `C-w H/J/K/L`: move the window to the far side.
+    MoveWindowFarLeft,
+    MoveWindowFarDown,
+    MoveWindowFarUp,
+    MoveWindowFarRight,
+    /// `C-w x` / `C-w r` / `C-w R`.
+    ExchangeWindow,
+    RotateWindowsDown,
+    RotateWindowsUp,
+    /// `C-w n` / `:new` (stacked) and `:vnew` (side by side).
+    NewWindowBelow,
+    NewWindowRight,
     /// Visual-block `r<char>`: overwrite every char of the rectangle.
     EvilBlockReplace(String),
     /// Helix `p` / `P`: paste after / before every selection.
@@ -722,6 +821,29 @@ pub enum EditorCommand {
         on_output: String,
         on_exit: Option<String>,
     },
+    /// Spawn a debug adapter (see [`DapStartArgs`]): Content-Length-framed DAP
+    /// JSON on stdio. Boxed like [`HttpStream`](Self::HttpStream): its payload
+    /// would otherwise bloat every `Result<(), EditorCommand>` (clippy
+    /// `result_large_err`).
+    DapStart(Box<DapStartArgs>),
+    /// Like [`DapStart`](Self::DapStart) but connect to `host:port` for
+    /// adapters that serve DAP over a socket instead of stdio (delve).
+    DapConnect {
+        id: u64,
+        host: String,
+        port: u16,
+        on_message: String,
+        on_exit: Option<String>,
+    },
+    /// Frame one complete DAP JSON message to session `id`'s adapter.
+    DapSend {
+        id: u64,
+        message: String,
+    },
+    /// Kill session `id`'s adapter (its process group) / close its socket.
+    DapKill {
+        id: u64,
+    },
     /// Write `text` to process `id`'s stdin (Emacs `process-send-string`).
     SendProcess {
         id: u64,
@@ -730,6 +852,12 @@ pub enum EditorCommand {
     /// Kill process `id` (Emacs `kill-process`).
     KillProcess {
         id: u64,
+    },
+    /// Bind process `id` to buffer `name`: killing the buffer terminates the
+    /// process (Emacs `set-process-buffer`).
+    SetProcessBuffer {
+        id: u64,
+        name: String,
     },
     /// Open a streaming HTTP POST (see [`HttpStreamArgs`]); the transport for
     /// talking directly to a model provider's SSE endpoint (e.g. Anthropic) from
@@ -868,6 +996,18 @@ pub enum EditorCommand {
     },
     /// Close the current undo group so the next edit starts a new one.
     UndoBoundary,
+    /// Remember the undo state (Emacs `prepare-change-group`); a later
+    /// `UndoAmalgamateEnd` folds every undo node added since into one, so a
+    /// multi-command operation (query-replace across many keystrokes) undoes
+    /// as a single step.
+    UndoAmalgamateBegin,
+    /// Fold the undo nodes recorded since `UndoAmalgamateBegin` into one
+    /// (Emacs `undo-amalgamate-change-group`). No-op without a begin.
+    UndoAmalgamateEnd,
+    /// Toggle the active buffer between a read-only special buffer driven by
+    /// `mode`'s keymap and ordinary editable text (`""`) — occur-edit / wgrep
+    /// flip a result buffer editable in place and back.
+    SetSpecialMode(String),
     /// Set a buffer-local variable on the active buffer.
     BufferLocalSet {
         key: String,
@@ -897,6 +1037,22 @@ pub enum EditorCommand {
         callback: String,
         sticky: bool,
     },
+    // --- Session persistence (scheme/session.scm: savehist + desktop) -----
+    /// Publish the [`SessionState`] (rings, buffers, layout), then call
+    /// `callback` so it reads fresh values.
+    SessionRefresh(String),
+    /// Replace one history ring wholesale (`"minibuffer"`, `"kill"`,
+    /// `"search"`, `"command"`), oldest entry first — savehist's restore.
+    SetSessionRing {
+        ring: String,
+        items: Vec<String>,
+    },
+    /// Visit `(path, point)` files as background buffers (no switch, no
+    /// find-file-hook); missing/unreadable files are skipped silently, and an
+    /// already-open file just gets its point moved.
+    RestoreFileBuffers(Vec<(String, usize)>),
+    /// Rebuild the window split tree (see [`LayoutSpec`]).
+    SetWindowLayout(LayoutSpec),
 }
 
 /// One row of a transient popup: a key, its description, and the Steel command
@@ -944,4 +1100,31 @@ pub struct HelmSourceSpec {
     /// Optional Scheme fn name; given the selected candidate it returns the
     /// preview as a list of lines, shown in a side pane. `None` = no preview.
     pub preview: Option<String>,
+}
+
+/// A window split tree as data — what `(window-layout)` returns and
+/// `(set-window-layout tree)` rebuilds (desktop save/restore). Scheme sees it as
+/// nested lists: `(leaf name path point selected?)` and
+/// `(split vertical? ratio a b)`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutSpec {
+    Leaf {
+        /// Buffer name shown in the pane. On restore, a leaf is resolved by
+        /// `path` first (when non-empty), then by this name.
+        buffer: String,
+        /// The buffer's visited file, or "" for a fileless buffer.
+        path: String,
+        /// The pane's point (byte offset).
+        point: usize,
+        /// Whether this is the selected window.
+        selected: bool,
+    },
+    Split {
+        /// `true` = stacked (split below), `false` = side by side.
+        vertical: bool,
+        /// Fraction of the extent given to `a`.
+        ratio: f32,
+        a: Box<LayoutSpec>,
+        b: Box<LayoutSpec>,
+    },
 }

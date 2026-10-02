@@ -91,6 +91,29 @@ mod engine_tests {
     }
 
     #[test]
+    fn out_of_range_ports_and_sizes_raise_instead_of_wrapping() {
+        let (engine, _rx) = ScriptEngine::new();
+        // 70000 used to truncate to port 4464 and -1 to 65535; both now raise.
+        for src in [
+            r#"(tcp-listen "127.0.0.1" 70000)"#,
+            r#"(tcp-listen "127.0.0.1" -1)"#,
+            r#"(tcp-connect "127.0.0.1" 65536 10 10)"#,
+            r#"(tcp-connect "127.0.0.1" 1 -5 10)"#,
+            r#"(http-serve "127.0.0.1" 99999 "text/plain" "" 'cb)"#,
+            "(http-server-stop -1)",
+            "(random-bytes -1)",
+            "(udp-recv 1 -1)",
+        ] {
+            assert!(engine.eval(src).is_err(), "{src} should raise");
+        }
+        // In range still works.
+        let ok = engine
+            .eval(r#"(tcp-listener-close (tcp-listen "127.0.0.1" 0))"#)
+            .unwrap();
+        assert_eq!(ok.value.as_deref(), Some("#true"));
+    }
+
+    #[test]
     fn tls_connect_reports_failure_cleanly() {
         let (engine, _rx) = ScriptEngine::new();
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
@@ -1065,16 +1088,24 @@ mod engine_tests {
         assert!(bound("evil-normal", "^", "evil-first-non-blank"));
         assert!(bound("evil-normal", "g g", "evil-goto-first-line"));
         assert!(bound("evil-normal", "shift-g", "evil-goto-last-line"));
-        // d / c operators over motions, plus the D / C shorthands.
-        assert!(bound("evil-normal", "d w", "evil-delete-word"));
-        assert!(bound("evil-normal", "d b", "evil-delete-word-back"));
-        assert!(bound("evil-normal", "d $", "evil-delete-to-eol"));
+        // d / c / y are operators (the grammar resolves the motion), plus the
+        // D / C shorthands.
+        assert!(bound("evil-normal", "d", r#"evil-operator "delete""#));
+        assert!(bound("evil-normal", "c", r#"evil-operator "change""#));
+        assert!(bound("evil-normal", "y", r#"evil-operator "yank""#));
+        assert!(bound("evil-normal", ">", r#"evil-operator "indent""#));
+        assert!(bound("evil-operator", "w", r#"evil-motion "w""#));
+        assert!(bound("evil-operator", "$", r#"evil-motion "$""#));
+        assert!(bound("evil-operator", "g g", r#"evil-motion "gg""#));
+        assert!(bound("evil-operator", "f", r#"evil-motion-find "f" %c"#));
         assert!(bound("evil-normal", "shift-d", "evil-delete-to-eol"));
-        assert!(bound("evil-normal", "c c", "evil-change-line"));
-        assert!(bound("evil-normal", "c w", "evil-change-word"));
-        assert!(bound("evil-normal", "c b", "evil-change-word-back"));
-        assert!(bound("evil-normal", "c $", "evil-change-to-eol"));
         assert!(bound("evil-normal", "shift-c", "evil-change-to-eol"));
+        // `.` repeats the last change; it takes a count (`3.`).
+        assert!(bound("evil-normal", ".", "evil-repeat"));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::SetCountAware(n) if n == "evil-repeat"))
+        );
         // Visual additions: change/substitute, swap-ends, and case folding.
         assert!(bound("evil-visual", "c", "evil-visual-change"));
         assert!(bound("evil-visual", "s", "evil-visual-change"));
@@ -1086,11 +1117,13 @@ mod engine_tests {
         assert!(bound("evil-visual-line", "u", "evil-visual-downcase"));
         assert!(bound("evil-visual-line", "shift-u", "evil-visual-upcase"));
         // gq/gw — the format (fill to *fill-column*) operator family.
-        assert!(bound("evil-normal", "g q q", "evil-fill-line"));
-        assert!(bound("evil-normal", "g q g q", "evil-fill-line"));
-        assert!(bound("evil-normal", "g q i p", "evil-fill-paragraph"));
-        assert!(bound("evil-normal", "g q a p", "evil-fill-paragraph"));
-        assert!(bound("evil-normal", "g w w", "evil-fill-line-keep"));
+        assert!(bound("evil-normal", "g q", r#"evil-operator "fill""#));
+        assert!(bound("evil-normal", "g w", r#"evil-operator "fill-keep""#));
+        assert!(bound(
+            "evil-normal",
+            "g shift-u",
+            r#"evil-operator "upcase""#
+        ));
         assert!(bound("evil-visual", "g q", "evil-visual-fill"));
         assert!(bound("evil-visual-line", "g q", "evil-visual-fill"));
         // C-r must redo — unbound it falls through to Emacs isearch-backward.
@@ -1113,34 +1146,24 @@ mod engine_tests {
         assert!(bound("evil-normal", "g d", "lsp-find-definition"));
         assert!(bound("evil-normal", "shift-k", "lsp-hover"));
         assert!(bound("evil-normal", "q", "evil-kbd-macro-toggle"));
-        assert!(bound("evil-normal", "@ @", "call-last-kbd-macro"));
+        assert!(bound("evil-normal", "@", "evil-macro-play %c"));
+        assert!(bound("evil-normal", "\"", "evil-use-register %c"));
+        assert!(bound("evil-visual", "\"", "evil-use-register %c"));
+        assert!(bound("evil-insert", "ctrl-r", "evil-insert-register %c"));
         assert!(bound("evil-normal", "g shift-j", "evil-join-line-no-space"));
-        assert!(bound("evil-normal", "g u u", "evil-downcase-line"));
+        assert!(bound("evil-normal", "g u", r#"evil-operator "downcase""#));
         // Visual: paste-over, case toggle, extend-flavored find.
         assert!(bound("evil-visual", "p", "evil-visual-paste"));
         assert!(bound("evil-visual", "~", "evil-visual-toggle-case"));
         assert!(bound("evil-visual", "f", "evil-find-char-forward-visual"));
         assert!(bound("evil-visual-line", "p", "evil-visual-paste"));
-        // Text objects are generated: spot-check the chords and their exprs.
+        // Text objects are generated into the operator keymap: spot-check.
+        assert!(bound("evil-operator", "i w", r#"evil-object "i" "word""#));
+        assert!(bound("evil-operator", "a (", r#"evil-object "a" "paren""#));
         assert!(bound(
-            "evil-normal",
-            "d i w",
-            r#"evil-object-cmd "delete" "i" "word""#
-        ));
-        assert!(bound(
-            "evil-normal",
-            "c a (",
-            r#"evil-object-cmd "change" "a" "paren""#
-        ));
-        assert!(bound(
-            "evil-normal",
-            "y i \"",
-            r#"evil-object-cmd "yank" "i" "dquote""#
-        ));
-        assert!(bound(
-            "evil-normal",
-            "d a p",
-            r#"evil-object-cmd "delete" "a" "para""#
+            "evil-operator",
+            "i \"",
+            r#"evil-object "i" "dquote""#
         ));
         assert!(bound(
             "evil-visual",
@@ -1542,6 +1565,428 @@ mod engine_tests {
         );
     }
 
+    /// The Vim operator grammar: `(evil-operate op count force thunk)` turns a
+    /// motion result into a range with Vim's exclusive / inclusive / linewise
+    /// rules and applies the operator.
+    #[test]
+    fn evil_operator_grammar_ranges() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        let run = |text: &str, point: usize, src: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                selections: vec![(point, point)],
+                evil_state: "normal".into(),
+                visible_lines: (0, 100),
+                ..Default::default()
+            });
+            engine.eval(src).unwrap().commands
+        };
+        let op = |op: &str, count: usize, force: &str, motion: &str| {
+            format!("(evil-operate \"{op}\" {count} \"{force}\" (lambda () {motion}))")
+        };
+        let kill = |c: &[EditorCommand], s: usize, e: usize| {
+            c.iter().any(
+                |c| matches!(c, C::KillRegionBetween { start, end } if *start == s && *end == e),
+            )
+        };
+        // dw / 2d3w (count multiplies) / dw on a line's last word (no join).
+        let c = run("foo bar", 0, &op("delete", 0, "", r#"(evil-motion "w")"#));
+        assert!(kill(&c, 0, 4), "dw: {c:?}");
+        let c = run(
+            "a b c d e f g h",
+            0,
+            &op("delete", 6, "", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 0, 12), "2d3w: {c:?}");
+        let c = run(
+            "foo bar\n  baz",
+            4,
+            &op("delete", 0, "", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 4, 7), "dw at eol: {c:?}");
+        // cw is ce from inside a word, and enters Insert.
+        let c = run(
+            "hello world",
+            0,
+            &op("change", 0, "", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 0, 5), "cw: {c:?}");
+        assert!(c.iter().any(|c| matches!(c, C::EvilInsertState)), "{c:?}");
+        // e is inclusive; ge inclusive backward; $ to the line end.
+        let c = run("foo bar", 0, &op("delete", 0, "", r#"(evil-motion "e")"#));
+        assert!(kill(&c, 0, 3), "de: {c:?}");
+        let c = run("foo bar", 4, &op("delete", 0, "", r#"(evil-motion "ge")"#));
+        assert!(kill(&c, 2, 5), "dge: {c:?}");
+        let c = run(
+            "abc def\nx",
+            2,
+            &op("delete", 0, "", r#"(evil-motion "$")"#),
+        );
+        assert!(kill(&c, 2, 7), "d$: {c:?}");
+        // j / dd / 3dd are linewise.
+        let c = run("a\nb\nc\n", 0, &op("delete", 0, "", r#"(evil-motion "j")"#));
+        assert!(kill(&c, 0, 4), "dj: {c:?}");
+        assert!(c.iter().any(|c| matches!(c, C::EvilSetLinewise)), "{c:?}");
+        let c = run(
+            "a\nb\nc\nd\n",
+            0,
+            &op("delete", 3, "", r#"(evil-motion "line")"#),
+        );
+        assert!(kill(&c, 0, 6), "3dd: {c:?}");
+        // d} from a paragraph's first column turns linewise (Vim's rule).
+        let c = run(
+            "aa\nbb\n\ncc\n",
+            0,
+            &op("delete", 0, "", r#"(evil-motion "}")"#),
+        );
+        assert!(kill(&c, 0, 6), "d}}: {c:?}");
+        // f / t (inclusive, via the captured char), and the search motion.
+        let c = run(
+            "abcdef",
+            0,
+            &op("delete", 0, "", r#"(evil-motion-find "f" "d")"#),
+        );
+        assert!(kill(&c, 0, 4), "dfd: {c:?}");
+        let c = run(
+            "abcdef",
+            0,
+            &op("delete", 0, "", r#"(evil-motion-find "t" "d")"#),
+        );
+        assert!(kill(&c, 0, 3), "dtd: {c:?}");
+        let c = run(
+            "abcdef",
+            5,
+            &op("delete", 0, "", r#"(evil-motion-find "F" "b")"#),
+        );
+        assert!(kill(&c, 1, 5), "dFb: {c:?}");
+        let c = run(
+            "foo bar",
+            0,
+            &op("delete", 0, "", r#"(evil-motion-search "bar" #t)"#),
+        );
+        assert!(kill(&c, 0, 4), "d/bar: {c:?}");
+        // Text objects, case operators, forced linewise.
+        let c = run(
+            "foo bar baz",
+            5,
+            &op("delete", 0, "", r#"(evil-object "i" "word")"#),
+        );
+        assert!(kill(&c, 4, 7), "diw: {c:?}");
+        let c = run(
+            "foo bar",
+            0,
+            &op("upcase", 0, "", r#"(evil-object "i" "word")"#),
+        );
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 0, end: 3, text } if text == "FOO")),
+            "gUiw: {c:?}"
+        );
+        let c = run(
+            "ab cd\nef\n",
+            0,
+            &op("delete", 0, "V", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 0, 6), "dVw: {c:?}");
+        // dvj: charwise, exclusive, keeping the column.
+        let c = run(
+            "abc\ndef\n",
+            1,
+            &op("delete", 0, "v", r#"(evil-motion "j")"#),
+        );
+        assert!(kill(&c, 1, 5), "dvj: {c:?}");
+        // yy keeps the cursor; >j shifts two lines through the indent command.
+        let c = run("a\nb\nc", 0, &op("yank", 2, "", r#"(evil-motion "line")"#));
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::SetRegion { start: 0, end: 4 })),
+            "2yy: {c:?}"
+        );
+        let c = run("a\nb\nc\n", 0, &op("indent", 0, "", r#"(evil-motion "j")"#));
+        assert!(c.iter().any(|c| matches!(c, C::IndentRegion)), ">j: {c:?}");
+        // A failed motion (dh at column 0) does nothing — and c doesn't insert.
+        let c = run("abc", 0, &op("change", 0, "", r#"(evil-motion "h")"#));
+        assert!(
+            !c.iter()
+                .any(|c| matches!(c, C::EvilInsertState | C::KillRegionBetween { .. })),
+            "ch at bol: {c:?}"
+        );
+        // dG / d3G — linewise to the last / third line.
+        let c = run(
+            "a\nb\nc\nd\n",
+            0,
+            &op("delete", 3, "", r#"(evil-motion "G")"#),
+        );
+        assert!(kill(&c, 0, 6), "d3G: {c:?}");
+        // ) — sentence motion.
+        let c = run(
+            "One two. Three four.",
+            0,
+            &op("delete", 0, "", r#"(evil-motion ")")"#),
+        );
+        assert!(kill(&c, 0, 9), "d): {c:?}");
+        // Visual-mode operator: gU on the selection, then back to Normal.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("abc def"),
+            point: 2,
+            region: Some((0, 3)),
+            evil_state: "visual".into(),
+            ..Default::default()
+        });
+        let c = engine
+            .eval(r#"(evil-visual-operator "upcase")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 0, end: 3, text } if text == "ABC")),
+            "visual gU: {c:?}"
+        );
+        assert!(c.iter().any(|c| matches!(c, C::EvilNormalState)), "{c:?}");
+    }
+
+    /// Tree-sitter text objects and motions, the gc comment operator, ]d,
+    /// and C-a / C-x — against real parse trees.
+    #[test]
+    fn evil_tree_sitter_objects_and_extras() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        let src = "fn alpha(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n// one\n// two\nstruct S {\n    x: i32,\n}\n\nfn beta() {}\n";
+        let set = |lang: &str, text: &str, point: usize| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                selections: vec![(point, point)],
+                language: lang.into(),
+                major_mode: lang.into(),
+                tree: crate::highlight::parse_for_test(lang, text),
+                ..Default::default()
+            });
+        };
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap_or_default();
+        let at = |needle: &str| src.find(needle).unwrap();
+        // af: the whole function, linewise; if: the body lines.
+        set("rust", src, at("a + b"));
+        let fn_end = at("}\n\n// one") + 2;
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "function")"#),
+            format!("(\"line\" 0 {fn_end})")
+        );
+        assert_eq!(
+            val(r#"(evil-object-range-typed "i" "function")"#),
+            format!("(\"line\" {} {})", at("    a + b"), at("}\n\n// one"))
+        );
+        // aa / ia on a parameter: the last one takes the comma before it.
+        set("rust", src, at("b: i32"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "i" "argument")"#),
+            format!("(\"char\" {} {})", at("b: i32"), at("b: i32") + 6)
+        );
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "argument")"#),
+            format!("(\"char\" {} {})", at(", b: i32"), at("b: i32") + 6)
+        );
+        set("rust", src, at("a: i32"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "argument")"#),
+            format!("(\"char\" {} {})", at("a: i32"), at("b: i32"))
+        );
+        // ac: the struct; a/: both adjacent line comments.
+        set("rust", src, at("x: i32"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "class")"#),
+            format!("(\"line\" {} {})", at("struct S"), at("}\n\nfn beta") + 2)
+        );
+        set("rust", src, at("one"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "comment")"#),
+            format!("(\"line\" {} {})", at("// one"), at("struct S"))
+        );
+        // ]m from the top lands on beta; daf deletes alpha linewise.
+        set("rust", src, 0);
+        assert_eq!(
+            val(r#"(evil-ts-motion-target "function" #t #f 1)"#),
+            at("fn beta").to_string()
+        );
+        set("rust", src, at("a + b"));
+        let c = engine
+            .eval(r#"(evil-operate "delete" 0 "" (lambda () (evil-object "a" "function")))"#)
+            .unwrap()
+            .commands;
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::KillRegionBetween { start: 0, end } if *end == fn_end)),
+            "daf: {c:?}"
+        );
+        // gc / gcc: comment at the shallowest indent, then uncomment.
+        set("python", "a\n  b\n", 0);
+        let c = engine.eval("(evil-comment-lines 0 6)").unwrap().commands;
+        assert!(
+            c.iter().any(
+                |c| matches!(c, C::ReplaceRegion { start: 0, end: 5, text } if text == "# a\n#   b")
+            ),
+            "gc: {c:?}"
+        );
+        set("python", "# a\n  # b\n", 0);
+        let c = engine.eval("(evil-comment-lines 0 10)").unwrap().commands;
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { text, .. } if text == "a\n  b")),
+            "gc uncomment: {c:?}"
+        );
+        // C-a / C-x: decimal (signed), hex keeping width/case, x-1 is not -1.
+        let inc = |text: &str, point: usize, delta: i64| {
+            set("rust", text, point);
+            engine
+                .eval(&format!("(evil-increment-by {delta})"))
+                .unwrap()
+                .commands
+        };
+        let c = inc("x = 9;", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 4, end: 5, text } if text == "10")),
+            "{c:?}"
+        );
+        let c = inc("v -5 w", 0, 3);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 2, end: 4, text } if text == "-2")),
+            "{c:?}"
+        );
+        let c = inc("n = 0x0f", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { text, .. } if text == "0x10")),
+            "{c:?}"
+        );
+        let c = inc("n = 0xFF", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { text, .. } if text == "0x100")),
+            "{c:?}"
+        );
+        let c = inc("x-1", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 2, end: 3, text } if text == "2")),
+            "{c:?}"
+        );
+        // ]d: the next diagnostic's position.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("aaa\nbbb\nccc\n"),
+            point: 0,
+            diagnostics: vec!["2\t1\terror\tboom".into(), "1\t0\twarning\tw".into()],
+            ..Default::default()
+        });
+        let c = engine.eval("(evil-next-diagnostic)").unwrap().commands;
+        assert!(c.iter().any(|c| matches!(c, C::GotoChar(4))), "]d: {c:?}");
+    }
+
+    /// More Scheme-side coverage for the late additions: Lisp function objects
+    /// (by form head), visual C-a progressive, and the fold z-commands.
+    #[test]
+    fn evil_lisp_objects_visual_increment_and_folds() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        // af in Scheme: the enclosing (define …), not the inner (+ a b).
+        let text = "(define (f a b)\n  (+ a b))\n";
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str(text),
+            point: text.find("+ a").unwrap(),
+            language: "scheme".into(),
+            tree: crate::highlight::parse_for_test("scheme", text),
+            ..Default::default()
+        });
+        assert_eq!(
+            engine
+                .eval(r#"(evil-object-range-typed "a" "function")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(format!("(\"line\" 0 {})", text.len()).as_str())
+        );
+        // ia in Scheme: an operand, not the operator.
+        assert_eq!(
+            engine
+                .eval(r#"(evil-object-range-typed "i" "argument")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(
+                format!(
+                    "(\"char\" {} {})",
+                    text.rfind("a b)").unwrap(),
+                    text.rfind("a b)").unwrap() + 1
+                )
+                .as_str()
+            )
+        );
+        // Visual g C-a over three lines: +1, +2, +3.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("x 0\nx 0\nx 0\n"),
+            point: 0,
+            region: Some((0, 11)),
+            evil_state: "visual-line".into(),
+            ..Default::default()
+        });
+        let c = engine
+            .eval("(evil-visual-increment-progressive)")
+            .unwrap()
+            .commands;
+        let reps: Vec<(usize, String)> = c
+            .iter()
+            .filter_map(|c| match c {
+                C::ReplaceRegion { start, text, .. } => Some((*start, text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reps,
+            vec![
+                (10, "3".to_string()),
+                (6, "2".to_string()),
+                (2, "1".to_string())
+            ],
+            "{c:?}"
+        );
+        // zc inside an indented block closes its header's fold.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("a:\n  b\n  c\nd\n"),
+            point: 5,
+            line: 1,
+            name: "f.py".into(),
+            ..Default::default()
+        });
+        let c = engine.eval("(fold-close-at-point)").unwrap().commands;
+        assert!(
+            c.iter().any(|c| matches!(c, C::FoldLines { .. })),
+            "zc should fold the block: {c:?}"
+        );
+        // `r` resolves to a replayable, count-aware command.
+        assert!(matches!(
+            engine.eval(r#"(evil-replace-with "x")"#).unwrap().commands.as_slice(),
+            [C::EvilReplaceWith(ch)] if ch == "x"
+        ));
+    }
+
     #[test]
     fn evil_leader_key_configurable() {
         let (engine, _rx) = ScriptEngine::new();
@@ -1737,6 +2182,55 @@ mod engine_tests {
     }
 
     #[test]
+    fn negative_offsets_never_reach_the_editor() {
+        // Steel wraps a negative int converted to `usize` (-1 → usize::MAX),
+        // which the editor then clamped to the buffer END — `(delete-region -5
+        // 2)` deleted from 2 to the end. Position primitives clamp negatives
+        // to 0 at the boundary instead.
+        let (engine, _rx) = ScriptEngine::new();
+        let (commands, error) = engine.eval_collecting(
+            "(goto-char -1) (delete-region -5 2) (replace-region 0 -1 \"x\") \
+             (insert-at -1 \"x\") (set-region -1 3) (select-to -2)",
+        );
+        assert!(error.is_none(), "{error:?}");
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    EditorCommand::GotoChar(0),
+                    EditorCommand::DeleteRegion { start: 0, end: 2 },
+                    EditorCommand::ReplaceRegion {
+                        start: 0,
+                        end: 0,
+                        ..
+                    },
+                    EditorCommand::InsertAt { pos: 0, .. },
+                    EditorCommand::SetRegion { start: 0, end: 3 },
+                    EditorCommand::SelectTo(0),
+                ]
+            ),
+            "got {commands:?}"
+        );
+        // Pure reads clamp the same way (no snapshot published → empty text).
+        assert_eq!(
+            engine
+                .eval("(buffer-substring -3 2)")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"\"")
+        );
+        assert_eq!(
+            engine
+                .eval("(grapheme-backward -1)")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
     fn evil_visual_block_commands_resolve() {
         let (engine, _rx) = ScriptEngine::new();
         // `C-v` enters block-wise Visual.
@@ -1800,6 +2294,148 @@ mod engine_tests {
             engine.eval("(evil-append)").unwrap().commands.as_slice(),
             [EditorCommand::ForwardChar, EditorCommand::EvilInsertState]
         ));
+    }
+
+    /// Registers and register macros: `"x`, `C-r x`, `qx` / `q`, `@x` reach
+    /// their editor commands.
+    #[test]
+    fn evil_registers_and_macro_commands() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        let c = engine.eval(r#"(evil-use-register "a")"#).unwrap().commands;
+        assert!(matches!(c.as_slice(), [EditorCommand::EvilUseRegister(r)] if r == "a"));
+        let c = engine.eval(r#"(evil-macro-play "q")"#).unwrap().commands;
+        assert!(matches!(c.as_slice(), [EditorCommand::EvilMacroPlay(r)] if r == "q"));
+        // `q` arms a register read when idle, and stops a recording otherwise.
+        engine.set_snapshot(EditorSnapshot::default());
+        let c = engine.eval("(evil-kbd-macro-toggle)").unwrap().commands;
+        assert!(
+            c.iter().any(|c| matches!(c, EditorCommand::ReadChar { callback, .. } if callback == "evil-macro-record")),
+            "{c:?}"
+        );
+        engine.set_snapshot(EditorSnapshot {
+            kbd_macro_recording: true,
+            ..Default::default()
+        });
+        let c = engine.eval("(evil-kbd-macro-toggle)").unwrap().commands;
+        assert!(
+            matches!(c.as_slice(), [EditorCommand::EndKbdMacro]),
+            "{c:?}"
+        );
+    }
+
+    /// Marks: bindings, the mark motions under an operator (`d'a` linewise,
+    /// `` d`a `` exclusive), and the jump-command registry.
+    #[test]
+    fn evil_marks_and_jump_commands() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        let cmds = engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm")
+            .commands;
+        let bound = |mode: &str, chord: &str, to: &str| {
+            cmds.iter().any(
+                |c| matches!(c, C::DefineKey(m, s, cmd) if m == mode && s == chord && cmd == to),
+            )
+        };
+        assert!(bound("evil-normal", "m", "evil-set-mark %c"));
+        assert!(bound("evil-normal", "'", "evil-goto-mark-line %c"));
+        assert!(bound("evil-normal", "`", "evil-goto-mark %c"));
+        assert!(bound("evil-operator", "'", "evil-motion-mark %c #f"));
+        assert!(bound("evil-normal", "g v", "evil-reselect-visual"));
+        // The jump list: C-o back, C-i forward (TAB falls back to it in Rust).
+        assert!(bound("evil-normal", "ctrl-o", "evil-jump-backward"));
+        assert!(bound("evil-normal", "ctrl-i", "evil-jump-forward"));
+        // C-w window commands.
+        assert!(bound("evil-normal", "ctrl-w h", "windmove-left"));
+        assert!(bound("evil-normal", "ctrl-w ctrl-l", "windmove-right"));
+        assert!(bound("evil-normal", "ctrl-w =", "balance-windows"));
+        assert!(bound(
+            "evil-normal",
+            "ctrl-w shift-k",
+            "evil-window-move-very-top"
+        ));
+        assert!(bound("evil-normal", "ctrl-w o", "delete-other-windows"));
+        // Ex: & / g& repeat the last :s; `:` from Visual.
+        assert!(bound("evil-normal", "&", r#"evil-ex "s""#));
+        assert!(bound("evil-normal", "g &", r#"evil-ex "%&&""#));
+        assert!(bound("evil-visual-line", ":", "evil-ex-command"));
+        // Tree-sitter motions / objects, diagnostics, folds, C-a, gc.
+        assert!(bound("evil-normal", "] m", "evil-next-function-start"));
+        assert!(bound("evil-normal", "[ [", "evil-previous-class-start"));
+        assert!(bound(
+            "evil-operator",
+            "] m",
+            r#"evil-ts-motion "function" #t #f"#
+        ));
+        assert!(bound(
+            "evil-operator",
+            "a f",
+            r#"evil-object "a" "function""#
+        ));
+        assert!(bound(
+            "evil-visual",
+            "i a",
+            r#"evil-object-cmd "select" "i" "argument""#
+        ));
+        assert!(bound("evil-normal", "] d", "evil-next-diagnostic"));
+        assert!(bound("evil-normal", "z c", "fold-close-at-point"));
+        assert!(bound("evil-normal", "z shift-m", "fold-all"));
+        assert!(bound("evil-normal", "ctrl-a", "evil-increment"));
+        assert!(bound(
+            "evil-visual",
+            "g ctrl-a",
+            "evil-visual-increment-progressive"
+        ));
+        assert!(bound("evil-normal", "g c", r#"evil-operator "comment""#));
+        for jump in [
+            "evil-goto-last-line",
+            "evil-search-next",
+            "evil-matchit",
+            "lsp-find-definition",
+        ] {
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, C::SetJumpCommand(n) if n == jump)),
+                "{jump} should be a jump command"
+            );
+        }
+        let run = |src: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str("aa\nbb\ncc\ndd\n"),
+                point: 1,
+                marks: vec![("a".into(), 7)],
+                ..Default::default()
+            });
+            engine.eval(src).unwrap().commands
+        };
+        let c = run(r#"(evil-operate "delete" 0 "" (lambda () (evil-motion-mark "a" #f)))"#);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::KillRegionBetween { start: 0, end: 9 })),
+            "d'a: {c:?}"
+        );
+        let c = run(r#"(evil-operate "delete" 0 "" (lambda () (evil-motion-mark "a" #t)))"#);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::KillRegionBetween { start: 1, end: 7 })),
+            "d`a: {c:?}"
+        );
+        // An unset mark fails the motion: nothing happens.
+        let c = run(r#"(evil-operate "delete" 0 "" (lambda () (evil-motion-mark "b" #t)))"#);
+        assert!(
+            !c.iter().any(|c| matches!(c, C::KillRegionBetween { .. })),
+            "{c:?}"
+        );
     }
 
     #[test]
@@ -5017,6 +5653,14 @@ mod magit_tests {
         ));
         assert!(matches!(
             engine
+                .eval(r#"(set-process-buffer 1 "*shell*")"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::SetProcessBuffer { id: 1, name }] if name == "*shell*"
+        ));
+        assert!(matches!(
+            engine
                 .eval("(start-kbd-macro)")
                 .unwrap()
                 .commands
@@ -7263,7 +7907,9 @@ mod compile_lib {
             engine.eval(src).unwrap();
         }
         // grep-files emits 1-based `path:line:text`; selecting a match must open
-        // the file and land on the 0-based line (line 12 -> GotoLine(11)).
+        // the file and, once it has loaded (open-file is async), land on the
+        // 0-based line 11. The jump is deferred, not queued behind the open —
+        // a GotoLine in the same batch would move point in the OLD buffer.
         let cmds = engine
             .eval(r#"(projectile-grep-goto "/proj/src/main.rs:12:    let x = 1;")"#)
             .unwrap();
@@ -7275,11 +7921,23 @@ mod compile_lib {
             cmds.commands
         );
         assert!(
-            cmds.commands
+            !cmds
+                .commands
                 .iter()
-                .any(|c| matches!(c, EditorCommand::GotoLine(11))),
-            "expected GotoLine(11), got {:?}",
+                .any(|c| matches!(c, EditorCommand::GotoLine(_))),
+            "goto must wait for the file to load, got {:?}",
             cmds.commands
+        );
+        let pending = engine.eval("*visit-pending*").unwrap();
+        assert_eq!(
+            format!("{:?}", pending.value),
+            format!(
+                "{:?}",
+                engine
+                    .eval(r#"(list "" "/proj/src/main.rs" 11 0 0)"#)
+                    .unwrap()
+                    .value
+            )
         );
     }
 }
@@ -8374,5 +9032,1255 @@ mod modal_keys {
             "double-bound chords:\n  {}",
             dupes.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod dap_lib {
+    use super::*;
+
+    fn engine_with_libs() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        engine
+    }
+
+    /// dap-request stamps sequential `seq`s and dap--on-message routes a
+    /// response body back to the stored Scheme callback by `request_seq`.
+    #[test]
+    fn responses_correlate_to_request_callbacks() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(
+                r#"(begin
+                     (set! *dap-session* 99)   ; pretend a transport is up
+                     (define dap-test-got "")
+                     (dap-request "evaluate" (hash "expression" "x")
+                                  (lambda (body) (set! dap-test-got (dap--str body 'result)))))"#,
+            )
+            .unwrap();
+        // The response to the wrong seq is ignored; the right one fires.
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 "{\"type\":\"response\",\"request_seq\":42,\"success\":true,\"command\":\"evaluate\",\"body\":{\"result\":\"nope\"}}")"#,
+        );
+        assert_eq!(v("dap-test-got"), "\"\"");
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 "{\"type\":\"response\",\"request_seq\":1,\"success\":true,\"command\":\"evaluate\",\"body\":{\"result\":\"42\"}}")"#,
+        );
+        assert_eq!(v("dap-test-got"), "\"42\"");
+        assert_eq!(
+            v("(length *dap-pending*)"),
+            "0",
+            "pending entry not consumed"
+        );
+    }
+
+    /// A `stopped` event flips the state machine, records the thread, and the
+    /// stackTrace response populates the frames + selects the innermost.
+    #[test]
+    fn stopped_event_updates_state_thread_and_frames() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine.eval(r#"(set! *dap-session* 99)"#).unwrap();
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 "{\"type\":\"event\",\"event\":\"stopped\",\"body\":{\"reason\":\"breakpoint\",\"threadId\":7}}")"#,
+        );
+        assert_eq!(v("(eq? *dap-state* 'stopped)"), "#true");
+        assert_eq!(v("*dap-thread*"), "7");
+        // Answer the stackTrace request (the most recent seq). The frame's
+        // source doesn't exist, so the jump is skipped but the selection isn't.
+        let _ = engine.eval(
+            r#"(dap--on-message
+                 (string-append
+                   "{\"type\":\"response\",\"request_seq\":" (int->string *dap-seq*)
+                   ",\"success\":true,\"command\":\"stackTrace\",\"body\":{\"stackFrames\":"
+                   "[{\"id\":3,\"name\":\"main\",\"line\":10,\"source\":{\"path\":\"/nonexistent/x.py\"}}]}}"))"#,
+        );
+        assert_eq!(v("(length *dap-frames*)"), "1");
+        assert_eq!(v("*dap-frame-idx*"), "0");
+        assert_eq!(v("(dap--current-frame-id)"), "3");
+    }
+
+    /// Breakpoint bookkeeping: per-file lookup, distinct files, condition
+    /// replacement, and the unverified marking from a setBreakpoints response.
+    #[test]
+    fn breakpoint_bookkeeping_and_verification() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(
+                r#"(set! *dap-breakpoints*
+                     (list (list "/a.py" 3 "") (list "/a.py" 9 "n > 2") (list "/b.go" 5 "")))"#,
+            )
+            .unwrap();
+        assert_eq!(v(r#"(length (dap--bps-for "/a.py"))"#), "2");
+        assert_eq!(v(r#"(length (dap--breakpoint-files))"#), "2");
+        assert_eq!(v(r#"(nth (dap--bp-at "/a.py" 9) 2)"#), "\"n > 2\"");
+        assert_eq!(v(r#"(dap--bp-at "/a.py" 4)"#), "#false");
+        // The adapter verifies the first /a.py breakpoint but not the second.
+        engine
+            .eval(
+                r#"(dap--note-verified "/a.py"
+                     (list (hash 'verified #t) (hash 'verified #f)))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (member (cons "/a.py" 9) *dap-bp-unverified*) #t #f)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(if (member (cons "/a.py" 3) *dap-bp-unverified*) #t #f)"#),
+            "#false"
+        );
+        // Setting a condition on an existing line replaces, not duplicates.
+        engine
+            .eval(r#"(begin (set! *dap--cond-target* (list "/a.py" 3)) (dap--set-condition "x == 1"))"#)
+            .unwrap();
+        assert_eq!(v(r#"(length (dap--bps-for "/a.py"))"#), "2");
+        assert_eq!(v(r#"(nth (dap--bp-at "/a.py" 3) 2)"#), "\"x == 1\"");
+    }
+
+    /// Adapter selection by file extension (debugpy for .py, delve for .go).
+    #[test]
+    fn adapter_registry_matches_extensions() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        assert_eq!(v(r#"(car (dap--adapter-for "/x/app.py"))"#), "\"debugpy\"");
+        assert_eq!(v(r#"(car (dap--adapter-for "/x/main.go"))"#), "\"delve\"");
+        assert_eq!(v(r#"(dap--adapter-for "/x/lib.rs")"#), "#false");
+    }
+
+    /// The panel build renders threads/stack/scopes/breakpoints from seeded
+    /// state and records the RET navigation tables.
+    #[test]
+    fn panel_build_renders_sections_and_nav_tables() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(
+                r#"(begin
+                     (set! *dap-state* 'stopped)
+                     (set! *dap-stopped-reason* "breakpoint")
+                     (set! *dap-adapter* (dap--adapter-for "/x/app.py"))
+                     (set! *dap-thread* 1)
+                     (set! *dap-threads* (list (hash 'id 1 'name "MainThread")))
+                     (set! *dap-frames* (list (hash 'id 3 'name "fetch" 'line 15
+                                                    'source (hash 'path "/x/app.py"))))
+                     (set! *dap-frame-idx* 0)
+                     (set! *dap-scopes* (list (list "Locals" 12 #f
+                                                    (list (hash 'name "resp" 'value "Response"
+                                                                'variablesReference 40)))))
+                     (set! *dap-breakpoints* (list (list "/x/app.py" 14 "")))
+                     (dap-ui--build))"#,
+            )
+            .unwrap();
+        let text = v("(section-text)");
+        assert!(text.contains("Debug: debugpy"), "header missing: {text}");
+        assert!(
+            text.contains("stopped: breakpoint"),
+            "state missing: {text}"
+        );
+        assert!(text.contains("MainThread"), "threads missing: {text}");
+        assert!(text.contains("fetch"), "stack missing: {text}");
+        assert!(text.contains("resp = Response"), "locals missing: {text}");
+        assert!(text.contains("app.py:14"), "breakpoints missing: {text}");
+        // The expandable variable landed in the RET table with its varref.
+        assert_eq!(v("(length *dap-ui--var-lines*)"), "1");
+        assert_eq!(v("(cdr (car *dap-ui--var-lines*))"), "40");
+        assert_eq!(v("(length *dap-ui--frame-lines*)"), "1");
+    }
+
+    /// delve listens on `:0`; the port comes from its announcement line.
+    #[test]
+    fn delve_port_parsed_from_announcement() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        assert_eq!(
+            v(r#"(dap--delve-port "DAP server listening at: 127.0.0.1:53211")"#),
+            "53211"
+        );
+        assert_eq!(
+            v(r#"(dap--delve-port "Type 'dlv help' for list")"#),
+            "#false"
+        );
+    }
+
+    /// Output for a console that isn't on screen is held in a capped backlog
+    /// instead of `append-to-buffer`, which would switch the selected window.
+    #[test]
+    fn hidden_console_output_is_backlogged_not_focus_stealing() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        let out = engine.eval(r#"(dap--console-append "hello\n")"#).unwrap();
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::AppendToBuffer { .. })),
+            "appended to a hidden console: {:?}",
+            out.commands
+        );
+        assert_eq!(v("*dap--console-backlog*"), "\"hello\\n\"");
+        engine
+            .eval(r#"(dap--console-append (make-string 70000 #\a))"#)
+            .unwrap();
+        assert_eq!(v("(string-length *dap--console-backlog*)"), "65536");
+    }
+
+    /// A force-kill timer only reaps the session it was scheduled for, and
+    /// dap-quit resets a session stuck "starting" with no transport.
+    #[test]
+    fn force_kill_is_pinned_and_quit_resets_starting() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval("(begin (set! *dap-session* 99) (dap--schedule-kill) (set! *dap-session* 100))")
+            .unwrap();
+        let out = engine.eval("(dap--force-kill)").unwrap();
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DapKill { .. })),
+            "killed the wrong session"
+        );
+        engine.eval("(set! *dap-session* 99)").unwrap();
+        let out = engine.eval("(dap--force-kill)").unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DapKill { id: 99 })),
+            "scheduled session not killed: {:?}",
+            out.commands
+        );
+        engine
+            .eval("(begin (set! *dap-session* -1) (set! *dap-state* 'starting) (dap-quit))")
+            .unwrap();
+        assert_eq!(v("(eq? *dap-state* 'dead)"), "#true");
+    }
+
+    /// Jumping to a file that isn't open parks the goto (open-file is async)
+    /// for the find-file-hook instead of moving point in the current buffer.
+    #[test]
+    fn jump_to_unopened_file_is_deferred_to_find_file_hook() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        let out = engine
+            .eval(r#"(dap--visit "/nonexistent-dap/x.py" 12 #t)"#)
+            .unwrap();
+        assert!(
+            matches!(out.commands.as_slice(), [EditorCommand::OpenFile(p)] if p == "/nonexistent-dap/x.py"),
+            "expected only OpenFile: {:?}",
+            out.commands
+        );
+        assert_eq!(v("(nth *dap--pending-jump* 1)"), "12");
+    }
+
+    /// file-truename resolves symlinks (the adapter reports real paths) and
+    /// passes a nonexistent path through unchanged.
+    #[test]
+    fn file_truename_resolves_symlinks() {
+        let engine = engine_with_libs();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        let dir = std::env::temp_dir().join(format!("macros-truename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.py");
+        std::fs::write(&real, "").unwrap();
+        let link = dir.join("link.py");
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            v(&format!("(file-truename {:?})", link.display().to_string())),
+            format!(
+                "{:?}",
+                std::fs::canonicalize(&real).unwrap().display().to_string()
+            )
+        );
+        assert_eq!(
+            v(r#"(file-truename "/nonexistent-dap/y.py")"#),
+            "\"/nonexistent-dap/y.py\""
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod session_lib {
+    use super::*;
+
+    /// core + hooks + stubs for what session.scm reads from earlier files
+    /// (persistence-dir → a unique sandbox, the perspectives accessors), then
+    /// session.scm itself.
+    fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>, String) {
+        let (engine, rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/hooks.scm")).unwrap();
+        let dir = fresh_persistence_dir();
+        engine
+            .eval(&format!(
+                r#"(define (persistence-dir) "{dir}")
+                   (define *test-persp* #f)
+                   (define (perspective-current) "/proj/a")
+                   (define (perspective-restore-current! root) (set! *test-persp* root))"#
+            ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/session.scm"))
+            .expect("session.scm loads");
+        (engine, rx, dir)
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn escape_round_trips_newlines_tabs_and_backslashes() {
+        let (engine, _rx, _) = engine();
+        // Literal backslash-n (two chars), a real newline, a tab, a trailing
+        // backslash, and a CR — all survive.
+        let src = r#"(define s (string-append "a\\nb" "\n" "\tc\\" "\r" "d"))"#;
+        engine.eval(src).unwrap();
+        assert_eq!(
+            v(&engine, "(equal? (session-unescape (session-escape s)) s)"),
+            "#true"
+        );
+        // The escaped form is a single line with no raw tab.
+        assert_eq!(
+            v(&engine, r#"(string-contains? (session-escape s) "\n")"#),
+            "#false"
+        );
+        assert_eq!(
+            v(&engine, r#"(string-contains? (session-escape s) "\t")"#),
+            "#false"
+        );
+    }
+
+    #[test]
+    fn savehist_serialize_parse_round_trip_and_bounds() {
+        let (engine, _rx, _) = engine();
+        engine
+            .eval(
+                r#"(define rings (list (cons "minibuffer" (list "a" "b\nc"))
+                                       (cons "search" (list "foo"))
+                                       (cons "command" (list "magit-status"))
+                                       (cons "kill" (list "k1" "k\t2"))))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                "(equal? (savehist-parse (savehist-serialize rings)) rings)"
+            ),
+            "#true"
+        );
+        // Per-ring cap keeps the NEWEST entries.
+        engine.eval("(savehist-set-max 1)").unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(alist-ref (savehist-parse (savehist-serialize rings)) "minibuffer")"#
+            ),
+            r#"("b\nc")"#
+        );
+        // Kill ring opt-out: nothing written for it.
+        engine.eval("(savehist-save-kill-ring #f)").unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(alist-ref (savehist-parse (savehist-serialize rings)) "kill")"#
+            ),
+            "()"
+        );
+    }
+
+    #[test]
+    fn savehist_save_then_load_restores_every_ring() {
+        let (engine, _rx, dir) = engine();
+        engine.set_session(SessionState {
+            minibuffer_history: vec!["find me".into(), "two\nlines".into()],
+            kill_ring: vec!["killed".into()],
+            search_ring: vec!["needle".into()],
+            command_history: vec!["magit-status".into()],
+            ..Default::default()
+        });
+        engine.eval("(savehist-save)").unwrap();
+        assert!(std::path::Path::new(&format!("{dir}/savehist")).exists());
+        let out = engine.eval("(savehist-load)").unwrap();
+        let mut rings: Vec<(String, Vec<String>)> = out
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                EditorCommand::SetSessionRing { ring, items } => {
+                    Some((ring.clone(), items.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        rings.sort();
+        assert_eq!(
+            rings,
+            vec![
+                ("command".to_string(), vec!["magit-status".to_string()]),
+                ("kill".to_string(), vec!["killed".to_string()]),
+                (
+                    "minibuffer".to_string(),
+                    vec!["find me".to_string(), "two\nlines".to_string()]
+                ),
+                ("search".to_string(), vec!["needle".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_lines_round_trip_and_prune() {
+        let (engine, _rx, _) = engine();
+        engine
+            .eval(
+                r#"(define tree
+                     (list 'split #f 0.3
+                           (list 'leaf "main.rs" "/p/src/main.rs" 42 #t)
+                           (list 'split #t 0.5
+                                 (list 'leaf "*compilation*" "" 0 #f)
+                                 (list 'leaf "lib.rs" "/p/src/lib.rs" 7 #f))))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                "(equal? (desktop-lines->layout (desktop-layout->lines tree)) tree)"
+            ),
+            "#true"
+        );
+        // Dropping the fileless *compilation* leaf collapses its split.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(desktop-prune-layout tree (lambda (l) (not (equal? (nth l 2) ""))))"#
+            ),
+            r#"(split #false 0.3 (leaf "main.rs" "/p/src/main.rs" 42 #true) (leaf "lib.rs" "/p/src/lib.rs" 7 #false))"#
+        );
+        assert_eq!(
+            v(&engine, "(desktop-prune-layout tree (lambda (l) #f))"),
+            "#false"
+        );
+        // Truncated input parses to #f, not half a tree.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(desktop-lines->layout (list "split\th\t0.5" "leaf\t0\t1\ta\t/a"))"#
+            ),
+            "#false"
+        );
+    }
+
+    /// The real path: the editor publishes a layout, desktop serializes it to
+    /// disk text, parses it back, and `set-window-layout` queues exactly the
+    /// tree that was published.
+    #[test]
+    fn desktop_file_round_trips_the_published_layout() {
+        let (engine, _rx, _) = engine();
+        let layout = LayoutSpec::Split {
+            vertical: true,
+            ratio: 0.25,
+            a: Box::new(LayoutSpec::Leaf {
+                buffer: "a.rs".into(),
+                path: "/p/a.rs".into(),
+                point: 3,
+                selected: false,
+            }),
+            b: Box::new(LayoutSpec::Leaf {
+                buffer: "b.rs".into(),
+                path: "/p/b.rs".into(),
+                point: 99,
+                selected: true,
+            }),
+        };
+        engine.set_session(SessionState {
+            file_buffers: vec![("/p/a.rs".into(), 3), ("/p/b.rs".into(), 99)],
+            layout: Some(layout.clone()),
+            ..Default::default()
+        });
+        engine
+            .eval(
+                "(define parsed (desktop-parse (desktop-serialize (session-file-buffers) \
+                 (window-layout) (perspective-current))))",
+            )
+            .unwrap();
+        assert_eq!(
+            v(&engine, "(car parsed)"),
+            r#"(("/p/a.rs" 3) ("/p/b.rs" 99))"#
+        );
+        assert_eq!(v(&engine, "(nth parsed 2)"), r#""/proj/a""#);
+        let out = engine.eval("(set-window-layout (cadr parsed))").unwrap();
+        assert_eq!(out.value.as_deref(), Some("#true"));
+        match out.commands.as_slice() {
+            [EditorCommand::SetWindowLayout(spec)] => assert_eq!(spec, &layout),
+            other => panic!("expected one SetWindowLayout, got {other:?}"),
+        }
+    }
+
+    /// desktop-restore skips missing files, prunes their panes, and restores the
+    /// perspective; a desktop whose panes all vanished still lands on a file.
+    #[test]
+    fn desktop_restore_skips_missing_files() {
+        let (engine, _rx, dir) = engine();
+        let real = format!("{dir}/real.txt");
+        std::fs::write(&real, "hello").unwrap();
+        let text = format!(
+            "# macros desktop v1\nperspective\t{dir}\nbuffer\t2\t{real}\nbuffer\t0\t{dir}/gone.txt\n\
+             split\th\t0.5\nleaf\t2\t1\treal.txt\t{real}\nleaf\t0\t0\tgone.txt\t{dir}/gone.txt"
+        );
+        engine
+            .eval(&format!(
+                "(define n (desktop-restore (desktop-parse {:?})))",
+                text
+            ))
+            .map(|o| {
+                let kinds: Vec<String> = o
+                    .commands
+                    .iter()
+                    .map(|c| format!("{c:?}"))
+                    .collect();
+                assert!(
+                    kinds.iter().any(|k| k.starts_with("RestoreFileBuffers")
+                        && k.contains("real.txt")
+                        && !k.contains("gone.txt")),
+                    "{kinds:?}"
+                );
+                assert!(
+                    o.commands.iter().any(|c| matches!(
+                        c,
+                        EditorCommand::SetWindowLayout(LayoutSpec::Leaf { path, selected: true, .. })
+                            if path == &real
+                    )),
+                    "the split collapses onto the surviving pane: {kinds:?}"
+                );
+            })
+            .unwrap();
+        assert_eq!(v(&engine, "n"), "1");
+        assert_eq!(v(&engine, "*test-persp*"), format!("{dir:?}"));
+    }
+
+    #[test]
+    fn desktop_clear_deletes_file_and_stops_autosave() {
+        let (engine, _rx, dir) = engine();
+        engine.eval("(set! *desktop-primary* #t)").unwrap();
+        engine.set_session(SessionState::default());
+        engine.eval("(session-save-all)").unwrap();
+        let file = format!("{dir}/desktop");
+        assert!(std::path::Path::new(&file).exists(), "autosave wrote it");
+        engine.eval("(desktop-clear)").unwrap();
+        assert!(!std::path::Path::new(&file).exists());
+        engine.eval("(session-save-all)").unwrap();
+        assert!(
+            !std::path::Path::new(&file).exists(),
+            "cleared desktop isn't rewritten by autosave"
+        );
+        // desktop-save re-arms (it goes through session-refresh first).
+        let out = engine.eval("(desktop-save)").unwrap();
+        assert!(
+            out.commands.iter().any(
+                |c| matches!(c, EditorCommand::SessionRefresh(cb) if cb == "desktop--save-now")
+            )
+        );
+        assert_eq!(v(&engine, "(desktop-auto-save?)"), "#true");
+    }
+
+    /// The after-init entry point and the autosave tick run cleanly and keep
+    /// the timer armed (by name — run-with-timer takes a string callback).
+    #[test]
+    fn startup_and_autosave_tick_arm_the_timer() {
+        let (engine, _rx, _) = engine();
+        let timer = |out: &EvalResult| {
+            out.commands.iter().any(|c| {
+                matches!(c, EditorCommand::RunWithTimer { ms: 300000, callback }
+                    if callback == "session-autosave-tick")
+            })
+        };
+        let out = engine.eval("(session-startup)").expect("startup runs");
+        assert!(timer(&out), "{:?}", out.commands);
+        let out = engine.eval("(session-autosave-tick)").expect("tick runs");
+        assert!(timer(&out), "{:?}", out.commands);
+        assert!(
+            out.commands.iter().any(
+                |c| matches!(c, EditorCommand::SessionRefresh(cb) if cb == "session-save-all")
+            )
+        );
+        // Opting out from init.scm turns the whole thing off.
+        engine
+            .eval("(savehist-mode #f) (desktop-save-mode #f)")
+            .unwrap();
+        assert_eq!(v(&engine, "(desktop-auto-save?)"), "#false");
+    }
+
+    #[test]
+    fn session_hooks_are_registered() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/hooks.scm")).unwrap();
+        engine
+            .eval(
+                r#"(define (persistence-dir) "/nonexistent-session-test")
+                   (define (perspective-current) #f)
+                   (define (perspective-restore-current! r) #f)"#,
+            )
+            .unwrap();
+        let out = engine
+            .eval(include_str!("../../scheme/session.scm"))
+            .unwrap();
+        let hooks: Vec<String> = out
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                EditorCommand::AddHook(hook, _) => Some(hook.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(hooks.contains(&"after-init-hook".to_string()), "{hooks:?}");
+        assert!(hooks.contains(&"kill-emacs-hook".to_string()), "{hooks:?}");
+    }
+}
+
+#[cfg(test)]
+mod test_runner_lib {
+    use super::*;
+
+    fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
+        let (engine, rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/diagnostics.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/test-runner.scm"))
+            .expect("test-runner.scm loads");
+        (engine, rx)
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    /// Evaluate `(f text line)` for a source text given as a Rust string.
+    fn at(engine: &ScriptEngine, f: &str, text: &str, line: usize) -> String {
+        engine.eval(&format!("(define src {text:?})")).unwrap();
+        v(engine, &format!("({f} src {line})"))
+    }
+
+    const RUST: &str = r#"use std::fmt;
+
+fn helper() -> u32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds_numbers() {
+        let s = "{ not a brace }";
+        assert_eq!(helper(), 1); // }
+    }
+
+    mod nested {
+        #[tokio::test]
+        #[should_panic]
+        async fn deep_one() {
+            if true {
+                panic!();
+            }
+        }
+    }
+
+    fn not_a_test() {
+        let x = 1;
+    }
+}
+"#;
+
+    #[test]
+    fn rust_enclosing_test_and_module_path() {
+        let (engine, _rx) = engine();
+        // Inside adds_numbers (brace in a string/comment doesn't confuse depth).
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 11),
+            r#"(("tests") "adds_numbers")"#
+        );
+        // On the fn line itself, and on its closing brace.
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 9),
+            r#"(("tests") "adds_numbers")"#
+        );
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 12),
+            r#"(("tests") "adds_numbers")"#
+        );
+        // Nested module, attribute stack with #[should_panic] between.
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 19),
+            r#"(("tests" "nested") "deep_one")"#
+        );
+        // A non-test fn, the space between tests, and non-test code: none.
+        assert_eq!(at(&engine, "test-rust-point", RUST, 25), "#false");
+        assert_eq!(at(&engine, "test-rust-point", RUST, 13), "#false");
+        assert_eq!(at(&engine, "test-rust-point", RUST, 2), "#false");
+    }
+
+    #[test]
+    fn rust_file_targets() {
+        let (engine, _rx) = engine();
+        for (rel, want) in [
+            ("src/script/tests.rs", r#"("" . "script::tests")"#),
+            ("src/editor/mod.rs", r#"("" . "editor")"#),
+            ("src/main.rs", r#"("" . "")"#),
+            ("tests/integration.rs", r#"("--test integration " . "")"#),
+            ("src/bin/tool.rs", r#"("--bin tool " . "")"#),
+        ] {
+            assert_eq!(
+                v(&engine, &format!("(test-rust-file-target {rel:?})")),
+                want,
+                "{rel}"
+            );
+        }
+        engine.eval(&format!("(define src {RUST:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'point "rust" "src/calc.rs" src 19)"#
+            ),
+            r#"("cargo test calc::tests::nested::deep_one" . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'file "rust" "tests/it.rs" src 0)"#
+            ),
+            r#"("cargo test --test it " . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'file "rust" "src/calc.rs" src 0)"#
+            ),
+            r#"("cargo test calc::" . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(cdr (test-command 'point "rust" "src/calc.rs" src 2))"#
+            ),
+            r#""Point is not inside a #[test] function""#
+        );
+    }
+
+    const PY: &str = "import pytest\n\nclass TestMath:\n    def setup_method(self):\n        pass\n\n    def test_add(self):\n        x = 1\n\n        assert x == 1\n\n@pytest.mark.slow\ndef test_top():\n    def inner():\n        pass\n    inner()\n";
+
+    #[test]
+    fn python_pytest_node_ids() {
+        let (engine, _rx) = engine();
+        assert_eq!(
+            at(&engine, "test-python-point", PY, 9),
+            r#""TestMath::test_add""#
+        );
+        // A blank line inside the method still belongs to it.
+        assert_eq!(
+            at(&engine, "test-python-point", PY, 8),
+            r#""TestMath::test_add""#
+        );
+        // In the class but not in a test → the class.
+        assert_eq!(at(&engine, "test-python-point", PY, 4), r#""TestMath""#);
+        // A nested helper inside a top-level test → the test.
+        assert_eq!(at(&engine, "test-python-point", PY, 14), r#""test_top""#);
+        assert_eq!(at(&engine, "test-python-point", PY, 0), "#false");
+        engine.eval(&format!("(define src {PY:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "python" "tests/test_m.py" src 9))"#
+            ),
+            r#""python -m pytest 'tests/test_m.py::TestMath::test_add'""#
+        );
+    }
+
+    const GO: &str = "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n\nfunc helper() int { return 1 }\n\nfunc TestSub(t *testing.T) {}\n";
+
+    #[test]
+    fn go_test_names() {
+        let (engine, _rx) = engine();
+        assert_eq!(at(&engine, "test-go-point", GO, 6), r#""TestAdd""#);
+        assert_eq!(at(&engine, "test-go-point", GO, 10), "#false");
+        assert_eq!(at(&engine, "test-go-point", GO, 2), "#false");
+        engine.eval(&format!("(define src {GO:?})")).unwrap();
+        assert_eq!(
+            v(&engine, "(test-go-file-names src)"),
+            r#"("TestAdd" "TestSub")"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "go" "calc_test.go" src 6))"#
+            ),
+            r#""go test -run '^TestAdd$' .""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'file "go" "calc_test.go" src 6))"#
+            ),
+            r#""go test -run '^(TestAdd|TestSub)$' .""#
+        );
+    }
+
+    const JS: &str = "import { sum } from './sum';\n\ndescribe('sum', () => {\n  it(\"adds (1+2)\", () => {\n    expect(sum(1, 2)).toBe(3);\n  });\n\n  test.only(`it's fine`, () => {});\n});\n";
+
+    #[test]
+    fn js_test_names_and_runner_detection() {
+        let (engine, _rx) = engine();
+        assert_eq!(at(&engine, "test-js-point", JS, 4), r#""adds (1+2)""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 7), r#""it's fine""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 2), r#""sum""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 0), "#false");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-js-runner "{\"devDependencies\": {\"vitest\": \"1\"}}")"#
+            ),
+            r#""vitest""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-js-runner "{\"scripts\": {\"test\": \"jest\"}}")"#
+            ),
+            r#""jest""#
+        );
+        assert_eq!(v(&engine, r#"(test-js-runner "{}")"#), r#""npm""#);
+        engine.eval(&format!("(define src {JS:?})")).unwrap();
+        // The -t pattern is regex-escaped and shell-quoted.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "jest" "src/sum.test.ts" src 4))"#
+            ),
+            r#""npx jest 'src/sum.test.ts' -t 'adds \\(1\\+2\\)'""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "vitest" "a.test.ts" src 7))"#
+            ),
+            r#""npx vitest run 'a.test.ts' -t 'it'\\''s fine'""#
+        );
+    }
+
+    #[test]
+    fn zig_and_custom_templates() {
+        let (engine, _rx) = engine();
+        let zig = "const std = @import(\"std\");\n\ntest \"adds\" {\n    try std.testing.expect(true);\n}\n";
+        assert_eq!(at(&engine, "test-zig-point", zig, 3), r#""adds""#);
+        engine
+            .eval(r#"(test-runner-set-command "rust" 'point "cargo nextest run {filter}")"#)
+            .unwrap();
+        engine.eval(&format!("(define src {RUST:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "rust" "src/lib.rs" src 11))"#
+            ),
+            r#""cargo nextest run tests::adds_numbers""#
+        );
+        // The other kinds are untouched.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'project "rust" "src/lib.rs" src 11))"#
+            ),
+            r#""cargo test""#
+        );
+    }
+
+    /// End to end: point in a Rust test in a real temp crate → `test-at-point`
+    /// launches cargo in the crate root through compile-mode, and
+    /// `test-rerun-last` repeats it there.
+    #[test]
+    fn test_at_point_runs_in_crate_root_and_reruns() {
+        let (engine, _rx) = engine();
+        let root = fresh_persistence_dir();
+        std::fs::write(format!("{root}/Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(format!("{root}/src")).unwrap();
+        let file = format!("{root}/src/calc.rs");
+        std::fs::write(&file, RUST).unwrap();
+        engine.set_snapshot(EditorSnapshot {
+            path: file.clone(),
+            directory: format!("{root}/src"),
+            text: Rope::from_str(RUST),
+            line: 11,
+            ..Default::default()
+        });
+        let ran = |out: &EvalResult| {
+            out.commands.iter().any(|c| match c {
+                EditorCommand::MakeProcess { args, .. } => args.iter().any(|a| {
+                    a.contains(&format!(
+                        "cd {root} && cargo test calc::tests::adds_numbers"
+                    ))
+                }),
+                _ => false,
+            })
+        };
+        let out = engine.eval("(test-at-point)").unwrap();
+        assert!(ran(&out), "{:?}", out.commands);
+        // Finish the run so the compile lane is free again, then rerun.
+        engine.eval(r#"(compile-done "0")"#).unwrap();
+        let out = engine.eval("(test-rerun-last)").unwrap();
+        assert!(ran(&out), "{:?}", out.commands);
+        // recompile (`g` in *compilation*) stays pinned to the crate root.
+        assert_eq!(v(&engine, "*compile-fixed-dir*"), format!("{root:?}"));
+    }
+}
+
+/// query-replace / replace-string (replace.scm), occur + editable results
+/// (occur.scm), and the `buffer-search-all` / `regexp-search-lines` bridges.
+#[cfg(test)]
+mod search_replace_tests {
+    use super::*;
+
+    fn engine_with(text: &str, point: usize) -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        // The receiver is dropped: these tests only read eval results.
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine.set_snapshot(EditorSnapshot {
+            name: "src.txt".into(),
+            text: Rope::from_str(text),
+            point,
+            ..Default::default()
+        });
+        engine
+    }
+
+    fn value(engine: &ScriptEngine, q: &str) -> String {
+        engine.eval(q).unwrap().value.unwrap_or_default()
+    }
+
+    fn commands(engine: &ScriptEngine, q: &str) -> Vec<EditorCommand> {
+        engine.eval(q).unwrap().commands
+    }
+
+    fn replacements(cmds: &[EditorCommand]) -> Vec<(usize, usize, String)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                EditorCommand::ReplaceRegion { start, end, text } => {
+                    Some((*start, *end, text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Apply ReplaceRegion commands (byte offsets) to `text`, in order — what
+    /// the editor does — so tests can check the resulting buffer.
+    fn apply(text: &str, reps: &[(usize, usize, String)]) -> String {
+        let mut s = text.to_string();
+        for (a, b, t) in reps {
+            s.replace_range(*a..*b, t);
+        }
+        s
+    }
+
+    #[test]
+    fn replacement_expansion_backrefs_and_case() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            value(
+                &e,
+                r#"(qr-expand-replacement "<\\1|\\2|\\&|\\\\|\\9>" (list "ab" "a" "b"))"#
+            ),
+            r#""<a|b|ab|\\|>""#
+        );
+        // Multibyte groups and literal text survive the char walk.
+        assert_eq!(
+            value(&e, r#"(qr-expand-replacement "é\\1ü\\n" (list "x" "ö"))"#),
+            "\"éöü\\n\""
+        );
+        // Emacs case-replace: a lower-case replacement copies the match's case.
+        assert_eq!(value(&e, r#"(qr-case-adjust "bar" "FOO")"#), r#""BAR""#);
+        assert_eq!(value(&e, r#"(qr-case-adjust "bar" "Foo")"#), r#""Bar""#);
+        assert_eq!(value(&e, r#"(qr-case-adjust "bar" "foo")"#), r#""bar""#);
+        assert_eq!(
+            value(&e, r#"(qr-case-adjust "émile" "ÉCOLE")"#),
+            r#""ÉMILE""#
+        );
+        // …but not when the user typed an upper-case replacement or FROM.
+        assert_eq!(
+            value(&e, r#"(qr-replacement-for (list 0 3 "FOO") "Bar" #f #t)"#),
+            r#""Bar""#
+        );
+        assert_eq!(
+            value(&e, r#"(qr-replacement-for (list 0 3 "FOO") "bar" #f #f)"#),
+            r#""bar""#
+        );
+        // Smart case + literal quoting.
+        assert_eq!(value(&e, r#"(qr-pattern "a.b" #f #t)"#), r#""(?i)a\\.b""#);
+        assert_eq!(
+            value(&e, r#"(qr-pattern "A.b" #t (qr-fold? "A.b"))"#),
+            r#""A.b""#
+        );
+    }
+
+    #[test]
+    fn buffer_search_all_reports_byte_offsets_and_groups() {
+        let e = engine_with("héllo wörld\nfoo bar foo\n", 0);
+        assert_eq!(
+            value(&e, r#"(buffer-search-all "(f)(o)o" 0 100)"#),
+            r#"((14 17 "foo" "f" "o") (22 25 "foo" "f" "o"))"#
+        );
+        // `^` is a real line anchor even when the window starts mid-line, and
+        // matches must lie wholly inside the window.
+        assert_eq!(value(&e, r#"(buffer-search-all "^foo" 15 100)"#), "()");
+        assert_eq!(
+            value(&e, r#"(buffer-search-all "foo" 0 24)"#),
+            r#"((14 17 "foo"))"#
+        );
+        assert!(value(&e, r#"(buffer-search-all "(" 0 10)"#).contains("unclosed group"));
+        assert_eq!(
+            value(&e, r#"(regexp-search-lines "o" (list "wö o" "x"))"#),
+            "(((4 5)) ())"
+        );
+    }
+
+    #[test]
+    fn query_replace_session_over_multibyte_text() {
+        let text = "héllo Foo wörld\nfoo bar FOO — foo\n";
+        let e = engine_with(text, 0);
+        let start = commands(&e, r#"(qr-start "foo" "bar" #f 0 (point-max) #f #f #f)"#);
+        assert!(
+            start
+                .iter()
+                .any(|c| matches!(c, EditorCommand::UndoAmalgamateBegin))
+        );
+        assert!(start.iter().any(
+            |c| matches!(c, EditorCommand::ReadKeyStart { callback, .. } if callback == "qr-key")
+        ));
+        assert!(
+            start
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetRegion { start: 7, end: 10 }))
+        );
+        let mut reps = Vec::new();
+        reps.extend(replacements(&commands(&e, r#"(qr-key "y")"#))); // Foo -> Bar
+        reps.extend(replacements(&commands(&e, r#"(qr-key "n")"#))); // skip foo
+        reps.extend(replacements(&commands(&e, r#"(qr-key "!")"#))); // FOO, foo
+        assert_eq!(apply(text, &reps), "héllo Bar wörld\nfoo bar BAR — bar\n");
+        // The session already ended at `!`: a stray key only disarms.
+        let done = commands(&e, r#"(qr-key "q")"#);
+        assert!(replacements(&done).is_empty(), "{done:?}");
+        assert_eq!(value(&e, "*qr-count*"), "3");
+    }
+
+    #[test]
+    fn query_replace_undo_back_and_finish() {
+        let text = "a1 a2 a3";
+        let e = engine_with(text, 0);
+        commands(
+            &e,
+            r#"(qr-start "a([0-9])" "<\\1>" #t 0 (point-max) #f #f #f)"#,
+        );
+        let mut reps = Vec::new();
+        reps.extend(replacements(&commands(&e, r#"(qr-key " ")"#)));
+        reps.extend(replacements(&commands(&e, r#"(qr-key "y")"#)));
+        assert_eq!(apply(text, &reps), "<1> <2> a3");
+        reps.extend(replacements(&commands(&e, r#"(qr-key "u")"#))); // a2 back
+        assert_eq!(apply(text, &reps), "<1> a2 a3");
+        reps.extend(replacements(&commands(&e, r#"(qr-key "^")"#)));
+        reps.extend(replacements(&commands(&e, r#"(qr-key "U")"#)));
+        assert_eq!(apply(text, &reps), text);
+        reps.extend(replacements(&commands(&e, r#"(qr-key ".")"#)));
+        assert_eq!(apply(text, &reps), "<1> a2 a3");
+        assert_eq!(value(&e, "*qr-active?*"), "#false");
+    }
+
+    #[test]
+    fn query_replace_quits_on_escape_and_stray_keys() {
+        let e = engine_with("x x", 0);
+        commands(&e, r#"(qr-start "x" "y" #f 0 (point-max) #f #f #f)"#);
+        let cmds = commands(&e, r#"(qr-key "escape")"#);
+        assert!(cmds.iter().any(|c| matches!(c, EditorCommand::ReadKeyStop)));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::UndoAmalgamateEnd))
+        );
+        assert!(replacements(&cmds).is_empty());
+        // A key after the session ended just disarms the capture.
+        let cmds = commands(&e, r#"(qr-key "y")"#);
+        assert!(replacements(&cmds).is_empty());
+    }
+
+    #[test]
+    fn replace_string_from_point_and_in_region() {
+        let text = "ö-ab ab ab";
+        // From point (byte 6, the 2nd "ab" — after the 2-byte ö) to the end.
+        let e = engine_with(text, 6);
+        let cmds = commands(
+            &e,
+            r#"(qr-replace-all-in "ab" "ÿÿ" #f (point) (point-max))"#,
+        );
+        assert_eq!(apply(text, &replacements(&cmds)), "ö-ab ÿÿ ÿÿ");
+        // Within a region [3, 9): only the first two.
+        let cmds = commands(&e, r#"(qr-replace-all-in "a(b)" "\\1\\1" #t 3 9)"#);
+        assert_eq!(apply(text, &replacements(&cmds)), "ö-bb bb ab");
+    }
+
+    #[test]
+    fn occur_collects_lines_and_lays_out_byte_offsets() {
+        let e = engine_with("héllo Foo wörld\nnothing\nfoo bar FOO\n", 0);
+        assert_eq!(
+            value(&e, r#"(occur-collect (occur-fold-pattern "foo"))"#),
+            r#"(3 ("src.txt" "" 0 "      1:" "héllo Foo wörld") ("src.txt" "" 2 "      3:" "foo bar FOO"))"#
+        );
+        // Header "é\n" is 3 bytes; the match after a multibyte char lands on
+        // byte, not char, offsets; read-only ranges cover header+prefixes.
+        assert_eq!(
+            value(
+                &e,
+                r#"(results-layout (list "é" "occur-mode" "(?i)foo"
+                     (list->vector (list (results-record "b" "" 0 "1:" "é foo")
+                                         (results-record "b" "" 1 "2:" "FOO")))))"#
+            ),
+            r#"("é\n1:é foo\n2:FOO" ((12 14 "occur-prefix") (14 17 "occur-match") (3 5 "occur-prefix") (8 11 "occur-match")) ((0 5) (12 14)))"#
+        );
+    }
+
+    #[test]
+    fn results_parse_edits_detects_changes_and_broken_lines() {
+        let e = engine_with("", 0);
+        let spec = r#"(list "hdr" "occur-mode" "foo"
+            (list->vector (list (results-record "b" "" 1 "     2:" "foo é")
+                                (results-record "b" "" 3 "     4:" "zz"))))"#;
+        assert_eq!(
+            value(
+                &e,
+                &format!(r#"(results-parse-edits {spec} "hdr\n     2:FOO é\n     4:zz")"#)
+            ),
+            r#"((0 "FOO é"))"#
+        );
+        assert!(
+            value(
+                &e,
+                &format!(r#"(results-parse-edits {spec} "hdr\n     2:x\nnew\n     4:zz")"#)
+            )
+            .contains("number of result lines changed")
+        );
+        assert!(
+            value(
+                &e,
+                &format!(r#"(results-parse-edits {spec} "hdr\n  2:x\n     4:zz")"#)
+            )
+            .contains("Line 2 lost its prefix")
+        );
+    }
+
+    #[test]
+    fn results_apply_file_patches_lines_on_disk() {
+        let dir = std::env::temp_dir().join(format!("macros-wgrep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.txt");
+        // Line 1 has trailing spaces + CR (grep shows it trimmed); line 2 is
+        // multibyte; line 3 changed since the search and must be skipped.
+        std::fs::write(&path, "keep\nfoo é  \r\nbär\nstale\n").unwrap();
+        let e = engine_with("", 0);
+        let p = path.to_str().unwrap();
+        let res = value(
+            &e,
+            &format!(
+                r#"(results-apply-file "{p}" (list (list 0 1 "foo é" "FOO É")
+                                                  (list 1 2 "bär" "baz")
+                                                  (list 2 3 "fresh" "x")))"#
+            ),
+        );
+        assert_eq!(res, "((1 0) . 1)");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "keep\nFOO É  \r\nbaz\nstale\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn results_patch_buffer_line_uses_byte_offsets() {
+        // Line 1 = "é foo  " (trailing spaces kept for a grep-trimmed view).
+        let e = engine_with("ab\né foo  \nz", 0);
+        let cmds = commands(&e, r#"(results-patch-buffer-line (list 0 1 "é foo" "ü"))"#);
+        assert_eq!(replacements(&cmds), vec![(3, 9, "ü".to_string())]);
+        // A line that no longer matches is left alone.
+        let cmds = commands(&e, r#"(results-patch-buffer-line (list 0 2 "y" "q"))"#);
+        assert!(replacements(&cmds).is_empty());
+        // Records stay mutable so applied edits can be folded back in.
+        assert_eq!(
+            value(
+                &e,
+                r#"(begin (results-set! "*t*" "h" "occur-mode" "x" (list 1 2))
+                          (vector-set! (results-records (results-spec "*t*")) 0 9)
+                          (vector-ref (results-records (results-spec "*t*")) 0))"#
+            ),
+            "9"
+        );
+    }
+
+    #[test]
+    fn grep_records_use_relative_prefixes() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            value(
+                &e,
+                r#"(projectile-grep-record "/proj" "/proj/src/é.rs:12:  x: é")"#
+            ),
+            r#"("" "/proj/src/é.rs" 11 "src/é.rs:12:" "  x: é")"#
+        );
+    }
+
+    #[test]
+    fn replace_keys_are_bound() {
+        let e = engine_with("", 0);
+        let cmds = commands(&e, include_str!("../../scheme/replace.scm"));
+        let bound = |chord: &str, cmd: &str| {
+            cmds.iter().any(|c| {
+                matches!(c, EditorCommand::DefineKey(m, k, v)
+                    if m == "fundamental" && k == chord && v == cmd)
+            })
+        };
+        assert!(bound("alt-%", "query-replace"));
+        assert!(bound("ctrl-alt-%", "query-replace-regexp"));
+        assert!(bound("ctrl-c p r", "projectile-replace"));
+        for cmd in [
+            "query-replace",
+            "query-replace-regexp",
+            "replace-string",
+            "replace-regexp",
+            "project-query-replace",
+            "projectile-replace",
+            "results-edit",
+        ] {
+            let q = format!(r#"(if (member "{cmd}" *interactive-commands*) "y" "n")"#);
+            assert_eq!(value(&e, &q), r#""y""#, "{cmd} not registered");
+        }
     }
 }

@@ -136,13 +136,19 @@ impl Editor {
         // Any keystroke is cursor activity: keep the cursor solid and restart the
         // blink cycle (no-op timer when `cursor-blink` is off).
         self.reset_blink(cx);
+        self.dispatch_keystroke(ks, cx);
+    }
 
+    /// Route one keystroke through the modal layers (see [`Self::on_key_down`]);
+    /// also how `:normal` feeds its keys.
+    pub(super) fn dispatch_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
         // Precedence: startup gate → transient → helm → minibuffer → completion
         // popup → terminal → evil replace-pending → evil Normal/Visual → modal
         // leader → evil Insert → special-buffer chord overlay → special buffer →
         // universal argument → Emacs dispatch.
         let layers = [
             Self::key_config_pending,
+            Self::key_sub_confirm,
             Self::key_titlebar_dropdown,
             Self::key_transient,
             Self::key_helm,
@@ -151,6 +157,8 @@ impl Editor {
             Self::key_terminal,
             Self::key_evil_replace,
             Self::key_read_char,
+            Self::key_read_key,
+            Self::key_evil_capture,
             Self::key_evil_modal,
             Self::key_leader,
             Self::key_evil_insert,
@@ -379,6 +387,13 @@ impl Editor {
             && !ks.modifiers.alt
             && !ks.modifiers.platform;
         if is_text && let Some(ch) = ks.key_char.clone() {
+            let n = self.evil_replace_count;
+            let expr = format!("(evil-replace-with {})", super::vim::steel_quote(&ch));
+            self.record_event(if n > 1 {
+                MacroEvent::Counted(expr, n)
+            } else {
+                MacroEvent::Command(expr)
+            });
             self.evil_replace_char(&ch, cx);
         }
         cx.notify();
@@ -405,10 +420,8 @@ impl Editor {
             // dropped when ReadChar applied (see the ReadChar dispatch), so
             // replay runs `(callback "<char>")` directly instead of re-arming
             // a capture that playback could never satisfy.
-            if let Some(events) = self.macro_recording.as_mut() {
-                let escaped = ch.replace('\\', "\\\\").replace('"', "\\\"");
-                events.push(MacroEvent::Command(format!("({callback} \"{escaped}\")")));
-            }
+            let escaped = ch.replace('\\', "\\\\").replace('"', "\\\"");
+            self.record_event(MacroEvent::Command(format!("({callback} \"{escaped}\")")));
             // The engine passes `ch` as the callback's argument verbatim (no
             // source-string interpolation), so quotes/backslashes are safe.
             self.script.dispatch_action(&callback, Some(&ch));
@@ -416,6 +429,59 @@ impl Editor {
         cx.notify();
         cx.stop_propagation();
         Handled::Yes
+    }
+
+    /// While a sticky `read-key-start` capture is armed (query-replace), EVERY
+    /// keystroke goes to its Scheme callback: printable keys as the character
+    /// itself, anything else as its chord name (`"escape"`, `"ctrl-g"`, …).
+    /// The OS-special keys (RET, DEL, TAB, arrows) arrive via the `act_*`
+    /// handlers instead — see [`read_key_action`](Self::read_key_action).
+    fn key_read_key(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
+        let Some(callback) = self.read_key_pending.clone() else {
+            return Handled::No;
+        };
+        let is_text = ks.key_char.is_some()
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform;
+        let key = match ks.key_char.clone() {
+            Some(ch) if is_text => ch,
+            _ => chord_string(ks),
+        };
+        self.deliver_read_key(&callback, &key, cx);
+        cx.stop_propagation();
+        Handled::Yes
+    }
+
+    /// The `act_*` (gpui action key) side of [`key_read_key`](Self::key_read_key):
+    /// when a capture is armed and no modal surface (minibuffer, Helm, …) owns
+    /// the key, hand `key` to the callback and report it consumed.
+    pub(super) fn read_key_action(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if self.minibuffer.is_some()
+            || self.helm.is_some()
+            || self.transient.is_some()
+            || self.titlebar_dropdown_open()
+        {
+            return false;
+        }
+        let Some(callback) = self.read_key_pending.clone() else {
+            return false;
+        };
+        self.deliver_read_key(&callback, key, cx);
+        true
+    }
+
+    /// Pass `key` to the read-key callback against a fresh snapshot. Escape and
+    /// C-g also disarm the capture (after delivery), so a Scheme error mid-
+    /// dialog can't leave every key swallowed.
+    fn deliver_read_key(&mut self, callback: &str, key: &str, cx: &mut Context<Self>) {
+        if key == "escape" || key == "ctrl-g" {
+            self.read_key_pending = None;
+        }
+        self.status = SharedString::default();
+        self.publish_point();
+        self.script.dispatch_action(callback, Some(key));
+        cx.notify();
     }
 
     /// Evil Normal/Visual: the evil keymap is consulted FIRST for every chord,
@@ -437,6 +503,9 @@ impl Editor {
     fn key_evil_modal(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
         if !self.evil_intercepts() || self.active.special.is_some() || ks.modifiers.platform {
             return Handled::No;
+        }
+        if self.vim.op.is_some() {
+            return self.key_operator_pending(ks, cx);
         }
         let chord = chord_string(ks);
         // Vim/Helix count prefix: at the start of a command, a digit is a
@@ -477,7 +546,28 @@ impl Editor {
             self.status = SharedString::default();
             // Consume any count prefix (`3dd`, `5G`); see `dispatch_counted`.
             let count = self.modal_count.take();
-            self.dispatch_counted(&expr, count, cx);
+            // A new Normal-state command: the previous one is done (and, if
+            // it changed the buffer, becomes what `.` repeats).
+            if self.evil == EvilState::Normal {
+                self.dot_boundary(&expr);
+                self.register_boundary(&expr);
+            }
+            // Visual keys keep `'<` / `'>` (and `gv`) current before they act.
+            if matches!(
+                self.evil,
+                EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
+            ) {
+                self.note_visual_exit();
+            }
+            // Jump commands (G, %, n, …) remember where they started.
+            if self.evil_intercepts() && self.is_jump_expr(&expr) {
+                self.record_jump();
+            }
+            // An operator (`d`) or a `%c` binding (`m`, `"`) waits for more
+            // input instead of running now.
+            if !self.evil_route_binding(&expr, &candidate, count, cx) {
+                self.dispatch_counted(&expr, count, cx);
+            }
             cx.stop_propagation();
             return Handled::Yes;
         }
@@ -595,7 +685,10 @@ impl Editor {
                 .resolve_mode(self.evil_insert_keymap(), &chord_string(ks))
                 .map(str::to_string)
         {
-            self.run_script(&expr, cx);
+            // `C-r a` (insert register a): wait for the register key.
+            if !self.evil_route_binding(&expr, &chord_string(ks), None, cx) {
+                self.dispatch_recorded(&expr, cx);
+            }
             cx.stop_propagation();
             return Handled::Yes;
         }
@@ -951,6 +1044,7 @@ impl Editor {
         // mark is active (`all_selections`), so a drag must activate it.
         if !self.modal_helix {
             self.evil = EvilState::Visual;
+            self.dot_unrepeatable();
         }
         self.active.mark_active = true;
     }
@@ -1173,6 +1267,9 @@ impl Editor {
     // --- GPUI action handlers (OS-special keys -> commands) ----------------
 
     pub(super) fn act_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("backspace", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_backspace(cx);
         } else if self.transient.is_some() {
@@ -1190,6 +1287,7 @@ impl Editor {
         } else if self.evil_intercepts() {
             self.apply_command(EditorCommand::BackwardChar, cx); // vim: move left
         } else {
+            self.record_event(MacroEvent::Command("(delete-backward-char)".into()));
             self.apply_command(EditorCommand::DeleteBackwardChar, cx);
             if self.completion_popup.is_some() {
                 self.popup_refilter(cx);
@@ -1197,6 +1295,9 @@ impl Editor {
         }
     }
     pub(super) fn act_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("delete", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_delete(cx);
         } else if self.transient.is_some() {
@@ -1216,10 +1317,16 @@ impl Editor {
             // No `evil_intercepts` branch on purpose: in vim, Del in Normal mode
             // deletes the char under the cursor (like `x`), unlike Backspace
             // which only moves left — see act_backspace.
+            if !self.evil_intercepts() {
+                self.record_event(MacroEvent::Command("(delete-char)".into()));
+            }
             self.apply_command(EditorCommand::DeleteChar, cx);
         }
     }
     pub(super) fn act_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("left", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_move(-1, cx);
             return;
@@ -1236,6 +1343,9 @@ impl Editor {
         }
     }
     pub(super) fn act_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("right", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_move(1, cx);
             return;
@@ -1252,6 +1362,9 @@ impl Editor {
         }
     }
     pub(super) fn act_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("up", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_move(-1, cx);
             return;
@@ -1274,6 +1387,9 @@ impl Editor {
         }
     }
     pub(super) fn act_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("down", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_move(1, cx);
             return;
@@ -1296,6 +1412,9 @@ impl Editor {
         }
     }
     pub(super) fn act_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("home", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_set(0, cx);
         } else if self.minibuffer.is_some() {
@@ -1309,6 +1428,9 @@ impl Editor {
         }
     }
     pub(super) fn act_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("end", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_set(usize::MAX, cx);
         } else if let Some(len) = self.minibuffer.as_ref().map(|mb| mb.input.len()) {
@@ -1322,6 +1444,9 @@ impl Editor {
         }
     }
     pub(super) fn act_newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("enter", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_select_current(cx);
             return;
@@ -1349,10 +1474,14 @@ impl Editor {
             // an evil/helix keymap binding for RET wins
         } else if !self.evil_intercepts() && !self.mode_key("enter", cx) {
             // a mode may rebind RET (comint send-input); else insert a newline
+            self.record_event(MacroEvent::Command("(newline)".into()));
             self.apply_command(EditorCommand::Newline, cx);
         }
     }
     pub(super) fn act_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("tab", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             return; // dropdown is modal; TAB has no filter binding
         }
@@ -1381,13 +1510,22 @@ impl Editor {
         } else if self.modal_action_key("tab", cx) {
             // an evil/helix keymap binding for TAB wins (before the mode map,
             // so a modal user's explicit binding isn't shadowed by org-tab)
-        } else if !self.mode_key("tab", cx) && !self.evil_intercepts() {
+        } else if !self.mode_key("tab", cx) {
             // A mode binding (e.g. org-mode's `org-tab` heading cycle) wins in
             // every state, including evil Normal/Visual — TAB is a gpui action
             // key that never reaches the evil keymap, so consult the mode map
             // here or modal users lose it. The plain indent fallback still only
-            // runs when evil isn't intercepting.
-            self.apply_command(EditorCommand::IndentForTab, cx);
+            // runs when evil isn't intercepting; in evil Normal, TAB is Vim's
+            // C-i (jump forward) — the same key on a terminal.
+            if !self.evil_intercepts() {
+                self.record_event(MacroEvent::Command("(indent-for-tab-command)".into()));
+                self.apply_command(EditorCommand::IndentForTab, cx);
+            } else if self.evil == EvilState::Normal
+                && !self.modal_helix
+                && self.active.special.is_none()
+            {
+                self.evil_jump(true, cx);
+            }
         }
     }
     pub(super) fn act_select_left(

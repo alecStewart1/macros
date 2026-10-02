@@ -1,6 +1,6 @@
-;; Editing commands written in Scheme on the new primitives — comment-dwim,
-;; replace-string, and occur. Each command's edits coalesce into one undo group
-;; (the editor wraps a command batch), so they undo as a unit.
+;; Editing commands written in Scheme on the new primitives — comment-dwim.
+;; Each command's edits coalesce into one undo group (the editor wraps a
+;; command batch), so they undo as a unit.
 
 ;; --- comment-dwim -----------------------------------------------------------
 ;; The comment prefix is a buffer-local ("comment-string"); modes set it (e.g.
@@ -31,38 +31,11 @@
                           (substring line (+ i (string-length cs)) (string-length line))))
           (else (loop (+ i 1))))))
 
-;; --- replace-string (literal, whole buffer) ---------------------------------
-(define *replace-from* "")
-
-(define (replace-string)
-  (read-string "Replace string: " 'replace-string-from))
-(define (replace-string-from from)
-  (set! *replace-from* from)
-  (read-string (string-append "Replace \"" from "\" with: ") "replace-string-to"))
-(define (replace-string-to to)
-  (let* ((text (buffer-string))
-         (new (replace-regexp-in-string (regexp-quote *replace-from*) to text)))
-    (replace-region 0 (point-max) new)
-    (message (string-append "Replaced \"" *replace-from* "\""))))
-
-;; --- occur ------------------------------------------------------------------
-;; List lines matching a regexp in a read-only *occur* buffer.
-(define (occur)
-  (read-string "Occur regexp: " 'occur-run))
-(define (occur-run re)
-  (let ((matched (filter (lambda (l) (>= (string-match re l) 0))
-                         (split-many (buffer-string) "\n"))))
-    (render-buffer "*occur*" "occur-mode"
-                   (if (null? matched)
-                       (string-append "No matches for " re)
-                       (join-lines matched))
-                   '())))
+;; replace-string / query-replace live in replace.scm; occur (and its
+;; editable occur-edit mode) in occur.scm.
 
 ;; --- keymap -----------------------------------------------------------------
 (define-key "fundamental" "alt-;" 'comment-dwim)
-(define-key "fundamental" "alt-%" 'replace-string)  ; (Emacs M-% is query-replace)
-(define-key "fundamental" "ctrl-c o" 'occur)
-(define-key "occur-mode" "q" 'kill-buffer)
 
 ;; steel-mode uses ";; " line comments.
 (add-hook "steel" "edit-steel-comment-string")
@@ -70,5 +43,3 @@
 
 ;; Make the editing entry points M-x discoverable.
 (register-command 'comment-dwim)
-(register-command 'occur)
-(register-command 'replace-string)

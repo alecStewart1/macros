@@ -249,6 +249,8 @@ impl Editor {
             Some(MinibufferPurpose::ConfirmGrammarInstall)
         );
         self.minibuffer = None;
+        // An operator waiting on its `/` motion is abandoned with the read.
+        self.vim.op = None;
         if grammar_confirm {
             // C-g out of the trust prompt declines this grammar and moves on to
             // the next queued one — otherwise the queue would stall here.
@@ -279,7 +281,7 @@ impl Editor {
                 .collect(),
             Some(MinibufferPurpose::FindFile) => file_completions(input),
             Some(MinibufferPurpose::Confirm(_))
-            | Some(MinibufferPurpose::QuitSave)
+            | Some(MinibufferPurpose::QuitSave { .. })
             | Some(MinibufferPurpose::ConfirmGrammarInstall) => ["yes", "no"]
                 .iter()
                 .map(|s| s.to_string())
@@ -312,6 +314,7 @@ impl Editor {
             Some(
                 MinibufferPurpose::SearchForward
                 | MinibufferPurpose::SearchBackward
+                | MinibufferPurpose::OperatorSearch(_)
                 | MinibufferPurpose::Isearch
                 | MinibufferPurpose::ExCommand
                 | MinibufferPurpose::EvalExpression
@@ -414,7 +417,7 @@ impl Editor {
         if !matches!(
             mb.purpose,
             MinibufferPurpose::Confirm(_)
-                | MinibufferPurpose::QuitSave
+                | MinibufferPurpose::QuitSave { .. }
                 | MinibufferPurpose::SchemeYesNo(_)
                 | MinibufferPurpose::ConfirmGrammarInstall
         ) {
@@ -425,6 +428,7 @@ impl Editor {
                 if input.is_empty() {
                     self.echo("", cx);
                 } else if self.script.command_names().iter().any(|c| c == &input) {
+                    self.note_command(&input);
                     self.run_script(&format!("({input})"), cx);
                 } else {
                     self.echo(format!("[No match: {input}]"), cx);
@@ -447,15 +451,15 @@ impl Editor {
                     self.echo("Cancelled", cx);
                 }
             }
-            MinibufferPurpose::QuitSave => match input.as_str() {
+            MinibufferPurpose::QuitSave { relaunch } => match input.as_str() {
                 "yes" | "y" => {
                     // A failed write aborts the quit — the error echo would never
                     // be seen otherwise, and the unsaved buffer would be lost.
                     if self.save_all_modified(cx) {
-                        cx.quit();
+                        self.finish_quit(relaunch, cx);
                     }
                 }
-                "no" | "n" => cx.quit(),
+                "no" | "n" => self.finish_quit(relaunch, cx),
                 _ => self.echo("Cancelled", cx),
             },
             MinibufferPurpose::CompleteAtPoint => {
@@ -469,6 +473,7 @@ impl Editor {
             }
             MinibufferPurpose::SearchForward => {
                 if !input.is_empty() {
+                    self.note_search(&input);
                     self.search_query = Some(input);
                 }
                 self.evil_search_forward = true;
@@ -476,6 +481,7 @@ impl Editor {
             }
             MinibufferPurpose::SearchBackward => {
                 if !input.is_empty() {
+                    self.note_search(&input);
                     self.search_query = Some(input);
                 }
                 self.evil_search_forward = false;
@@ -486,6 +492,7 @@ impl Editor {
                 // the string so a later empty C-s recalls it; keep `search_query`
                 // set so the matches stay highlighted (Emacs lazy-highlight).
                 if !input.is_empty() {
+                    self.note_search(&input);
                     self.last_isearch = Some(input);
                 } else if let Some(prev) = self.last_isearch.clone() {
                     // RET on an empty isearch with a prior string: adopt it.
@@ -493,6 +500,9 @@ impl Editor {
                 }
                 // The read is over; the transient state goes with it.
                 self.isearch = None;
+            }
+            MinibufferPurpose::OperatorSearch(forward) => {
+                self.evil_operator_search_submit(forward, &input, cx)
             }
             MinibufferPurpose::ExCommand => self.run_ex_command(&input, cx),
             MinibufferPurpose::EvalExpression => {

@@ -67,7 +67,7 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 | Key | Command |
 | --- | --- |
 | <kbd>C-s</kbd> / <kbd>C-r</kbd> | `isearch-forward` / `isearch-backward` |
-| <kbd>M-%</kbd> | `replace-string` |
+| <kbd>M-%</kbd> / <kbd>C-M-%</kbd> | `query-replace` / `query-replace-regexp` |
 | <kbd>C-c o</kbd> | `occur` |
 | <kbd>M-x</kbd> | `execute-extended-command` (command palette) |
 | <kbd>M-:</kbd> | `eval-expression` |

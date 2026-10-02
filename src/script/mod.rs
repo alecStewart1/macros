@@ -6,12 +6,14 @@
 //!   * [`engine`] — the [`ScriptEngine`] handle and its dedicated thread.
 //!   * [`registry`] — `build_engine`: every registered Scheme bridge function.
 //!   * [`convert`] — SteelVal parsing/formatting helpers.
+//!   * [`session`] — session-persistence primitives (savehist / desktop).
 
 mod commands;
 mod convert;
 mod engine;
 mod gix;
 mod registry;
+mod session;
 mod state;
 
 pub use commands::*;
@@ -19,6 +21,7 @@ pub(crate) use convert::*;
 pub use engine::*;
 pub(crate) use gix::*;
 pub(crate) use registry::*;
+pub(crate) use session::*;
 pub use state::*;
 
 #[cfg(test)]

@@ -98,6 +98,7 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("lsp-document-symbols", LspDocumentSymbols),
         ("lsp-code-action", LspCodeAction),
         ("lsp-format-buffer", LspFormatBuffer),
+        ("lsp-restart", LspRestart),
         ("lsp-call-hierarchy-incoming", LspCallHierarchyIncoming),
         ("lsp-call-hierarchy-outgoing", LspCallHierarchyOutgoing),
         ("lsp-rename", LspPrepareRename),
@@ -153,6 +154,31 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("evil-set-linewise", EvilSetLinewise),
         ("evil-set-charwise", EvilSetCharwise),
         ("count-repeat-step", CountRepeatStep),
+        ("replay-step", ReplayStep),
+        ("evil-repeat", EvilRepeat),
+        ("evil-reselect-visual", EvilReselectVisual),
+        ("evil-jump-backward", EvilJumpBackward),
+        ("evil-jump-forward", EvilJumpForward),
+        ("windmove-left", WindmoveLeft),
+        ("windmove-down", WindmoveDown),
+        ("windmove-up", WindmoveUp),
+        ("windmove-right", WindmoveRight),
+        ("previous-window-any-frame", PreviousWindow),
+        ("evil-window-mru", LastWindow),
+        ("evil-window-top-left", TopLeftWindow),
+        ("evil-window-bottom-right", BottomRightWindow),
+        ("balance-windows", BalanceWindows),
+        ("evil-window-set-height", MaximizeWindowHeight),
+        ("evil-window-set-width", MaximizeWindowWidth),
+        ("evil-window-move-far-left", MoveWindowFarLeft),
+        ("evil-window-move-very-bottom", MoveWindowFarDown),
+        ("evil-window-move-very-top", MoveWindowFarUp),
+        ("evil-window-move-far-right", MoveWindowFarRight),
+        ("evil-window-exchange", ExchangeWindow),
+        ("evil-window-rotate-downwards", RotateWindowsDown),
+        ("evil-window-rotate-upwards", RotateWindowsUp),
+        ("evil-window-new", NewWindowBelow),
+        ("evil-window-vnew", NewWindowRight),
         ("helix-paste-after", HelixPasteAfter),
         ("helix-paste-before", HelixPasteBefore),
         ("isearch-forward", IsearchForward),
@@ -181,6 +207,7 @@ pub(crate) fn build_engine(
     snapshot: &SharedSnapshot,
     markers: &Markers,
     options: &Options,
+    session: &SharedSession,
 ) -> (Engine, Vec<String>) {
     let mut engine = Engine::new();
     let mut names: Vec<String> = Vec::new();
@@ -520,6 +547,145 @@ pub(crate) fn build_engine(
         "evil-block-replace",
         EditorCommand::EvilBlockReplace,
     );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-use-register",
+        EditorCommand::EvilUseRegister,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-insert-register",
+        EditorCommand::EvilInsertRegister,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-macro-record",
+        EditorCommand::EvilMacroRecord,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-macro-play",
+        EditorCommand::EvilMacroPlay,
+    );
+    register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
+    register_unary(&mut reg, queue, "evil-ex", EditorCommand::EvilEx);
+    // `(reindent-lines first last)` — Vim `=` over 0-based lines.
+    register_binary(
+        &mut reg,
+        queue,
+        "reindent-lines",
+        EditorCommand::ReindentLines,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-replace-with",
+        EditorCommand::EvilReplaceWith,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-ex-goto-line",
+        EditorCommand::EvilExGotoLine,
+    );
+    register_unary(&mut reg, queue, "evil-goto-mark", |m: String| {
+        EditorCommand::EvilGotoMark(m, true)
+    });
+    register_unary(&mut reg, queue, "evil-goto-mark-line", |m: String| {
+        EditorCommand::EvilGotoMark(m, false)
+    });
+    {
+        // `(set-jump-command! 'name)` — running `name` from a key is a jump:
+        // the jump list and `''` record where it started (G, /, %, gd, …).
+        let q = queue.clone();
+        reg.register_fn("set-jump-command!", move |value: SteelVal| {
+            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
+            q.lock().unwrap().push(EditorCommand::SetJumpCommand(name));
+        });
+    }
+    // `(buffer-language)` → the highlighting language ("" when none).
+    register_snapshot_read(&mut reg, snapshot, "buffer-language", |s| {
+        s.language.clone()
+    });
+    {
+        // `(ts-ancestors pos)` → flat `(kind start end …)` of every syntax node
+        // containing pos, innermost first; `()` without a tree. Synchronous —
+        // the published snapshot carries the tree.
+        let shared = snapshot.clone();
+        reg.register_fn("ts-ancestors", move |pos: usize| -> Vec<SteelVal> {
+            let snap = shared.load();
+            let Some(tree) = snap.tree.as_ref() else {
+                return Vec::new();
+            };
+            crate::highlight::tree_ancestors(tree, pos)
+                .into_iter()
+                .flat_map(|(k, s, e)| {
+                    [
+                        SteelVal::StringV(k.into()),
+                        SteelVal::IntV(s as isize),
+                        SteelVal::IntV(e as isize),
+                    ]
+                })
+                .collect()
+        });
+    }
+    {
+        // `(ts-children start end)` → flat `(kind start end named? …)` of the
+        // children of the node spanning exactly [start, end).
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "ts-children",
+            move |start: usize, end: usize| -> Vec<SteelVal> {
+                let snap = shared.load();
+                let Some(tree) = snap.tree.as_ref() else {
+                    return Vec::new();
+                };
+                crate::highlight::tree_children(tree, start, end)
+                    .into_iter()
+                    .flat_map(|(k, s, e, named)| {
+                        [
+                            SteelVal::StringV(k.into()),
+                            SteelVal::IntV(s as isize),
+                            SteelVal::IntV(e as isize),
+                            SteelVal::BoolV(named),
+                        ]
+                    })
+                    .collect()
+            },
+        );
+    }
+    {
+        // `(ts-ranges-of-kinds '("function_item" …))` → flat `(start end …)` of
+        // every node of those kinds, in document order.
+        let shared = snapshot.clone();
+        reg.register_fn("ts-ranges-of-kinds", move |kinds: SteelVal| -> Vec<usize> {
+            let kinds = steel_string_list(&kinds);
+            let snap = shared.load();
+            let Some(tree) = snap.tree.as_ref() else {
+                return Vec::new();
+            };
+            crate::highlight::tree_ranges_of_kinds(tree, &kinds)
+                .into_iter()
+                .flat_map(|(s, e)| [s, e])
+                .collect()
+        });
+    }
+    {
+        // `(mark-position "a")` → byte offset of mark a in this buffer, or -1.
+        let shared = snapshot.clone();
+        reg.register_fn("mark-position", move |m: String| -> isize {
+            shared
+                .load()
+                .marks
+                .iter()
+                .find(|(c, _)| *c == m)
+                .map_or(-1, |(_, p)| *p as isize)
+        });
+    }
     {
         // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
         // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
@@ -683,6 +849,24 @@ pub(crate) fn build_engine(
             queue,
             "clear-line-icons",
             EditorCommand::ClearLineIcons,
+        );
+    }
+    {
+        // `(set-gutter-dot line face)` puts a colored dot (the diagnostic-dot
+        // shape) in the gutter of 0-based `line` of the active buffer, tinted
+        // by theme face `face`; `(clear-gutter-dots)` removes them all.
+        // Breakpoint signs (dap.scm).
+        register_binary(
+            &mut reg,
+            queue,
+            "set-gutter-dot",
+            EditorCommand::SetGutterDot,
+        );
+        register_nullary(
+            &mut reg,
+            queue,
+            "clear-gutter-dots",
+            EditorCommand::ClearGutterDots,
         );
     }
     {
@@ -918,7 +1102,9 @@ pub(crate) fn build_engine(
     // auto-refresh).
     register_render_buffer(&mut reg, queue, "render-buffer", false);
     register_render_buffer(&mut reg, queue, "render-buffer-quiet", true);
-    register_unary(&mut reg, queue, "goto-line", EditorCommand::GotoLine);
+    register_unary(&mut reg, queue, "goto-line", |n: isize| {
+        EditorCommand::GotoLine(scheme_pos(n))
+    });
     register_unary(
         &mut reg,
         queue,
@@ -1003,15 +1189,32 @@ pub(crate) fn build_engine(
         "transient-quit",
         EditorCommand::TransientQuit,
     );
-    register_unary(&mut reg, queue, "goto-char", EditorCommand::GotoChar);
-    register_binary(&mut reg, queue, "delete-region", |start, end| {
-        EditorCommand::DeleteRegion { start, end }
+    register_unary(&mut reg, queue, "goto-char", |n: isize| {
+        EditorCommand::GotoChar(scheme_pos(n))
     });
-    register_binary(&mut reg, queue, "kill-region-between", |start, end| {
-        EditorCommand::KillRegionBetween { start, end }
-    });
-    register_binary(&mut reg, queue, "set-region", |start, end| {
-        EditorCommand::SetRegion { start, end }
+    register_binary(
+        &mut reg,
+        queue,
+        "delete-region",
+        |start: isize, end: isize| EditorCommand::DeleteRegion {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+        },
+    );
+    register_binary(
+        &mut reg,
+        queue,
+        "kill-region-between",
+        |start: isize, end: isize| EditorCommand::KillRegionBetween {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+        },
+    );
+    register_binary(&mut reg, queue, "set-region", |start: isize, end: isize| {
+        EditorCommand::SetRegion {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+        }
     });
     {
         // `(set-selections '(a0 h0 a1 h1 …))` — replace the whole selection set
@@ -1038,11 +1241,21 @@ pub(crate) fn build_engine(
         "lsp-semantic-tokens",
         EditorCommand::LspSemanticTokens,
     );
-    register_ternary(&mut reg, queue, "replace-region", |start, end, text| {
-        EditorCommand::ReplaceRegion { start, end, text }
-    });
-    register_binary(&mut reg, queue, "insert-at", |pos, text| {
-        EditorCommand::InsertAt { pos, text }
+    register_ternary(
+        &mut reg,
+        queue,
+        "replace-region",
+        |start: isize, end: isize, text| EditorCommand::ReplaceRegion {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+            text,
+        },
+    );
+    register_binary(&mut reg, queue, "insert-at", |pos: isize, text| {
+        EditorCommand::InsertAt {
+            pos: scheme_pos(pos),
+            text,
+        }
     });
     register_unary(
         &mut reg,
@@ -1079,6 +1292,28 @@ pub(crate) fn build_engine(
         queue,
         "undo-boundary",
         EditorCommand::UndoBoundary,
+    );
+    // `(undo-amalgamate-begin)` … `(undo-amalgamate-end)` — fold every edit
+    // made between them, across any number of commands, into ONE undo step.
+    register_nullary(
+        &mut reg,
+        queue,
+        "undo-amalgamate-begin",
+        EditorCommand::UndoAmalgamateBegin,
+    );
+    register_nullary(
+        &mut reg,
+        queue,
+        "undo-amalgamate-end",
+        EditorCommand::UndoAmalgamateEnd,
+    );
+    // `(set-special-mode "occur-mode")` makes the active buffer a read-only
+    // special buffer on that keymap; `(set-special-mode "")` makes it editable.
+    register_unary(
+        &mut reg,
+        queue,
+        "set-special-mode",
+        EditorCommand::SetSpecialMode,
     );
     register_unary(
         &mut reg,
@@ -1164,9 +1399,25 @@ pub(crate) fn build_engine(
             callback: callback.0,
         },
     );
+    // `(read-key-start "prompt" 'callback)` — a STICKY capture: every key is
+    // passed to `(callback "<key>")` (printable keys as the character, others
+    // as their chord name: "enter", "backspace", "escape", "ctrl-g", …) until
+    // `(read-key-stop)`. Escape / C-g also disarm. Backs query-replace.
+    register_binary(
+        &mut reg,
+        queue,
+        "read-key-start",
+        |prompt, callback: Callback| EditorCommand::ReadKeyStart {
+            prompt,
+            callback: callback.0,
+        },
+    );
+    register_nullary(&mut reg, queue, "read-key-stop", EditorCommand::ReadKeyStop);
     // `(select-to pos)` — extend the selection to byte `pos` (goto-char
     // collapses; this is its extend-flavored twin for visual-mode motions).
-    register_unary(&mut reg, queue, "select-to", EditorCommand::SelectTo);
+    register_unary(&mut reg, queue, "select-to", |n: isize| {
+        EditorCommand::SelectTo(scheme_pos(n))
+    });
     // `(set-search-query "regex" forward?)` — store the query + direction the
     // way `/` and `?` do, without prompting, so evil-search-next/-previous
     // repeat it (evil `*`/`#`).
@@ -1336,6 +1587,15 @@ pub(crate) fn build_engine(
     });
     reg.register_fn("file-directory?", |path: String| -> bool {
         std::path::Path::new(&path).is_dir()
+    });
+    // `(file-truename path)` → the canonical absolute path (symlinks and
+    // `..` resolved — Emacs's `file-truename`), or `path` unchanged when it
+    // doesn't exist. Lets dap.scm match an adapter's frame paths (e.g. macOS
+    // `/private/tmp/…`) against the buffer that visits `/tmp/…`.
+    reg.register_fn("file-truename", |path: String| -> String {
+        std::fs::canonicalize(&path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(path)
     });
     // `(packages-directory)` → where `package-install` clones git packages:
     // the active config dir's `packages/` subdirectory. Resolved in Rust at call
@@ -1714,6 +1974,82 @@ pub(crate) fn build_engine(
     register_unary(&mut reg, queue, "kill-process", |id| {
         EditorCommand::KillProcess { id }
     });
+    // `(set-process-buffer id name)`: killing buffer `name` terminates process
+    // `id` (its whole process group), like Emacs's process buffer.
+    register_binary(&mut reg, queue, "set-process-buffer", |id, name| {
+        EditorCommand::SetProcessBuffer { id, name }
+    });
+    // --- DAP (Debug Adapter Protocol) --------------------------------------
+    {
+        // `(dap-start program args cwd on-message on-exit)` → a session id
+        // (used by dap-send / dap-kill). The adapter speaks Content-Length-
+        // framed DAP JSON on stdio; every incoming message — response, event,
+        // or reverse request — reaches `on-message` as raw JSON text (parse
+        // with `string->jsexpr`). The transport is protocol-free: dap.scm
+        // stamps `seq` and owns the whole state machine. `cwd` "" = inherit;
+        // on-exit "" = none (it receives the exit code as a string).
+        let q = queue.clone();
+        let ids = async_ids.clone();
+        reg.register_fn(
+            "dap-start",
+            move |program: String,
+                  args: SteelVal,
+                  cwd: String,
+                  on_message: Callback,
+                  on_exit: Callback|
+                  -> usize {
+                let id = ids.next();
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::DapStart(Box::new(DapStartArgs {
+                        id,
+                        program,
+                        args: steel_string_list(&args),
+                        cwd,
+                        on_message: on_message.0,
+                        on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
+                    })));
+                id as usize
+            },
+        );
+    }
+    {
+        // `(dap-connect host port on-message on-exit)` → a session id, for
+        // adapters that serve DAP over a socket instead of stdio (delve's
+        // `dlv dap`); Scheme spawns the server itself (make-process) and
+        // connects once it announces its port.
+        let q = queue.clone();
+        let ids = async_ids.clone();
+        reg.register_fn(
+            "dap-connect",
+            move |host: String,
+                  port: usize,
+                  on_message: Callback,
+                  on_exit: Callback|
+                  -> Result<usize, String> {
+                // Reject rather than silently wrap (70000 as u16 = 4464).
+                let port = u16::try_from(port)
+                    .ok()
+                    .filter(|&p| p != 0)
+                    .ok_or_else(|| format!("dap-connect: invalid port {port}"))?;
+                let id = ids.next();
+                q.lock().unwrap().push(EditorCommand::DapConnect {
+                    id,
+                    host,
+                    port,
+                    on_message: on_message.0,
+                    on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
+                });
+                Ok(id as usize)
+            },
+        );
+    }
+    register_binary(&mut reg, queue, "dap-send", |id, message| {
+        EditorCommand::DapSend { id, message }
+    });
+    register_unary(&mut reg, queue, "dap-kill", |id| EditorCommand::DapKill {
+        id,
+    });
     {
         // `(make-http-stream url headers body on-line on-done)` → a stream id
         // (used by http-stream-cancel). `headers` is a flat list of alternating
@@ -1820,12 +2156,12 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "http-serve",
             move |host: String,
-                  port: usize,
+                  Port(port): Port,
                   content_type: String,
                   body: String,
                   on_request: Callback|
                   -> usize {
-                let listener = match std::net::TcpListener::bind((host.as_str(), port as u16)) {
+                let listener = match std::net::TcpListener::bind((host.as_str(), port)) {
                     Ok(l) => l,
                     Err(_) => return 0,
                 };
@@ -1847,7 +2183,7 @@ pub(crate) fn build_engine(
             },
         );
     }
-    register_unary(&mut reg, queue, "http-server-stop", |port: u16| {
+    register_unary(&mut reg, queue, "http-server-stop", |Port(port): Port| {
         EditorCommand::HttpServerStop { port }
     });
     // --- Crypto / encoding (OAuth PKCE + general use) ---------------------
@@ -1856,7 +2192,11 @@ pub(crate) fn build_engine(
     //   (define verifier  (hex->base64url (random-bytes 32)))
     //   (define challenge (hex->base64url (sha256 verifier)))
     //   (define state     (hex->base64url (random-bytes 32)))
-    reg.register_fn("random-bytes", |n: usize| -> String {
+    reg.register_fn("random-bytes", |NonNeg(n): NonNeg| -> String {
+        // Key/nonce material, not bulk data: cap so a typo can't OOM the editor.
+        if n > 1 << 20 {
+            return String::new();
+        }
         let mut buf = vec![0u8; n];
         match getrandom::getrandom(&mut buf) {
             Ok(()) => hex::encode(&buf),
@@ -1956,8 +2296,12 @@ pub(crate) fn build_engine(
     //   (udp-close id)            → #t if the id existed
     reg.register_fn(
         "tcp-connect",
-        |host: String, port: usize, connect_ms: usize, read_ms: usize| -> usize {
-            match tcp_connect_impl(&host, port as u16, connect_ms as u64, read_ms as u64) {
+        |host: String,
+         Port(port): Port,
+         NonNeg(connect_ms): NonNeg,
+         NonNeg(read_ms): NonNeg|
+         -> usize {
+            match tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64) {
                 Ok(tcp) => {
                     let id = sock_next_id();
                     sock_conns()
@@ -1975,9 +2319,12 @@ pub(crate) fn build_engine(
     );
     reg.register_fn(
         "tls-connect",
-        |host: String, port: usize, connect_ms: usize, read_ms: usize| -> usize {
-            let tcp = match tcp_connect_impl(&host, port as u16, connect_ms as u64, read_ms as u64)
-            {
+        |host: String,
+         Port(port): Port,
+         NonNeg(connect_ms): NonNeg,
+         NonNeg(read_ms): NonNeg|
+         -> usize {
+            let tcp = match tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64) {
                 Ok(t) => t,
                 Err(e) => {
                     tls_set_error(e);
@@ -2033,28 +2380,32 @@ pub(crate) fn build_engine(
             },
         }
     });
-    reg.register_fn("socket-set-timeout", |id: usize, ms: usize| -> bool {
-        let conns = sock_conns().lock().unwrap();
-        let Some(reader) = conns.get(&id) else {
-            tls_set_error(format!("socket-set-timeout: no connection {id}"));
-            return false;
-        };
-        let dur = if ms == 0 {
-            None
-        } else {
-            Some(std::time::Duration::from_millis(ms as u64))
-        };
-        reader.get_ref().tcp().set_read_timeout(dur).is_ok()
-    });
+    reg.register_fn(
+        "socket-set-timeout",
+        |id: usize, NonNeg(ms): NonNeg| -> bool {
+            let conns = sock_conns().lock().unwrap();
+            let Some(reader) = conns.get(&id) else {
+                tls_set_error(format!("socket-set-timeout: no connection {id}"));
+                return false;
+            };
+            let dur = if ms == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_millis(ms as u64))
+            };
+            reader.get_ref().tcp().set_read_timeout(dur).is_ok()
+        },
+    );
     reg.register_fn("socket-send", |id: usize, text: String| -> bool {
         socket_send_impl(id, text.as_bytes())
     });
     reg.register_fn("socket-recv-line", |id: usize| -> String {
         socket_recv_line_impl(id)
     });
-    reg.register_fn("socket-recv-bytes", |id: usize, n: usize| -> String {
-        socket_recv_bytes_impl(id, n)
-    });
+    reg.register_fn(
+        "socket-recv-bytes",
+        |id: usize, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
+    );
     reg.register_fn("socket-close", |id: usize| -> bool {
         sock_conns().lock().unwrap().remove(&id).is_some()
     });
@@ -2068,7 +2419,7 @@ pub(crate) fn build_engine(
     reg.register_fn("tls-recv-line", |id: usize| -> String {
         socket_recv_line_impl(id)
     });
-    reg.register_fn("tls-recv-bytes", |id: usize, n: usize| -> String {
+    reg.register_fn("tls-recv-bytes", |id: usize, NonNeg(n): NonNeg| -> String {
         socket_recv_bytes_impl(id, n)
     });
     reg.register_fn("tls-close", |id: usize| -> bool {
@@ -2078,8 +2429,8 @@ pub(crate) fn build_engine(
         tls_last_error_slot().lock().unwrap().clone()
     });
     // TCP server.
-    reg.register_fn("tcp-listen", |host: String, port: usize| -> usize {
-        match std::net::TcpListener::bind((host.as_str(), port as u16)) {
+    reg.register_fn("tcp-listen", |host: String, Port(port): Port| -> usize {
+        match std::net::TcpListener::bind((host.as_str(), port)) {
             Ok(l) => {
                 let id = sock_next_id();
                 sock_listeners().lock().unwrap().insert(id, l);
@@ -2154,7 +2505,7 @@ pub(crate) fn build_engine(
     });
     reg.register_fn(
         "udp-send",
-        |id: usize, host: String, port: usize, hex_data: String| -> bool {
+        |id: usize, host: String, Port(port): Port, hex_data: String| -> bool {
             let Ok(bytes) = hex::decode(hex_data.trim()) else {
                 tls_set_error("udp-send: bad hex".into());
                 return false;
@@ -2164,7 +2515,7 @@ pub(crate) fn build_engine(
                 tls_set_error(format!("udp-send: no socket {id}"));
                 return false;
             };
-            match sock.send_to(&bytes, (host.as_str(), port as u16)) {
+            match sock.send_to(&bytes, (host.as_str(), port)) {
                 Ok(_) => true,
                 Err(e) => {
                     tls_set_error(format!("udp-send: {e}"));
@@ -2173,7 +2524,7 @@ pub(crate) fn build_engine(
             }
         },
     );
-    reg.register_fn("udp-recv", |id: usize, max: usize| -> String {
+    reg.register_fn("udp-recv", |id: usize, NonNeg(max): NonNeg| -> String {
         let socks = sock_udp().lock().unwrap();
         let Some(sock) = socks.get(&id) else {
             tls_set_error(format!("udp-recv: no socket {id}"));
@@ -2331,7 +2682,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "socket-connect-async",
             move |host: String,
-                  port: usize,
+                  Port(port): Port,
                   tls: bool,
                   on_data: Callback,
                   on_close: Callback|
@@ -2342,7 +2693,7 @@ pub(crate) fn build_engine(
                 q.lock().unwrap().push(EditorCommand::SocketConnectAsync {
                     id,
                     host,
-                    port: port as u16,
+                    port,
                     tls,
                     on_data,
                     on_close,
@@ -2550,6 +2901,17 @@ pub(crate) fn build_engine(
     register_snapshot_read(&mut reg, snapshot, "lsp-server-ready?", |s| s.lsp_ready);
     // `(evil-enabled?)` → #t when modal (evil) editing is active.
     register_snapshot_read(&mut reg, snapshot, "evil-enabled?", |s| s.evil_enabled);
+    // `(evil-state)` → "normal" / "insert" / "visual" / "visual-line" /
+    // "visual-block", or "" when modal editing is off.
+    register_snapshot_read(&mut reg, snapshot, "evil-state", |s| s.evil_state.clone());
+    // `(search-query)` → the active `/` regex ("" if none); `(search-forward?)`
+    // → whether it was a forward (`/`) search. For the `n`/`N` motions.
+    register_snapshot_read(&mut reg, snapshot, "search-query", |s| {
+        s.search_query.clone()
+    });
+    register_snapshot_read(&mut reg, snapshot, "search-forward?", |s| s.search_forward);
+    // `(major-mode)` → the buffer's major mode name ("rust", "org-mode", …).
+    register_snapshot_read(&mut reg, snapshot, "major-mode", |s| s.major_mode.clone());
     // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
     register_snapshot_read(&mut reg, snapshot, "helix-enabled?", |s| s.helix_enabled);
     // `(prefix-count)` → the count typed before a count-aware modal command, 0
@@ -2621,7 +2983,8 @@ pub(crate) fn build_engine(
     {
         // Bytes `[a, b)` of the buffer, clamped (Emacs `(buffer-substring a b)`).
         let shared = snapshot.clone();
-        reg.register_fn("buffer-substring", move |a: usize, b: usize| -> String {
+        reg.register_fn("buffer-substring", move |a: isize, b: isize| -> String {
+            let (a, b) = (scheme_pos(a), scheme_pos(b));
             let rope = shared.load().text.clone();
             // Snap to char boundaries so we never slice mid-codepoint.
             let (start, end) = (snap_byte(&rope, a), snap_byte(&rope, b));
@@ -2685,8 +3048,8 @@ pub(crate) fn build_engine(
     {
         // `(make-marker pos)` → a marker id (allocated synchronously).
         let m = markers.clone();
-        reg.register_fn("make-marker", move |pos: usize| -> usize {
-            m.lock().unwrap().alloc(pos) as usize
+        reg.register_fn("make-marker", move |pos: isize| -> usize {
+            m.lock().unwrap().alloc(scheme_pos(pos)) as usize
         });
     }
     {
@@ -2702,8 +3065,8 @@ pub(crate) fn build_engine(
     }
     {
         let m = markers.clone();
-        reg.register_fn("set-marker", move |id: u64, pos: usize| {
-            m.lock().unwrap().positions.insert(id, pos);
+        reg.register_fn("set-marker", move |id: u64, pos: isize| {
+            m.lock().unwrap().positions.insert(id, scheme_pos(pos));
         });
     }
     {
@@ -2721,7 +3084,8 @@ pub(crate) fn build_engine(
     macro_rules! register_pos_fn {
         ($name:literal, $f:expr) => {{
             let shared = snapshot.clone();
-            reg.register_fn($name, move |pos: usize| -> usize {
+            reg.register_fn($name, move |pos: isize| -> usize {
+                let pos = scheme_pos(pos);
                 let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
                 let f: fn(&crate::buffer::Buffer, usize) -> usize = $f;
                 f(&buf, pos.min(buf.len()))
@@ -2738,6 +3102,54 @@ pub(crate) fn build_engine(
     register_pos_fn!("bigword-forward-start", |b, p| b.forward_bigword_start(p));
     register_pos_fn!("bigword-backward-start", |b, p| b.backward_bigword_start(p));
     register_pos_fn!("bigword-forward-end", |b, p| b.forward_bigword_end(p));
+    register_pos_fn!("word-backward-end", |b, p| b.backward_word_end(p));
+    register_pos_fn!("bigword-backward-end", |b, p| b.backward_bigword_end(p));
+    {
+        // `(buffer-regex-matches pattern start end)` → a flat list
+        // `(s0 e0 s1 e1 …)` of the BUFFER byte ranges of every match inside
+        // [start, end). Offsets are buffer bytes, so callers never mix the
+        // char-indexed string accessors with regex byte offsets.
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "buffer-regex-matches",
+            move |pattern: String, start: usize, end: usize| -> Vec<usize> {
+                let Ok(re) = Regex::new(&pattern) else {
+                    return Vec::new();
+                };
+                let rope = shared.load().text.clone();
+                let (a, b) = (snap_byte(&rope, start), snap_byte(&rope, end));
+                if a >= b {
+                    return Vec::new();
+                }
+                let text = rope.byte_slice(a..b).to_string();
+                re.find_iter(&text)
+                    .flat_map(|m| [a + m.start(), a + m.end()])
+                    .collect()
+            },
+        );
+    }
+    {
+        // `(regex-search-pos pattern from forward?)` → byte offset of the next
+        // match strictly after (forward) / before (backward) `from`, wrapping
+        // around the buffer like `n`/`N`; -1 when none (or a bad regex).
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "regex-search-pos",
+            move |pattern: String, from: usize, forward: bool| -> isize {
+                let Ok(re) = Regex::new(&pattern) else {
+                    return -1;
+                };
+                let text = shared.load().text.to_string();
+                let starts: Vec<usize> = re.find_iter(&text).map(|m| m.start()).collect();
+                let hit = if forward {
+                    starts.iter().find(|&&s| s > from).or(starts.first())
+                } else {
+                    starts.iter().rev().find(|&&s| s < from).or(starts.last())
+                };
+                hit.map_or(-1, |&h| h as isize)
+            },
+        );
+    }
     register_pos_fn!("line-start-pos", |b, p| b.line_range_at(p).start);
     register_pos_fn!("line-end-pos", |b, p| b.line_range_at(p).end);
     register_pos_fn!("line-of-pos", |b, p| b.line_index_at_byte(p));
@@ -2800,6 +3212,63 @@ pub(crate) fn build_engine(
         },
     );
     {
+        // `(buffer-search-all regex start end)` → every match of `regex` in the
+        // active buffer whose bytes lie within `[start, end)`, as a list of
+        // `(mstart mend "match" "group1" …)` records (BYTE offsets; an unmatched
+        // group is ""). `^`/`$` are line anchors (multi-line), evaluated against
+        // the real line boundaries even when `start`/`end` fall mid-line. An
+        // invalid regex returns its error message as a string instead. Reads
+        // the published snapshot rope directly — no whole-buffer string crosses
+        // into Scheme (query-replace / occur on big files).
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "buffer-search-all",
+            move |pattern: String, start: usize, end: usize| -> SteelVal {
+                let re = match regex::RegexBuilder::new(&pattern).multi_line(true).build() {
+                    Ok(re) => re,
+                    Err(err) => return SteelVal::StringV(err.to_string().into()),
+                };
+                let rope = shared.load().text.clone();
+                buffer_search_all(&rope, &re, start, end)
+            },
+        );
+    }
+    // `(regexp-search-lines regex lines)` → for each string in `lines`, the
+    // list of its non-empty matches as `(start end)` BYTE offsets. One call and
+    // one regex compile for a whole result buffer (occur / grep highlighting);
+    // an invalid regex yields `()` for every line.
+    reg.register_fn(
+        "regexp-search-lines",
+        |pattern: String, lines: SteelVal| -> SteelVal {
+            let lines = steel_string_list(&lines);
+            let re = regex::RegexBuilder::new(&pattern)
+                .multi_line(true)
+                .build()
+                .ok();
+            let per_line: Vec<SteelVal> = lines
+                .iter()
+                .map(|line| {
+                    let spans: Vec<SteelVal> = re
+                        .iter()
+                        .flat_map(|re| re.find_iter(line))
+                        .filter(|m| m.end() > m.start())
+                        .map(|m| {
+                            SteelVal::ListV(
+                                vec![
+                                    SteelVal::IntV(m.start() as isize),
+                                    SteelVal::IntV(m.end() as isize),
+                                ]
+                                .into(),
+                            )
+                        })
+                        .collect();
+                    SteelVal::ListV(spans.into())
+                })
+                .collect();
+            SteelVal::ListV(per_line.into())
+        },
+    );
+    {
         // `(re-search-forward pattern)` → `(start end)` of the next match at/after
         // point, or `()` if none. Scheme drives point/edits from the result.
         let shared = snapshot.clone();
@@ -2819,6 +3288,8 @@ pub(crate) fn build_engine(
             }
         });
     }
+    // Session persistence (savehist / desktop) — see src/script/session.rs.
+    register_session(&mut reg, queue, session);
     (engine, names)
 }
 
@@ -2832,7 +3303,7 @@ pub(crate) struct Registrar<'a> {
 }
 
 impl Registrar<'_> {
-    fn register_fn<FN, ARGS, RET>(&mut self, name: &'static str, func: FN)
+    pub(crate) fn register_fn<FN, ARGS, RET>(&mut self, name: &'static str, func: FN)
     where
         Engine: RegisterFn<FN, ARGS, RET>,
     {
@@ -2986,6 +3457,42 @@ pub(crate) fn register_snapshot_read<T: IntoSteelVal + 'static>(
 /// to its length. Slicing a `Rope` panics on a non-boundary index, so the
 /// text-slicing bridges route caller-supplied offsets through this first — the
 /// boundary safety the old `String`-slicing bridges did by hand.
+/// Matches of `re` inside bytes `[start, end)` of `rope` — the worker behind
+/// `buffer-search-all`. Searches the enclosing whole lines so `^`/`$`/`\b`
+/// see real context, then keeps only matches fully inside the window.
+pub(crate) fn buffer_search_all(rope: &Rope, re: &Regex, start: usize, end: usize) -> SteelVal {
+    let (s, e) = (snap_byte(rope, start), snap_byte(rope, end));
+    if s > e {
+        return SteelVal::ListV(Vec::<SteelVal>::new().into());
+    }
+    let from = rope.line_to_byte(rope.byte_to_line(s));
+    let to = {
+        let line = rope.byte_to_line(e);
+        let line_start = rope.line_to_byte(line);
+        let line_str = rope.line(line).to_string();
+        line_start + line_str.find('\n').unwrap_or(line_str.len())
+    }
+    .max(e);
+    let text = rope.byte_slice(from..to).to_string();
+    let out: Vec<SteelVal> = re
+        .captures_iter(&text)
+        .filter_map(|caps| {
+            let m = caps.get(0)?;
+            let (ms, me) = (from + m.start(), from + m.end());
+            if ms < s || me > e {
+                return None;
+            }
+            let mut rec = vec![SteelVal::IntV(ms as isize), SteelVal::IntV(me as isize)];
+            rec.extend(
+                caps.iter()
+                    .map(|g| SteelVal::StringV(g.map_or("", |g| g.as_str()).into())),
+            );
+            Some(SteelVal::ListV(rec.into()))
+        })
+        .collect();
+    SteelVal::ListV(out.into())
+}
+
 pub(crate) fn snap_byte(rope: &Rope, byte: usize) -> usize {
     let byte = byte.min(rope.len_bytes());
     rope.char_to_byte(rope.byte_to_char(byte))

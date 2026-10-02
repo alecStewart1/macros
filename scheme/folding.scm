@@ -119,6 +119,44 @@
 ;; Toggle the fold of the block at (or enclosing) point — the keyboard command.
 (define (fold-toggle-at-point) (fold-toggle-at-line (buffer-line)))
 
+;; The fold header at or enclosing `line` (indentation style): the line
+;; itself when it heads a block, else the nearest header above whose block
+;; reaches this line. #f when there is none.
+(define (fold--header-for line)
+  (let ((total (line-count)))
+    (let loop ((i line))
+      (cond ((< i 0) #f)
+            ((let ((ind (fold--header-indent i total)))
+               (and ind (or (= i line) (>= (fold--block-end i ind total) line))))
+             i)
+            (else (loop (- i 1)))))))
+
+;; zc / zo — close / open the fold at (or around) point. Other fold styles
+;; (org, markdown) only know toggling, so these toggle there.
+(define (fold--set-at-point closed)
+  (if (not (equal? (fold--style) "indent"))
+      (fold-toggle-at-point)
+      (let ((h (fold--header-for (buffer-line))))
+        (when (and h (not (eq? (fold--folded? h) closed)))
+          (fold--indent-toggle h)
+          (when closed (goto-line h))))))
+(define (fold-close-at-point) (fold--set-at-point #t))
+(define (fold-open-at-point) (fold--set-at-point #f))
+
+;; zj / zk — the next / previous fold header line.
+(define (fold--header-scan from step)
+  (let ((total (line-count)))
+    (let loop ((i (+ from step)))
+      (cond ((or (< i 0) (>= i total)) #f)
+            ((fold--header-indent i total) i)
+            (else (loop (+ i step)))))))
+(define (fold-next-header)
+  (let ((h (fold--header-scan (buffer-line) 1)))
+    (if h (goto-line h) (message "No fold below"))))
+(define (fold-previous-header)
+  (let ((h (fold--header-scan (buffer-line) -1)))
+    (if h (goto-line h) (message "No fold above"))))
+
 ;; Fold every block in the buffer (indentation style).
 (define (fold-all)
   (let ((total (line-count)) (acc '()))
@@ -159,3 +197,5 @@
 (register-command 'fold-all)
 (register-command 'fold-show-all)
 (register-command 'fold-refresh)
+(register-command 'fold-close-at-point)
+(register-command 'fold-open-at-point)

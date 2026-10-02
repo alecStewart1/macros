@@ -233,6 +233,21 @@
       (perspective-sync-titlebar)
       (perspective-save))))
 
+;; --- session (desktop) accessors ------------------------------------------------
+;; session.scm (loads later) saves/restores the CURRENT perspective with the
+;; desktop. It must go through these functions: a cross-file read or `set!` of
+;; `*perspective-current*` would hit a different binding than the one this
+;; file's functions use (see the setter note above).
+(define (perspective-current) *perspective-current*)
+
+;; Re-select `root` as the current perspective without visiting anything (the
+;; desktop restores the files itself). Ignored unless `root` is a known, still
+;; existing perspective.
+(define (perspective-restore-current! root)
+  (when (and root (alist-ref *perspectives* root) (file-exists? root))
+    (set! *perspective-current* root)
+    (perspective-sync-titlebar)))
+
 (add-hook "find-file-hook" "perspective-track")
 (add-hook "buffer-switch-hook" "perspective-note")
 (add-hook "buffer-select-hook" "perspective-follow")

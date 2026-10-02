@@ -18,6 +18,23 @@ fn is_special_buffer_name(name: &str) -> bool {
     name.starts_with('*') && name.ends_with('*') && name.len() > 1
 }
 
+/// The identity of the file at `path` for "is it already open?" checks: the
+/// canonical path (symlinks, `.`/`..`, and relative spellings resolved). A file
+/// that doesn't exist yet canonicalizes its directory and keeps its name; a
+/// relative path resolves against the process cwd (the editor never `chdir`s).
+pub(super) fn file_identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let absolute = || std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir)
+            .map(|dir| dir.join(name))
+            .unwrap_or_else(|_| absolute()),
+        _ => absolute(),
+    }
+}
+
 impl Editor {
     /// Names of all open buffers (active first).
     pub(super) fn buffer_names(&self) -> Vec<String> {
@@ -106,6 +123,20 @@ impl Editor {
         // Any buffer switch/create/kill flows through here — keep Scheme's view
         // of the buffer list current.
         self.sync_buffers();
+        // An in-flight completion was for the buffer we just left; its answer
+        // must not pop up (with that buffer's byte range) in this one.
+        for server in self.servers.values_mut() {
+            if let Some((id, _)) = server.pending_completion.take() {
+                server.client.cancel(id);
+            }
+        }
+        // A buffer shown again after its server (re)started — or after it was
+        // closed in it — needs a fresh `didOpen` (no-op when already open).
+        if let Some(language) = self.active_language()
+            && self.servers.contains_key(&language)
+        {
+            self.lsp_open_active(&language);
+        }
     }
 
     /// Make the buffer `name` active, snapshotting the current one.
@@ -185,23 +216,22 @@ impl Editor {
     }
 
     /// `C-x C-f`: visit a file, reusing its buffer if already open.
+    ///
+    /// "Already open" compares canonical paths ([`file_identity`]), so
+    /// `./src/main.rs`, an absolute spelling, and a symlink to it all reuse one
+    /// buffer, and a visit while the same file's read is still in flight is
+    /// dropped rather than racing to create a second buffer.
     pub(super) fn find_file(&mut self, input: &str, cx: &mut Context<Self>) {
         let path = PathBuf::from(expand_path(input.trim()));
         if path.as_os_str().is_empty() {
             return;
         }
-        if self.active.path.as_deref() == Some(path.as_path()) {
-            self.echo(format!("Already in {}", self.active.name), cx);
+        let identity = file_identity(&path);
+        if self.switch_to_visiting(&identity, cx) {
             return;
         }
-        if let Some(index) = self
-            .inactive
-            .iter()
-            .position(|d| d.path.as_deref() == Some(path.as_path()))
-        {
-            self.activate(index, true, cx);
-            self.echo(format!("Switched to {}", self.active.name), cx);
-            return;
+        if !self.pending_opens.insert(identity.clone()) {
+            return; // the first visit's read will install (and show) it
         }
 
         let name = path.file_name().map_or_else(
@@ -217,25 +247,50 @@ impl Editor {
             .spawn(async move { std::fs::read_to_string(&read_path) });
         cx.spawn(async move |this, cx| {
             let result = read.await;
-            this.update(cx, |editor, cx| match result {
-                Ok(contents) => editor.open_file(name, path, contents, cx),
-                // A missing file is the ordinary "visit a new file" flow: an
-                // empty buffer that creates the file on first save.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    editor.open_file(name, path, String::new(), cx)
+            this.update(cx, |editor, cx| {
+                editor.pending_opens.remove(&identity);
+                match result {
+                    Ok(contents) => editor.open_file(name, path, contents, cx),
+                    // A missing file is the ordinary "visit a new file" flow: an
+                    // empty buffer that creates the file on first save.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        editor.open_file(name, path, String::new(), cx)
+                    }
+                    // Anything else (permissions, non-UTF-8 data, …) must NOT open
+                    // an empty file-visiting buffer — saving that buffer would
+                    // truncate the file on disk. Report and leave the editor as-is.
+                    Err(err) => editor.echo(format!("Could not open {name}: {err}"), cx),
                 }
-                // Anything else (permissions, non-UTF-8 data, …) must NOT open
-                // an empty file-visiting buffer — saving that buffer would
-                // truncate the file on disk. Report and leave the editor as-is.
-                Err(err) => editor.echo(format!("Could not open {name}: {err}"), cx),
             })
             .ok();
         })
         .detach();
     }
 
+    /// If some buffer already visits the file `identity` (a [`file_identity`]),
+    /// show it and return `true`.
+    fn switch_to_visiting(&mut self, identity: &Path, cx: &mut Context<Self>) -> bool {
+        let visits = |doc: &Document| {
+            doc.path
+                .as_deref()
+                .is_some_and(|p| file_identity(p) == identity)
+        };
+        if visits(&self.active) {
+            self.echo(format!("Already in {}", self.active.name), cx);
+            return true;
+        }
+        if let Some(index) = self.inactive.iter().position(visits) {
+            self.activate(index, true, cx);
+            self.echo(format!("Switched to {}", self.active.name), cx);
+            return true;
+        }
+        false
+    }
+
     /// Install a freshly-read file as the active buffer (foreground half of the
-    /// async `find_file`).
+    /// async `find_file`, and of LSP's `visit_path`). Re-checks for an existing
+    /// buffer on the file — another route may have opened it meanwhile — and
+    /// gives the new buffer a unique name (see [`Self::unique_buffer_name`]).
     pub(super) fn open_file(
         &mut self,
         name: String,
@@ -243,6 +298,10 @@ impl Editor {
         contents: String,
         cx: &mut Context<Self>,
     ) {
+        if self.switch_to_visiting(&file_identity(&path), cx) {
+            return;
+        }
+        let name = self.unique_buffer_name(&name, &path);
         let doc = make_document(name.clone(), Some(path), &contents);
         let current = self.snapshot_active();
         self.inactive.push(current);
@@ -255,6 +314,79 @@ impl Editor {
         self.reconcile_watches(cx); // watch the newly-visited file (auto-revert)
     }
 
+    /// A buffer name for visiting `path` that no open buffer uses. `base` (the
+    /// file name) when free; otherwise Emacs uniquify's `post-forward-angle-
+    /// brackets` style — `mod.rs<editor>`, adding parent directories until the
+    /// suffix tells this file apart from every other open file of that name
+    /// (`mod.rs<a/src>`), with a numeric `mod.rs<2>` as the last resort.
+    ///
+    /// Only the NEW buffer is named this way; existing buffers keep their
+    /// names, since Scheme state (perspectives, buffer-locals, pane lists) is
+    /// keyed by buffer name and a rename would orphan it.
+    pub(super) fn unique_buffer_name(&self, base: &str, path: &Path) -> String {
+        let taken = |n: &str| self.active.name == n || self.inactive.iter().any(|d| d.name == n);
+        if !taken(base) {
+            return base.to_string();
+        }
+        let identity = file_identity(path);
+        // Other open files with the same file name, as canonical paths.
+        let others: Vec<PathBuf> = std::iter::once(&self.active)
+            .chain(&self.inactive)
+            .filter_map(|d| d.path.as_deref())
+            .map(file_identity)
+            .filter(|p| *p != identity && p.file_name() == identity.file_name())
+            .collect();
+        uniquified_name(base, &identity, &others, taken)
+    }
+}
+
+/// The naming rule behind [`Editor::unique_buffer_name`], pure for testing:
+/// `base<dir>` with the fewest trailing parent directories of `path` that no
+/// path in `others` shares, skipping names `taken` reports in use; numeric
+/// `base<N>` when no directory suffix works.
+fn uniquified_name(
+    base: &str,
+    path: &Path,
+    others: &[PathBuf],
+    taken: impl Fn(&str) -> bool,
+) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    let dirs = |p: &Path| -> Vec<String> {
+        p.parent()
+            .map(|d| {
+                d.components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let suffix = |parts: &[String], depth: usize| -> Option<String> {
+        (depth <= parts.len()).then(|| parts[parts.len() - depth..].join("/"))
+    };
+    let mine = dirs(path);
+    let theirs: Vec<Vec<String>> = others.iter().map(|p| dirs(p)).collect();
+    for depth in 1..=mine.len() {
+        let Some(s) = suffix(&mine, depth) else { break };
+        let candidate = format!("{base}<{s}>");
+        let distinct = theirs
+            .iter()
+            .all(|t| suffix(t, depth).as_deref() != Some(s.as_str()));
+        if distinct && !taken(&candidate) {
+            return candidate;
+        }
+    }
+    (2..)
+        .map(|n| format!("{base}<{n}>"))
+        .find(|c| !taken(c))
+        .expect("an unused numeric suffix exists")
+}
+
+impl Editor {
     /// Open files dropped onto the window from the OS (Finder, a terminal, etc.).
     /// Each dropped file is visited in its own buffer; the last one ends up
     /// active. Directories are skipped — `find_file` only reads regular files.
@@ -284,7 +416,10 @@ impl Editor {
     /// buffer keeps its own file; this just drops a copy.
     pub(super) fn write_buffer_to(&mut self, path: &str, cx: &mut Context<Self>) {
         let target = expand_path(path.trim());
-        match std::fs::write(&target, self.active.buffer.full_text()) {
+        match crate::save::write_now(
+            Path::new(&target),
+            self.active.buffer.full_text().as_bytes(),
+        ) {
             Ok(()) => self.echo(format!("Wrote {target}"), cx),
             Err(err) => self.echo(format!("Save failed: {err}"), cx),
         }
@@ -420,6 +555,9 @@ impl Editor {
             // wholesale — this also refreshes its mode/highlighter for the new text.
             let doc_path = doc.path.clone();
             self.inactive[idx] = make_document(name.clone(), doc_path, &disk);
+            // Its servers still hold the old text under this URI.
+            let uri = document_uri(&self.inactive[idx]);
+            self.lsp_sync_document(&uri, &disk);
             self.echo(format!("Reverted {name} (changed on disk)"), cx);
         }
     }
@@ -536,17 +674,20 @@ impl Editor {
             self.echo("Buffer is not visiting a file", cx);
             return;
         }
-        if self.formatting_for_save {
-            // Re-entry after an LSP format-on-save completed: just write now.
-            self.formatting_for_save = false;
-        } else {
-            // First entry: run synchronous before-save hooks (e.g. a shell
-            // formatter), then — if this language formats via LSP on save —
-            // kick off the (async) format and defer the write to its response.
-            self.run_hook_blocking("before-save-hook", cx);
-            if self.start_lsp_format_on_save(cx) {
-                return;
-            }
+        if self
+            .active_uri()
+            .is_some_and(|uri| self.formatting_for_save.contains_key(&uri))
+        {
+            // The format's response (or its timeout) writes this buffer.
+            self.echo("Save pending (waiting on formatting)", cx);
+            return;
+        }
+        // Run synchronous before-save hooks (e.g. a shell formatter), then — if
+        // this language formats via LSP on save — kick off the (async) format
+        // and defer the write to its response.
+        self.run_hook_blocking("before-save-hook", cx);
+        if self.start_lsp_format_on_save(cx) {
+            return;
         }
         self.write_active_to_disk(cx);
     }
@@ -559,18 +700,28 @@ impl Editor {
         // Failed inactive writes are reported (and keep `modified` set) rather
         // than being silently dropped from the count.
         let mut failed: Vec<String> = Vec::new();
+        let mut saved_uris = Vec::new();
+        let mut written: Vec<PathBuf> = Vec::new();
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
-                match std::fs::write(&path, doc.buffer.full_text()) {
+                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
                     Ok(()) => {
                         doc.modified = false;
                         saved += 1;
+                        saved_uris.push(document_uri(doc));
+                        written.push(path);
                     }
                     Err(err) => failed.push(format!("{}: {err}", doc.name)),
                 }
             }
+        }
+        for uri in saved_uris {
+            self.lsp_did_save(&uri);
+        }
+        for path in written {
+            self.rewatch_file(&path, cx);
         }
         if self.active.path.is_some() && self.active.modified {
             // Async; reports its own failure (and restores `modified`) later.
@@ -590,31 +741,72 @@ impl Editor {
 
     /// Write the active buffer to its file off the UI thread. Optimistically
     /// clears `modified`; restores it (and reports) if the write fails.
+    ///
+    /// The write is atomic and ordered per file (see [`crate::save`]): the
+    /// ticket taken here, with the text snapshot, guarantees an older save
+    /// still in flight can't land after this one.
     pub(super) fn write_active_to_disk(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.active.path.clone() else {
             return;
         };
         let text = self.active.buffer.full_text();
         let name = self.active.name.clone();
+        let uri = document_uri(&self.active);
         self.active.modified = false;
-        let write = cx
-            .background_executor()
-            .spawn(async move { std::fs::write(&path, text) });
+        let ticket = crate::save::ticket(&path);
+        let write_path = path.clone();
+        let write = cx.background_executor().spawn(async move {
+            let outcome = crate::save::write_sequenced(&ticket, &write_path, text.as_bytes());
+            (ticket, outcome)
+        });
         cx.spawn(async move |this, cx| {
-            let result = write.await;
+            let (ticket, result) = write.await;
             this.update(cx, |editor, cx| match result {
-                Ok(()) => {
+                Ok(crate::save::SaveOutcome::Written) => {
+                    editor.rewatch_file(&path, cx);
                     editor.echo(format!("Wrote {name}"), cx);
+                    editor.lsp_did_save(&uri);
                     editor.run_hook("after-save-hook"); // Emacs after-save-hook
                 }
+                // A newer save of this file already landed and reported.
+                Ok(crate::save::SaveOutcome::Superseded) => {}
                 Err(err) => {
-                    editor.active.modified = true;
-                    editor.echo(format!("Save failed: {err}"), cx);
+                    // Re-dirty the buffer that was SAVED (by its file), not
+                    // whatever happens to be active now — and only if no newer
+                    // save owns its state.
+                    if crate::save::is_latest(&ticket) {
+                        editor.mark_path_modified(&path);
+                    }
+                    editor.echo(format!("Save failed: {name}: {err}"), cx);
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Re-arm the auto-revert watch on `path` after we saved it. An atomic save
+    /// renames a new inode over the file; inode-based backends (inotify) drop
+    /// the old watch with it, which would silently end auto-revert for this
+    /// file. (Path-based FSEvents doesn't need it, but re-arming is harmless.)
+    pub(super) fn rewatch_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !self.fs.watched.remove(path) {
+            return;
+        }
+        if let Some(debouncer) = self.fs.debouncer.as_mut() {
+            let _ = debouncer.watcher().unwatch(path);
+        }
+        self.reconcile_watches(cx);
+    }
+
+    /// Mark whichever buffer visits `path` (active or not) as modified.
+    fn mark_path_modified(&mut self, path: &Path) {
+        if let Some(doc) = std::iter::once(&mut self.active)
+            .chain(self.inactive.iter_mut())
+            .find(|d| d.path.as_deref() == Some(path))
+        {
+            doc.modified = true;
+        }
     }
 
     /// If the active buffer's language formats via LSP on save and a server is
@@ -637,8 +829,27 @@ impl Editor {
         if !ready {
             return false;
         }
-        self.formatting_for_save = true;
-        self.lsp_format(cx);
+        self.format_save_seq += 1;
+        let token = self.format_save_seq;
+        self.formatting_for_save.insert(uri.clone(), token);
+        if !self.lsp_format_request(Some(token), cx) {
+            self.formatting_for_save.remove(&uri);
+            return false;
+        }
+        // A server that never answers must not wedge the save: after the
+        // timeout, write this document unformatted (unless the response or a
+        // server exit already completed this save — the token tells).
+        let timer = cx.background_executor().timer(FORMAT_ON_SAVE_TIMEOUT);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            this.update(cx, |editor, cx| {
+                if editor.finish_format_on_save(&uri, token, cx) {
+                    editor.echo("Formatting timed out; saved unformatted", cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
         true
     }
 
@@ -680,28 +891,52 @@ impl Editor {
     /// tears the whole app down rather than leaving a windowless process on
     /// macOS.
     pub fn confirm_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        self.confirm_quit_ex(false, cx)
+    }
+
+    /// The update pill's "relaunch into the staged build": the same unsaved-
+    /// buffer prompt as a normal quit, relaunching only if the quit goes ahead
+    /// (a cancelled prompt leaves no relaunch helper behind).
+    pub fn confirm_quit_and_relaunch(&mut self, cx: &mut Context<Self>) {
+        self.confirm_quit_ex(true, cx);
+    }
+
+    fn confirm_quit_ex(&mut self, relaunch: bool, cx: &mut Context<Self>) -> bool {
         if self.any_modified() {
-            let mut dirty: Vec<&str> = Vec::new();
-            if self.active.modified && !is_special_buffer_name(&self.active.name) {
-                dirty.push(&self.active.name);
-            }
-            for doc in &self.inactive {
-                if doc.modified && !is_special_buffer_name(&doc.name) {
-                    dirty.push(&doc.name);
-                }
-            }
-            let listing = dirty.join(", ");
+            let listing = self.modified_buffer_names().join(", ");
             self.echo(format!("Modified buffers: {listing}"), cx);
             self.open_minibuffer(
                 "Save modified buffers before quitting? (yes/no, C-g to cancel) ",
-                MinibufferPurpose::QuitSave,
+                MinibufferPurpose::QuitSave { relaunch },
                 "",
                 cx,
             );
         } else {
-            cx.quit();
+            self.finish_quit(relaunch, cx);
         }
         false
+    }
+
+    /// Names of the buffers [`any_modified`](Self::any_modified) counts as
+    /// unsaved, active first.
+    pub(super) fn modified_buffer_names(&self) -> Vec<String> {
+        std::iter::once(&self.active)
+            .chain(&self.inactive)
+            .filter(|d| d.modified && !is_special_buffer_name(&d.name))
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    /// Actually quit (the user has confirmed, or nothing was unsaved). With
+    /// `relaunch`, first spawn the helper that reopens the staged update once
+    /// this process exits; if that fails, stay running and say so rather than
+    /// quitting into nothing.
+    pub(super) fn finish_quit(&mut self, relaunch: bool, cx: &mut Context<Self>) {
+        if relaunch && let Err(err) = crate::update::relaunch() {
+            self.echo(format!("Relaunch failed: {err}"), cx);
+            return;
+        }
+        self.quit_now(cx);
     }
 
     /// Write every modified, file-visiting buffer (active + inactive) to disk
@@ -717,7 +952,7 @@ impl Editor {
         if self.active.modified
             && let Some(path) = self.active.path.clone()
         {
-            match std::fs::write(&path, self.active.buffer.full_text()) {
+            match crate::save::write_now(&path, self.active.buffer.full_text().as_bytes()) {
                 Ok(()) => self.active.modified = false,
                 Err(err) => failed.push(format!("{}: {err}", self.active.name)),
             }
@@ -726,7 +961,7 @@ impl Editor {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
-                match std::fs::write(&path, doc.buffer.full_text()) {
+                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
                     Ok(()) => doc.modified = false,
                     Err(err) => failed.push(format!("{}: {err}", doc.name)),
                 }
@@ -752,10 +987,12 @@ impl Editor {
             return false;
         };
         self.run_hook_blocking("before-save-hook", cx);
-        match std::fs::write(&path, self.active.buffer.full_text()) {
+        match crate::save::write_now(&path, self.active.buffer.full_text().as_bytes()) {
             Ok(()) => {
                 self.active.modified = false;
                 self.echo(format!("Wrote {}", self.active.name), cx);
+                let uri = document_uri(&self.active);
+                self.lsp_did_save(&uri);
                 self.run_hook("after-save-hook");
                 true
             }
@@ -806,6 +1043,11 @@ impl Editor {
 
     pub(super) fn kill_active_buffer(&mut self, cx: &mut Context<Self>) {
         let killed = self.active.name.clone();
+        // `didClose` it — which also discards any pending full-sync for it, so
+        // the replacement's text is never flushed under the killed URI (this
+        // path swaps buffers without `snapshot_active`'s flush).
+        let killed_uri = document_uri(&self.active);
+        self.lsp_close_document(&killed_uri);
         let replacement = self
             .inactive
             .pop()
@@ -819,8 +1061,10 @@ impl Editor {
     }
 
     /// Shut down and forget any embedded terminal backing buffer `name` (its
-    /// `Drop` closes the PTY and ends the event-loop thread).
+    /// `Drop` closes the PTY and ends the event-loop thread), and terminate any
+    /// `make-process` child bound to it via `set-process-buffer`.
     pub(super) fn drop_terminal_for_buffer(&mut self, name: &str) {
+        self.kill_processes_for_buffer(name);
         if let Some(id) = self
             .terminals
             .values()
@@ -841,7 +1085,8 @@ impl Editor {
         if name == self.active.name {
             self.kill_active_buffer(cx);
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
-            self.inactive.remove(idx);
+            let doc = self.inactive.remove(idx);
+            self.lsp_close_document(&document_uri(&doc));
             self.drop_terminal_for_buffer(name);
             self.sync_buffers();
             self.echo(format!("Killed {name}"), cx);
@@ -918,6 +1163,10 @@ impl Editor {
             self.active.line_icons.clear();
             let line = self.active.buffer.line_index_at_byte(self.point());
             self.active.buffer = Buffer::new(&text);
+            // The old undo records address the replaced text; replaying one
+            // against the new text corrupts it (or panics). Start fresh.
+            self.active.reset_undo();
+            self.undo_group_started = false;
             self.active.line_faces = faces;
             self.lines.clear();
             let last = self.active.buffer.line_count().saturating_sub(1);
@@ -938,6 +1187,7 @@ impl Editor {
                 .map(|pt| doc.buffer.line_index_at_byte(pt.min(doc.buffer.len())))
                 .unwrap_or(0);
             doc.buffer = Buffer::new(&text);
+            doc.reset_undo(); // see the active branch above
             doc.line_faces = faces;
             doc.line_icons.clear();
             doc.overlays = Overlays::default();
@@ -1132,6 +1382,7 @@ impl Editor {
                 let doc = &mut self.inactive[idx];
                 let (s, e) = line_span(&doc.buffer, ds, de);
                 doc.buffer.replace(s..e, &text);
+                doc.reset_undo(); // unrecorded edit: old records are stale
                 doc.modified = true;
                 if let Some(h) = doc.highlighter.as_mut() {
                     h.set_text(doc.buffer.rope());
@@ -1185,4 +1436,73 @@ impl Editor {
     }
 
     // --- yasnippet session ------------------------------------------------
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_identity, uniquified_name};
+    use std::path::PathBuf;
+
+    #[test]
+    fn duplicate_file_names_get_distinguishing_dir_suffixes() {
+        let p = PathBuf::from;
+        let taken = |names: &'static [&'static str]| move |n: &str| names.contains(&n);
+        // Free name → as-is.
+        assert_eq!(
+            uniquified_name("mod.rs", &p("/x/src/script/mod.rs"), &[], taken(&[])),
+            "mod.rs"
+        );
+        // The nearest differing parent dir.
+        assert_eq!(
+            uniquified_name(
+                "mod.rs",
+                &p("/x/src/script/mod.rs"),
+                &[p("/x/src/editor/mod.rs")],
+                taken(&["mod.rs"]),
+            ),
+            "mod.rs<script>"
+        );
+        // Same immediate parent → go up until they differ.
+        assert_eq!(
+            uniquified_name(
+                "lib.rs",
+                &p("/w/b/src/lib.rs"),
+                &[p("/w/a/src/lib.rs")],
+                taken(&["lib.rs"]),
+            ),
+            "lib.rs<b/src>"
+        );
+        // A non-file buffer holding the name (no path to compare) still gets
+        // a dir suffix; an occupied suffixed name falls through to numbers.
+        assert_eq!(
+            uniquified_name("notes", &p("/n/notes"), &[], taken(&["notes"])),
+            "notes<n>"
+        );
+        assert_eq!(
+            uniquified_name("notes", &p("/notes"), &[], taken(&["notes"])),
+            "notes<2>"
+        );
+    }
+
+    #[test]
+    fn file_identity_unifies_spellings_of_one_file() {
+        let dir = std::env::temp_dir().join(format!("macros-identity-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("sub/f.txt");
+        std::fs::write(&file, "x").unwrap();
+        let dotted = dir.join("sub/../sub/./f.txt");
+        assert_eq!(file_identity(&dotted), file_identity(&file));
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.txt");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(file_identity(&link), file_identity(&file));
+        }
+        // Not yet on disk: canonical dir + name, still matching other spellings.
+        assert_eq!(
+            file_identity(&dir.join("sub/../new.txt")),
+            file_identity(&dir.join("new.txt"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

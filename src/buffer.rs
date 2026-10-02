@@ -95,7 +95,12 @@ impl Buffer {
 
     /// Replace byte `range` with `new_text`, returning the byte offset just past
     /// the inserted text — the natural new cursor position.
+    ///
+    /// `range` is normalized first (see [`Self::clamp_range`]): an inverted,
+    /// out-of-bounds, or mid-codepoint range is repaired rather than handed to
+    /// ropey, whose `remove` aborts the whole process on bad input.
     pub fn replace(&mut self, range: Range<usize>, new_text: &str) -> usize {
+        let range = self.clamp_range(range);
         let start_char = self.rope.byte_to_char(range.start);
         let end_char = self.rope.byte_to_char(range.end);
         if start_char != end_char {
@@ -106,6 +111,21 @@ impl Buffer {
         }
         self.tick += 1;
         range.start + new_text.len()
+    }
+
+    /// `offset` clamped to the buffer and floored to a char boundary — the one
+    /// place untrusted offsets (Scheme, stale positions) become safe to slice
+    /// the rope at.
+    pub fn snap(&self, offset: usize) -> usize {
+        let offset = offset.min(self.len());
+        self.rope.char_to_byte(self.rope.byte_to_char(offset))
+    }
+
+    /// `range` normalized for editing: ends swapped if inverted, both clamped
+    /// to the buffer, and each floored to a char boundary (see [`Self::snap`]).
+    pub fn clamp_range(&self, range: Range<usize>) -> Range<usize> {
+        let (a, b) = (self.snap(range.start), self.snap(range.end));
+        a.min(b)..a.max(b)
     }
 
     /// Index of the line containing byte `offset`.
@@ -123,11 +143,34 @@ impl Buffer {
     }
 
     /// Byte offset for an LSP position (`line`, UTF-16 column from line start).
+    ///
+    /// Out-of-range positions clamp per the LSP spec: a `character` past the
+    /// end of its line lands at the line's end (before the line terminator —
+    /// never on the next line), and a `line` at or past the line count lands at
+    /// the end of the document.
     pub fn position_to_byte(&self, line: usize, utf16_col: usize) -> usize {
-        let line = line.min(self.line_count().saturating_sub(1));
+        if line >= self.line_count() {
+            return self.len();
+        }
         let line_start_char = self.rope.line_to_char(line);
+        // Every line but the last ends in a terminator (whatever ropey counts
+        // as one); strip it, treating `\r\n` as a single break. The last line
+        // never has one — a trailing break yields a final empty line instead.
+        let mut content_end_char = if line + 1 < self.line_count() {
+            self.rope.line_to_char(line + 1) - 1
+        } else {
+            self.rope.len_chars()
+        };
+        if line + 1 < self.line_count()
+            && content_end_char > line_start_char
+            && self.rope.char(content_end_char) == '\n'
+            && self.rope.char(content_end_char - 1) == '\r'
+        {
+            content_end_char -= 1;
+        }
         let line_start_u16 = self.rope.char_to_utf16_cu(line_start_char);
-        let target_u16 = (line_start_u16 + utf16_col).min(self.rope.len_utf16_cu());
+        let line_end_u16 = self.rope.char_to_utf16_cu(content_end_char);
+        let target_u16 = (line_start_u16 + utf16_col).min(line_end_u16);
         self.rope
             .char_to_byte(self.rope.utf16_cu_to_char(target_u16))
     }
@@ -155,6 +198,7 @@ impl Buffer {
 
     /// Line `i` as `(byte_range_excluding_break, text)`.
     pub fn line(&self, i: usize) -> (Range<usize>, String) {
+        let i = i.min(self.line_count().saturating_sub(1));
         let start = self.rope.line_to_byte(i);
         let raw = self.rope.line(i).to_string();
         let trimmed = raw.strip_suffix('\n').unwrap_or(&raw);
@@ -194,7 +238,7 @@ impl Buffer {
     }
 
     pub fn char_to_byte(&self, char_idx: usize) -> usize {
-        self.rope.char_to_byte(char_idx)
+        self.rope.char_to_byte(char_idx.min(self.rope.len_chars()))
     }
 
     // --- Word motion ------------------------------------------------------
@@ -279,6 +323,41 @@ impl Buffer {
             ci += 1;
         }
         self.rope.char_to_byte(ci)
+    }
+
+    /// Vim `ge` — ON the last character of the previous word: walk back out of
+    /// the class run under `from` (when on one), over any whitespace, and land
+    /// on the char before. 0 when there is no earlier word.
+    pub fn backward_word_end(&self, from: usize) -> usize {
+        self.backward_end_by(from, char_class)
+    }
+
+    /// Vim `gE` — like [`Self::backward_word_end`] over WORDs.
+    pub fn backward_bigword_end(&self, from: usize) -> usize {
+        self.backward_end_by(from, |c| {
+            if c.is_whitespace() {
+                CharClass::Space
+            } else {
+                CharClass::Word
+            }
+        })
+    }
+
+    fn backward_end_by(&self, from: usize, class: impl Fn(char) -> CharClass) -> usize {
+        let total = self.rope.len_chars();
+        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        if ci < total {
+            let here = class(self.rope.char(ci));
+            if here != CharClass::Space {
+                while ci > 0 && class(self.rope.char(ci - 1)) == here {
+                    ci -= 1;
+                }
+            }
+        }
+        while ci > 0 && class(self.rope.char(ci - 1)) == CharClass::Space {
+            ci -= 1;
+        }
+        self.rope.char_to_byte(ci.saturating_sub(1))
     }
 
     /// Vim `W` — the start of the next whitespace-delimited WORD (every
@@ -412,14 +491,23 @@ impl Buffer {
     // --- Grapheme-aware cursor movement -----------------------------------
 
     /// The grapheme boundary immediately before `offset` (crossing line breaks).
+    /// A CRLF pair is one unit: stepping back over the break from a line start
+    /// lands before its `\r`, never between `\r` and `\n`. Always returns a
+    /// char boundary, even for a mid-codepoint `offset`.
     pub fn prev_grapheme(&self, offset: usize) -> usize {
+        let offset = self.snap(offset);
         if offset == 0 {
             return 0;
         }
         let line = self.line_range_at(offset);
         if offset <= line.start {
-            // At a line start: the preceding byte is the line break.
-            return offset - 1;
+            // At a line start: the preceding char is the `\n` line break —
+            // possibly the second half of a CRLF pair.
+            let ci = self.rope.byte_to_char(offset);
+            if ci >= 2 && self.rope.char(ci - 1) == '\n' && self.rope.char(ci - 2) == '\r' {
+                return self.rope.char_to_byte(ci - 2);
+            }
+            return self.rope.char_to_byte(ci - 1);
         }
         let text = self.slice_to_string(line.start..offset);
         let prev = text
@@ -430,15 +518,23 @@ impl Buffer {
     }
 
     /// The grapheme boundary immediately after `offset` (crossing line breaks).
+    /// At a line's end the whole break is crossed — `\n` or a CRLF pair —
+    /// landing on the next line's start. Always returns a char boundary.
     pub fn next_grapheme(&self, offset: usize) -> usize {
         let len = self.len();
+        let offset = self.snap(offset);
         if offset >= len {
             return len;
         }
-        let line = self.line_range_at(offset);
+        let row = self.line_index_at_byte(offset);
+        let line = self.line_range(row);
         if offset >= line.end {
-            // At end of line content: step past the line break to the next line.
-            return (offset + 1).min(len);
+            // At end of line content (or between a CRLF's `\r` and `\n`): step
+            // past the line break to the next line's start.
+            return self
+                .rope
+                .line_to_byte((row + 1).min(self.line_count()))
+                .min(len);
         }
         let text = self.slice_to_string(offset..line.end);
         let next = text.graphemes(true).next().map_or(1, str::len);
@@ -507,6 +603,25 @@ mod tests {
     }
 
     #[test]
+    fn lsp_position_clamps_per_spec() {
+        let buffer = Buffer::new("abc\r\nde\nxy");
+        // A column past the line's end stops before the terminator — never on
+        // the `\r`, the `\n`, or the next line.
+        assert_eq!(buffer.position_to_byte(0, 3), 3);
+        assert_eq!(buffer.position_to_byte(0, 99), 3);
+        assert_eq!(buffer.position_to_byte(1, 99), 7); // "de" ends at byte 7
+        assert_eq!(buffer.position_to_byte(2, 99), buffer.len());
+        // A line at/past the line count is the end of the document.
+        assert_eq!(buffer.position_to_byte(3, 0), buffer.len());
+        assert_eq!(buffer.position_to_byte(99, 5), buffer.len());
+        // A trailing newline's final empty line is a real (empty) line.
+        let trailing = Buffer::new("ab\n");
+        assert_eq!(trailing.position_to_byte(0, 9), 2);
+        assert_eq!(trailing.position_to_byte(1, 9), 3);
+        assert_eq!(Buffer::new("").position_to_byte(0, 4), 0);
+    }
+
+    #[test]
     fn backward_symbol_keeps_whole_lisp_tokens() {
         // `backward_word` splits on '-'/'>' ; `backward_symbol` must not, so REPL
         // completion gets the full token to match and replace.
@@ -569,5 +684,81 @@ mod tests {
         assert_eq!(p.forward_word_start(0), 3); // '.' starts a punctuation word
         assert_eq!(p.forward_word_start(3), 4); // 'b' of "bar"
         assert_eq!(p.forward_word_start(4), 8); // 'b' of "baz" (skips '\n')
+    }
+
+    #[test]
+    fn only_lf_breaks_lines() {
+        // U+2028 LINE SEPARATOR (3 bytes), U+2029, NEL, VT and FF are ordinary
+        // characters — the editor's line model is `\n` only, like tree-sitter.
+        let b = Buffer::new("a\u{2028}b\u{2029}c\u{85}d\u{b}e\u{c}f");
+        assert_eq!(b.line_count(), 1);
+        // Backspace right after U+2028 used to step 1 byte into the middle of
+        // the 3-byte char and abort the process.
+        let after_sep = "a\u{2028}".len();
+        assert_eq!(b.prev_grapheme(after_sep), 1);
+        assert_eq!(b.next_grapheme(1), after_sep);
+        let mut b = Buffer::new("a\u{2028}b");
+        let cursor = b.replace(b.prev_grapheme(after_sep)..after_sep, "");
+        assert_eq!((cursor, b.full_text().as_str()), (1, "ab"));
+    }
+
+    #[test]
+    fn grapheme_steps_land_on_char_boundaries_from_any_offset() {
+        let b = Buffer::new("é\u{2028}x\n日本");
+        for offset in 0..=b.len() + 3 {
+            for got in [b.prev_grapheme(offset), b.next_grapheme(offset)] {
+                assert!(got <= b.len(), "{offset} -> {got}");
+                assert!(b.full_text().is_char_boundary(got), "{offset} -> {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_is_one_unit_for_motion_and_deletion() {
+        let mut b = Buffer::new("abc\r\ndef");
+        // Lines exclude the whole break.
+        assert_eq!(b.line_count(), 2);
+        assert_eq!(b.line_range(0), 0..3);
+        assert_eq!(b.line_range(1), 5..8);
+        // C-f / C-d at EOL crosses the pair; C-b / Backspace at BOL does too.
+        assert_eq!(b.next_grapheme(3), 5);
+        assert_eq!(b.prev_grapheme(5), 3);
+        // From between `\r` and `\n` (an offset a stale position could hold),
+        // both directions still leave the pair.
+        assert_eq!(b.next_grapheme(4), 5);
+        assert_eq!(b.prev_grapheme(4), 3);
+        // Backspace at line-2 start removes the whole CRLF, no bare `\r` left.
+        let cursor = b.replace(b.prev_grapheme(5)..5, "");
+        assert_eq!((cursor, b.full_text().as_str()), (3, "abcdef"));
+        // Delete-forward / kill-line at EOL likewise.
+        let mut b = Buffer::new("abc\r\ndef\r\n");
+        let end = b.next_grapheme(3);
+        b.replace(3..end, "");
+        assert_eq!(b.full_text(), "abcdef\r\n");
+        // A trailing CRLF: stepping past it reaches the (empty) last line.
+        assert_eq!(b.next_grapheme(6), 8);
+        assert_eq!(b.prev_grapheme(8), 6);
+        // CRLF elsewhere is preserved verbatim — no conversion on round-trip.
+        assert_eq!(b.full_text().matches("\r\n").count(), 1);
+    }
+
+    #[test]
+    fn replace_normalizes_bad_ranges_instead_of_aborting() {
+        let mut b = Buffer::new("héllo");
+        // Inverted → swapped.
+        assert_eq!(b.replace(Range { start: 3, end: 1 }, "X"), 2);
+        assert_eq!(b.full_text(), "hXllo");
+        // Past the end → clamped.
+        let mut b = Buffer::new("abc");
+        assert_eq!(b.replace(10..20, "!"), 4);
+        assert_eq!(b.full_text(), "abc!");
+        // Mid-codepoint → floored to the char boundary.
+        let mut b = Buffer::new("é");
+        assert_eq!(b.replace(1..1, "x"), 1);
+        assert_eq!(b.full_text(), "xé");
+        assert_eq!(b.clamp_range(Range { start: 9, end: 2 }), 1..3); // "xé": 2 is inside é
+        assert_eq!(b.snap(usize::MAX), b.len());
+        // Out-of-range line index clamps rather than panicking.
+        assert_eq!(b.line_range(99), 0..3);
     }
 }

@@ -31,7 +31,7 @@
 (define (ml-text* s face) (ml--seg "lit" s face "" ""))
 
 ;; The default layout — identical to the Rust fallback:
-;;   -- name  (modes)  [project]  git:branch  lsp …  E:n W:n
+;;   -- name  (modes)  [project]  git:branch  lsp …  [progress]  E:n W:n
 ;; Reorder, drop, restyle, or add slots here to taste. Held in a global so a
 ;; module loaded later (e.g. a plugin) can contribute a segment via
 ;; `mode-line-add-segment` without restating the whole list.
@@ -45,6 +45,7 @@
        (ml-slot* "project" "" "  [" "]")
        (ml-slot* "git" "magit-branch" "  git:" "")
        (ml-field* 'lsp "" "  lsp " "")
+       (ml-slot* "lsp-progress" "" "  [" "]")   ; server $/progress (indexing …)
        (ml-field* 'diagnostics "" "  " "")))
 
 (set-mode-line-format *mode-line-format*)

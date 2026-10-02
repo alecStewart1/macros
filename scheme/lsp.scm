@@ -16,6 +16,7 @@
 ;;   lsp-rename                rename the symbol everywhere
 ;;   lsp-format-buffer         format the whole buffer
 ;;   lsp-code-action           offer code actions / quick fixes
+;;   lsp-restart               restart this buffer's language server
 
 ;; --- minibuffer-driven commands (need an argument) --------------------------
 

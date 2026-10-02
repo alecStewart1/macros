@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,8 +31,11 @@ use crate::theme::Theme;
 mod buffers;
 mod commands;
 mod completion;
+#[cfg(test)]
+mod e2e_tests;
 mod editing_extras;
 mod evil;
+mod ex;
 mod grammars;
 mod helm;
 mod input;
@@ -45,8 +47,11 @@ mod minibuffer;
 mod modeline;
 mod overlays;
 mod panes;
+mod registers;
+mod session;
 mod terminal;
 mod undo;
+mod vim;
 
 pub use helm::HelmView;
 use helm::{HelmAction, HelmSession, HelmSource, helm_sources_from_specs, wrap_index};
@@ -55,7 +60,7 @@ use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
 use panes::{WindowLayout, layout_leaves, node_at, set_ratio_at, union_bounds};
-use terminal::keystroke_to_bytes;
+use terminal::{ProcessHandle, keystroke_to_bytes};
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
 // rather than through the Scheme keymap, then delegated to the same commands.
@@ -130,14 +135,19 @@ enum MinibufferPurpose {
     /// A yes/no confirmation gating `action`.
     Confirm(PendingAction),
     /// Quit-time save offer: `yes` saves all modified buffers then quits, `no`
-    /// quits discarding changes, `C-g` cancels the quit.
-    QuitSave,
+    /// quits discarding changes, `C-g` cancels the quit. `relaunch`: the quit
+    /// was requested by the update pill, so relaunch into the staged build
+    /// once (and only once) the quit actually goes ahead.
+    QuitSave { relaunch: bool },
     /// LSP completion: replace the word at `completion_range` with the choice.
     CompleteAtPoint,
     /// evil `/` — regex search forward.
     SearchForward,
     /// evil `?` — regex search backward.
     SearchBackward,
+    /// evil `d/pat` / `d?pat`: the search motion of a pending operator
+    /// (true = forward).
+    OperatorSearch(bool),
     /// Emacs `C-s` / `C-r` — incremental search. The query is read in the
     /// minibuffer and matched live on every keystroke (see `isearch_*`).
     Isearch,
@@ -194,6 +204,9 @@ struct Document {
     /// Per-line icon (asset name + char column to paint at), for special buffers
     /// like the file tree. Mirrors `line_faces`.
     line_icons: HashMap<usize, (usize, SharedString)>,
+    /// Gutter dot faces by line index — breakpoint signs (`set-gutter-dot`,
+    /// dap.scm). Mirrors `line_faces`.
+    gutter_dots: HashMap<usize, SharedString>,
     /// Per-line inline image: `line -> image file path`. The decoded bitmap lives
     /// in the editor-wide [`Editor::image_cache`]; this just records which lines
     /// display which image (Org inline images / LaTeX previews).
@@ -207,6 +220,16 @@ struct Document {
     diff_marks: HashMap<usize, DiffMark>,
     /// Copilot-style inline suggestion (`ghost-text-show`), if one is showing.
     ghost: Option<GhostText>,
+}
+
+/// The URI identifying `doc` for LSP. File buffers use a `file://` URI;
+/// unsaved buffers (e.g. `*scratch*`) get a stable `untitled:` URI so they can
+/// still be served (the built-in Steel LSP just uses it as a key).
+fn document_uri(doc: &Document) -> String {
+    match doc.path.as_deref() {
+        Some(path) => lsp::path_to_uri(path),
+        None => format!("untitled:{}", doc.name),
+    }
 }
 
 /// A copilot-style inline suggestion: display-only text rendered dim at point.
@@ -262,6 +285,10 @@ const LOG_BUFFER_LINES_CAP: usize = 5000;
 /// LSP entry point that can't dispatch.
 pub(super) const NO_LSP_FOR_BUFFER: &str = "No language server for this buffer";
 
+/// How long a save waits on the server's format-on-save response before
+/// writing the buffer unformatted.
+const FORMAT_ON_SAVE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// An active minibuffer prompt: a single-line input read in the echo area.
 struct Minibuffer {
     prompt: String,
@@ -294,6 +321,7 @@ struct DecorationTarget<'a> {
     buffer: &'a Buffer,
     overlays: &'a mut Overlays,
     line_icons: &'a mut HashMap<usize, (usize, SharedString)>,
+    gutter_dots: &'a mut HashMap<usize, SharedString>,
     line_images: &'a mut HashMap<usize, (PathBuf, usize)>,
 }
 
@@ -497,6 +525,10 @@ pub struct Editor {
     /// the fallback `default-directory` for fileless buffers so `publish_point`
     /// doesn't make a `current_dir` syscall on every snapshot publish.
     process_cwd: String,
+    /// Files whose async `find_file` read is in flight, by canonical path — a
+    /// second visit of the same file meanwhile is dropped instead of racing
+    /// to create a duplicate buffer.
+    pending_opens: HashSet<PathBuf>,
     /// Other open buffers (snapshots), most-recently-used last.
     inactive: Vec<Document>,
 
@@ -526,9 +558,17 @@ pub struct Editor {
     /// Languages whose buffers are LSP-formatted on save (set via the Scheme
     /// `lsp-language` config / `(set-lsp-format-on-save …)`).
     lsp_format_on_save: HashSet<String>,
-    /// True while a save is waiting on an LSP format response (so the format's
-    /// applied edits trigger the actual write, and we don't re-run hooks).
-    formatting_for_save: bool,
+    /// Saves waiting on an LSP format response, keyed by the formatted
+    /// document's URI → the token its `Format` request carries. The response
+    /// (or the timeout, or the server dying) writes THAT document — not
+    /// whichever buffer happens to be active by then.
+    formatting_for_save: HashMap<String, u64>,
+    /// Source of `formatting_for_save` tokens, so a stale timeout or a late
+    /// response can't complete a newer save of the same file.
+    format_save_seq: u64,
+    /// In-flight `$/progress` reports, `(language:token, title, text)` in
+    /// begin order; the newest is shown in the `lsp-progress` mode-line slot.
+    lsp_progress: Vec<(String, String, String)>,
     /// Candidates + replacement range for the active completion minibuffer.
     completion_items: Vec<String>,
     completion_range: Option<Range<usize>>,
@@ -552,6 +592,8 @@ pub struct Editor {
     evil_replace_pending: bool,
     /// How many chars the pending `r` overwrites (`3rx`).
     evil_replace_count: usize,
+    /// Vim grammar state: pending operator, `%c` capture, … (see vim.rs).
+    vim: vim::VimState,
     /// The count published to Scheme as `(prefix-count)` while a count-aware
     /// command is dispatched (0 otherwise).
     prefix_count: usize,
@@ -569,6 +611,13 @@ pub struct Editor {
     /// printable keystroke is passed to (vim `f`/`t`/`F`/`T` char-find and
     /// friends). Cleared by that keystroke; any non-text chord cancels.
     read_char_pending: Option<String>,
+    /// A sticky `read-key-start` capture: the Scheme callback EVERY keystroke
+    /// is passed to (as a key name) until `read-key-stop` / Escape / C-g.
+    /// query-replace's y/n/!/q dialog runs on it.
+    read_key_pending: Option<String>,
+    /// Undo state recorded by `(undo-amalgamate-begin)`; the matching end
+    /// squashes every undo node added since into one.
+    undo_amalgamate: Option<UndoBase>,
     /// True until startup config (bundled scripts + `init.scm`) has been applied.
     /// While set, plain keystrokes are swallowed so they can't self-insert before
     /// `(evil-mode)` runs — the window can be revealed by the load watchdog before
@@ -588,6 +637,8 @@ pub struct Editor {
     /// The last completed `C-s` string, so an empty `C-s` recalls it (Emacs).
     /// Lives outside [`Self::isearch`]: it must survive the search closing.
     last_isearch: Option<String>,
+    /// Search ring + command history kept for session persistence (savehist).
+    session: session::SessionRings,
     /// `C-l` (recenter-top-bottom) cycle position: 0 = middle, 1 = top, 2 = bottom.
     /// Advances on each consecutive press; resets when point has moved since.
     recenter_cycle: usize,
@@ -619,6 +670,8 @@ pub struct Editor {
     layout: WindowLayout,
     /// The selected pane's id — where editing and the cursor live.
     selected_pane: usize,
+    /// The previously selected pane, for `C-w p`.
+    last_pane: Option<usize>,
     /// Monotonic id source for new panes.
     next_pane_id: usize,
     /// Each pane's last painted screen bounds, for click-to-focus routing.
@@ -633,6 +686,10 @@ pub struct Editor {
     resizing: Option<ResizeDrag>,
     /// Live async child processes, by id (for stdin/kill).
     processes: HashMap<u64, ProcessHandle>,
+    /// Live DAP sessions, by id (for dap-send / dap-kill). The transport
+    /// (framing, adapter process/socket) lives in [`crate::dap::DapClient`];
+    /// the protocol state machine lives in Scheme (dap.scm).
+    dap_sessions: HashMap<u64, crate::dap::DapClient>,
     /// Cancel flags for in-flight HTTP streams, by id. `http-stream-cancel` flips
     /// the flag; the stream's reader thread checks it between lines and stops.
     http_streams: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -754,17 +811,11 @@ pub struct TitlebarDropdownView {
     pub selected: Option<usize>,
 }
 
-/// A message from an async [`make_process`](Editor::make_process) child: one
-/// stdout line, or the process finishing (the editor then `wait()`s for the code).
+/// A message from an async worker (HTTP stream, socket, …): one output line,
+/// or the stream closing.
 enum ProcMsg {
     Line(String),
     Exit,
-}
-
-/// A live child process kept so Scheme can send to its stdin or kill it.
-struct ProcessHandle {
-    child: Child,
-    stdin: Option<ChildStdin>,
 }
 
 /// A terminal pane's last painted geometry, for mapping a mouse position to a
@@ -785,6 +836,8 @@ enum MacroEvent {
     /// A modal command run under a count (`3dd`), replayed with that count.
     Counted(String, usize),
     Text(String),
+    /// A key token typed by `:normal` (`x`, `<Esc>`, `<CR>`, …).
+    Key(String),
 }
 
 /// Overlays / text properties on a buffer (the Emacs overlay + text-property
@@ -1098,14 +1151,24 @@ struct LspServer {
     ready: bool,
     /// Server's preferred sync kind (full, incremental, or none).
     sync_kind: lsp::SyncKind,
+    /// The process is gone (stdout closed). Kept in the map — not ready, no
+    /// open documents — until the next `maybe_start_lsp` / `lsp-restart`
+    /// replaces it with a fresh spawn.
+    exited: bool,
+    /// Whether the server wants `textDocument/didSave` (`Some(include_text)`).
+    save: Option<bool>,
+    /// `codeActionProvider.resolveProvider`: edit-less code actions are
+    /// completed via `codeAction/resolve` before applying.
+    code_action_resolve: bool,
     /// URIs we've sent `didOpen` for to this server.
     open: HashSet<String>,
     versions: HashMap<String, i32>,
     /// Pending completion request: (id, word range being completed).
     pending_completion: Option<(i64, Range<usize>)>,
     /// In-flight non-completion requests (definition, references, rename, …),
-    /// keyed by request id so the response can be routed to the right handler.
-    pending: HashMap<i64, PendingRequest>,
+    /// keyed by request id so the response can be routed to the right handler,
+    /// with the document each was issued against.
+    pending: HashMap<i64, (PendingRequest, RequestTarget)>,
     /// `semanticTokens` legend (token-type names by id) from `initialize`.
     semantic_legend: Vec<String>,
     /// Whether the server supports `prepareRename` (gates the pre-check).
@@ -1118,6 +1181,18 @@ struct LspServer {
     semantic_state: HashMap<String, (Option<String>, Vec<i64>)>,
     /// The reader task forwarding this server's messages; dropped on removal.
     _task: Task<()>,
+}
+
+/// The document an LSP request was issued against: its URI plus the buffer's
+/// edit tick at send time ([`Buffer::tick`] — a document version that, unlike
+/// the LSP one, also covers edits still waiting in the full-sync debounce).
+/// Responses that edit or decorate a buffer resolve their target through this
+/// rather than "whatever is active now", and drop themselves when the text has
+/// changed since (their positions would be stale).
+#[derive(Clone, Debug)]
+struct RequestTarget {
+    uri: String,
+    tick: u64,
 }
 
 /// What a pending LSP request was for — picked up in `on_lsp_message` to route
@@ -1142,10 +1217,14 @@ enum PendingRequest {
     SignatureHelp,
     /// Rename → apply the resulting workspace edit.
     Rename,
-    /// Formatting → apply the resulting text edits to the active buffer.
-    Format,
+    /// Formatting → apply the resulting text edits to the requesting buffer.
+    /// `save` is the `formatting_for_save` token when this is format-on-save.
+    Format { save: Option<u64> },
     /// Code actions → the `*lsp-actions*` buffer.
     CodeAction,
+    /// `codeAction/resolve` result → apply the now-complete action (or, if the
+    /// server returns nothing usable, the original one as-is).
+    ResolveCodeAction(Box<lsp::CodeAction>),
     /// `prepareCallHierarchy` done → send the incoming/outgoing-calls request
     /// (true = incoming). The prepared item is echoed back verbatim.
     CallHierarchyPrepare(bool),
@@ -1281,6 +1360,7 @@ impl Editor {
             process_cwd: std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            pending_opens: HashSet::new(),
             inactive: Vec::new(),
             lsp_commands: HashMap::new(),
             extensions: HashMap::new(),
@@ -1291,7 +1371,9 @@ impl Editor {
             xref_marker_stack: Vec::new(),
             code_actions: Vec::new(),
             lsp_format_on_save: HashSet::new(),
-            formatting_for_save: false,
+            formatting_for_save: HashMap::new(),
+            format_save_seq: 0,
+            lsp_progress: Vec::new(),
             completion_items: Vec::new(),
             completion_range: None,
             completion_popup: None,
@@ -1302,18 +1384,22 @@ impl Editor {
             evil: EvilState::Disabled,
             evil_replace_pending: false,
             evil_replace_count: 1,
+            vim: vim::VimState::default(),
             prefix_count: 0,
             count_aware: HashSet::new(),
             count_repeat: None,
             kill_append: false,
             kill_appended: false,
             read_char_pending: None,
+            read_key_pending: None,
+            undo_amalgamate: None,
             config_pending: true,
             search_query: None,
             evil_search_forward: true,
             evil_yank_linewise: false,
             isearch: None,
             last_isearch: None,
+            session: session::SessionRings::default(),
             recenter_cycle: 0,
             recenter_point: usize::MAX,
             image_cache: HashMap::new(),
@@ -1329,6 +1415,7 @@ impl Editor {
             }],
             layout: WindowLayout::Leaf(0),
             selected_pane: 0,
+            last_pane: None,
             next_pane_id: 1,
             pane_bounds: Vec::new(),
             completion_popup_hit: None,
@@ -1336,6 +1423,7 @@ impl Editor {
             resizing: None,
             processes: HashMap::new(),
             async_sockets: HashMap::new(),
+            dap_sessions: HashMap::new(),
             http_streams: HashMap::new(),
             http_servers: HashMap::new(),
             terminals: HashMap::new(),
@@ -1432,6 +1520,13 @@ impl Editor {
                 }
             }
         }));
+        // Quitting takes make-process children (own process groups, so no
+        // terminal SIGHUP reaches them) and embedded terminals down with us.
+        cx.on_app_quit(|editor, _| {
+            editor.shutdown_processes();
+            async {}
+        })
+        .detach();
         editor.parse_full();
         editor.sync_buffers();
         // Start the cursor-blink loop now, so the cursor blinks from the first
@@ -1970,15 +2065,39 @@ impl Editor {
         }
     }
 
+    /// Whether replacing bytes `[a, b)` would touch a `read-only` text property
+    /// range `[s, e)`: it may not overlap it, insert strictly inside or at its
+    /// start (`s <= a < e`), or delete the char just before it (`b == s`, the
+    /// newline that holds a protected line prefix in place). Inserting at `e`
+    /// — right after a protected prefix — is allowed. All three cases reduce
+    /// to `a < e && b >= s`.
+    fn edit_hits_read_only(&self, a: usize, b: usize) -> bool {
+        self.active
+            .overlays
+            .props
+            .iter()
+            .any(|(r, k, _)| k == "read-only" && a < r.end && b >= r.start)
+    }
+
     /// Apply a buffer edit and record its inverse for undo. Returns the byte
     /// offset just past the inserted text. Highlighting is updated
     /// **incrementally**: the edit's positions are captured before the change,
     /// then tree-sitter reuses the unchanged subtrees on reparse.
     fn edit(&mut self, range: Range<usize>, new_text: &str) -> usize {
+        // `read-only` text properties (occur-edit / wgrep's `file:line:`
+        // prefixes) refuse any edit touching them; point stays put.
+        if self.edit_hits_read_only(range.start, range.end) {
+            self.status = "Text is read-only".into();
+            return self.point();
+        }
         // A ghost suggestion never survives a buffer change — the text it was
         // computed against is gone. Eager clearing here (every mutation funnels
         // through `edit`) is what keeps the ghost free of any byte bookkeeping.
         self.active.ghost = None;
+        // Normalize once, up front, so the undo record, the highlighter's
+        // InputEdit, LSP sync, and overlay shifts all agree with what the rope
+        // actually does (it repairs bad ranges itself — see `Buffer::replace`).
+        let range = self.active.buffer.clamp_range(range);
         let (range_start, range_end) = (range.start, range.end);
         let removed = self.active.buffer.slice_to_string(range.clone());
         let removed_newlines = removed.matches('\n').count();
@@ -2043,6 +2162,11 @@ impl Editor {
         // Move any markers tracking positions in this buffer.
         self.script
             .adjust_markers(range_start, range_end, new_text.len());
+        // …and the Vim marks / jump list, then the change marks `[ ] .`.
+        self.shift_vim_positions(range_start, range_end, new_text.len());
+        self.set_auto_mark('[', range_start);
+        self.set_auto_mark(']', range_start + new_text.len().saturating_sub(1));
+        self.set_auto_mark('.', range_start);
         // Shift byte-range overlays the same way so they stay aligned until the
         // debounced re-fontify runs — otherwise hidden ranges / faces below the
         // edit point at stale bytes for a frame and visibly flicker (e.g. an Org
@@ -2169,8 +2293,15 @@ impl Editor {
         if range.is_empty() {
             return;
         }
+        // Vim `"_d`: the black hole register swallows the text.
+        let reg = self.take_kill_register();
+        if reg == Some('_') {
+            self.delete_range(range, cx);
+            return;
+        }
         let killed = self.active.buffer.slice_to_string(range.clone());
         self.set_clipboard(&killed, cx); // C-k/C-w/M-d also feed the OS clipboard
+        self.note_register_kill(registers::KillKind::Delete, reg, &killed);
         self.push_kill(killed);
         self.delete_range(range, cx);
     }
@@ -2656,7 +2787,17 @@ impl Editor {
             self.indent_region(region, step, cx);
             return;
         }
-        if electric && !self.has_extra_cursors() {
+        if electric && !self.has_extra_cursors() && self.structural_reindent_line(step, cx) {
+            return;
+        }
+        self.insert_text(&" ".repeat(step), cx);
+    }
+
+    /// Reindent point's line from the language's structure: the Lisp aligner,
+    /// or the tree-sitter indent / align queries. False when neither knows
+    /// (no grammar or indent query) — the line is left alone.
+    fn structural_reindent_line(&mut self, step: usize, cx: &mut Context<Self>) -> bool {
+        {
             // Lisp: paren-aligning reindent.
             if self
                 .active_language()
@@ -2664,7 +2805,7 @@ impl Editor {
                 .is_some_and(is_lisp_language)
             {
                 self.lisp_reindent_line(cx);
-                return;
+                return true;
             }
             // Tree-sitter structural reindent of the current line.
             let line = self.active.buffer.line_range_at(self.point());
@@ -2686,14 +2827,54 @@ impl Editor {
             // same precedence the newline path uses.
             if let Some(col) = self.tree_align(ref_byte, ref_byte, target_row) {
                 self.reindent_current_line(col, cx);
-                return;
+                return true;
             }
             if let Some(level) = self.tree_indent(ref_byte, ref_byte, target_row, Some(ref_byte)) {
                 self.reindent_current_line(level * step, cx);
-                return;
+                return true;
             }
         }
-        self.insert_text(&" ".repeat(step), cx);
+        false
+    }
+
+    /// Vim `=` over (0-based) lines `first..=last`: each non-blank line is
+    /// reindented structurally, or — with no grammar to ask — to the previous
+    /// non-blank line's indentation (`autoindent`). The cursor lands on the
+    /// first line's first non-blank.
+    pub(super) fn reindent_lines(&mut self, first: usize, last: usize, cx: &mut Context<Self>) {
+        let step = self.structural_indent_width(cx).max(1);
+        let last = last.min(self.active.buffer.line_count().saturating_sub(1));
+        self.begin_undo_group();
+        for line in first..=last {
+            let lr = self.active.buffer.line_range(line);
+            let text = self.active.buffer.slice_to_string(lr.clone());
+            if text.trim().is_empty() {
+                continue;
+            }
+            self.collapse_to(lr.start);
+            if self.structural_reindent_line(step, cx) {
+                continue;
+            }
+            let prev = (0..line).rev().find_map(|l| {
+                let t = self
+                    .active
+                    .buffer
+                    .slice_to_string(self.active.buffer.line_range(l));
+                (!t.trim().is_empty()).then(|| {
+                    t.chars()
+                        .take_while(|c| *c == ' ' || *c == '\t')
+                        .map(|c| if c == '\t' { step } else { 1 })
+                        .sum::<usize>()
+                })
+            });
+            if let Some(col) = prev {
+                self.reindent_current_line(col, cx);
+            }
+        }
+        self.end_undo_group();
+        let start = self.active.buffer.line_range(first).start;
+        self.collapse_to(self.first_non_blank(start));
+        cx.notify();
     }
 
     /// Shift every line `region` touches `step` columns right, as one undo unit,
@@ -2725,6 +2906,43 @@ impl Editor {
         cx.notify();
     }
 
+    /// Shift (0-based) lines `first..=last` one `step` right (`dir` >= 0) or
+    /// left, skipping blank lines; outdenting removes up to `step` columns of
+    /// leading whitespace (a tab counts as the whole step). No undo grouping —
+    /// callers group.
+    fn shift_line_range(&mut self, first: usize, last: usize, dir: isize, step: usize) {
+        let pad = " ".repeat(step);
+        // Bottom-up, so an earlier line's edit can't shift the offsets of the
+        // lines still to come.
+        for line in (first..=last).rev() {
+            let lr = self.active.buffer.line_range(line);
+            if lr.end <= lr.start {
+                continue; // blank line: vim leaves it alone
+            }
+            if dir >= 0 {
+                self.edit(lr.start..lr.start, &pad);
+            } else {
+                let text = self.active.buffer.slice_to_string(lr.clone());
+                let mut cols = 0;
+                let mut bytes = 0;
+                for c in text.chars() {
+                    if cols >= step {
+                        break;
+                    }
+                    match c {
+                        ' ' => cols += 1,
+                        '\t' => cols = step,
+                        _ => break,
+                    }
+                    bytes += c.len_utf8();
+                }
+                if bytes > 0 {
+                    self.edit(lr.start..lr.start + bytes, "");
+                }
+            }
+        }
+    }
+
     /// Shift the lines spanned by the region (or, with no region, the current
     /// line) one indent step right (`dir` +1) or left (`dir` -1) — vim `>>` /
     /// `<<` and visual `>` / `<`, Helix `>` / `<`. Outdenting removes up to
@@ -2751,39 +2969,8 @@ impl Editor {
             last = (first + self.prefix_count - 1)
                 .min(self.active.buffer.line_count().saturating_sub(1));
         }
-        let pad = " ".repeat(step);
         self.begin_undo_group();
-        // Bottom-up, so an earlier line's edit can't shift the offsets of the
-        // lines still to come.
-        for line in (first..=last).rev() {
-            let lr = self.active.buffer.line_range(line);
-            if lr.end <= lr.start {
-                continue; // blank line: vim leaves it alone
-            }
-            if dir >= 0 {
-                self.edit(lr.start..lr.start, &pad);
-            } else {
-                // Drop up to `step` columns of leading whitespace. A tab counts
-                // as the whole step, so it's removed outright.
-                let text = self.active.buffer.slice_to_string(lr.clone());
-                let mut cols = 0;
-                let mut bytes = 0;
-                for c in text.chars() {
-                    if cols >= step {
-                        break;
-                    }
-                    match c {
-                        ' ' => cols += 1,
-                        '\t' => cols = step,
-                        _ => break,
-                    }
-                    bytes += c.len_utf8();
-                }
-                if bytes > 0 {
-                    self.edit(lr.start..lr.start + bytes, "");
-                }
-            }
-        }
+        self.shift_line_range(first, last, dir, step);
         self.end_undo_group();
         if had_region {
             self.active.selected_range =
@@ -2826,26 +3013,27 @@ impl Editor {
         cx.notify();
     }
 
+    // The explicitly-addressed primitives below take offsets straight from
+    // Scheme, so they normalize (swap inverted ends, clamp, floor to a char
+    // boundary) rather than trust them — Emacs accepts `(delete-region 9 3)`.
     fn delete_region(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
-        let len = self.active.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        if start < end {
-            let cursor = self.edit(start..end, "");
+        let range = self.active.buffer.clamp_range(start..end);
+        if !range.is_empty() {
+            let cursor = self.edit(range, "");
             self.collapse_to(cursor);
             cx.notify();
         }
     }
 
     fn replace_region(&mut self, start: usize, end: usize, text: &str, cx: &mut Context<Self>) {
-        let len = self.active.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        let cursor = self.edit(start..end, text);
+        let range = self.active.buffer.clamp_range(start..end);
+        let cursor = self.edit(range, text);
         self.collapse_to(cursor);
         cx.notify();
     }
 
     fn insert_at(&mut self, pos: usize, text: &str, cx: &mut Context<Self>) {
-        let pos = pos.min(self.active.buffer.len());
+        let pos = self.active.buffer.snap(pos);
         let cursor = self.edit(pos..pos, text);
         self.collapse_to(cursor);
         cx.notify();
@@ -3001,6 +3189,8 @@ impl Editor {
             if lines > LOG_BUFFER_LINES_CAP {
                 let cut = doc.buffer.line_range(lines - LOG_BUFFER_LINES_CAP).start;
                 doc.buffer.replace(0..cut, "");
+                doc.reset_undo(); // unrecorded edit: old records are stale
+                doc.selected_range = doc.buffer.clamp_range(doc.selected_range.clone());
             }
         } else {
             self.inactive
@@ -3193,6 +3383,36 @@ impl Editor {
             helix_enabled: self.modal_helix,
             kbd_macro_recording: self.macro_recording.is_some(),
             prefix_count: self.prefix_count,
+            evil_state: match self.evil {
+                EvilState::Disabled => "",
+                EvilState::Normal => "normal",
+                EvilState::Insert => "insert",
+                EvilState::Visual => "visual",
+                EvilState::VisualLine => "visual-line",
+                EvilState::VisualBlock => "visual-block",
+            }
+            .to_string(),
+            search_query: self.search_query.clone().unwrap_or_default(),
+            search_forward: self.evil_search_forward,
+            marks: self.active_marks(),
+            language: self
+                .active
+                .modes
+                .active_language()
+                .unwrap_or("")
+                .to_string(),
+            tree: self
+                .active
+                .highlighter
+                .as_ref()
+                .and_then(|h| h.tree().cloned()),
+            major_mode: self
+                .active
+                .modes
+                .names()
+                .last()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
         });
     }
 
@@ -3301,6 +3521,7 @@ impl Editor {
                     buffer: &doc.buffer,
                     overlays: &mut doc.overlays,
                     line_icons: &mut doc.line_icons,
+                    gutter_dots: &mut doc.gutter_dots,
                     line_images: &mut doc.line_images,
                 }
             }
@@ -3308,6 +3529,7 @@ impl Editor {
                 buffer: &self.active.buffer,
                 overlays: &mut self.active.overlays,
                 line_icons: &mut self.active.line_icons,
+                gutter_dots: &mut self.active.gutter_dots,
                 line_images: &mut self.active.line_images,
             },
         }
@@ -3676,15 +3898,9 @@ impl Editor {
 
     // --- LSP --------------------------------------------------------------
 
-    /// The URI identifying the active buffer for LSP. File buffers use a
-    /// `file://` URI; unsaved buffers (e.g. `*scratch*`) get a stable
-    /// `untitled:` URI so they can still be served (the built-in Steel LSP just
-    /// uses it as a key).
+    /// The URI identifying the active buffer for LSP (see [`document_uri`]).
     fn active_uri(&self) -> Option<String> {
-        match self.active.path.as_deref() {
-            Some(path) => Some(lsp::path_to_uri(path)),
-            None => Some(format!("untitled:{}", self.active.name)),
-        }
+        Some(document_uri(&self.active))
     }
 
     /// The LSP language id for the active buffer: the Scheme-configured mapping
@@ -3875,6 +4091,11 @@ impl Editor {
         let word_range = self.active.buffer.word_start(point)..point;
         let sent = if let Some(server) = self.servers.get_mut(&language) {
             if server.ready && server.open.contains(&uri) {
+                // A newer request supersedes the in-flight one: its response
+                // would be dropped anyway, so let the server stop working on it.
+                if let Some((old, _)) = server.pending_completion.take() {
+                    server.client.cancel(old);
+                }
                 let id = server.client.completion(&uri, line, character);
                 server.pending_completion = Some((id, word_range));
                 true
@@ -4014,6 +4235,13 @@ impl Editor {
     /// argument calls) is dispatched to the engine thread so a slow script can't
     /// freeze the UI — its commands arrive via `apply_script_outcome`.
     fn run_script(&mut self, source: &str, cx: &mut Context<Self>) {
+        // Vim-grammar commands with string arguments (`(evil-use-register
+        // "a")`, …) apply synchronously, like builtins: the next keystroke or
+        // replayed command depends on their state.
+        if let Some(command) = vim::native_command(source) {
+            self.apply_command(command, cx);
+            return;
+        }
         if let Some(commands) = self.script.builtins_for(source) {
             // One builtin: apply directly (motions/edits manage their own undo).
             // A sequence: group it so the compound binding undoes as one unit.
@@ -4032,17 +4260,14 @@ impl Editor {
             // `(current-buffer)` sees it as of this invocation.
             self.publish_point();
             self.script.dispatch(source, false);
+            self.vim.went_async = true;
         }
     }
 
     /// Run a key-resolved command and, if recording a keyboard macro, append it
     /// (skipping the macro-control commands themselves).
     fn dispatch_recorded(&mut self, expr: &str, cx: &mut Context<Self>) {
-        if let Some(events) = self.macro_recording.as_mut()
-            && !expr.contains("kbd-macro")
-        {
-            events.push(MacroEvent::Command(expr.to_string()));
-        }
+        self.record_event(MacroEvent::Command(expr.to_string()));
         self.run_script(expr, cx);
     }
 
@@ -4061,22 +4286,21 @@ impl Editor {
             return;
         };
         // Record the count with the command, so replay re-runs `3dd`, not `dd`.
-        if let Some(events) = self.macro_recording.as_mut()
-            && !expr.contains("kbd-macro")
-        {
-            events.push(MacroEvent::Counted(expr.to_string(), n));
-        }
+        self.record_event(MacroEvent::Counted(expr.to_string(), n));
         self.run_counted(expr, n, cx);
     }
 
     /// The unrecorded body of [`Self::dispatch_counted`] (macro replay calls
     /// it directly).
     fn run_counted(&mut self, expr: &str, n: usize, cx: &mut Context<Self>) {
+        // The command name: the call's first token (`(evil-macro-play "a")`).
         let name = expr
             .trim()
             .trim_start_matches('(')
             .trim_end_matches(')')
-            .trim();
+            .split(char::is_whitespace)
+            .next()
+            .unwrap_or("");
         if self.count_aware.contains(name) {
             self.prefix_count = n;
             self.run_script(expr, cx);
@@ -4199,12 +4423,24 @@ impl Editor {
     // --- Keyboard macros --------------------------------------------------
 
     fn start_kbd_macro(&mut self, cx: &mut Context<Self>) {
+        self.vim.macro_register = None;
         self.macro_recording = Some(Vec::new());
         self.echo("Recording keyboard macro…", cx);
     }
 
     fn end_kbd_macro(&mut self, cx: &mut Context<Self>) {
         if let Some(rec) = self.macro_recording.take() {
+            // `qa … q` stores it in register a too (`qA` appends).
+            if let Some(r) = self.vim.macro_register.take() {
+                let lower = r.to_ascii_lowercase();
+                let stored = self.vim.macros.entry(lower).or_default();
+                if r.is_ascii_uppercase() {
+                    stored.extend(rec.iter().cloned());
+                } else {
+                    *stored = rec.clone();
+                }
+                self.vim.last_macro_register = Some(lower);
+            }
             self.last_macro = rec;
             self.echo("Keyboard macro defined", cx);
         }
@@ -4215,13 +4451,9 @@ impl Editor {
             self.echo("No keyboard macro defined", cx);
             return;
         }
-        for event in self.last_macro.clone() {
-            match event {
-                MacroEvent::Command(expr) => self.run_script(&expr, cx),
-                MacroEvent::Counted(expr, n) => self.run_counted(&expr, n, cx),
-                MacroEvent::Text(text) => self.insert_text(&text, cx),
-            }
-        }
+        // Replayed one command at a time, each against a fresh snapshot (see
+        // `replay_events`).
+        self.replay_events(self.last_macro.clone(), false, cx);
     }
 
     /// Mark startup config as fully applied, so plain keystrokes stop being
@@ -4274,29 +4506,6 @@ fn next_grapheme(s: &str, cursor: usize) -> usize {
         .graphemes(true)
         .next()
         .map_or(cursor, |g| cursor + g.len())
-}
-
-/// Translate Vim-style backreferences (`\1`..`\9`, `\0`) in a substitution
-/// replacement to the regex crate's `${N}` form. Other `\x` escapes pass through.
-fn translate_backrefs(replacement: &str) -> String {
-    let mut out = String::with_capacity(replacement.len());
-    let mut chars = replacement.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.peek() {
-                Some(d) if d.is_ascii_digit() => {
-                    out.push_str("${");
-                    out.push(*d);
-                    out.push('}');
-                    chars.next();
-                }
-                Some(_) | None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Compose the trailing-token indent rules with the structural result. A line
@@ -4403,6 +4612,7 @@ fn blank_document(
         special: None,
         line_faces: HashMap::new(),
         line_icons: HashMap::new(),
+        gutter_dots: HashMap::new(),
         line_images: HashMap::new(),
         overlays: Overlays::default(),
         locals: HashMap::new(),
@@ -4856,6 +5066,106 @@ impl Render for Editor {
     }
 }
 
+impl Editor {
+    /// Typed text (the IME's `replace_text_in_range`, minus the window) —
+    /// also how `:normal` replays printable keys in Insert state.
+    pub(super) fn type_text(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.titlebar_dropdown_open() {
+            self.titlebar_dropdown_input(new_text, cx);
+            return;
+        }
+        if self.helm.is_some() {
+            self.helm_input(new_text, cx);
+            return;
+        }
+        if self.minibuffer.is_some() {
+            self.mb_insert(new_text, cx);
+            return;
+        }
+        if self.evil_intercepts() {
+            return; // Normal/Visual: plain keys are commands, not text
+        }
+        if self.transient.is_some() || self.active.special.is_some() {
+            return; // modal transient / read-only special buffer: never insert
+        }
+        if !self.pending_keys.is_empty() {
+            return; // mid key-sequence; ignore stray text the platform may emit
+        }
+        // universal-argument (Emacs `C-u N` then a literal char): insert it N
+        // times. Repeat up front so a recorded keyboard macro replays the full
+        // text and electric-pair / completion see the final string.
+        let repeated;
+        let new_text = match self.uarg.pending.take() {
+            Some(n) if n > 1 => {
+                self.status = SharedString::default();
+                repeated = new_text.repeat(n as usize);
+                repeated.as_str()
+            }
+            _ => new_text,
+        };
+        // While avy hints are showing, the next printable key picks a hint: hand
+        // it to Scheme's `avy-pick` and consume it (never self-insert).
+        if !self.avy_hints.is_empty() {
+            self.avy_hints.clear();
+            cx.notify();
+            self.script.dispatch_action("avy-pick", Some(new_text));
+            return;
+        }
+        // Record self-inserted text into an in-progress keyboard macro.
+        self.record_event(MacroEvent::Text(new_text.to_string()));
+
+        let range = range_utf16
+            .as_ref()
+            .map(|r| self.active.buffer.range_from_utf16(r))
+            .or_else(|| self.active.marked_range.clone())
+            .unwrap_or_else(|| self.active.selected_range.clone());
+
+        // multiple-cursors: replicate the typed text at every cursor.
+        if self.has_extra_cursors() && range.is_empty() {
+            self.multi_insert(new_text, cx);
+            return;
+        }
+
+        // electric-pair-mode: handle a single typed delimiter specially.
+        if self.electric_pair
+            && new_text.chars().count() == 1
+            && self.electric_pair_insert(&range, new_text, cx)
+        {
+            return;
+        }
+
+        let cursor = self.edit(range, new_text);
+        self.collapse_to(cursor);
+        self.ensure_cursor_visible();
+        // A trigger character (e.g. `.`) always starts a fresh completion, even
+        // mid-word with a popup already open — otherwise typing `List.` would just
+        // refilter (and drop) the `List` popup instead of requesting members.
+        let triggers = cx
+            .global::<crate::settings::Settings>()
+            .completion_trigger_chars(self.active_language().as_deref());
+        let trigger = new_text.chars().count() == 1
+            && new_text
+                .chars()
+                .next()
+                .is_some_and(|c| self.lsp_trigger_char(c, &triggers));
+        if trigger {
+            self.completion_popup = None;
+            self.completion_auto_pending = false;
+            self.maybe_auto_complete(new_text, cx);
+        } else if self.completion_popup.is_some() {
+            self.popup_refilter(cx);
+        } else {
+            self.maybe_auto_complete(new_text, cx);
+        }
+        cx.notify();
+    }
+}
+
 impl EntityInputHandler for Editor {
     fn text_for_range(
         &mut self,
@@ -4909,96 +5219,7 @@ impl EntityInputHandler for Editor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_input(new_text, cx);
-            return;
-        }
-        if self.helm.is_some() {
-            self.helm_input(new_text, cx);
-            return;
-        }
-        if self.minibuffer.is_some() {
-            self.mb_insert(new_text, cx);
-            return;
-        }
-        if self.evil_intercepts() {
-            return; // Normal/Visual: plain keys are commands, not text
-        }
-        if self.transient.is_some() || self.active.special.is_some() {
-            return; // modal transient / read-only special buffer: never insert
-        }
-        if !self.pending_keys.is_empty() {
-            return; // mid key-sequence; ignore stray text the platform may emit
-        }
-        // universal-argument (Emacs `C-u N` then a literal char): insert it N
-        // times. Repeat up front so a recorded keyboard macro replays the full
-        // text and electric-pair / completion see the final string.
-        let repeated;
-        let new_text = match self.uarg.pending.take() {
-            Some(n) if n > 1 => {
-                self.status = SharedString::default();
-                repeated = new_text.repeat(n as usize);
-                repeated.as_str()
-            }
-            _ => new_text,
-        };
-        // While avy hints are showing, the next printable key picks a hint: hand
-        // it to Scheme's `avy-pick` and consume it (never self-insert).
-        if !self.avy_hints.is_empty() {
-            self.avy_hints.clear();
-            cx.notify();
-            self.script.dispatch_action("avy-pick", Some(new_text));
-            return;
-        }
-        // Record self-inserted text into an in-progress keyboard macro.
-        if let Some(rec) = self.macro_recording.as_mut() {
-            rec.push(MacroEvent::Text(new_text.to_string()));
-        }
-
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.active.buffer.range_from_utf16(r))
-            .or_else(|| self.active.marked_range.clone())
-            .unwrap_or_else(|| self.active.selected_range.clone());
-
-        // multiple-cursors: replicate the typed text at every cursor.
-        if self.has_extra_cursors() && range.is_empty() {
-            self.multi_insert(new_text, cx);
-            return;
-        }
-
-        // electric-pair-mode: handle a single typed delimiter specially.
-        if self.electric_pair
-            && new_text.chars().count() == 1
-            && self.electric_pair_insert(&range, new_text, cx)
-        {
-            return;
-        }
-
-        let cursor = self.edit(range, new_text);
-        self.collapse_to(cursor);
-        self.ensure_cursor_visible();
-        // A trigger character (e.g. `.`) always starts a fresh completion, even
-        // mid-word with a popup already open — otherwise typing `List.` would just
-        // refilter (and drop) the `List` popup instead of requesting members.
-        let triggers = cx
-            .global::<crate::settings::Settings>()
-            .completion_trigger_chars(self.active_language().as_deref());
-        let trigger = new_text.chars().count() == 1
-            && new_text
-                .chars()
-                .next()
-                .is_some_and(|c| self.lsp_trigger_char(c, &triggers));
-        if trigger {
-            self.completion_popup = None;
-            self.completion_auto_pending = false;
-            self.maybe_auto_complete(new_text, cx);
-        } else if self.completion_popup.is_some() {
-            self.popup_refilter(cx);
-        } else {
-            self.maybe_auto_complete(new_text, cx);
-        }
-        cx.notify();
+        self.type_text(range_utf16, new_text, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -5113,7 +5334,7 @@ mod tests {
         Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
         file_completions, is_repeatable, language_for_path, last_sexp, line_span, prefix_arg_value,
         push_capped, scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at,
-        top_level_form_at, translate_backrefs,
+        top_level_form_at,
     };
 
     #[test]
@@ -5320,14 +5541,6 @@ mod tests {
         assert_eq!(pretty_sequence("alt-g n"), "M-g n");
         assert_eq!(pretty_sequence("ctrl-c shift-p"), "C-c P");
         assert_eq!(pretty_sequence("ctrl-x"), "C-x");
-    }
-
-    #[test]
-    fn backref_translation_for_substitute() {
-        assert_eq!(translate_backrefs(r"\1-\2"), "${1}-${2}");
-        assert_eq!(translate_backrefs("plain"), "plain");
-        // Non-digit escapes pass through unchanged.
-        assert_eq!(translate_backrefs(r"a\tb"), r"a\tb");
     }
 
     #[test]
