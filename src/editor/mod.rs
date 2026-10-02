@@ -2684,7 +2684,17 @@ impl Editor {
             self.indent_region(region, step, cx);
             return;
         }
-        if electric && !self.has_extra_cursors() {
+        if electric && !self.has_extra_cursors() && self.structural_reindent_line(step, cx) {
+            return;
+        }
+        self.insert_text(&" ".repeat(step), cx);
+    }
+
+    /// Reindent point's line from the language's structure: the Lisp aligner,
+    /// or the tree-sitter indent / align queries. False when neither knows
+    /// (no grammar or indent query) — the line is left alone.
+    fn structural_reindent_line(&mut self, step: usize, cx: &mut Context<Self>) -> bool {
+        {
             // Lisp: paren-aligning reindent.
             if self
                 .active_language()
@@ -2692,7 +2702,7 @@ impl Editor {
                 .is_some_and(is_lisp_language)
             {
                 self.lisp_reindent_line(cx);
-                return;
+                return true;
             }
             // Tree-sitter structural reindent of the current line.
             let line = self.active.buffer.line_range_at(self.point());
@@ -2714,14 +2724,54 @@ impl Editor {
             // same precedence the newline path uses.
             if let Some(col) = self.tree_align(ref_byte, ref_byte, target_row) {
                 self.reindent_current_line(col, cx);
-                return;
+                return true;
             }
             if let Some(level) = self.tree_indent(ref_byte, ref_byte, target_row, Some(ref_byte)) {
                 self.reindent_current_line(level * step, cx);
-                return;
+                return true;
             }
         }
-        self.insert_text(&" ".repeat(step), cx);
+        false
+    }
+
+    /// Vim `=` over (0-based) lines `first..=last`: each non-blank line is
+    /// reindented structurally, or — with no grammar to ask — to the previous
+    /// non-blank line's indentation (`autoindent`). The cursor lands on the
+    /// first line's first non-blank.
+    pub(super) fn reindent_lines(&mut self, first: usize, last: usize, cx: &mut Context<Self>) {
+        let step = self.structural_indent_width(cx).max(1);
+        let last = last.min(self.active.buffer.line_count().saturating_sub(1));
+        self.begin_undo_group();
+        for line in first..=last {
+            let lr = self.active.buffer.line_range(line);
+            let text = self.active.buffer.slice_to_string(lr.clone());
+            if text.trim().is_empty() {
+                continue;
+            }
+            self.collapse_to(lr.start);
+            if self.structural_reindent_line(step, cx) {
+                continue;
+            }
+            let prev = (0..line).rev().find_map(|l| {
+                let t = self
+                    .active
+                    .buffer
+                    .slice_to_string(self.active.buffer.line_range(l));
+                (!t.trim().is_empty()).then(|| {
+                    t.chars()
+                        .take_while(|c| *c == ' ' || *c == '\t')
+                        .map(|c| if c == '\t' { step } else { 1 })
+                        .sum::<usize>()
+                })
+            });
+            if let Some(col) = prev {
+                self.reindent_current_line(col, cx);
+            }
+        }
+        self.end_undo_group();
+        let start = self.active.buffer.line_range(first).start;
+        self.collapse_to(self.first_non_blank(start));
+        cx.notify();
     }
 
     /// Shift every line `region` touches `step` columns right, as one undo unit,

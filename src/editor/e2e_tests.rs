@@ -365,3 +365,81 @@ fn search_jumps_visual_ex_and_tree_sitter(cx: &mut TestAppContext) {
     keys(&ed, cx, "ctrl-w p");
     assert_eq!(ed.read_with(cx, |e, _| e.selected_pane), bottom);
 }
+
+#[gpui::test]
+fn classic_commands_still_work(cx: &mut TestAppContext) {
+    let cases: &[(&str, usize, &str, &str)] = &[
+        // (text, point, keys, expected)
+        ("foo bar baz\n", 5, "c i w X escape w .", "foo X X\n"),
+        ("a b c\n", 0, "d a w .", "c\n"),
+        ("p1\np1\n\np2\n", 0, "d a p", "p2\n"),
+        ("x\ny\n", 0, "y i p shift-g p", "x\ny\nx\ny\n"),
+        ("abc\ndef\n", 1, "d v j", "aef\n"),
+        ("Hello\n", 0, "g shift-u shift-u", "HELLO\n"),
+        ("Hello\n", 0, "g u u", "hello\n"),
+        ("Hello\n", 0, "g ~ ~", "hELLO\n"),
+        ("a\nb\nc\nd\n", 0, "2 c c Z escape", "Z\nc\nd\n"),
+        ("abc def\n", 4, "shift-d", "abc \n"),
+        ("abc def\n", 4, "shift-c Z escape", "abc Z\n"),
+        ("abc\n", 0, "s Z escape", "Zbc\n"),
+        ("abc\n", 2, "x x", "a\n"),
+        ("one two\n", 0, "y w shift-p", "one one two\n"),
+        ("a\nb\nc\nd\n", 0, "3 shift-j", "a b c\nd\n"),
+        ("x1\nx2\nx3\n", 0, "d 2 j", ""),
+        ("x1\nx2\nx3\n", 3, "d k", "x3\n"),
+        ("  a\nb\n", 3, "= j", "  a\n  b\n"),
+        ("a b\n", 0, "> > .", "        a b\n"),
+        ("one two three\n", 0, "d t h", "hree\n"),
+        ("one two three\n", 0, "d e .", " three\n"),
+        ("one two three\n", 8, "d b", "one three\n"),
+        ("one two three\n", 12, "d 0", "e\n"),
+        ("    abc\n", 6, "d ^", "    c\n"),
+        ("(a (b) c)\n", 4, "d i (", "(a () c)\n"),
+        ("(a (b) c)\n", 4, "c a ( Z escape", "(a Z c)\n"),
+        ("f(x, y)\n", 0, "d %", "\n"),
+    ];
+    for (text_in, pt, seq, want) in cases {
+        let ed = setup(cx, text_in);
+        ed.update(cx, |e, _| e.collapse_to(*pt));
+        keys(&ed, cx, seq);
+        assert_eq!(&text(&ed, cx), want, "{seq:?} on {text_in:?}");
+    }
+}
+
+#[gpui::test]
+fn marks_search_and_ex_extras(cx: &mut TestAppContext) {
+    // Exact mark jump and a marked range in ex.
+    let ed = setup(cx, "l1\nl2 xy\nl3\nl4\nl5\n");
+    keys(&ed, cx, "j l l l m a j j m b g g ` a");
+    assert_eq!(point(&ed, cx), 6);
+    ex(&ed, cx, "'a,'bd");
+    assert_eq!(text(&ed, cx), "l1\nl5\n");
+    // dn after a search; @: repeats the last ex command.
+    let ed = setup(cx, "a x b x c x\n");
+    keys(&ed, cx, "/");
+    minibuffer(&ed, cx, "x");
+    keys(&ed, cx, "0 d n");
+    assert_eq!(text(&ed, cx), "x b x c x\n");
+    let ed = setup(cx, "a\na\na\n");
+    ex(&ed, cx, "s/a/b/");
+    keys(&ed, cx, "j @ :");
+    assert_eq!(text(&ed, cx), "b\nb\na\n");
+    // :s with groups and &.
+    let ed = setup(cx, "key=val\n");
+    ex(&ed, cx, r"s/(\w+)=(\w+)/\2=\1 [&]/");
+    assert_eq!(text(&ed, cx), "val=key [key=val]\n");
+    // :g!/pat/d and :v.
+    let ed = setup(cx, "keep 1\ndrop\nkeep 2\n");
+    ex(&ed, cx, "v/keep/d");
+    assert_eq!(text(&ed, cx), "keep 1\nkeep 2\n");
+    // Undo of a :g is one step.
+    keys(&ed, cx, "u");
+    assert_eq!(text(&ed, cx), "keep 1\ndrop\nkeep 2\n");
+    // :{n} goes to a line; :$ the last; jump list records it.
+    ex(&ed, cx, "2");
+    assert_eq!(point(&ed, cx), 7);
+    // Visual block delete still works.
+    let ed = setup(cx, "abc\ndef\n");
+    keys(&ed, cx, "ctrl-v j l d");
+    assert_eq!(text(&ed, cx), "c\nf\n");
+}

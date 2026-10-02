@@ -835,6 +835,7 @@ impl Editor {
             }
             EvilReselectVisual => self.evil_reselect_visual(cx),
             EvilEx(line) => self.run_ex_command(&line, cx),
+            ReindentLines(first, last) => self.reindent_lines(first, last, cx),
             EvilExGotoLine(n) => self.evil_ex_goto_line(&n, cx),
             EvilJumpBackward => self.evil_jump(false, cx),
             EvilJumpForward => self.evil_jump(true, cx),

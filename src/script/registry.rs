@@ -571,6 +571,13 @@ pub(crate) fn build_engine(
     );
     register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
     register_unary(&mut reg, queue, "evil-ex", EditorCommand::EvilEx);
+    // `(reindent-lines first last)` — Vim `=` over 0-based lines.
+    register_binary(
+        &mut reg,
+        queue,
+        "reindent-lines",
+        EditorCommand::ReindentLines,
+    );
     register_unary(
         &mut reg,
         queue,

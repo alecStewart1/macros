@@ -464,6 +464,8 @@ pub enum EditorCommand {
     /// `r x` resolved: overwrite `(prefix-count)` chars with x (what a macro or
     /// `.` replays for `r`).
     EvilReplaceWith(String),
+    /// Vim `=`: reindent (0-based) lines first..=last.
+    ReindentLines(usize, usize),
     /// Run an ex command line (`(evil-ex "%s/a/b/g")`; `&` / `g&` use it).
     EvilEx(String),
     /// Move to the start of (1-based) line N — a `:normal` replay step.

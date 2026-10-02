@@ -1032,23 +1032,10 @@
           (evil-apply-operator op kind rb re)))
     (when (not (equal? op "change")) (evil-normal-state))))
 
-;; `=` — re-indent lines. With no language indenter wired into Scheme, this
-;; normalizes each line's indentation to its first non-blank line's above's
-;; (copying the previous line's indent), the `autoindent` behavior.
+;; `=` — re-indent lines: structurally (tree-sitter indent queries, the Lisp
+;; aligner) where the language has them, else to the previous line's indent.
 (define (evil-reindent-lines s e)
-  (let* ((first (line-of-pos s))
-         (last (line-of-pos (max s (- e 1))))
-         (indent-of (lambda (pos)
-                      (buffer-substring (line-start-pos pos) (evil-first-nonblank-pos pos))))
-         (base (if (> first 0) (indent-of (pos-at-char-column (- first 1) 0)) "")))
-    (let loop ((ln last))
-      (when (>= ln first)
-        (let* ((ls (pos-at-char-column ln 0)) (fnb (evil-first-nonblank-pos ls)))
-          (when (and (< fnb (line-end-pos ls))
-                     (not (equal? (buffer-substring ls fnb) base)))
-            (replace-region ls fnb base)))
-        (loop (- ln 1))))
-    (goto-char (evil-first-nonblank-pos s))))
+  (reindent-lines (line-of-pos s) (line-of-pos (max s (- e 1)))))
 
 
 ;; --- the operator-pending keymap -------------------------------------------------
