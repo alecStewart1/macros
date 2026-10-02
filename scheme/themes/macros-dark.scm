@@ -118,3 +118,10 @@
 (set-face "dap-inline"             "#8a8a72")  ; inline locals after the stopped line
 (set-face "dap-heading"            "#87c3ff")  ; panel section headings
 (set-face "dap-dim"                "#707070")  ; panel de-emphasis
+
+;; occur.scm — *occur* / *grep* result buffers (header, dimmed file:line
+;; prefixes, bold match highlight; bold re-declared like the wavy above).
+(set-face "occur-header" "#87c3ff")
+(set-face "occur-prefix" "#6d6d6d")
+(set-face "occur-match" "#ebc88d")
+(set-face-bold "occur-match" #t)

@@ -601,6 +601,13 @@ pub struct Editor {
     /// printable keystroke is passed to (vim `f`/`t`/`F`/`T` char-find and
     /// friends). Cleared by that keystroke; any non-text chord cancels.
     read_char_pending: Option<String>,
+    /// A sticky `read-key-start` capture: the Scheme callback EVERY keystroke
+    /// is passed to (as a key name) until `read-key-stop` / Escape / C-g.
+    /// query-replace's y/n/!/q dialog runs on it.
+    read_key_pending: Option<String>,
+    /// Undo state recorded by `(undo-amalgamate-begin)`; the matching end
+    /// squashes every undo node added since into one.
+    undo_amalgamate: Option<UndoBase>,
     /// True until startup config (bundled scripts + `init.scm`) has been applied.
     /// While set, plain keystrokes are swallowed so they can't self-insert before
     /// `(evil-mode)` runs — the window can be revealed by the load watchdog before
@@ -1369,6 +1376,8 @@ impl Editor {
             kill_append: false,
             kill_appended: false,
             read_char_pending: None,
+            read_key_pending: None,
+            undo_amalgamate: None,
             config_pending: true,
             search_query: None,
             evil_search_forward: true,
@@ -2040,11 +2049,31 @@ impl Editor {
         }
     }
 
+    /// Whether replacing bytes `[a, b)` would touch a `read-only` text property
+    /// range `[s, e)`: it may not overlap it, insert strictly inside or at its
+    /// start (`s <= a < e`), or delete the char just before it (`b == s`, the
+    /// newline that holds a protected line prefix in place). Inserting at `e`
+    /// — right after a protected prefix — is allowed. All three cases reduce
+    /// to `a < e && b >= s`.
+    fn edit_hits_read_only(&self, a: usize, b: usize) -> bool {
+        self.active
+            .overlays
+            .props
+            .iter()
+            .any(|(r, k, _)| k == "read-only" && a < r.end && b >= r.start)
+    }
+
     /// Apply a buffer edit and record its inverse for undo. Returns the byte
     /// offset just past the inserted text. Highlighting is updated
     /// **incrementally**: the edit's positions are captured before the change,
     /// then tree-sitter reuses the unchanged subtrees on reparse.
     fn edit(&mut self, range: Range<usize>, new_text: &str) -> usize {
+        // `read-only` text properties (occur-edit / wgrep's `file:line:`
+        // prefixes) refuse any edit touching them; point stays put.
+        if self.edit_hits_read_only(range.start, range.end) {
+            self.status = "Text is read-only".into();
+            return self.point();
+        }
         // A ghost suggestion never survives a buffer change — the text it was
         // computed against is gone. Eager clearing here (every mutation funnels
         // through `edit`) is what keeps the ghost free of any byte bookkeeping.

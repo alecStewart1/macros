@@ -442,6 +442,20 @@ pub enum EditorCommand {
         prompt: String,
         callback: String,
     },
+    /// Arm a STICKY key capture (`read-key-start`): every keystroke — printable
+    /// keys as their character, everything else (RET, DEL, Escape, chords) as
+    /// its chord name (`"enter"`, `"backspace"`, `"ctrl-g"`, …) — is passed to
+    /// the Scheme `callback` until `ReadKeyStop`. Unlike `ReadChar` it stays
+    /// armed across keys, so a multi-key Scheme dialog (query-replace's
+    /// y/n/!/q loop) can't lose a fast keystroke to the normal keymap between
+    /// callbacks. Escape / C-g are delivered and ALSO disarm, so a Scheme error
+    /// can never strand the capture. Re-arming just updates the prompt.
+    ReadKeyStart {
+        prompt: String,
+        callback: String,
+    },
+    /// Disarm the `ReadKeyStart` capture.
+    ReadKeyStop,
     /// Extend the selection to byte `pos` — the extend-flavored `goto-char`,
     /// for visual-mode motion targets computed in Scheme.
     SelectTo(usize),
@@ -920,6 +934,18 @@ pub enum EditorCommand {
     },
     /// Close the current undo group so the next edit starts a new one.
     UndoBoundary,
+    /// Remember the undo state (Emacs `prepare-change-group`); a later
+    /// `UndoAmalgamateEnd` folds every undo node added since into one, so a
+    /// multi-command operation (query-replace across many keystrokes) undoes
+    /// as a single step.
+    UndoAmalgamateBegin,
+    /// Fold the undo nodes recorded since `UndoAmalgamateBegin` into one
+    /// (Emacs `undo-amalgamate-change-group`). No-op without a begin.
+    UndoAmalgamateEnd,
+    /// Toggle the active buffer between a read-only special buffer driven by
+    /// `mode`'s keymap and ordinary editable text (`""`) — occur-edit / wgrep
+    /// flip a result buffer editable in place and back.
+    SetSpecialMode(String),
     /// Set a buffer-local variable on the active buffer.
     BufferLocalSet {
         key: String,

@@ -1129,6 +1129,28 @@ pub(crate) fn build_engine(
         "undo-boundary",
         EditorCommand::UndoBoundary,
     );
+    // `(undo-amalgamate-begin)` … `(undo-amalgamate-end)` — fold every edit
+    // made between them, across any number of commands, into ONE undo step.
+    register_nullary(
+        &mut reg,
+        queue,
+        "undo-amalgamate-begin",
+        EditorCommand::UndoAmalgamateBegin,
+    );
+    register_nullary(
+        &mut reg,
+        queue,
+        "undo-amalgamate-end",
+        EditorCommand::UndoAmalgamateEnd,
+    );
+    // `(set-special-mode "occur-mode")` makes the active buffer a read-only
+    // special buffer on that keymap; `(set-special-mode "")` makes it editable.
+    register_unary(
+        &mut reg,
+        queue,
+        "set-special-mode",
+        EditorCommand::SetSpecialMode,
+    );
     register_unary(
         &mut reg,
         queue,
@@ -1213,6 +1235,20 @@ pub(crate) fn build_engine(
             callback: callback.0,
         },
     );
+    // `(read-key-start "prompt" 'callback)` — a STICKY capture: every key is
+    // passed to `(callback "<key>")` (printable keys as the character, others
+    // as their chord name: "enter", "backspace", "escape", "ctrl-g", …) until
+    // `(read-key-stop)`. Escape / C-g also disarm. Backs query-replace.
+    register_binary(
+        &mut reg,
+        queue,
+        "read-key-start",
+        |prompt, callback: Callback| EditorCommand::ReadKeyStart {
+            prompt,
+            callback: callback.0,
+        },
+    );
+    register_nullary(&mut reg, queue, "read-key-stop", EditorCommand::ReadKeyStop);
     // `(select-to pos)` — extend the selection to byte `pos` (goto-char
     // collapses; this is its extend-flavored twin for visual-mode motions).
     register_unary(&mut reg, queue, "select-to", |n: isize| {
@@ -2953,6 +2989,63 @@ pub(crate) fn build_engine(
         },
     );
     {
+        // `(buffer-search-all regex start end)` → every match of `regex` in the
+        // active buffer whose bytes lie within `[start, end)`, as a list of
+        // `(mstart mend "match" "group1" …)` records (BYTE offsets; an unmatched
+        // group is ""). `^`/`$` are line anchors (multi-line), evaluated against
+        // the real line boundaries even when `start`/`end` fall mid-line. An
+        // invalid regex returns its error message as a string instead. Reads
+        // the published snapshot rope directly — no whole-buffer string crosses
+        // into Scheme (query-replace / occur on big files).
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "buffer-search-all",
+            move |pattern: String, start: usize, end: usize| -> SteelVal {
+                let re = match regex::RegexBuilder::new(&pattern).multi_line(true).build() {
+                    Ok(re) => re,
+                    Err(err) => return SteelVal::StringV(err.to_string().into()),
+                };
+                let rope = shared.load().text.clone();
+                buffer_search_all(&rope, &re, start, end)
+            },
+        );
+    }
+    // `(regexp-search-lines regex lines)` → for each string in `lines`, the
+    // list of its non-empty matches as `(start end)` BYTE offsets. One call and
+    // one regex compile for a whole result buffer (occur / grep highlighting);
+    // an invalid regex yields `()` for every line.
+    reg.register_fn(
+        "regexp-search-lines",
+        |pattern: String, lines: SteelVal| -> SteelVal {
+            let lines = steel_string_list(&lines);
+            let re = regex::RegexBuilder::new(&pattern)
+                .multi_line(true)
+                .build()
+                .ok();
+            let per_line: Vec<SteelVal> = lines
+                .iter()
+                .map(|line| {
+                    let spans: Vec<SteelVal> = re
+                        .iter()
+                        .flat_map(|re| re.find_iter(line))
+                        .filter(|m| m.end() > m.start())
+                        .map(|m| {
+                            SteelVal::ListV(
+                                vec![
+                                    SteelVal::IntV(m.start() as isize),
+                                    SteelVal::IntV(m.end() as isize),
+                                ]
+                                .into(),
+                            )
+                        })
+                        .collect();
+                    SteelVal::ListV(spans.into())
+                })
+                .collect();
+            SteelVal::ListV(per_line.into())
+        },
+    );
+    {
         // `(re-search-forward pattern)` → `(start end)` of the next match at/after
         // point, or `()` if none. Scheme drives point/edits from the result.
         let shared = snapshot.clone();
@@ -3141,6 +3234,42 @@ pub(crate) fn register_snapshot_read<T: IntoSteelVal + 'static>(
 /// to its length. Slicing a `Rope` panics on a non-boundary index, so the
 /// text-slicing bridges route caller-supplied offsets through this first — the
 /// boundary safety the old `String`-slicing bridges did by hand.
+/// Matches of `re` inside bytes `[start, end)` of `rope` — the worker behind
+/// `buffer-search-all`. Searches the enclosing whole lines so `^`/`$`/`\b`
+/// see real context, then keeps only matches fully inside the window.
+pub(crate) fn buffer_search_all(rope: &Rope, re: &Regex, start: usize, end: usize) -> SteelVal {
+    let (s, e) = (snap_byte(rope, start), snap_byte(rope, end));
+    if s > e {
+        return SteelVal::ListV(Vec::<SteelVal>::new().into());
+    }
+    let from = rope.line_to_byte(rope.byte_to_line(s));
+    let to = {
+        let line = rope.byte_to_line(e);
+        let line_start = rope.line_to_byte(line);
+        let line_str = rope.line(line).to_string();
+        line_start + line_str.find('\n').unwrap_or(line_str.len())
+    }
+    .max(e);
+    let text = rope.byte_slice(from..to).to_string();
+    let out: Vec<SteelVal> = re
+        .captures_iter(&text)
+        .filter_map(|caps| {
+            let m = caps.get(0)?;
+            let (ms, me) = (from + m.start(), from + m.end());
+            if ms < s || me > e {
+                return None;
+            }
+            let mut rec = vec![SteelVal::IntV(ms as isize), SteelVal::IntV(me as isize)];
+            rec.extend(
+                caps.iter()
+                    .map(|g| SteelVal::StringV(g.map_or("", |g| g.as_str()).into())),
+            );
+            Some(SteelVal::ListV(rec.into()))
+        })
+        .collect();
+    SteelVal::ListV(out.into())
+}
+
 pub(crate) fn snap_byte(rope: &Rope, byte: usize) -> usize {
     let byte = byte.min(rope.len_bytes());
     rope.char_to_byte(rope.byte_to_char(byte))

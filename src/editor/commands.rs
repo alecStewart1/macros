@@ -276,6 +276,12 @@ impl Editor {
             ReplaceRegion { start, end, text } => self.replace_region(start, end, &text, cx),
             InsertAt { pos, text } => self.insert_at(pos, &text, cx),
             UndoBoundary => self.undo_boundary(),
+            UndoAmalgamateBegin => self.undo_amalgamate = Some(self.undo_base()),
+            UndoAmalgamateEnd => {
+                if let Some(base) = self.undo_amalgamate.take() {
+                    self.squash_undo_since(&base);
+                }
+            }
             other => return Err(other),
         }
         Ok(())
@@ -533,6 +539,19 @@ impl Editor {
                 // `fundamental`'s hooks is a no-op when nothing changed.
                 self.active.hooks_ran = false;
                 self.run_mode_hooks_once(cx);
+                cx.notify();
+            }
+            SetSpecialMode(mode) => {
+                if mode.is_empty() {
+                    self.active.special = None;
+                } else {
+                    let mut modes = ModeStack::default();
+                    modes.push(Mode::new("fundamental"));
+                    modes.push(Mode::new(&mode));
+                    self.active.modes = modes;
+                    self.active.special = Some(mode);
+                    self.active.modified = false;
+                }
                 cx.notify();
             }
             NextBuffer => self.next_buffer(cx),
@@ -817,6 +836,15 @@ impl Editor {
                 }
                 self.read_char_pending = Some(callback);
                 self.status = prompt.into();
+                cx.notify();
+            }
+            ReadKeyStart { prompt, callback } => {
+                self.read_key_pending = Some(callback);
+                self.status = prompt.into();
+                cx.notify();
+            }
+            ReadKeyStop => {
+                self.read_key_pending = None;
                 cx.notify();
             }
             SetSearchQuery { query, forward } => {

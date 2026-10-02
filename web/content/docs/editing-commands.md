@@ -48,17 +48,44 @@ Type to extend the match; <kbd>C-s</kbd> / <kbd>C-r</kbd> again to jump to the n
 
 ## Replace
 
-`replace-string` performs a literal, whole-buffer replacement:
+| Key | Command |
+| --- | --- |
+| <kbd>M-%</kbd> | `query-replace` — ask at each match of a literal string |
+| <kbd>C-M-%</kbd> | `query-replace-regexp` — same, for a regexp |
+| <kbd>M-x</kbd> `replace-string` / `replace-regexp` | replace every match without asking |
+| <kbd>C-c p r</kbd> / <kbd>C-c p %</kbd> | `projectile-replace` / `projectile-replace-regexp` — across the project |
 
-```
-M-%   →  replace-string
-```
+All of them run from point to the end of the buffer, or inside the active region (an evil Visual selection counts). An empty search string reuses the previous pair. An all-lower-case search matches any case, and a lower-case replacement then follows the match's case (`FOO` → `BAR`, `Foo` → `Bar`). In the regexp versions `\1`…`\9` insert capture groups, `\&` the whole match, `\n` / `\t` a newline / tab.
 
-It prompts for the search text and the replacement and runs over the buffer; the edits form one undo group.
+At each match of a query session:
+
+| Key | Action |
+| --- | --- |
+| <kbd>y</kbd> / <kbd>SPC</kbd> | replace and go on |
+| <kbd>n</kbd> / <kbd>DEL</kbd> | skip |
+| <kbd>!</kbd> | replace all remaining |
+| <kbd>.</kbd> | replace this one and stop |
+| <kbd>,</kbd> | replace, but stay to look at the result |
+| <kbd>u</kbd> / <kbd>U</kbd> | undo the last / every replacement |
+| <kbd>^</kbd> | back to the previous match |
+| <kbd>E</kbd> | edit the replacement string |
+| <kbd>q</kbd> / <kbd>RET</kbd> | stop (any other key stops too) |
+| <kbd>?</kbd> | help |
+
+The whole session is a single undo step. The keys work the same under evil and helix (<kbd>M-%</kbd> falls through the modal keymaps).
+
+The project versions find the files with ripgrep (gitignore-aware), then run a query session through each file in turn: <kbd>!</kbd> finishes the current file, <kbd>Y</kbd> replaces everything in all remaining files, <kbd>N</kbd> skips to the next file. At the end you're asked whether to save the files that changed. With evil, bind them on your leader, e.g. `(evil-leader-set "n R" 'projectile-replace)`.
 
 ## Occur
 
-<kbd>C-c o</kbd> (`occur`) prompts for a pattern and opens an `*occur*` buffer listing every matching line. Move with <kbd>n</kbd> / <kbd>p</kbd>, press <kbd>Enter</kbd> to jump to a match in the source, <kbd>q</kbd> to close.
+<kbd>C-c o</kbd> (`occur`) prompts for a regexp (an all-lower-case one ignores case) and opens an `*occur*` window listing every matching line with its line number, matches highlighted. <kbd>n</kbd> / <kbd>p</kbd> move between hits; <kbd>Enter</kbd>, <kbd>o</kbd> or a click jumps to the match in the source; <kbd>q</kbd> closes.
+
+### Editing results (occur-edit / wgrep)
+
+In `*occur*` and in the project grep buffer (<kbd>C-c p G</kbd>), press <kbd>e</kbd> or <kbd>C-c C-p</kbd> (<kbd>i</kbd> under evil/helix) to make the results editable. Only the text after each `file:line:` prefix can change — the prefixes are read-only. Then:
+
+- <kbd>C-c C-c</kbd> applies every changed line. Sources open in a buffer are edited in that buffer and left modified for you to review and save; files that aren't open are patched directly on disk. A line that changed since the search is skipped and reported.
+- <kbd>C-c C-k</kbd> throws the edits away.
 
 ## Comment toggling
 
