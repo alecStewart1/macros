@@ -928,6 +928,7 @@ impl Editor {
             }
             SendProcess { id, text } => self.send_to_process(id, &text, cx),
             KillProcess { id } => self.kill_process(id),
+            SetProcessBuffer { id, name } => self.set_process_buffer(id, name),
             HttpStream(args) => self.http_stream(*args, cx),
             HttpStreamCancel { id } => self.http_stream_cancel(id),
             HttpRequest(args) => self.http_request(*args, cx),

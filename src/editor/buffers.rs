@@ -872,8 +872,10 @@ impl Editor {
     }
 
     /// Shut down and forget any embedded terminal backing buffer `name` (its
-    /// `Drop` closes the PTY and ends the event-loop thread).
+    /// `Drop` closes the PTY and ends the event-loop thread), and terminate any
+    /// `make-process` child bound to it via `set-process-buffer`.
     pub(super) fn drop_terminal_for_buffer(&mut self, name: &str) {
+        self.kill_processes_for_buffer(name);
         if let Some(id) = self
             .terminals
             .values()

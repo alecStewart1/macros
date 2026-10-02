@@ -252,6 +252,7 @@ fn install_in(spec: InstallSpec, root: &Path) -> Result<String, String> {
 /// by rev would then silently reuse). It also lets two concurrent installs of the
 /// same slug clone independently; the loser's temp dir is discarded.
 fn fetch(repo: &str, rev: &str, dest: &Path) -> Result<(), String> {
+    validate_git_args(repo, rev)?;
     if dest.join(".git").exists() {
         return Ok(());
     }
@@ -271,19 +272,19 @@ fn fetch(repo: &str, rev: &str, dest: &Path) -> Result<(), String> {
     // server (a shallow `--branch` clone can't take an arbitrary SHA).
     run(
         Command::new("git")
-            .arg("clone")
+            .args(["clone", "--quiet", "--"])
             .arg(repo)
-            .arg(&tmp)
-            .arg("--quiet"),
+            .arg(&tmp),
         "git clone",
     )
     .map_err(clean)?;
     run(
         Command::new("git")
             .current_dir(&tmp)
-            .arg("checkout")
-            .arg("--quiet")
-            .arg(rev),
+            .args(["checkout", "--quiet"])
+            .arg(rev)
+            // Trailing `--`: `rev` is a revision, never a pathspec.
+            .arg("--"),
         "git checkout",
     )
     .map_err(clean)?;
@@ -302,6 +303,19 @@ fn fetch(repo: &str, rev: &str, dest: &Path) -> Result<(), String> {
         }
         Err(e) => Err(clean(format!("publish checkout: {e}"))),
     }
+}
+
+/// Refuse a `repo`/`rev` that git would parse as an option (`--upload-pack=…`,
+/// `-c…`): they come from user/package grammar specs. Paired with the `--`
+/// separators in [`fetch`].
+fn validate_git_args(repo: &str, rev: &str) -> Result<(), String> {
+    if repo.is_empty() || repo.starts_with('-') {
+        return Err(format!("invalid grammar repo {repo:?}"));
+    }
+    if rev.is_empty() || rev.starts_with('-') {
+        return Err(format!("invalid grammar rev {rev:?}"));
+    }
+    Ok(())
 }
 
 /// Compile the grammar's C (and optional scanner) in `src_dir` into the shared
@@ -645,6 +659,20 @@ fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_option_like_repo_and_rev() {
+        use super::validate_git_args;
+        assert!(validate_git_args("https://github.com/x/tree-sitter-y", "v1.0").is_ok());
+        assert!(validate_git_args("--upload-pack=touch /tmp/pwned", "main").is_err());
+        assert!(validate_git_args("https://github.com/x/y", "--orphan=x").is_err());
+        assert!(validate_git_args("-c", "main").is_err());
+        assert!(validate_git_args("", "main").is_err());
+        // fetch refuses before touching git or the filesystem.
+        let dest = std::env::temp_dir().join("macros-grammar-never-created");
+        assert!(super::fetch("--help", "main", &dest).is_err());
+        assert!(!dest.exists());
+    }
+
     use super::*;
 
     /// Registering a real `LanguageFn` makes it resolvable everywhere the editor

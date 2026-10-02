@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,7 +54,7 @@ use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
 use panes::{WindowLayout, layout_leaves, node_at, set_ratio_at, union_bounds};
-use terminal::keystroke_to_bytes;
+use terminal::{ProcessHandle, keystroke_to_bytes};
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
 // rather than through the Scheme keymap, then delegated to the same commands.
@@ -776,17 +775,11 @@ pub struct TitlebarDropdownView {
     pub selected: Option<usize>,
 }
 
-/// A message from an async [`make_process`](Editor::make_process) child: one
-/// stdout line, or the process finishing (the editor then `wait()`s for the code).
+/// A message from an async worker (HTTP stream, socket, …): one output line,
+/// or the stream closing.
 enum ProcMsg {
     Line(String),
     Exit,
-}
-
-/// A live child process kept so Scheme can send to its stdin or kill it.
-struct ProcessHandle {
-    child: Child,
-    stdin: Option<ChildStdin>,
 }
 
 /// A terminal pane's last painted geometry, for mapping a mouse position to a
@@ -1482,6 +1475,13 @@ impl Editor {
                 }
             }
         }));
+        // Quitting takes make-process children (own process groups, so no
+        // terminal SIGHUP reaches them) and embedded terminals down with us.
+        cx.on_app_quit(|editor, _| {
+            editor.shutdown_processes();
+            async {}
+        })
+        .detach();
         editor.parse_full();
         editor.sync_buffers();
         // Start the cursor-blink loop now, so the cursor blinks from the first

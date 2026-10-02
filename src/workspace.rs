@@ -193,8 +193,15 @@ impl Workspace {
                     ws.log_message("Update downloaded — restart Macros to finish.", cx);
                     ws.set_update_phase(UpdatePhase::Ready, cx);
                 }
-                // Not reachable on macOS (always stages), but keep the pill sane.
-                Ok(_) => ws.set_update_phase(UpdatePhase::Ready, cx),
+                // Unsigned (dev) build: no team to verify an update against,
+                // so the download page was opened instead of auto-installing.
+                Ok(crate::update::InstallOutcome::OpenedDownloadPage) => {
+                    ws.log_message(
+                        "This build is unsigned — opened the download page instead.",
+                        cx,
+                    );
+                    ws.set_update_phase(UpdatePhase::Available, cx);
+                }
                 Err(err) => {
                     ws.log_message(format!("Update download failed: {err}"), cx);
                     ws.set_update_phase(UpdatePhase::Available, cx);

@@ -395,12 +395,13 @@ pub(crate) fn tree_mode_str(mode: gix::objs::tree::EntryMode) -> &'static str {
 /// git's octal mode string for an index entry.
 pub(crate) fn index_mode_str(mode: gix::index::entry::Mode) -> &'static str {
     use gix::index::entry::Mode;
-    if mode.contains(Mode::SYMLINK) {
+    // COMMIT (0o160000) shares SYMLINK's bits, so test it first.
+    if mode.is_submodule() {
+        "160000"
+    } else if mode.contains(Mode::SYMLINK) {
         "120000"
     } else if mode.contains(Mode::FILE_EXECUTABLE) {
         "100755"
-    } else if mode.contains(Mode::COMMIT) {
-        "160000"
     } else {
         "100644"
     }
@@ -464,10 +465,35 @@ pub(crate) fn diff_one_file(
 /// A path's blob id + git mode on one side of a diff (a tree or the index).
 pub(crate) type GixSide = (gix::ObjectId, &'static str);
 
-/// Flatten a tree to `path → (blob id, mode)` for every file it contains.
-/// `.files()` records directories (trees) and submodules (commits) too; we keep
-/// only blobs/symlinks, else a "deleted directory" would diff the raw tree
-/// object — bytes that garble the buffer and break magit's parser.
+/// Git mode of a submodule (gitlink) entry. Its id names a commit in the
+/// *submodule's* repo, so it must never be looked up as a blob here.
+pub(crate) const GITLINK_MODE: &str = "160000";
+
+/// The bytes git diffs for a gitlink: `Subproject commit <hex>` — exactly what
+/// `git diff` shows for a moved submodule, so magit parses it as a normal hunk.
+pub(crate) fn gitlink_text(id: &gix::oid) -> Vec<u8> {
+    format!("Subproject commit {}\n", id.to_hex()).into_bytes()
+}
+
+/// Content of one side of a diff: the blob for files/symlinks, the synthetic
+/// `Subproject commit` line for gitlinks.
+fn side_content(
+    repo: &gix::Repository,
+    id: gix::ObjectId,
+    mode: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if mode == GITLINK_MODE {
+        Ok(gitlink_text(&id))
+    } else {
+        Ok(repo.find_object(id)?.data.clone())
+    }
+}
+
+/// Flatten a tree to `path → (id, mode)` for every file it contains.
+/// `.files()` records directories (trees) too; we keep only blobs/symlinks and
+/// submodules (commits), else a "deleted directory" would diff the raw tree
+/// object — bytes that garble the buffer and break magit's parser. Submodule
+/// ids are rendered via [`gitlink_text`], never read as objects.
 pub(crate) fn tree_side_map(
     tree: &gix::Tree<'_>,
 ) -> Result<std::collections::BTreeMap<Vec<u8>, GixSide>, Box<dyn std::error::Error>> {
@@ -476,7 +502,7 @@ pub(crate) fn tree_side_map(
         .breadthfirst
         .files()?
         .into_iter()
-        .filter(|e| e.mode.is_blob_or_symlink())
+        .filter(|e| e.mode.is_blob_or_symlink() || e.mode.is_commit())
         .map(|e| (Vec::from(e.filepath), (e.oid, tree_mode_str(e.mode))))
         .collect())
 }
@@ -488,30 +514,36 @@ pub(crate) fn diff_side_maps(
     old: &std::collections::BTreeMap<Vec<u8>, GixSide>,
     new: &std::collections::BTreeMap<Vec<u8>, GixSide>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let blob = |id: gix::ObjectId| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(repo.find_object(id)?.data.clone())
-    };
     let mut keys: Vec<&Vec<u8>> = old.keys().chain(new.keys()).collect();
     keys.sort();
     keys.dedup();
     let mut out = String::new();
-    for k in keys {
-        let path = String::from_utf8_lossy(k).into_owned();
-        match (old.get(k), new.get(k)) {
-            (Some((oo, om)), Some((no, nm))) if oo != no => {
-                let (o, n) = (blob(*oo)?, blob(*no)?);
-                out.push_str(&diff_one_file(&path, Some((&o, om)), Some((&n, nm))));
-            }
-            (None, Some((no, nm))) => {
-                let n = blob(*no)?;
-                out.push_str(&diff_one_file(&path, None, Some((&n, nm))));
-            }
-            (Some((oo, om)), None) => {
-                let o = blob(*oo)?;
-                out.push_str(&diff_one_file(&path, Some((&o, om)), None));
-            }
-            _ => {}
+    // Content of an optional side; `Err(())` = unreadable object.
+    let content = |side: Option<&GixSide>| -> Result<Option<(Vec<u8>, &'static str)>, ()> {
+        match side {
+            Some((id, m)) => side_content(repo, *id, m)
+                .map(|c| Some((c, *m)))
+                .map_err(|_| ()),
+            None => Ok(None),
         }
+    };
+    for k in keys {
+        let (o, n) = match (old.get(k), new.get(k)) {
+            (Some(o), Some(n)) if o.0 != n.0 => (Some(o), Some(n)),
+            (None, Some(n)) => (None, Some(n)),
+            (Some(o), None) => (Some(o), None),
+            _ => continue,
+        };
+        // One unreadable object skips that path rather than blanking the diff.
+        let (Ok(o), Ok(n)) = (content(o), content(n)) else {
+            continue;
+        };
+        let path = String::from_utf8_lossy(k);
+        out.push_str(&diff_one_file(
+            &path,
+            o.as_ref().map(|(c, m)| (c.as_slice(), *m)),
+            n.as_ref().map(|(c, m)| (c.as_slice(), *m)),
+        ));
     }
     Ok(out)
 }
@@ -524,21 +556,20 @@ pub(crate) fn gix_diff_text(dir: &str, cached: bool) -> Result<String, Box<dyn s
     use std::collections::BTreeMap;
     let repo = gix::discover(dir)?;
     let index = repo.open_index()?;
-    let blob = |id: gix::ObjectId| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(repo.find_object(id)?.data.clone())
-    };
     let mut out = String::new();
 
     if cached {
         // HEAD tree vs index. No HEAD yet (unborn) → empty tree, so every staged
-        // path reads as an addition (initial commit).
+        // path reads as an addition (initial commit). Gitlinks are kept on both
+        // sides (rendered as `Subproject commit` lines), so a staged submodule
+        // bump shows up and an untouched one compares equal by id.
         let head = match repo.head_tree() {
             Ok(t) => tree_side_map(&t)?,
             Err(_) => BTreeMap::new(),
         };
         let mut idx: BTreeMap<Vec<u8>, GixSide> = BTreeMap::new();
         for e in index.entries() {
-            if e.stage() != gix::index::entry::Stage::Unconflicted {
+            if e.stage() != gix::index::entry::Stage::Unconflicted || e.mode.is_sparse() {
                 continue;
             }
             idx.insert(e.path(&index).to_vec(), (e.id, index_mode_str(e.mode)));
@@ -547,26 +578,114 @@ pub(crate) fn gix_diff_text(dir: &str, cached: bool) -> Result<String, Box<dyn s
     } else {
         // index vs working tree.
         let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
+        let index_time = index.timestamp();
         for e in index.entries() {
-            if e.stage() != gix::index::entry::Stage::Unconflicted {
+            if e.stage() != gix::index::entry::Stage::Unconflicted
+                || e.mode.is_sparse()
+                || e.flags.contains(gix::index::entry::Flags::SKIP_WORKTREE)
+            {
                 continue;
             }
             let path = String::from_utf8_lossy(e.path(&index)).into_owned();
             let mode = index_mode_str(e.mode);
-            let file = workdir.join(&path);
-            if !file.exists() {
-                let o = blob(e.id)?;
-                out.push_str(&diff_one_file(&path, Some((&o, mode)), None));
-            } else {
-                let disk = std::fs::read(&file)?;
-                let o = blob(e.id)?;
-                if disk != o {
-                    out.push_str(&diff_one_file(&path, Some((&o, mode)), Some((&disk, mode))));
+            // A single unreadable entry is skipped, never fatal to the diff.
+            match worktree_change(
+                &repo,
+                &workdir,
+                e,
+                &path,
+                e.stat.is_racy(index_time, Default::default()),
+            ) {
+                Some(WorktreeChange::Deleted) => {
+                    if let Ok(o) = side_content(&repo, e.id, mode) {
+                        out.push_str(&diff_one_file(&path, Some((&o, mode)), None));
+                    }
                 }
+                Some(WorktreeChange::Modified { old, new }) => {
+                    out.push_str(&diff_one_file(
+                        &path,
+                        Some((&old, mode)),
+                        Some((&new, mode)),
+                    ));
+                }
+                None => {}
             }
         }
     }
     Ok(out)
+}
+
+/// How a tracked path's working-tree copy differs from its index entry.
+pub(crate) enum WorktreeChange {
+    Deleted,
+    /// Old (index) and new (worktree) content — blob bytes, a symlink's target,
+    /// or a gitlink's `Subproject commit` line.
+    Modified {
+        old: Vec<u8>,
+        new: Vec<u8>,
+    },
+}
+
+/// Compare one index entry with its working-tree file; `None` when unchanged
+/// or unreadable (one bad file must never abort a whole diff/status). Clean
+/// files are skipped from the index's stat cache (size/mtime/ino…) without
+/// reading them, unless the entry is racy (modified in the same second the
+/// index was written), in which case content decides — git's own strategy.
+/// Submodules compare their checked-out HEAD; symlinks their target path.
+pub(crate) fn worktree_change(
+    repo: &gix::Repository,
+    workdir: &std::path::Path,
+    e: &gix::index::Entry,
+    path: &str,
+    racy: bool,
+) -> Option<WorktreeChange> {
+    let stat_opts = gix::index::entry::stat::Options::default();
+    let file = workdir.join(path);
+    let meta = match gix::index::fs::Metadata::from_path_no_follow(&file) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Some(WorktreeChange::Deleted);
+        }
+        Err(_) => return None,
+    };
+
+    if e.mode.is_submodule() {
+        // Uninitialized (empty dir) or unreadable submodules show no change.
+        let head = gix::open(&file).ok()?.head_id().ok()?.detach();
+        return (head != e.id).then(|| WorktreeChange::Modified {
+            old: gitlink_text(&e.id),
+            new: gitlink_text(&head),
+        });
+    }
+
+    if !racy
+        && let Ok(disk_stat) = gix::index::entry::Stat::from_fs(&meta)
+        && e.stat.matches(&disk_stat, stat_opts)
+    {
+        return None;
+    }
+
+    // Symlinks diff their target path (what git stores), not the pointee.
+    let new = if e.mode.contains(gix::index::entry::Mode::SYMLINK) {
+        link_target_bytes(&std::fs::read_link(&file).ok()?)
+    } else {
+        std::fs::read(&file).ok()?
+    };
+    let old = repo.find_object(e.id).ok()?.data.clone();
+    (new != old).then_some(WorktreeChange::Modified { old, new })
+}
+
+/// A symlink target as the raw bytes git stores in the link's blob.
+fn link_target_bytes(target: &std::path::Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        target.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        target.to_string_lossy().replace('\\', "/").into_bytes()
+    }
 }
 
 /// `(gix-show dir rev)` backend: `git show <rev>`-format text — the commit
@@ -890,8 +1009,13 @@ pub(crate) fn gix_status_entries(
     // index (stage 0) path→oid, plus every index path for the untracked test.
     let mut idx: BTreeMap<Vec<u8>, gix::ObjectId> = BTreeMap::new();
     let mut idx_paths: HashSet<Vec<u8>> = HashSet::new();
+    // Submodule checkouts: their files belong to another repo, never untracked.
+    let mut gitlink_dirs: HashSet<std::path::PathBuf> = HashSet::new();
     for e in index.entries() {
         idx_paths.insert(e.path(&index).to_vec());
+        if e.mode.is_submodule() {
+            gitlink_dirs.insert(workdir.join(String::from_utf8_lossy(e.path(&index)).as_ref()));
+        }
         if e.stage() == gix::index::entry::Stage::Unconflicted {
             idx.insert(e.path(&index).to_vec(), e.id);
         }
@@ -902,7 +1026,7 @@ pub(crate) fn gix_status_entries(
             .breadthfirst
             .files()?
             .into_iter()
-            .filter(|e| e.mode.is_blob_or_symlink()) // drop tree/submodule entries
+            .filter(|e| e.mode.is_blob_or_symlink() || e.mode.is_commit()) // drop tree/submodule entries
             .map(|e| (Vec::from(e.filepath), e.oid))
             .collect(),
         Err(_) => BTreeMap::new(),
@@ -924,34 +1048,28 @@ pub(crate) fn gix_status_entries(
         codes.entry(k.clone()).or_insert([' ', ' '])[0] = x;
     }
 
-    // Y — unstaged (index vs working tree). Skip reading content when size+mtime
-    // match the index's stat cache, the way git does (so this stays cheap).
+    // Y — unstaged (index vs working tree). Skip reading content when the
+    // index's stat cache says the file is clean, the way git does.
+    let index_time = index.timestamp();
     for e in index.entries() {
-        if e.stage() != gix::index::entry::Stage::Unconflicted {
+        if e.stage() != gix::index::entry::Stage::Unconflicted
+            || e.mode.is_sparse()
+            || e.flags.contains(gix::index::entry::Flags::SKIP_WORKTREE)
+        {
             continue;
         }
         let rel = e.path(&index).to_vec();
-        let file = workdir.join(String::from_utf8_lossy(&rel).as_ref());
-        let y = match std::fs::metadata(&file) {
-            Err(_) => 'D', // gone from the worktree
-            Ok(meta) => {
-                let mtime_matches = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .is_some_and(|d| {
-                        d.as_secs() as u32 == e.stat.mtime.secs
-                            && d.subsec_nanos() == e.stat.mtime.nsecs
-                    });
-                if meta.len() == e.stat.size as u64 && mtime_matches {
-                    continue; // unchanged per the stat cache
-                }
-                let disk = std::fs::read(&file).unwrap_or_default();
-                if disk == repo.find_object(e.id)?.data.clone() {
-                    continue; // touched but identical content
-                }
-                'M'
-            }
+        let path = String::from_utf8_lossy(&rel).into_owned();
+        let y = match worktree_change(
+            repo,
+            &workdir,
+            e,
+            &path,
+            e.stat.is_racy(index_time, Default::default()),
+        ) {
+            Some(WorktreeChange::Deleted) => 'D',
+            Some(WorktreeChange::Modified { .. }) => 'M',
+            None => continue,
         };
         codes.entry(rel).or_insert([' ', ' '])[1] = y;
     }
@@ -963,6 +1081,7 @@ pub(crate) fn gix_status_entries(
         .git_global(true)
         .git_exclude(true)
         .parents(true)
+        .filter_entry(move |d| !gitlink_dirs.contains(d.path()))
         .build();
     for entry in walker.filter_map(Result::ok) {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -1066,4 +1185,115 @@ pub(crate) fn diff_line_marks(head: &str, text: &str) -> Vec<(usize, crate::edit
         }
     }
     marks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "protocol.file.allow=always"])
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// Submodules (gitlinks) and symlinks must diff like git, and one
+    /// unreadable file must not blank the whole diff.
+    #[cfg(unix)]
+    #[test]
+    fn diff_handles_submodules_symlinks_and_unreadable_files() {
+        let root = std::env::temp_dir().join(format!("macros-gix-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (sub_src, top) = (root.join("sub-src"), root.join("top"));
+        std::fs::create_dir_all(&sub_src).unwrap();
+        std::fs::create_dir_all(&top).unwrap();
+
+        git(&sub_src, &["init", "-q"]);
+        std::fs::write(sub_src.join("s.txt"), "s\n").unwrap();
+        git(&sub_src, &["add", "."]);
+        git(&sub_src, &["commit", "-qm", "sub init"]);
+
+        git(&top, &["init", "-q"]);
+        std::fs::write(top.join("a.txt"), "a\n").unwrap();
+        std::fs::write(top.join("locked.txt"), "x\n").unwrap();
+        std::os::unix::fs::symlink("a.txt", top.join("link")).unwrap();
+        git(&top, &["add", "."]);
+        git(
+            &top,
+            &["submodule", "add", "-q", sub_src.to_str().unwrap(), "sub"],
+        );
+        git(&top, &["commit", "-qm", "init"]);
+        let d = top.to_str().unwrap();
+
+        // Clean tree: nothing unstaged, nothing staged, no submodule files
+        // reported as untracked.
+        assert_eq!(gix_diff_text(d, false).unwrap(), "");
+        assert_eq!(gix_diff_text(d, true).unwrap(), "");
+        let repo = gix::discover(d).unwrap();
+        assert!(gix_status_entries(&repo).unwrap().is_empty());
+
+        // Move the submodule's HEAD, retarget the symlink, edit a file, and
+        // make another modified file unreadable.
+        std::fs::write(top.join("sub/s.txt"), "s2\n").unwrap();
+        git(&top.join("sub"), &["commit", "-qam", "sub bump"]);
+        std::fs::remove_file(top.join("link")).unwrap();
+        std::os::unix::fs::symlink("elsewhere", top.join("link")).unwrap();
+        std::fs::write(top.join("a.txt"), "a\nb\n").unwrap();
+        let locked = top.join("locked.txt");
+        std::fs::write(&locked, "changed!\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let diff = gix_diff_text(d, false).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(diff.contains("diff --git a/a.txt b/a.txt\n"), "{diff}");
+        assert!(diff.contains("+b\n"), "{diff}");
+        assert!(diff.contains("diff --git a/link b/link\n"), "{diff}");
+        assert!(
+            diff.contains("-a.txt\n") && diff.contains("+elsewhere\n"),
+            "{diff}"
+        );
+        assert!(diff.contains("diff --git a/sub b/sub\n"), "{diff}");
+        let sub_head = gix::open(top.join("sub"))
+            .unwrap()
+            .head_id()
+            .unwrap()
+            .detach();
+        assert!(
+            diff.contains(&format!("+Subproject commit {}\n", sub_head.to_hex())),
+            "{diff}"
+        );
+
+        let status = gix_status_entries(&repo).unwrap();
+        let y_of = |p: &str| status.iter().find(|e| e.path == p).map(|e| e.y);
+        assert_eq!(y_of("sub"), Some('M'));
+        assert_eq!(y_of("link"), Some('M'));
+        assert!(status.iter().all(|e| !e.path.starts_with("sub/")));
+
+        // Staged submodule bump renders as a Subproject hunk, never a blob read.
+        git(&top, &["add", "sub"]);
+        let cached = gix_diff_text(d, true).unwrap();
+        assert!(cached.contains("diff --git a/sub b/sub\n"), "{cached}");
+        assert!(
+            cached.contains(&format!("+Subproject commit {}\n", sub_head.to_hex())),
+            "{cached}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_mode_str_distinguishes_gitlink_from_symlink() {
+        use gix::index::entry::Mode;
+        assert_eq!(index_mode_str(Mode::COMMIT), "160000");
+        assert_eq!(index_mode_str(Mode::SYMLINK), "120000");
+        assert_eq!(index_mode_str(Mode::FILE_EXECUTABLE), "100755");
+        assert_eq!(index_mode_str(Mode::FILE), "100644");
+    }
 }

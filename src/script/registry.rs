@@ -1715,6 +1715,11 @@ pub(crate) fn build_engine(
     register_unary(&mut reg, queue, "kill-process", |id| {
         EditorCommand::KillProcess { id }
     });
+    // `(set-process-buffer id name)`: killing buffer `name` terminates process
+    // `id` (its whole process group), like Emacs's process buffer.
+    register_binary(&mut reg, queue, "set-process-buffer", |id, name| {
+        EditorCommand::SetProcessBuffer { id, name }
+    });
     {
         // `(make-http-stream url headers body on-line on-done)` → a stream id
         // (used by http-stream-cancel). `headers` is a flat list of alternating
@@ -1821,12 +1826,12 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "http-serve",
             move |host: String,
-                  port: usize,
+                  Port(port): Port,
                   content_type: String,
                   body: String,
                   on_request: Callback|
                   -> usize {
-                let listener = match std::net::TcpListener::bind((host.as_str(), port as u16)) {
+                let listener = match std::net::TcpListener::bind((host.as_str(), port)) {
                     Ok(l) => l,
                     Err(_) => return 0,
                 };
@@ -1848,7 +1853,7 @@ pub(crate) fn build_engine(
             },
         );
     }
-    register_unary(&mut reg, queue, "http-server-stop", |port: u16| {
+    register_unary(&mut reg, queue, "http-server-stop", |Port(port): Port| {
         EditorCommand::HttpServerStop { port }
     });
     // --- Crypto / encoding (OAuth PKCE + general use) ---------------------
@@ -1857,7 +1862,11 @@ pub(crate) fn build_engine(
     //   (define verifier  (hex->base64url (random-bytes 32)))
     //   (define challenge (hex->base64url (sha256 verifier)))
     //   (define state     (hex->base64url (random-bytes 32)))
-    reg.register_fn("random-bytes", |n: usize| -> String {
+    reg.register_fn("random-bytes", |NonNeg(n): NonNeg| -> String {
+        // Key/nonce material, not bulk data: cap so a typo can't OOM the editor.
+        if n > 1 << 20 {
+            return String::new();
+        }
         let mut buf = vec![0u8; n];
         match getrandom::getrandom(&mut buf) {
             Ok(()) => hex::encode(&buf),
@@ -1957,8 +1966,12 @@ pub(crate) fn build_engine(
     //   (udp-close id)            → #t if the id existed
     reg.register_fn(
         "tcp-connect",
-        |host: String, port: usize, connect_ms: usize, read_ms: usize| -> usize {
-            match tcp_connect_impl(&host, port as u16, connect_ms as u64, read_ms as u64) {
+        |host: String,
+         Port(port): Port,
+         NonNeg(connect_ms): NonNeg,
+         NonNeg(read_ms): NonNeg|
+         -> usize {
+            match tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64) {
                 Ok(tcp) => {
                     let id = sock_next_id();
                     sock_conns()
@@ -1976,9 +1989,12 @@ pub(crate) fn build_engine(
     );
     reg.register_fn(
         "tls-connect",
-        |host: String, port: usize, connect_ms: usize, read_ms: usize| -> usize {
-            let tcp = match tcp_connect_impl(&host, port as u16, connect_ms as u64, read_ms as u64)
-            {
+        |host: String,
+         Port(port): Port,
+         NonNeg(connect_ms): NonNeg,
+         NonNeg(read_ms): NonNeg|
+         -> usize {
+            let tcp = match tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64) {
                 Ok(t) => t,
                 Err(e) => {
                     tls_set_error(e);
@@ -2034,28 +2050,32 @@ pub(crate) fn build_engine(
             },
         }
     });
-    reg.register_fn("socket-set-timeout", |id: usize, ms: usize| -> bool {
-        let conns = sock_conns().lock().unwrap();
-        let Some(reader) = conns.get(&id) else {
-            tls_set_error(format!("socket-set-timeout: no connection {id}"));
-            return false;
-        };
-        let dur = if ms == 0 {
-            None
-        } else {
-            Some(std::time::Duration::from_millis(ms as u64))
-        };
-        reader.get_ref().tcp().set_read_timeout(dur).is_ok()
-    });
+    reg.register_fn(
+        "socket-set-timeout",
+        |id: usize, NonNeg(ms): NonNeg| -> bool {
+            let conns = sock_conns().lock().unwrap();
+            let Some(reader) = conns.get(&id) else {
+                tls_set_error(format!("socket-set-timeout: no connection {id}"));
+                return false;
+            };
+            let dur = if ms == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_millis(ms as u64))
+            };
+            reader.get_ref().tcp().set_read_timeout(dur).is_ok()
+        },
+    );
     reg.register_fn("socket-send", |id: usize, text: String| -> bool {
         socket_send_impl(id, text.as_bytes())
     });
     reg.register_fn("socket-recv-line", |id: usize| -> String {
         socket_recv_line_impl(id)
     });
-    reg.register_fn("socket-recv-bytes", |id: usize, n: usize| -> String {
-        socket_recv_bytes_impl(id, n)
-    });
+    reg.register_fn(
+        "socket-recv-bytes",
+        |id: usize, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
+    );
     reg.register_fn("socket-close", |id: usize| -> bool {
         sock_conns().lock().unwrap().remove(&id).is_some()
     });
@@ -2069,7 +2089,7 @@ pub(crate) fn build_engine(
     reg.register_fn("tls-recv-line", |id: usize| -> String {
         socket_recv_line_impl(id)
     });
-    reg.register_fn("tls-recv-bytes", |id: usize, n: usize| -> String {
+    reg.register_fn("tls-recv-bytes", |id: usize, NonNeg(n): NonNeg| -> String {
         socket_recv_bytes_impl(id, n)
     });
     reg.register_fn("tls-close", |id: usize| -> bool {
@@ -2079,8 +2099,8 @@ pub(crate) fn build_engine(
         tls_last_error_slot().lock().unwrap().clone()
     });
     // TCP server.
-    reg.register_fn("tcp-listen", |host: String, port: usize| -> usize {
-        match std::net::TcpListener::bind((host.as_str(), port as u16)) {
+    reg.register_fn("tcp-listen", |host: String, Port(port): Port| -> usize {
+        match std::net::TcpListener::bind((host.as_str(), port)) {
             Ok(l) => {
                 let id = sock_next_id();
                 sock_listeners().lock().unwrap().insert(id, l);
@@ -2155,7 +2175,7 @@ pub(crate) fn build_engine(
     });
     reg.register_fn(
         "udp-send",
-        |id: usize, host: String, port: usize, hex_data: String| -> bool {
+        |id: usize, host: String, Port(port): Port, hex_data: String| -> bool {
             let Ok(bytes) = hex::decode(hex_data.trim()) else {
                 tls_set_error("udp-send: bad hex".into());
                 return false;
@@ -2165,7 +2185,7 @@ pub(crate) fn build_engine(
                 tls_set_error(format!("udp-send: no socket {id}"));
                 return false;
             };
-            match sock.send_to(&bytes, (host.as_str(), port as u16)) {
+            match sock.send_to(&bytes, (host.as_str(), port)) {
                 Ok(_) => true,
                 Err(e) => {
                     tls_set_error(format!("udp-send: {e}"));
@@ -2174,7 +2194,7 @@ pub(crate) fn build_engine(
             }
         },
     );
-    reg.register_fn("udp-recv", |id: usize, max: usize| -> String {
+    reg.register_fn("udp-recv", |id: usize, NonNeg(max): NonNeg| -> String {
         let socks = sock_udp().lock().unwrap();
         let Some(sock) = socks.get(&id) else {
             tls_set_error(format!("udp-recv: no socket {id}"));
@@ -2332,7 +2352,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "socket-connect-async",
             move |host: String,
-                  port: usize,
+                  Port(port): Port,
                   tls: bool,
                   on_data: Callback,
                   on_close: Callback|
@@ -2343,7 +2363,7 @@ pub(crate) fn build_engine(
                 q.lock().unwrap().push(EditorCommand::SocketConnectAsync {
                     id,
                     host,
-                    port: port as u16,
+                    port,
                     tls,
                     on_data,
                     on_close,
