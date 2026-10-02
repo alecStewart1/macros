@@ -4057,17 +4057,14 @@ impl Editor {
             // `(current-buffer)` sees it as of this invocation.
             self.publish_point();
             self.script.dispatch(source, false);
+            self.vim.went_async = true;
         }
     }
 
     /// Run a key-resolved command and, if recording a keyboard macro, append it
     /// (skipping the macro-control commands themselves).
     fn dispatch_recorded(&mut self, expr: &str, cx: &mut Context<Self>) {
-        if let Some(events) = self.macro_recording.as_mut()
-            && !expr.contains("kbd-macro")
-        {
-            events.push(MacroEvent::Command(expr.to_string()));
-        }
+        self.record_event(MacroEvent::Command(expr.to_string()));
         self.run_script(expr, cx);
     }
 
@@ -4086,11 +4083,7 @@ impl Editor {
             return;
         };
         // Record the count with the command, so replay re-runs `3dd`, not `dd`.
-        if let Some(events) = self.macro_recording.as_mut()
-            && !expr.contains("kbd-macro")
-        {
-            events.push(MacroEvent::Counted(expr.to_string(), n));
-        }
+        self.record_event(MacroEvent::Counted(expr.to_string(), n));
         self.run_counted(expr, n, cx);
     }
 
@@ -4240,13 +4233,9 @@ impl Editor {
             self.echo("No keyboard macro defined", cx);
             return;
         }
-        for event in self.last_macro.clone() {
-            match event {
-                MacroEvent::Command(expr) => self.run_script(&expr, cx),
-                MacroEvent::Counted(expr, n) => self.run_counted(&expr, n, cx),
-                MacroEvent::Text(text) => self.insert_text(&text, cx),
-            }
-        }
+        // Replayed one command at a time, each against a fresh snapshot (see
+        // `replay_events`).
+        self.replay_events(self.last_macro.clone(), false, cx);
     }
 
     /// Mark startup config as fully applied, so plain keystrokes stop being
@@ -4976,9 +4965,7 @@ impl EntityInputHandler for Editor {
             return;
         }
         // Record self-inserted text into an in-progress keyboard macro.
-        if let Some(rec) = self.macro_recording.as_mut() {
-            rec.push(MacroEvent::Text(new_text.to_string()));
-        }
+        self.record_event(MacroEvent::Text(new_text.to_string()));
 
         let range = range_utf16
             .as_ref()

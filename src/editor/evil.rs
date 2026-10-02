@@ -131,6 +131,11 @@ impl Editor {
     pub(super) fn evil_normal_state(&mut self, cx: &mut Context<Self>) {
         let was_insert = matches!(self.evil, EvilState::Insert);
         self.evil = EvilState::Normal;
+        // One insert session (with the command that opened it: `cw`, `o`, …)
+        // undoes as one step, as in Vim.
+        if was_insert {
+            self.squash_insert_session();
+        }
         // Collapse any block-insert cursors (vim leaves a single cursor after a
         // blockwise `I`/`A` once you press Escape). No-op without extras.
         if self.has_extra_cursors() {

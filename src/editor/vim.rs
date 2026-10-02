@@ -51,6 +51,97 @@ pub(super) struct VimState {
     /// The motion count typed before an operator's `/` / `?` search motion,
     /// held while the minibuffer reads the pattern.
     pub search_count: Option<usize>,
+    /// Set by `run_script` whenever it hands a command to the engine thread
+    /// (its commands apply later) — a replay then waits for the sentinel.
+    pub went_async: bool,
+    /// The Normal-state command being recorded for `.` (from its first key
+    /// through any Insert session it opens).
+    pub dot: Option<DotRec>,
+    /// The last command that changed the buffer — what `.` replays.
+    pub last_change: Vec<MacroEvent>,
+    /// A replay in progress (macro / `.`).
+    pub replay: Option<Replay>,
+    /// Undo state when the current Normal-state command began, so the Insert
+    /// session it opens squashes into one undo step on Escape.
+    pub cmd_undo_base: Option<UndoBase>,
+}
+
+/// The command `.` may repeat, as it is being recorded.
+pub(super) struct DotRec {
+    pub events: Vec<MacroEvent>,
+    /// Buffer + edit tick when it began: it counts as a change only if that
+    /// buffer was edited by the time the next command starts.
+    pub buffer: String,
+    pub tick: u64,
+    /// Only a register prefix so far (`"a`): the next key continues it.
+    pub prefix_only: bool,
+    /// Built from a mouse selection — not reproducible by replaying keys.
+    pub unrepeatable: bool,
+}
+
+/// Recorded events replayed one at a time: each async (Scheme) command must
+/// apply before the next runs, or every command would read the same stale
+/// pre-replay snapshot.
+pub(super) struct Replay {
+    pub queue: std::collections::VecDeque<MacroEvent>,
+    /// An async command is in flight; `(replay-step)` resumes.
+    pub waiting: bool,
+    /// Squash the whole replay into one undo step (`.`).
+    pub undo_base: Option<UndoBase>,
+}
+
+/// Commands that never count as "the last change", even though they edit.
+fn is_repeat_neutral(expr: &str) -> bool {
+    let name = expr
+        .trim()
+        .trim_start_matches('(')
+        .split(|c: char| c.is_whitespace() || c == ')')
+        .next()
+        .unwrap_or("");
+    matches!(
+        name,
+        "undo"
+            | "redo"
+            | "undo-tree-undo"
+            | "undo-tree-redo"
+            | "evil-repeat"
+            | "call-last-kbd-macro"
+            | "evil-macro-play"
+    )
+}
+
+/// `3.`: give the repeated command the new count. The operator call carries
+/// its count inline; anything else becomes a counted command.
+pub(super) fn override_count(events: &mut [MacroEvent], n: usize) {
+    for ev in events.iter_mut() {
+        match ev {
+            MacroEvent::Command(expr) | MacroEvent::Counted(expr, _)
+                if expr.starts_with("(evil-operate ") =>
+            {
+                // (evil-operate "op" COUNT …): swap the first integer.
+                let head_end = expr["(evil-operate ".len()..].find('"').and_then(|q| {
+                    let after = "(evil-operate ".len() + q + 1;
+                    expr[after..].find('"').map(|q2| after + q2 + 1)
+                });
+                if let Some(i) = head_end {
+                    let rest = expr[i..].trim_start();
+                    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+                    let tail = &rest[digits..];
+                    *ev = MacroEvent::Command(format!("{} {n}{tail}", &expr[..i]));
+                }
+                return;
+            }
+            MacroEvent::Counted(_, c) => {
+                *c = n;
+                return;
+            }
+            MacroEvent::Command(expr) => {
+                *ev = MacroEvent::Counted(expr.clone(), n);
+                return;
+            }
+            MacroEvent::Text(_) => {}
+        }
+    }
 }
 
 /// `(evil-operator "name")` → `name`.
@@ -150,6 +241,220 @@ pub(super) fn fill_char_arg(expr: &str, ch: &str) -> String {
 }
 
 impl Editor {
+    /// Append an event to the keyboard macro being recorded (unless it is a
+    /// macro-control command) and to the `.` recording. Nothing is recorded
+    /// while a replay runs — the replayed command was recorded once already.
+    pub(super) fn record_event(&mut self, ev: MacroEvent) {
+        if self.vim.replay.is_some() {
+            return;
+        }
+        let macro_ctl = matches!(&ev, MacroEvent::Command(e) | MacroEvent::Counted(e, _)
+            if e.contains("kbd-macro"));
+        if !macro_ctl && let Some(events) = self.macro_recording.as_mut() {
+            events.push(ev.clone());
+        }
+        if let Some(dot) = self.vim.dot.as_mut() {
+            dot.events.push(ev);
+        }
+    }
+
+    /// Drop the event just recorded (a `read-char` arming command — the
+    /// resolved callback is recorded in its place).
+    pub(super) fn unrecord_last_event(&mut self) {
+        if self.vim.replay.is_some() {
+            return;
+        }
+        if let Some(events) = self.macro_recording.as_mut() {
+            events.pop();
+        }
+        if let Some(dot) = self.vim.dot.as_mut() {
+            dot.events.pop();
+        }
+    }
+
+    /// The edit tick of the buffer named `name` (active or not).
+    fn buffer_tick_of(&self, name: &str) -> Option<u64> {
+        if self.active.name == name {
+            return Some(self.active.buffer.tick());
+        }
+        self.inactive
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.buffer.tick())
+    }
+
+    /// Close the current `.` recording: keep it as the last change when its
+    /// buffer was edited.
+    fn dot_finalize(&mut self) {
+        let Some(rec) = self.vim.dot.take() else {
+            return;
+        };
+        if rec.unrepeatable || rec.events.is_empty() {
+            return;
+        }
+        let changed = self
+            .buffer_tick_of(&rec.buffer)
+            .is_some_and(|t| t != rec.tick);
+        let neutral = rec.events.iter().any(|e| match e {
+            MacroEvent::Command(x) | MacroEvent::Counted(x, _) => is_repeat_neutral(x),
+            MacroEvent::Text(_) => false,
+        });
+        if changed && !neutral {
+            self.vim.last_change = rec.events;
+        }
+    }
+
+    /// A Normal-state command is starting (its key just resolved to `expr`):
+    /// finish recording the previous one and start recording this one.
+    pub(super) fn dot_boundary(&mut self, expr: &str) {
+        if self.vim.replay.is_some() {
+            return;
+        }
+        let register_prefix = expr.trim_start().starts_with("(evil-use-register");
+        if let Some(rec) = self.vim.dot.as_mut()
+            && rec.prefix_only
+        {
+            // `"a` then `dd`: one command.
+            rec.prefix_only = register_prefix;
+            return;
+        }
+        self.dot_finalize();
+        self.vim.cmd_undo_base = Some(self.undo_base());
+        if expr.trim() == "(evil-repeat)" {
+            return; // `.` itself is never recorded
+        }
+        self.vim.dot = Some(DotRec {
+            events: Vec::new(),
+            buffer: self.active.name.clone(),
+            tick: self.active.buffer.tick(),
+            prefix_only: register_prefix,
+            unrepeatable: false,
+        });
+    }
+
+    /// The current command can't be repeated by replaying its keys (a mouse
+    /// selection made it).
+    pub(super) fn dot_unrepeatable(&mut self) {
+        self.dot_finalize();
+        self.vim.dot = Some(DotRec {
+            events: Vec::new(),
+            buffer: self.active.name.clone(),
+            tick: self.active.buffer.tick(),
+            prefix_only: false,
+            unrepeatable: true,
+        });
+    }
+
+    /// Escape out of Insert: the whole session (and the command that opened
+    /// it) becomes one undo step.
+    pub(super) fn squash_insert_session(&mut self) {
+        if self.vim.replay.is_some() {
+            return;
+        }
+        if let Some(base) = self.vim.cmd_undo_base.take() {
+            self.squash_undo_since(&base);
+        }
+    }
+
+    /// Vim `.`: replay the last change, with `3.` overriding its count. The
+    /// replay is one undo step.
+    pub(super) fn evil_repeat(&mut self, cx: &mut Context<Self>) {
+        // A `.` typed before the next command boundary closes the change
+        // being recorded first, so it repeats what was just done.
+        self.dot_finalize();
+        let mut events = self.vim.last_change.clone();
+        if events.is_empty() {
+            self.echo("No previous change to repeat", cx);
+            return;
+        }
+        if self.prefix_count > 0 {
+            override_count(&mut events, self.prefix_count);
+            self.vim.last_change = events.clone();
+        }
+        self.replay_events(events, true, cx);
+    }
+
+    /// Replay recorded events (a macro, `.`). Nested replays (`.` inside a
+    /// macro, `@b` inside `@a`) splice their events in front of the rest.
+    pub(super) fn replay_events(
+        &mut self,
+        events: Vec<MacroEvent>,
+        squash: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(r) = self.vim.replay.as_mut() {
+            for ev in events.into_iter().rev() {
+                r.queue.push_front(ev);
+            }
+            return;
+        }
+        self.vim.replay = Some(Replay {
+            queue: events.into(),
+            waiting: false,
+            undo_base: squash.then(|| self.undo_base()),
+        });
+        self.replay_pump(cx);
+    }
+
+    /// `(replay-step)`: the async command the replay was waiting on applied.
+    pub(super) fn replay_step(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.vim.replay.as_mut() {
+            r.waiting = false;
+        }
+        self.replay_pump(cx);
+    }
+
+    fn replay_pump(&mut self, cx: &mut Context<Self>) {
+        loop {
+            let Some(r) = self.vim.replay.as_mut() else {
+                return;
+            };
+            if r.waiting {
+                return;
+            }
+            let Some(ev) = r.queue.pop_front() else {
+                let r = self.vim.replay.take().expect("replay");
+                if let Some(base) = r.undo_base {
+                    self.squash_undo_since(&base);
+                }
+                return;
+            };
+            self.vim.went_async = false;
+            match ev {
+                MacroEvent::Text(text) => self.insert_text(&text, cx),
+                MacroEvent::Command(expr) => self.run_script(&expr, cx),
+                MacroEvent::Counted(expr, n) => {
+                    let name = expr
+                        .trim()
+                        .trim_start_matches('(')
+                        .trim_end_matches(')')
+                        .trim();
+                    if self.count_aware.contains(name) || self.script.builtins_for(&expr).is_some()
+                    {
+                        self.run_counted(&expr, n, cx);
+                    } else {
+                        // A chained repeat would finish asynchronously in
+                        // several steps; replay it as N single runs instead.
+                        if let Some(r) = self.vim.replay.as_mut() {
+                            for _ in 0..n.min(10_000) {
+                                r.queue.push_front(MacroEvent::Command(expr.clone()));
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+            if std::mem::take(&mut self.vim.went_async)
+                && let Some(r) = self.vim.replay.as_mut()
+            {
+                r.waiting = true;
+                // FIFO engine: this runs after the command just dispatched,
+                // and its outcome applies after that command's.
+                self.script.dispatch("(replay-step)", false);
+            }
+        }
+    }
+
     /// Route a key-resolved evil binding that needs more input before it can
     /// run: a `%c` argument capture, or an operator (`evil-operator`) that now
     /// waits for its motion. Returns true when it took the binding (nothing
@@ -441,5 +746,27 @@ mod tests {
             r#"(evil-motion-find "f" "\"")"#
         );
         assert_eq!(search_prompt_expr(r#"(evil-op-search "?")"#), Some(false));
+    }
+
+    #[test]
+    fn dot_count_override_and_neutral_commands() {
+        let mut ev = vec![
+            MacroEvent::Command(
+                r#"(evil-operate "delete" 6 "" (lambda () (evil-motion "w")))"#.into(),
+            ),
+            MacroEvent::Text("x".into()),
+        ];
+        override_count(&mut ev, 3);
+        assert!(matches!(&ev[0], MacroEvent::Command(e)
+            if e == r#"(evil-operate "delete" 3 "" (lambda () (evil-motion "w")))"#));
+        let mut ev = vec![MacroEvent::Command("(evil-delete-char)".into())];
+        override_count(&mut ev, 4);
+        assert!(matches!(&ev[0], MacroEvent::Counted(e, 4) if e == "(evil-delete-char)"));
+        let mut ev = vec![MacroEvent::Counted("(evil-join-line)".into(), 2)];
+        override_count(&mut ev, 5);
+        assert!(matches!(&ev[0], MacroEvent::Counted(_, 5)));
+        assert!(is_repeat_neutral("(undo)"));
+        assert!(is_repeat_neutral("(evil-repeat)"));
+        assert!(!is_repeat_neutral("(evil-delete-char)"));
     }
 }

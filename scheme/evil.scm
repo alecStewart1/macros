@@ -1200,6 +1200,7 @@
 (define-key "evil-normal" "p" 'evil-paste-after)        ; p  (line-wise → below)
 (define-key "evil-normal" "shift-p" 'evil-paste-before) ; P  (line-wise → above)
 (define-key "evil-normal" "u" 'undo)
+(define-key "evil-normal" "." 'evil-repeat)              ; . — repeat the last change (3. = new count)
 (define-key "evil-normal" "ctrl-r" 'redo)               ; C-r — redo (else it falls
                                                         ; through to isearch-backward)
 (define-key "evil-normal" "v" 'evil-visual-state)
@@ -1575,4 +1576,5 @@
             evil-find-repeat evil-find-repeat-reverse
             evil-find-repeat-visual evil-find-repeat-reverse-visual
             evil-forward-sentence evil-backward-sentence
-            evil-forward-sentence-visual evil-backward-sentence-visual))
+            evil-forward-sentence-visual evil-backward-sentence-visual
+            evil-repeat))

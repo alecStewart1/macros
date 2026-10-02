@@ -790,9 +790,7 @@ impl Editor {
                 // playback can never provide. key_read_char records the
                 // RESOLVED callback call in its place, so `f o` replays as one
                 // self-contained command.
-                if let Some(events) = self.macro_recording.as_mut() {
-                    events.pop();
-                }
+                self.unrecord_last_event();
                 self.read_char_pending = Some(callback);
                 self.status = prompt.into();
                 cx.notify();
@@ -805,6 +803,8 @@ impl Editor {
                 self.count_aware.insert(name);
             }
             CountRepeatStep => self.count_repeat_step(cx),
+            ReplayStep => self.replay_step(cx),
+            EvilRepeat => self.evil_repeat(cx),
             EvilBlockReplace(ch) => self.evil_block_replace(&ch, cx),
             HelixPasteAfter => self.helix_paste(true, cx),
             HelixPasteBefore => self.helix_paste(false, cx),

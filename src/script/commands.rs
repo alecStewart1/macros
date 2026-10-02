@@ -438,6 +438,11 @@ pub enum EditorCommand {
     /// the batch as one repetition and triggers the next (with a fresh
     /// snapshot), so `3w`/`3dd` see the previous run's result.
     CountRepeatStep,
+    /// Sentinel queued behind each async command of a replay (macro, `.`):
+    /// the previous command's batch has applied, so the next may run.
+    ReplayStep,
+    /// Vim `.` — repeat the last change (count-aware: `3.`).
+    EvilRepeat,
     /// Visual-block `r<char>`: overwrite every char of the rectangle.
     EvilBlockReplace(String),
     /// Helix `p` / `P`: paste after / before every selection.

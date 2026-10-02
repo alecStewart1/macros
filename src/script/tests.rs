@@ -1077,6 +1077,12 @@ mod engine_tests {
         assert!(bound("evil-operator", "f", r#"evil-motion-find "f" %c"#));
         assert!(bound("evil-normal", "shift-d", "evil-delete-to-eol"));
         assert!(bound("evil-normal", "shift-c", "evil-change-to-eol"));
+        // `.` repeats the last change; it takes a count (`3.`).
+        assert!(bound("evil-normal", ".", "evil-repeat"));
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::SetCountAware(n) if n == "evil-repeat"))
+        );
         // Visual additions: change/substitute, swap-ends, and case folding.
         assert!(bound("evil-visual", "c", "evil-visual-change"));
         assert!(bound("evil-visual", "s", "evil-visual-change"));
