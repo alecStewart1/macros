@@ -135,3 +135,28 @@ impl IdGen {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
     }
 }
+
+/// Editor state that session persistence (scheme/session.scm's savehist +
+/// desktop) reads: the history rings and the window/buffer layout. Unlike the
+/// per-command [`EditorSnapshot`] it is published ON DEMAND — by
+/// `(session-refresh callback)` just before the callback runs, and right before
+/// `kill-emacs-hook` — so the hot command path never clones the kill ring.
+#[derive(Default, Clone)]
+pub struct SessionState {
+    /// Shared minibuffer input history, oldest first.
+    pub minibuffer_history: Vec<String>,
+    /// Kill ring, oldest first.
+    pub kill_ring: Vec<String>,
+    /// Completed search strings (isearch + evil `/` `?`), oldest first.
+    pub search_ring: Vec<String>,
+    /// Commands run via `M-x` (minibuffer or Helm), oldest first.
+    pub command_history: Vec<String>,
+    /// File-visiting buffers as `(path, point)`, in buffer-ring order with the
+    /// active buffer last.
+    pub file_buffers: Vec<(String, usize)>,
+    /// The window split tree, or `None` before the first publish.
+    pub layout: Option<super::LayoutSpec>,
+}
+
+/// The published [`SessionState`], shared with the engine thread.
+pub(crate) type SharedSession = Arc<Mutex<SessionState>>;

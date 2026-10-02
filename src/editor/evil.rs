@@ -668,35 +668,35 @@ impl Editor {
                 // vim's E37/E162 — and `!` is the explicit discard.
                 "q" | "quit" | "qa" | "qall" | "quitall" => {
                     if !self.refuse_quit_if_modified(cx) {
-                        cx.quit();
+                        self.quit_now(cx);
                     }
                 }
-                "q!" | "quit!" | "qa!" | "qall!" | "quitall!" => cx.quit(),
+                "q!" | "quit!" | "qa!" | "qall!" | "quitall!" => self.quit_now(cx),
                 // Write-then-quit must save *synchronously*: `save_buffer` spawns
                 // a background write that `cx.quit()` would cancel mid-flight
                 // (see `save_all_modified`'s quit-path contract). A failed write
                 // aborts the quit so the error stays visible and no work is lost.
                 "wq" | "x" | "xit" => {
                     if self.save_active_sync(cx) && !self.refuse_quit_if_modified(cx) {
-                        cx.quit();
+                        self.quit_now(cx);
                     }
                 }
                 // `:wq!` writes this buffer, then quits discarding the others.
                 "wq!" | "x!" | "xit!" => {
                     if self.save_active_sync(cx) {
-                        cx.quit();
+                        self.quit_now(cx);
                     }
                 }
                 // Still refuses if something couldn't be written (a modified
                 // buffer with no file, e.g. an edited *scratch*-like buffer).
                 "wqa" | "wqall" | "xa" | "xall" => {
                     if self.save_all_modified(cx) && !self.refuse_quit_if_modified(cx) {
-                        cx.quit();
+                        self.quit_now(cx);
                     }
                 }
                 "wqa!" | "wqall!" | "xa!" | "xall!" => {
                     if self.save_all_modified(cx) {
-                        cx.quit();
+                        self.quit_now(cx);
                     }
                 }
                 // Files.

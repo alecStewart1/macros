@@ -8731,3 +8731,649 @@ mod dap_lib {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod session_lib {
+    use super::*;
+
+    /// core + hooks + stubs for what session.scm reads from earlier files
+    /// (persistence-dir → a unique sandbox, the perspectives accessors), then
+    /// session.scm itself.
+    fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>, String) {
+        let (engine, rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/hooks.scm")).unwrap();
+        let dir = fresh_persistence_dir();
+        engine
+            .eval(&format!(
+                r#"(define (persistence-dir) "{dir}")
+                   (define *test-persp* #f)
+                   (define (perspective-current) "/proj/a")
+                   (define (perspective-restore-current! root) (set! *test-persp* root))"#
+            ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/session.scm"))
+            .expect("session.scm loads");
+        (engine, rx, dir)
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn escape_round_trips_newlines_tabs_and_backslashes() {
+        let (engine, _rx, _) = engine();
+        // Literal backslash-n (two chars), a real newline, a tab, a trailing
+        // backslash, and a CR — all survive.
+        let src = r#"(define s (string-append "a\\nb" "\n" "\tc\\" "\r" "d"))"#;
+        engine.eval(src).unwrap();
+        assert_eq!(
+            v(&engine, "(equal? (session-unescape (session-escape s)) s)"),
+            "#true"
+        );
+        // The escaped form is a single line with no raw tab.
+        assert_eq!(
+            v(&engine, r#"(string-contains? (session-escape s) "\n")"#),
+            "#false"
+        );
+        assert_eq!(
+            v(&engine, r#"(string-contains? (session-escape s) "\t")"#),
+            "#false"
+        );
+    }
+
+    #[test]
+    fn savehist_serialize_parse_round_trip_and_bounds() {
+        let (engine, _rx, _) = engine();
+        engine
+            .eval(
+                r#"(define rings (list (cons "minibuffer" (list "a" "b\nc"))
+                                       (cons "search" (list "foo"))
+                                       (cons "command" (list "magit-status"))
+                                       (cons "kill" (list "k1" "k\t2"))))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                "(equal? (savehist-parse (savehist-serialize rings)) rings)"
+            ),
+            "#true"
+        );
+        // Per-ring cap keeps the NEWEST entries.
+        engine.eval("(savehist-set-max 1)").unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(alist-ref (savehist-parse (savehist-serialize rings)) "minibuffer")"#
+            ),
+            r#"("b\nc")"#
+        );
+        // Kill ring opt-out: nothing written for it.
+        engine.eval("(savehist-save-kill-ring #f)").unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(alist-ref (savehist-parse (savehist-serialize rings)) "kill")"#
+            ),
+            "()"
+        );
+    }
+
+    #[test]
+    fn savehist_save_then_load_restores_every_ring() {
+        let (engine, _rx, dir) = engine();
+        engine.set_session(SessionState {
+            minibuffer_history: vec!["find me".into(), "two\nlines".into()],
+            kill_ring: vec!["killed".into()],
+            search_ring: vec!["needle".into()],
+            command_history: vec!["magit-status".into()],
+            ..Default::default()
+        });
+        engine.eval("(savehist-save)").unwrap();
+        assert!(std::path::Path::new(&format!("{dir}/savehist")).exists());
+        let out = engine.eval("(savehist-load)").unwrap();
+        let mut rings: Vec<(String, Vec<String>)> = out
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                EditorCommand::SetSessionRing { ring, items } => {
+                    Some((ring.clone(), items.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        rings.sort();
+        assert_eq!(
+            rings,
+            vec![
+                ("command".to_string(), vec!["magit-status".to_string()]),
+                ("kill".to_string(), vec!["killed".to_string()]),
+                (
+                    "minibuffer".to_string(),
+                    vec!["find me".to_string(), "two\nlines".to_string()]
+                ),
+                ("search".to_string(), vec!["needle".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_lines_round_trip_and_prune() {
+        let (engine, _rx, _) = engine();
+        engine
+            .eval(
+                r#"(define tree
+                     (list 'split #f 0.3
+                           (list 'leaf "main.rs" "/p/src/main.rs" 42 #t)
+                           (list 'split #t 0.5
+                                 (list 'leaf "*compilation*" "" 0 #f)
+                                 (list 'leaf "lib.rs" "/p/src/lib.rs" 7 #f))))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                "(equal? (desktop-lines->layout (desktop-layout->lines tree)) tree)"
+            ),
+            "#true"
+        );
+        // Dropping the fileless *compilation* leaf collapses its split.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(desktop-prune-layout tree (lambda (l) (not (equal? (nth l 2) ""))))"#
+            ),
+            r#"(split #false 0.3 (leaf "main.rs" "/p/src/main.rs" 42 #true) (leaf "lib.rs" "/p/src/lib.rs" 7 #false))"#
+        );
+        assert_eq!(
+            v(&engine, "(desktop-prune-layout tree (lambda (l) #f))"),
+            "#false"
+        );
+        // Truncated input parses to #f, not half a tree.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(desktop-lines->layout (list "split\th\t0.5" "leaf\t0\t1\ta\t/a"))"#
+            ),
+            "#false"
+        );
+    }
+
+    /// The real path: the editor publishes a layout, desktop serializes it to
+    /// disk text, parses it back, and `set-window-layout` queues exactly the
+    /// tree that was published.
+    #[test]
+    fn desktop_file_round_trips_the_published_layout() {
+        let (engine, _rx, _) = engine();
+        let layout = LayoutSpec::Split {
+            vertical: true,
+            ratio: 0.25,
+            a: Box::new(LayoutSpec::Leaf {
+                buffer: "a.rs".into(),
+                path: "/p/a.rs".into(),
+                point: 3,
+                selected: false,
+            }),
+            b: Box::new(LayoutSpec::Leaf {
+                buffer: "b.rs".into(),
+                path: "/p/b.rs".into(),
+                point: 99,
+                selected: true,
+            }),
+        };
+        engine.set_session(SessionState {
+            file_buffers: vec![("/p/a.rs".into(), 3), ("/p/b.rs".into(), 99)],
+            layout: Some(layout.clone()),
+            ..Default::default()
+        });
+        engine
+            .eval(
+                "(define parsed (desktop-parse (desktop-serialize (session-file-buffers) \
+                 (window-layout) (perspective-current))))",
+            )
+            .unwrap();
+        assert_eq!(
+            v(&engine, "(car parsed)"),
+            r#"(("/p/a.rs" 3) ("/p/b.rs" 99))"#
+        );
+        assert_eq!(v(&engine, "(nth parsed 2)"), r#""/proj/a""#);
+        let out = engine.eval("(set-window-layout (cadr parsed))").unwrap();
+        assert_eq!(out.value.as_deref(), Some("#true"));
+        match out.commands.as_slice() {
+            [EditorCommand::SetWindowLayout(spec)] => assert_eq!(spec, &layout),
+            other => panic!("expected one SetWindowLayout, got {other:?}"),
+        }
+    }
+
+    /// desktop-restore skips missing files, prunes their panes, and restores the
+    /// perspective; a desktop whose panes all vanished still lands on a file.
+    #[test]
+    fn desktop_restore_skips_missing_files() {
+        let (engine, _rx, dir) = engine();
+        let real = format!("{dir}/real.txt");
+        std::fs::write(&real, "hello").unwrap();
+        let text = format!(
+            "# macros desktop v1\nperspective\t{dir}\nbuffer\t2\t{real}\nbuffer\t0\t{dir}/gone.txt\n\
+             split\th\t0.5\nleaf\t2\t1\treal.txt\t{real}\nleaf\t0\t0\tgone.txt\t{dir}/gone.txt"
+        );
+        engine
+            .eval(&format!(
+                "(define n (desktop-restore (desktop-parse {:?})))",
+                text
+            ))
+            .map(|o| {
+                let kinds: Vec<String> = o
+                    .commands
+                    .iter()
+                    .map(|c| format!("{c:?}"))
+                    .collect();
+                assert!(
+                    kinds.iter().any(|k| k.starts_with("RestoreFileBuffers")
+                        && k.contains("real.txt")
+                        && !k.contains("gone.txt")),
+                    "{kinds:?}"
+                );
+                assert!(
+                    o.commands.iter().any(|c| matches!(
+                        c,
+                        EditorCommand::SetWindowLayout(LayoutSpec::Leaf { path, selected: true, .. })
+                            if path == &real
+                    )),
+                    "the split collapses onto the surviving pane: {kinds:?}"
+                );
+            })
+            .unwrap();
+        assert_eq!(v(&engine, "n"), "1");
+        assert_eq!(v(&engine, "*test-persp*"), format!("{dir:?}"));
+    }
+
+    #[test]
+    fn desktop_clear_deletes_file_and_stops_autosave() {
+        let (engine, _rx, dir) = engine();
+        engine.eval("(set! *desktop-primary* #t)").unwrap();
+        engine.set_session(SessionState::default());
+        engine.eval("(session-save-all)").unwrap();
+        let file = format!("{dir}/desktop");
+        assert!(std::path::Path::new(&file).exists(), "autosave wrote it");
+        engine.eval("(desktop-clear)").unwrap();
+        assert!(!std::path::Path::new(&file).exists());
+        engine.eval("(session-save-all)").unwrap();
+        assert!(
+            !std::path::Path::new(&file).exists(),
+            "cleared desktop isn't rewritten by autosave"
+        );
+        // desktop-save re-arms (it goes through session-refresh first).
+        let out = engine.eval("(desktop-save)").unwrap();
+        assert!(
+            out.commands.iter().any(
+                |c| matches!(c, EditorCommand::SessionRefresh(cb) if cb == "desktop--save-now")
+            )
+        );
+        assert_eq!(v(&engine, "(desktop-auto-save?)"), "#true");
+    }
+
+    /// The after-init entry point and the autosave tick run cleanly and keep
+    /// the timer armed (by name — run-with-timer takes a string callback).
+    #[test]
+    fn startup_and_autosave_tick_arm_the_timer() {
+        let (engine, _rx, _) = engine();
+        let timer = |out: &EvalResult| {
+            out.commands.iter().any(|c| {
+                matches!(c, EditorCommand::RunWithTimer { ms: 300000, callback }
+                    if callback == "session-autosave-tick")
+            })
+        };
+        let out = engine.eval("(session-startup)").expect("startup runs");
+        assert!(timer(&out), "{:?}", out.commands);
+        let out = engine.eval("(session-autosave-tick)").expect("tick runs");
+        assert!(timer(&out), "{:?}", out.commands);
+        assert!(
+            out.commands.iter().any(
+                |c| matches!(c, EditorCommand::SessionRefresh(cb) if cb == "session-save-all")
+            )
+        );
+        // Opting out from init.scm turns the whole thing off.
+        engine
+            .eval("(savehist-mode #f) (desktop-save-mode #f)")
+            .unwrap();
+        assert_eq!(v(&engine, "(desktop-auto-save?)"), "#false");
+    }
+
+    #[test]
+    fn session_hooks_are_registered() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/hooks.scm")).unwrap();
+        engine
+            .eval(
+                r#"(define (persistence-dir) "/nonexistent-session-test")
+                   (define (perspective-current) #f)
+                   (define (perspective-restore-current! r) #f)"#,
+            )
+            .unwrap();
+        let out = engine
+            .eval(include_str!("../../scheme/session.scm"))
+            .unwrap();
+        let hooks: Vec<String> = out
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                EditorCommand::AddHook(hook, _) => Some(hook.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(hooks.contains(&"after-init-hook".to_string()), "{hooks:?}");
+        assert!(hooks.contains(&"kill-emacs-hook".to_string()), "{hooks:?}");
+    }
+}
+
+#[cfg(test)]
+mod test_runner_lib {
+    use super::*;
+
+    fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
+        let (engine, rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/diagnostics.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/test-runner.scm"))
+            .expect("test-runner.scm loads");
+        (engine, rx)
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    /// Evaluate `(f text line)` for a source text given as a Rust string.
+    fn at(engine: &ScriptEngine, f: &str, text: &str, line: usize) -> String {
+        engine.eval(&format!("(define src {text:?})")).unwrap();
+        v(engine, &format!("({f} src {line})"))
+    }
+
+    const RUST: &str = r#"use std::fmt;
+
+fn helper() -> u32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds_numbers() {
+        let s = "{ not a brace }";
+        assert_eq!(helper(), 1); // }
+    }
+
+    mod nested {
+        #[tokio::test]
+        #[should_panic]
+        async fn deep_one() {
+            if true {
+                panic!();
+            }
+        }
+    }
+
+    fn not_a_test() {
+        let x = 1;
+    }
+}
+"#;
+
+    #[test]
+    fn rust_enclosing_test_and_module_path() {
+        let (engine, _rx) = engine();
+        // Inside adds_numbers (brace in a string/comment doesn't confuse depth).
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 11),
+            r#"(("tests") "adds_numbers")"#
+        );
+        // On the fn line itself, and on its closing brace.
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 9),
+            r#"(("tests") "adds_numbers")"#
+        );
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 12),
+            r#"(("tests") "adds_numbers")"#
+        );
+        // Nested module, attribute stack with #[should_panic] between.
+        assert_eq!(
+            at(&engine, "test-rust-point", RUST, 19),
+            r#"(("tests" "nested") "deep_one")"#
+        );
+        // A non-test fn, the space between tests, and non-test code: none.
+        assert_eq!(at(&engine, "test-rust-point", RUST, 25), "#false");
+        assert_eq!(at(&engine, "test-rust-point", RUST, 13), "#false");
+        assert_eq!(at(&engine, "test-rust-point", RUST, 2), "#false");
+    }
+
+    #[test]
+    fn rust_file_targets() {
+        let (engine, _rx) = engine();
+        for (rel, want) in [
+            ("src/script/tests.rs", r#"("" . "script::tests")"#),
+            ("src/editor/mod.rs", r#"("" . "editor")"#),
+            ("src/main.rs", r#"("" . "")"#),
+            ("tests/integration.rs", r#"("--test integration " . "")"#),
+            ("src/bin/tool.rs", r#"("--bin tool " . "")"#),
+        ] {
+            assert_eq!(
+                v(&engine, &format!("(test-rust-file-target {rel:?})")),
+                want,
+                "{rel}"
+            );
+        }
+        engine.eval(&format!("(define src {RUST:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'point "rust" "src/calc.rs" src 19)"#
+            ),
+            r#"("cargo test calc::tests::nested::deep_one" . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'file "rust" "tests/it.rs" src 0)"#
+            ),
+            r#"("cargo test --test it " . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'file "rust" "src/calc.rs" src 0)"#
+            ),
+            r#"("cargo test calc::" . #false)"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(cdr (test-command 'point "rust" "src/calc.rs" src 2))"#
+            ),
+            r#""Point is not inside a #[test] function""#
+        );
+    }
+
+    const PY: &str = "import pytest\n\nclass TestMath:\n    def setup_method(self):\n        pass\n\n    def test_add(self):\n        x = 1\n\n        assert x == 1\n\n@pytest.mark.slow\ndef test_top():\n    def inner():\n        pass\n    inner()\n";
+
+    #[test]
+    fn python_pytest_node_ids() {
+        let (engine, _rx) = engine();
+        assert_eq!(
+            at(&engine, "test-python-point", PY, 9),
+            r#""TestMath::test_add""#
+        );
+        // A blank line inside the method still belongs to it.
+        assert_eq!(
+            at(&engine, "test-python-point", PY, 8),
+            r#""TestMath::test_add""#
+        );
+        // In the class but not in a test → the class.
+        assert_eq!(at(&engine, "test-python-point", PY, 4), r#""TestMath""#);
+        // A nested helper inside a top-level test → the test.
+        assert_eq!(at(&engine, "test-python-point", PY, 14), r#""test_top""#);
+        assert_eq!(at(&engine, "test-python-point", PY, 0), "#false");
+        engine.eval(&format!("(define src {PY:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "python" "tests/test_m.py" src 9))"#
+            ),
+            r#""python -m pytest 'tests/test_m.py::TestMath::test_add'""#
+        );
+    }
+
+    const GO: &str = "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n\nfunc helper() int { return 1 }\n\nfunc TestSub(t *testing.T) {}\n";
+
+    #[test]
+    fn go_test_names() {
+        let (engine, _rx) = engine();
+        assert_eq!(at(&engine, "test-go-point", GO, 6), r#""TestAdd""#);
+        assert_eq!(at(&engine, "test-go-point", GO, 10), "#false");
+        assert_eq!(at(&engine, "test-go-point", GO, 2), "#false");
+        engine.eval(&format!("(define src {GO:?})")).unwrap();
+        assert_eq!(
+            v(&engine, "(test-go-file-names src)"),
+            r#"("TestAdd" "TestSub")"#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "go" "calc_test.go" src 6))"#
+            ),
+            r#""go test -run '^TestAdd$' .""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'file "go" "calc_test.go" src 6))"#
+            ),
+            r#""go test -run '^(TestAdd|TestSub)$' .""#
+        );
+    }
+
+    const JS: &str = "import { sum } from './sum';\n\ndescribe('sum', () => {\n  it(\"adds (1+2)\", () => {\n    expect(sum(1, 2)).toBe(3);\n  });\n\n  test.only(`it's fine`, () => {});\n});\n";
+
+    #[test]
+    fn js_test_names_and_runner_detection() {
+        let (engine, _rx) = engine();
+        assert_eq!(at(&engine, "test-js-point", JS, 4), r#""adds (1+2)""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 7), r#""it's fine""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 2), r#""sum""#);
+        assert_eq!(at(&engine, "test-js-point", JS, 0), "#false");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-js-runner "{\"devDependencies\": {\"vitest\": \"1\"}}")"#
+            ),
+            r#""vitest""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-js-runner "{\"scripts\": {\"test\": \"jest\"}}")"#
+            ),
+            r#""jest""#
+        );
+        assert_eq!(v(&engine, r#"(test-js-runner "{}")"#), r#""npm""#);
+        engine.eval(&format!("(define src {JS:?})")).unwrap();
+        // The -t pattern is regex-escaped and shell-quoted.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "jest" "src/sum.test.ts" src 4))"#
+            ),
+            r#""npx jest 'src/sum.test.ts' -t 'adds \\(1\\+2\\)'""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "vitest" "a.test.ts" src 7))"#
+            ),
+            r#""npx vitest run 'a.test.ts' -t 'it'\\''s fine'""#
+        );
+    }
+
+    #[test]
+    fn zig_and_custom_templates() {
+        let (engine, _rx) = engine();
+        let zig = "const std = @import(\"std\");\n\ntest \"adds\" {\n    try std.testing.expect(true);\n}\n";
+        assert_eq!(at(&engine, "test-zig-point", zig, 3), r#""adds""#);
+        engine
+            .eval(r#"(test-runner-set-command "rust" 'point "cargo nextest run {filter}")"#)
+            .unwrap();
+        engine.eval(&format!("(define src {RUST:?})")).unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'point "rust" "src/lib.rs" src 11))"#
+            ),
+            r#""cargo nextest run tests::adds_numbers""#
+        );
+        // The other kinds are untouched.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(car (test-command 'project "rust" "src/lib.rs" src 11))"#
+            ),
+            r#""cargo test""#
+        );
+    }
+
+    /// End to end: point in a Rust test in a real temp crate → `test-at-point`
+    /// launches cargo in the crate root through compile-mode, and
+    /// `test-rerun-last` repeats it there.
+    #[test]
+    fn test_at_point_runs_in_crate_root_and_reruns() {
+        let (engine, _rx) = engine();
+        let root = fresh_persistence_dir();
+        std::fs::write(format!("{root}/Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(format!("{root}/src")).unwrap();
+        let file = format!("{root}/src/calc.rs");
+        std::fs::write(&file, RUST).unwrap();
+        engine.set_snapshot(EditorSnapshot {
+            path: file.clone(),
+            directory: format!("{root}/src"),
+            text: Rope::from_str(RUST),
+            line: 11,
+            ..Default::default()
+        });
+        let ran = |out: &EvalResult| {
+            out.commands.iter().any(|c| match c {
+                EditorCommand::MakeProcess { args, .. } => args.iter().any(|a| {
+                    a.contains(&format!(
+                        "cd {root} && cargo test calc::tests::adds_numbers"
+                    ))
+                }),
+                _ => false,
+            })
+        };
+        let out = engine.eval("(test-at-point)").unwrap();
+        assert!(ran(&out), "{:?}", out.commands);
+        // Finish the run so the compile lane is free again, then rerun.
+        engine.eval(r#"(compile-done "0")"#).unwrap();
+        let out = engine.eval("(test-rerun-last)").unwrap();
+        assert!(ran(&out), "{:?}", out.commands);
+        // recompile (`g` in *compilation*) stays pinned to the crate root.
+        assert_eq!(v(&engine, "*compile-fixed-dir*"), format!("{root:?}"));
+    }
+}

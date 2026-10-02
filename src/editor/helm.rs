@@ -333,7 +333,8 @@ impl Editor {
     pub(super) fn helm_mx(&mut self, cx: &mut Context<Self>) {
         let source = HelmSource {
             name: "Commands".to_string(),
-            candidates: self.script.command_names().to_vec(),
+            // Recently run commands first (savehist's command history).
+            candidates: self.commands_by_recency(self.script.command_names()),
             annotations: HashMap::new(),
             dynamic: None,
             raw: false,
@@ -594,7 +595,10 @@ impl Editor {
                     }
                 }
             }
-            HelmAction::ExecuteCommand => self.script.dispatch_action(&candidate, None),
+            HelmAction::ExecuteCommand => {
+                self.note_command(&candidate);
+                self.script.dispatch_action(&candidate, None);
+            }
             HelmAction::ActionMenu => {
                 if let Some((original, actions)) = self.helm_action_context.take()
                     && let Some((_, function)) =

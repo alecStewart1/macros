@@ -936,7 +936,7 @@ impl Editor {
             self.echo(format!("Relaunch failed: {err}"), cx);
             return;
         }
-        cx.quit();
+        self.quit_now(cx);
     }
 
     /// Write every modified, file-visiting buffer (active + inactive) to disk

@@ -182,6 +182,7 @@ pub(crate) fn build_engine(
     snapshot: &SharedSnapshot,
     markers: &Markers,
     options: &Options,
+    session: &SharedSession,
 ) -> (Engine, Vec<String>) {
     let mut engine = Engine::new();
     let mut names: Vec<String> = Vec::new();
@@ -2971,6 +2972,8 @@ pub(crate) fn build_engine(
             }
         });
     }
+    // Session persistence (savehist / desktop) — see src/script/session.rs.
+    register_session(&mut reg, queue, session);
     (engine, names)
 }
 
@@ -2984,7 +2987,7 @@ pub(crate) struct Registrar<'a> {
 }
 
 impl Registrar<'_> {
-    fn register_fn<FN, ARGS, RET>(&mut self, name: &'static str, func: FN)
+    pub(crate) fn register_fn<FN, ARGS, RET>(&mut self, name: &'static str, func: FN)
     where
         Engine: RegisterFn<FN, ARGS, RET>,
     {

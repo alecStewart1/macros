@@ -14,6 +14,7 @@
 (define *compile-errors* '())  ; reversed list of (comp-line path src-line src-col face)
 (define *compile-line* 2)      ; *compilation* line the next output line lands on
 (define *compile-idx* -1)      ; cursor into the (forward) error list for nav
+(define *compile-fixed-dir* #f) ; dir a `compile-run-in` run is pinned to (recompile reuses it)
 
 ;; Parse one output line into (path src-line src-col) or #f. Tries the common
 ;; compiler/grep formats; first match wins (Emacs's compilation-error-regexp-alist).
@@ -31,6 +32,14 @@
    (cap "-->[ \t]+([^: \t]+):([0-9]+):([0-9]+)" 1 2 3)
    ;; python traceback: `  File "foo.py", line 42`
    (cap "File \"([^\"]+)\", line ([0-9]+)" 1 2 99)
+   ;; rust test panic: `thread 't' panicked at src/lib.rs:10:5:` (and the
+   ;; older `panicked at 'msg', src/lib.rs:10:5`)
+   (cap "panicked at (?:'.*', )?([^: \t']+):([0-9]+):([0-9]+)" 1 2 3)
+   ;; jest/node stack frame: `at fn (src/a.test.ts:12:5)`; vitest: `❯ src/a.test.ts:12:5`
+   (cap "\\(([^() \t]+\\.[a-z]+):([0-9]+):([0-9]+)\\)" 1 2 3)
+   (cap "❯ ([^ \t:]+):([0-9]+):([0-9]+)" 1 2 3)
+   ;; go test: `    foo_test.go:12: message` (indented, relative to the package)
+   (cap "^[ \t]+([^ \t:]+\\.go):([0-9]+):" 1 2 99)
    ;; gcc / clang / grep -n: `path:line[:col]:` at the start of the line
    (cap "^([^ \t:][^:]*):([0-9]+):(?:([0-9]+):)?" 1 2 3)))
 
@@ -54,27 +63,34 @@
         (select-window orig)))); hand focus back to the original buffer
 
 (define (compile-run cmd)
+  ;; Run in the SELECTED project (title-bar perspective) — like projectile's
+  ;; compile — not whatever buffer is current, so switching projects repoints
+  ;; the build. Falls back to the buffer's directory outside any project.
+  (compile-start (project-directory) cmd #f))
+
+;; Run `cmd` in an explicit directory (the test runner: a crate / Go package /
+;; JS package root). `recompile` (and `g` in *compilation*) reruns it there.
+(define (compile-run-in dir cmd) (compile-start dir cmd #t))
+
+(define (compile-start dir cmd pinned)
   (when (not (equal? (trim-end cmd) ""))
-    ;; Run in the SELECTED project (title-bar perspective) — like projectile's
-    ;; compile — not whatever buffer is current, so switching projects repoints
-    ;; the build. Falls back to the buffer's directory outside any project.
-    (let ((dir (project-directory)))
-      ;; lib-async's "compile" lane: one build at a time (a second is refused),
-      ;; cancellable via kill-compilation / C-g in *compilation*.
-      ;; `2>&1`: make-process captures stdout only, but compilers report on stderr.
-      (when (async-lane-run "compile" "/bin/sh"
-                            (list "-c" (string-append "cd " dir " && " cmd " 2>&1"))
-                            'compile-output 'compile-done)
-        (set! *compile-dir* dir)
-        (set! *compile-last* cmd)
-        (set! *compile-out* '())
-        (set! *compile-errors* '())
-        (set! *compile-line* 2)
-        (set! *compile-idx* -1)
-        (set! *next-error-source* "compile")
-        ;; Show the cwd in the command line (Emacs's "Entering directory"): the
-        ;; visible ground truth of where this build ran, whatever selected it.
-        (compile-display (string-append "$ cd " dir " && " cmd "\n\n"))))))
+    ;; lib-async's "compile" lane: one build at a time (a second is refused),
+    ;; cancellable via kill-compilation / C-g in *compilation*.
+    ;; `2>&1`: make-process captures stdout only, but compilers report on stderr.
+    (when (async-lane-run "compile" "/bin/sh"
+                          (list "-c" (string-append "cd " dir " && " cmd " 2>&1"))
+                          'compile-output 'compile-done)
+      (set! *compile-dir* dir)
+      (set! *compile-fixed-dir* (and pinned dir))
+      (set! *compile-last* cmd)
+      (set! *compile-out* '())
+      (set! *compile-errors* '())
+      (set! *compile-line* 2)
+      (set! *compile-idx* -1)
+      (set! *next-error-source* "compile")
+      ;; Show the cwd in the command line (Emacs's "Entering directory"): the
+      ;; visible ground truth of where this build ran, whatever selected it.
+      (compile-display (string-append "$ cd " dir " && " cmd "\n\n")))))
 
 ;; Stream each line live; record any error with the *compilation* line it sits on.
 (define (compile-output line)
@@ -108,7 +124,11 @@
     (message (if cancelled status
                  (string-append status " — " (int->string (length errs)) " error(s)")))))
 
-(define (recompile) (when (not (equal? *compile-last* "")) (compile-run *compile-last*)))
+(define (recompile)
+  (when (not (equal? *compile-last* ""))
+    (if *compile-fixed-dir*
+        (compile-run-in *compile-fixed-dir* *compile-last*)
+        (compile-run *compile-last*))))
 
 ;; Stop a running build: M-x kill-compilation from anywhere (Emacs parity), or
 ;; C-g inside *compilation* (which stays the ordinary quit when nothing runs).

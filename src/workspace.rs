@@ -237,6 +237,13 @@ impl Workspace {
             .update(cx, |editor, cx| editor.mark_config_loaded(cx));
     }
 
+    /// Run `after-init-hook` once startup + user config have loaded — where
+    /// session restore (desktop / savehist, scheme/session.scm) runs.
+    pub fn run_after_init(&self, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.run_after_init(cx));
+    }
+
     /// Run the initial buffer's mode hooks, after the startup + user scripts have
     /// registered them (this is what brings up the Steel LSP for `*scratch*`).
     pub fn run_startup_hooks(&self, cx: &mut Context<Self>) {
