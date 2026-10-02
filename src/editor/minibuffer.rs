@@ -249,6 +249,8 @@ impl Editor {
             Some(MinibufferPurpose::ConfirmGrammarInstall)
         );
         self.minibuffer = None;
+        // An operator waiting on its `/` motion is abandoned with the read.
+        self.vim.op = None;
         if grammar_confirm {
             // C-g out of the trust prompt declines this grammar and moves on to
             // the next queued one — otherwise the queue would stall here.
@@ -312,6 +314,7 @@ impl Editor {
             Some(
                 MinibufferPurpose::SearchForward
                 | MinibufferPurpose::SearchBackward
+                | MinibufferPurpose::OperatorSearch(_)
                 | MinibufferPurpose::Isearch
                 | MinibufferPurpose::ExCommand
                 | MinibufferPurpose::EvalExpression
@@ -493,6 +496,9 @@ impl Editor {
                 }
                 // The read is over; the transient state goes with it.
                 self.isearch = None;
+            }
+            MinibufferPurpose::OperatorSearch(forward) => {
+                self.evil_operator_search_submit(forward, &input, cx)
             }
             MinibufferPurpose::ExCommand => self.run_ex_command(&input, cx),
             MinibufferPurpose::EvalExpression => {

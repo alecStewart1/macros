@@ -45,20 +45,8 @@
 ;; the lines goes instead, so no phantom empty line is left behind; the
 ;; register still gets plain "line" text and linewise paste adds the break.
 (define (evil-delete-line)
-  (let* ((r (evil-lines-range (evil-count))) (s (car r)) (e (cadr r)))
-    (kill-region-between s e)
-    (evil-set-linewise)
-    (if (and (list-ref r 2) (> s 0))
-        ;; the lines were the last ones: drop the newline before them too and
-        ;; land on the (new) last line's first non-blank
-        (let ((ls (line-start-pos (- s 1))))
-          (delete-region (- s 1) s)
-          (goto-char (evil-skip-blanks-to ls (- s 1))))
-        (if (and (= e (point-max)) (> s 0))
-            ;; deleted through the end: land on the line above
-            (goto-char (evil-skip-blanks-to (line-start-pos (- s 1)) (- s 1)))
-            ;; the next line slides up to `s`: its first non-blank, pre-computed
-            (goto-char (+ s (- (evil-skip-blanks-to e (line-end-pos e)) e)))))))
+  (let ((r (evil-lines-range (evil-count))))
+    (evil-delete-lines (car r) (cadr r))))
 ;; Visual-mode delete/yank are character-wise (the selection's exact range).
 (define (evil-visual-delete) (kill-region) (evil-set-charwise) (evil-normal-state))
 (define (evil-visual-yank)
@@ -616,18 +604,6 @@
         (cons "[" "bracket") (cons "]" "bracket")
         (cons "<" "angle") (cons ">" "angle")))
 (for-each
- (lambda (opk)
-   (for-each
-    (lambda (to)
-      (for-each
-       (lambda (kind)
-         (define-key "evil-normal"
-           (string-append (car opk) " " kind " " (car to))
-           (string-append "evil-object-cmd \"" (cdr opk) "\" \"" kind "\" \"" (cdr to) "\"")))
-       (list "i" "a")))
-    *evil-text-objects*))
- (list (cons "c" "change") (cons "d" "delete") (cons "y" "yank")))
-(for-each
  (lambda (to)
    (for-each
     (lambda (kind)
@@ -636,6 +612,467 @@
         (string-append "evil-object-cmd \"select\" \"" kind "\" \"" (cdr to) "\"")))
     (list "i" "a")))
  *evil-text-objects*)
+
+;; --- the operator grammar (d/c/y/>/</=/gu/gU/g~/gq/gw/g?/gc × any motion) -----
+;; Vim's `{count}{operator}{count}{motion}`: an operator key is bound to
+;; `(evil-operator "name")`, which the editor turns into OPERATOR-PENDING state;
+;; the next keys resolve against the "evil-operator" keymap (motions + text
+;; objects, below), with digits as the motion count and `v`/`V` forcing the
+;; motion charwise/linewise. The doubled operator (`dd`, `>>`, `gUU`) is "the
+;; current line(s)". The editor then dispatches ONE self-contained call:
+;;
+;;   (evil-operate "delete" 6 "" (lambda () (evil-motion "w")))   ; 2d3w
+;;
+;; so a macro or `.` replays it with no pending state. `evil-operate` runs the
+;; motion thunk (which returns `(type from to)` computed from the snapshot),
+;; turns it into a byte range per Vim's exclusive/inclusive/linewise rules, and
+;; applies the operator. Add your own operator with `evil-define-operator` and
+;; bind a key to `evil-operator "name"`; add a motion with `evil-define-motion`.
+
+(define *evil-motion-count* 0)        ; count for the running motion (0 = none)
+(define *evil-op-name* "")            ; the operator the motion runs under
+(define (evil-mcount) (max 1 *evil-motion-count*))
+
+;; Motion results: (list type from to). `type` is "exclusive", "inclusive",
+;; "line", "exclusive!" (exclusive, but skip Vim's end-of-line adjustment), or
+;; "obj-char" / "obj-line" (a text object: an absolute range).
+(define (evil-mres type to) (list type (point) to))
+
+;; Apply `f` (pos → pos) `n` times, stopping early once it stops moving.
+(define (evil-repeat-pos f p n)
+  (let loop ((p p) (k n))
+    (if (<= k 0)
+        p
+        (let ((q (f p)))
+          (if (= q p) p (loop q (- k 1)))))))
+
+;; First non-blank byte of the line holding `pos`.
+(define (evil-first-nonblank-pos pos)
+  (evil-skip-blanks-to (line-start-pos pos) (line-end-pos pos)))
+
+;; Byte offset at char column `col` (clamped) on line `ln`.
+(define (evil-line-col-pos ln col) (pos-at-char-column ln col))
+
+;; Target of a vertical motion to line `ln`, keeping point's column.
+(define (evil-vertical-target ln)
+  (evil-line-col-pos (max 0 (min ln (evil-last-line))) (char-column (point))))
+
+;; `w`/`W` under an operator: the n-th next word start, except that when the
+;; last word moved over ends its line the range stops at that line's end (Vim:
+;; `dw` on a line's last word never joins the next line).
+(define (evil-word-op-target p n step)
+  (let* ((q (evil-repeat-pos step p (- n 1)))
+         (nx (step q))
+         (le (line-end-pos q)))
+    (if (and (> nx le) (< q le)) le nx)))
+
+;; `cw` / `cW`: Vim's special case — like `ce`, but from inside a word only
+;; to that word's end (the char run under point).
+(define (evil-change-word-target p n bigword)
+  (let* ((run-end (if bigword
+                      (let ((le (line-end-pos p)))
+                        (let loop ((i p))
+                          (if (and (< i le) (not (evil-blank-pos? i))) (loop (+ i 1)) i)))
+                      (cdr (or (evil-object-word #t) (cons p (grapheme-forward p))))))
+         (end-step (if bigword bigword-forward-end word-forward-end)))
+    (let loop ((r run-end) (k (- n 1)))
+      (if (<= k 0)
+          r
+          (loop (grapheme-forward (end-step (grapheme-backward r))) (- k 1))))))
+
+;; --- sentences ( ) -------------------------------------------------------------
+;; A sentence ends at . ! or ? (plus any closing )]"' chars) followed by
+;; whitespace; a blank line also starts one. The next sentence starts at the
+;; first non-blank after that.
+(define *evil-sentence-re* "[.!?][)\\]\"']*[ \t\n]+[^ \t\n]|\n[ \t]*\n[ \t\n]*[^ \t\n]")
+(define (evil-sentence-starts from to)
+  (let loop ((m (buffer-regex-matches *evil-sentence-re* from to)) (acc '()))
+    (if (or (null? m) (null? (cdr m)))
+        (reverse acc)
+        (loop (cddr m) (cons (grapheme-backward (cadr m)) acc)))))
+(define (evil-sentence-forward-pos p)
+  (let* ((mx (point-max))
+         (starts (evil-sentence-starts p (min mx (+ p 20000)))))
+    (let loop ((ss starts))
+      (cond ((null? ss) mx)
+            ((> (car ss) p) (car ss))
+            (else (loop (cdr ss)))))))
+(define (evil-sentence-backward-pos p)
+  (let* ((from (max 0 (- p 20000)))
+         (starts (cons from (evil-sentence-starts from p))))
+    (let loop ((ss starts) (best 0))
+      (cond ((null? ss) best)
+            ((< (car ss) p) (loop (cdr ss) (car ss)))
+            (else best)))))
+(define (evil-forward-sentence)
+  (goto-char (evil-repeat-pos evil-sentence-forward-pos (point) (evil-count))))
+(define (evil-backward-sentence)
+  (goto-char (evil-repeat-pos evil-sentence-backward-pos (point) (evil-count))))
+(define (evil-forward-sentence-visual)
+  (select-to (evil-repeat-pos evil-sentence-forward-pos (point) (evil-count))))
+(define (evil-backward-sentence-visual)
+  (select-to (evil-repeat-pos evil-sentence-backward-pos (point) (evil-count))))
+
+;; H / M / L — screen lines (top / middle / bottom of the window).
+(define (evil-screen-line which n)
+  (let* ((vl (visible-lines)) (top (car vl)) (bot (min (cadr vl) (evil-last-line))))
+    (cond ((equal? which "H") (min bot (+ top (- n 1))))
+          ((equal? which "L") (max top (- bot (- n 1))))
+          (else (quotient (+ top bot) 2)))))
+
+;; User-defined motions: name → thunk returning a motion result.
+(define *evil-user-motions* (hash))
+(define (evil-define-motion name thunk)
+  (set! *evil-user-motions* (hash-insert *evil-user-motions* name thunk)))
+
+;; The motion table. Every motion computes from the snapshot (point, buffer)
+;; and the motion count; #f means "fails" (Vim beeps; the operator is dropped).
+(define (evil-motion name)
+  (let* ((p (point)) (n (evil-mcount)) (raw *evil-motion-count*))
+    (cond
+      ((equal? name "line")                    ; dd / cc / yy / >> …
+       (let ((ln (min (evil-last-line) (+ (line-of-pos p) (- n 1)))))
+         (list "line" p (pos-at-char-column ln 0))))
+      ((equal? name "h")
+       (let ((ls (line-start-pos p)))
+         (and (> p ls)
+              (evil-mres "exclusive"
+                         (evil-repeat-pos (lambda (q) (if (> q ls) (grapheme-backward q) q)) p n)))))
+      ((equal? name "l")
+       (let ((le (line-end-pos p)))
+         (and (< p le)
+              (evil-mres "exclusive"
+                         (evil-repeat-pos (lambda (q) (if (< q le) (grapheme-forward q) q)) p n)))))
+      ((equal? name "j")
+       (let ((ln (line-of-pos p)))
+         (and (< ln (evil-last-line)) (list "line" p (evil-vertical-target (+ ln n))))))
+      ((equal? name "k")
+       (let ((ln (line-of-pos p)))
+         (and (> ln 0) (list "line" p (evil-vertical-target (- ln n))))))
+      ((equal? name "+")
+       (let ((ln (line-of-pos p)))
+         (and (< ln (evil-last-line))
+              (list "line" p (evil-first-nonblank-pos (evil-vertical-target (+ ln n)))))))
+      ((equal? name "-")
+       (let ((ln (line-of-pos p)))
+         (and (> ln 0) (list "line" p (evil-first-nonblank-pos (evil-vertical-target (- ln n)))))))
+      ((equal? name "_")
+       (list "line" p (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0)))
+      ((equal? name "w")
+       (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
+           (evil-mres "exclusive!" (evil-change-word-target p n #f))
+           (evil-mres "exclusive" (evil-word-op-target p n word-forward-start))))
+      ((equal? name "W")
+       (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
+           (evil-mres "exclusive!" (evil-change-word-target p n #t))
+           (evil-mres "exclusive" (evil-word-op-target p n bigword-forward-start))))
+      ((equal? name "b")  (evil-mres "exclusive" (evil-repeat-pos word-backward-start p n)))
+      ((equal? name "B")  (evil-mres "exclusive" (evil-repeat-pos bigword-backward-start p n)))
+      ((equal? name "e")  (evil-mres "inclusive" (evil-repeat-pos word-forward-end p n)))
+      ((equal? name "E")  (evil-mres "inclusive" (evil-repeat-pos bigword-forward-end p n)))
+      ((equal? name "ge") (evil-mres "inclusive" (evil-repeat-pos word-backward-end p n)))
+      ((equal? name "gE") (evil-mres "inclusive" (evil-repeat-pos bigword-backward-end p n)))
+      ((equal? name "0")  (evil-mres "exclusive" (line-start-pos p)))
+      ((equal? name "^")  (evil-mres "exclusive" (evil-first-nonblank-pos p)))
+      ((equal? name "$")
+       (evil-mres "exclusive!"
+                  (line-end-pos (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))))
+      ((equal? name "g_")
+       (let* ((ls (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))
+              (le (line-end-pos ls))
+              (last (let loop ((i le))
+                      (if (and (> i ls) (evil-blank-pos? (- i 1))) (loop (- i 1)) i))))
+         (evil-mres "exclusive!" last)))
+      ((equal? name "|")
+       (evil-mres "exclusive" (evil-line-col-pos (line-of-pos p) (- n 1))))
+      ((equal? name "gg")
+       (list "line" p (evil-first-nonblank-pos
+                       (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) 0) 0))))
+      ((equal? name "G")
+       (list "line" p (evil-first-nonblank-pos
+                       (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) (evil-last-line)) 0))))
+      ((equal? name "}")  (evil-mres "exclusive" (evil-repeat-pos paragraph-forward-pos p n)))
+      ((equal? name "{")  (evil-mres "exclusive" (evil-repeat-pos paragraph-backward-pos p n)))
+      ((equal? name ")")  (evil-mres "exclusive" (evil-repeat-pos evil-sentence-forward-pos p n)))
+      ((equal? name "(")  (evil-mres "exclusive" (evil-repeat-pos evil-sentence-backward-pos p n)))
+      ((equal? name "%")
+       (if (> raw 0)
+           (let ((ln (min (evil-last-line) (quotient (+ (* raw (line-count)) 99) 100))))
+             (list "line" p (pos-at-char-column (max 0 (- ln 1)) 0)))
+           (let ((tg (evil-matchit-target))) (and tg (evil-mres "inclusive" tg)))))
+      ((or (equal? name "H") (equal? name "M") (equal? name "L"))
+       (list "line" p (evil-first-nonblank-pos (pos-at-char-column (evil-screen-line name n) 0))))
+      ((equal? name ";") (evil-find-motion *evil-find-forward* n))
+      ((equal? name ",") (evil-find-motion (not *evil-find-forward*) n))
+      ((equal? name "n") (evil-search-motion (search-query) (search-forward?) n))
+      ((equal? name "N") (evil-search-motion (search-query) (not (search-forward?)) n))
+      ((equal? name "*") (evil-search-word-motion #t n))
+      ((equal? name "#") (evil-search-word-motion #f n))
+      (else
+       (let ((user (hash-try-get *evil-user-motions* name)))
+         (and user (user)))))))
+
+;; f/F/t/T as operator motions: `(evil-motion-find "f" "x")` (the editor fills
+;; in the char). f/t are inclusive, F/T exclusive — as in Vim.
+(define (evil-motion-find kind ch)
+  (set! *evil-find-char* ch)
+  (set! *evil-find-till* (or (equal? kind "t") (equal? kind "T")))
+  (set! *evil-find-forward* (or (equal? kind "f") (equal? kind "t")))
+  (evil-find-motion *evil-find-forward* (evil-mcount)))
+(define (evil-find-motion forward n)
+  (and *evil-find-char*
+       (let ((tg (evil-find-nth (point) *evil-find-char* *evil-find-till* forward n)))
+         (and tg (evil-mres (if forward "inclusive" "exclusive") tg)))))
+
+;; Search motions (`d/foo`, `dn`): exclusive, to the n-th match.
+(define (evil-search-motion pattern forward n)
+  (and (not (equal? pattern ""))
+       (let loop ((from (point)) (k n))
+         (let ((hit (regex-search-pos pattern from forward)))
+           (cond ((< hit 0) #f)
+                 ((<= k 1) (evil-mres "exclusive" hit))
+                 (else (loop hit (- k 1))))))))
+(define (evil-motion-search pattern forward)
+  (set-search-query pattern forward)
+  (evil-search-motion pattern forward (evil-mcount)))
+(define (evil-search-word-motion forward n)
+  (let ((w (evil-word-at-point)))
+    (and w
+         (let ((pat (string-append "\\b" (regexp-quote (buffer-substring (car w) (cdr w))) "\\b")))
+           (set-search-query pat forward)
+           (evil-search-motion pat forward n)))))
+
+;; Text objects under an operator: `(evil-object "i" "word")`.
+(define (evil-object kind obj)
+  (let ((r (evil-object-range kind obj)))
+    (and r (< (car r) (cdr r))
+         (list (if (equal? obj "para") "obj-line" "obj-char") (car r) (cdr r)))))
+
+;; The range of a motion result: (list kind start end), kind "char" or
+;; "line" (a line range runs from a line start to past the last line's
+;; newline, or to the buffer end). `force` is "", "v" or "V".
+(define (evil-line-range a b)
+  (let ((s (line-start-pos a)) (le (line-end-pos b)))
+    (list "line" s (if (< le (point-max)) (+ le 1) le))))
+(define (evil-motion->range m force)
+  (let* ((a0 (cadr m)) (b0 (caddr m))
+         (a (min a0 b0)) (b (max a0 b0))
+         (type (car m))
+         (type (cond ((equal? force "V") (if (equal? type "obj-char") "obj-line!" "line"))
+                     ((equal? force "v")
+                      (cond ((equal? type "line") "exclusive!")
+                            ((equal? type "inclusive") "exclusive!")
+                            ((equal? type "obj-line") "obj-char")
+                            ((equal? type "obj-char") "obj-char")
+                            (else "inclusive")))
+                     (else type))))
+    (cond
+      ((equal? type "obj-char") (list "char" a b))
+      ((equal? type "obj-line") (list "line" a b))
+      ((equal? type "obj-line!") (evil-line-range a (max a (- b 1))))
+      ((equal? type "line") (evil-line-range a b))
+      ((equal? type "inclusive")
+       (list "char" a (if (< b (point-max)) (grapheme-forward b) b)))
+      ((equal? type "exclusive!") (list "char" a b))
+      ;; Exclusive, with Vim's `:help exclusive` rules: an end in column 0 of
+      ;; a later line moves back to the end of the previous line; if the start
+      ;; is also at/before its line's first non-blank, the motion turns
+      ;; linewise (`d}` from a paragraph's first column deletes whole lines).
+      ((and (> b a) (= b (line-start-pos b)) (> (line-of-pos b) (line-of-pos a)))
+       (let ((b2 (line-end-pos (- b 1))))
+         (if (<= a (evil-first-nonblank-pos a))
+             (evil-line-range a b2)
+             (list "char" a b2))))
+      (else (list "char" a b)))))
+
+;; The linewise delete shared by `dd`, `dj`, `dip`, … over [s, e): on the
+;; buffer's last line (no newline after it) the newline BEFORE the lines goes
+;; too, so no phantom empty line is left; the cursor lands on the first
+;; non-blank of the line that slides into place.
+(define (evil-delete-lines s e)
+  (let ((eof (and (= e (point-max))
+                  (or (= e s) (not (equal? (buffer-substring (- e 1) e) "\n"))))))
+    (kill-region-between s e)
+    (evil-set-linewise)
+    (if (and eof (> s 0))
+        (let ((ls (line-start-pos (- s 1))))
+          (delete-region (- s 1) s)
+          (goto-char (evil-skip-blanks-to ls (- s 1))))
+        (if (and (= e (point-max)) (> s 0))
+            (goto-char (evil-skip-blanks-to (line-start-pos (- s 1)) (- s 1)))
+            (goto-char (+ s (- (evil-skip-blanks-to e (line-end-pos e)) e)))))))
+
+;; Case / rot13 folds over a string.
+(define (evil-rot13-char c)
+  (let ((n (char->integer c)))
+    (cond ((and (>= n 97) (<= n 122)) (integer->char (+ 97 (modulo (+ (- n 97) 13) 26))))
+          ((and (>= n 65) (<= n 90))  (integer->char (+ 65 (modulo (+ (- n 65) 13) 26))))
+          (else c))))
+(define (evil-rot13 s) (list->string (map evil-rot13-char (string->list s))))
+
+;; Replace [s, e) with (folder text), leaving point at `goto`.
+(define (evil-fold-range s e folder goto)
+  (when (< s e)
+    (let* ((old (buffer-substring s e)) (new (folder old)))
+      (when (not (equal? old new)) (replace-region s e new))))
+  (goto-char goto))
+
+;; Shift the lines of [s, e) one step right (dir > 0) or left: the region-
+;; aware indent commands do the work (they skip blank lines, honor the
+;; buffer's indent width and land on the first non-blank).
+(define (evil-shift-lines s e dir)
+  (set-region s (max s (- e 1)))
+  (if (> dir 0) (indent-region) (outdent-region))
+  (goto-char (evil-first-nonblank-pos s)))
+
+;; User-defined operators: name → (lambda (kind start end) …).
+(define *evil-user-operators* (hash))
+(define (evil-define-operator name proc)
+  (set! *evil-user-operators* (hash-insert *evil-user-operators* name proc)))
+
+;; Apply operator `op` to [s, e) of kind "char"/"line".
+(define (evil-apply-operator op kind s e)
+  (let ((line (equal? kind "line")) (p (point)))
+    (cond
+      ((equal? op "delete")
+       (if line
+           (evil-delete-lines s e)
+           (when (< s e) (kill-region-between s e) (evil-set-charwise))))
+      ((equal? op "change")
+       (if line
+           (let* ((eof (and (= e (point-max))
+                            (or (= e s) (not (equal? (buffer-substring (- e 1) e) "\n")))))
+                  (e2 (if eof e (- e 1))))
+             (when (< s e2) (kill-region-between s e2) (evil-set-linewise))
+             (goto-char s))
+           (when (< s e) (kill-region-between s e) (evil-set-charwise)))
+       (evil-insert-state))
+      ((equal? op "yank")
+       (when (< s e)
+         (set-region s e) (kill-ring-save)
+         (if line (evil-set-linewise) (evil-set-charwise))
+         (goto-char (if (and line (= (line-of-pos p) (line-of-pos s))) p s))))
+      ((equal? op "indent")  (evil-shift-lines s e 1))
+      ((equal? op "outdent") (evil-shift-lines s e -1))
+      ((equal? op "reindent") (evil-reindent-lines s e))
+      ((equal? op "downcase") (evil-fold-range s e string-downcase (if line p s)))
+      ((equal? op "upcase")   (evil-fold-range s e string-upcase (if line p s)))
+      ((equal? op "togglecase") (evil-fold-range s e string-toggle-case (if line p s)))
+      ((equal? op "rot13")    (evil-fold-range s e evil-rot13 (if line p s)))
+      ((equal? op "fill")
+       (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #f))
+      ((equal? op "fill-keep")
+       (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #t))
+      ((equal? op "comment") (evil-comment-lines s e))
+      (else
+       (let ((user (hash-try-get *evil-user-operators* op)))
+         (if user
+             (user kind s e)
+             (message (string-append "Unknown operator: " op))))))))
+
+;; The entry point the editor dispatches for `{count}{op}{count}{motion}`.
+(define (evil-operate op count force thunk)
+  (set! *evil-motion-count* count)
+  (set! *evil-op-name* op)
+  (let ((m (thunk)))
+    (set! *evil-motion-count* 0)
+    ;; A failed motion (#f) aborts the whole command — `c` doesn't even enter
+    ;; Insert — as in Vim.
+    (when m
+      (let ((r (evil-motion->range m force)))
+        (evil-apply-operator op (car r) (cadr r) (caddr r))))))
+
+;; An operator key in a Visual state: apply it to the selection, then leave
+;; Visual (change enters Insert instead).
+(define (evil-visual-operator op)
+  (let* ((rb (region-beginning)) (re (region-end))
+         (st (evil-state))
+         (kind (if (equal? st "visual-line") "line" "char")))
+    (when (and (>= rb 0) (< rb re))
+      (if (equal? op "yank")
+          ;; the live selection IS the range (Visual is inclusive in the core)
+          (begin (kill-ring-save)
+                 (if (equal? kind "line") (evil-set-linewise) (evil-set-charwise))
+                 (goto-char rb))
+          (evil-apply-operator op kind rb re)))
+    (when (not (equal? op "change")) (evil-normal-state))))
+
+;; `=` — re-indent lines. With no language indenter wired into Scheme, this
+;; normalizes each line's indentation to its first non-blank line's above's
+;; (copying the previous line's indent), the `autoindent` behavior.
+(define (evil-reindent-lines s e)
+  (let* ((first (line-of-pos s))
+         (last (line-of-pos (max s (- e 1))))
+         (indent-of (lambda (pos)
+                      (buffer-substring (line-start-pos pos) (evil-first-nonblank-pos pos))))
+         (base (if (> first 0) (indent-of (pos-at-char-column (- first 1) 0)) "")))
+    (let loop ((ln last))
+      (when (>= ln first)
+        (let* ((ls (pos-at-char-column ln 0)) (fnb (evil-first-nonblank-pos ls)))
+          (when (and (< fnb (line-end-pos ls))
+                     (not (equal? (buffer-substring ls fnb) base)))
+            (replace-region ls fnb base)))
+        (loop (- ln 1))))
+    (goto-char (evil-first-nonblank-pos s))))
+
+;; Placeholder until the comment operator lands (gc).
+(define (evil-comment-lines s e) (message "gc: no comment operator"))
+
+;; --- the operator-pending keymap -------------------------------------------------
+(define (evil-omap chord expr) (define-key "evil-operator" chord expr))
+(for-each
+ (lambda (b) (evil-omap (car b) (string-append "evil-motion \"" (cdr b) "\"")))
+ (list (cons "h" "h") (cons "l" "l") (cons "space" "l") (cons "j" "j") (cons "k" "k")
+       (cons "+" "+") (cons "-" "-") (cons "_" "_")
+       (cons "w" "w") (cons "shift-w" "W") (cons "b" "b") (cons "shift-b" "B")
+       (cons "e" "e") (cons "shift-e" "E") (cons "g e" "ge") (cons "g shift-e" "gE")
+       (cons "0" "0") (cons "^" "^") (cons "$" "$") (cons "g _" "g_") (cons "|" "|")
+       (cons "g g" "gg") (cons "shift-g" "G")
+       (cons "{" "{") (cons "}" "}") (cons "(" "(") (cons ")" ")") (cons "%" "%")
+       (cons "shift-h" "H") (cons "shift-m" "M") (cons "shift-l" "L")
+       (cons ";" ";") (cons "," ",") (cons "n" "n") (cons "shift-n" "N")
+       (cons "*" "*") (cons "#" "#")))
+(evil-omap "f" "evil-motion-find \"f\" %c")
+(evil-omap "shift-f" "evil-motion-find \"F\" %c")
+(evil-omap "t" "evil-motion-find \"t\" %c")
+(evil-omap "shift-t" "evil-motion-find \"T\" %c")
+(evil-omap "/" "evil-op-search \"/\"")
+(evil-omap "?" "evil-op-search \"?\"")
+;; Text objects: `d i w`, `c a (`, … (and the visual `i w` selections below).
+(for-each
+ (lambda (to)
+   (for-each
+    (lambda (kind)
+      (evil-omap (string-append kind " " (car to))
+                 (string-append "evil-object \"" kind "\" \"" (cdr to) "\"")))
+    (list "i" "a")))
+ *evil-text-objects*)
+
+;; Operator keys (normal state → operator-pending; visual → apply to selection).
+(define (evil-bind-operator chord op)
+  (define-key "evil-normal" chord (string-append "evil-operator \"" op "\"")))
+(evil-bind-operator "d" "delete")
+(evil-bind-operator "c" "change")
+(evil-bind-operator "y" "yank")
+(evil-bind-operator ">" "indent")
+(evil-bind-operator "<" "outdent")
+(evil-bind-operator "=" "reindent")
+(evil-bind-operator "g u" "downcase")
+(evil-bind-operator "g shift-u" "upcase")
+(evil-bind-operator "g ~" "togglecase")
+(evil-bind-operator "g ?" "rot13")
+(evil-bind-operator "g q" "fill")
+(evil-bind-operator "g w" "fill-keep")
+(evil-bind-operator "g c" "comment")
+(for-each
+ (lambda (km)
+   (define-key km "=" "evil-visual-operator \"reindent\"")
+   (define-key km "g u" "evil-visual-operator \"downcase\"")
+   (define-key km "g shift-u" "evil-visual-operator \"upcase\"")
+   (define-key km "g ~" "evil-visual-operator \"togglecase\"")
+   (define-key km "g ?" "evil-visual-operator \"rot13\"")
+   (define-key km "g c" "evil-visual-operator \"comment\""))
+ (list "evil-visual" "evil-visual-line"))
 
 ;; Visual-mode change (charwise selection's exact range) and case folding. Case
 ;; ops work the region text directly (builtins only) rather than via editing.scm.
@@ -726,6 +1163,8 @@
 (define-key "evil-normal" "shift-g" 'evil-goto-last-line); G  — last line, first non-blank
 (define-key "evil-normal" "{" 'evil-backward-paragraph)  ; { — previous paragraph boundary
 (define-key "evil-normal" "}" 'evil-forward-paragraph)   ; } — next paragraph boundary
+(define-key "evil-normal" "(" 'evil-backward-sentence)   ; ( — previous sentence start
+(define-key "evil-normal" ")" 'evil-forward-sentence)    ; ) — next sentence start
 (define-key "evil-normal" "%" 'evil-matchit)             ; % — matching bracket
 (define-key "evil-normal" "f" 'evil-find-char-forward)   ; f<char> — find char on line
 (define-key "evil-normal" "shift-f" 'evil-find-char-backward) ; F<char> — find backward
@@ -750,33 +1189,14 @@
 (define-key "evil-normal" "~" 'evil-toggle-case)         ; ~ — toggle case of char
 (define-key "evil-normal" "shift-j" 'evil-join-line)     ; J — join next line up
 (define-key "evil-normal" "g shift-j" 'evil-join-line-no-space) ; gJ — join, no space
-(define-key "evil-normal" "g q q" 'evil-fill-line)       ; gqq  — format current line
-(define-key "evil-normal" "g q g q" 'evil-fill-line)     ; gqgq — same, Vim's doubled form
-(define-key "evil-normal" "g q i p" 'evil-fill-paragraph); gqip — format paragraph
-(define-key "evil-normal" "g q a p" 'evil-fill-paragraph); gqap
-(define-key "evil-normal" "g w w" 'evil-fill-line-keep)  ; gww  — format line, keep cursor
-(define-key "evil-normal" "g u u" 'evil-downcase-line)   ; guu — lowercase line
-(define-key "evil-normal" "g shift-u shift-u" 'evil-upcase-line) ; gUU — uppercase line
-(define-key "evil-normal" "g ~ ~" 'evil-toggle-case-line); g~~ — toggle case of line
 (define-key "evil-normal" "g d" 'lsp-find-definition)    ; gd — go to definition (LSP)
 (define-key "evil-normal" "shift-k" 'lsp-hover)          ; K  — doc at point (LSP)
 (define-key "evil-normal" "q" 'evil-kbd-macro-toggle)    ; q — record macro (toggle)
 (define-key "evil-normal" "@ @" 'call-last-kbd-macro)    ; @@ — replay macro
 (define-key "evil-normal" "@ q" 'call-last-kbd-macro)    ; @q — same (one register)
-(define-key "evil-normal" "d d" 'evil-delete-line)       ; dd
-(define-key "evil-normal" "d w" 'evil-delete-word)       ; dw
-(define-key "evil-normal" "d b" 'evil-delete-word-back)  ; db
-(define-key "evil-normal" "d $" 'evil-delete-to-eol)     ; d$
 (define-key "evil-normal" "shift-d" 'evil-delete-to-eol) ; D  (= d$)
-(define-key "evil-normal" "c c" 'evil-change-line)       ; cc
-(define-key "evil-normal" "c w" 'evil-change-word)       ; cw  (Vim treats as ce)
-(define-key "evil-normal" "c b" 'evil-change-word-back)  ; cb
-(define-key "evil-normal" "c $" 'evil-change-to-eol)     ; c$
 (define-key "evil-normal" "shift-c" 'evil-change-to-eol) ; C  (= c$)
-(define-key "evil-normal" "y y" 'evil-yank-line)         ; yy  (→ system clipboard)
 (define-key "evil-normal" "shift-y" 'evil-yank-line)     ; Y (= yy)
-(define-key "evil-normal" "y w" 'evil-yank-word)         ; yw
-(define-key "evil-normal" "y $" 'evil-yank-to-eol)       ; y$
 (define-key "evil-normal" "p" 'evil-paste-after)        ; p  (line-wise → below)
 (define-key "evil-normal" "shift-p" 'evil-paste-before) ; P  (line-wise → above)
 (define-key "evil-normal" "u" 'undo)
@@ -803,12 +1223,8 @@
 (define-key "evil-normal" "ctrl-b" 'scroll-down)        ; full page back
 (define-key "evil-normal" "z z" 'recenter)              ; zz — center cursor line
 
-;; --- indent operators (>> / <<) ---------------------------------------------
-;; `indent-region` / `outdent-region` shift the region, or the current line when
-;; there isn't one, by one indent step — so the same command serves `>>` here and
-;; `>` in the visual maps below.
-(define-key "evil-normal" "> >" 'indent-region)         ; >> — indent line
-(define-key "evil-normal" "< <" 'outdent-region)        ; << — outdent line
+;; (`>>` / `<<` and every other operator + motion pair live in the operator
+;; grammar above: `>` / `<` are operators, doubled for the current line.)
 
 ;; --- Emacs chords vim owns in Normal state ----------------------------------
 ;; Unbound Ctrl chords fall through to the Emacs dispatch, which is what keeps
@@ -843,6 +1259,8 @@
 (define-key "evil-visual" "e" 'evil-forward-word-end)          ; e — end of word (extends)
 (define-key "evil-visual" "{" 'evil-backward-paragraph-visual) ; { / } — extend by paragraph
 (define-key "evil-visual" "}" 'evil-forward-paragraph-visual)
+(define-key "evil-visual" "(" 'evil-backward-sentence-visual)
+(define-key "evil-visual" ")" 'evil-forward-sentence-visual)
 (define-key "evil-visual" "f" 'evil-find-char-forward-visual)  ; f/F/t/T — extend to char
 (define-key "evil-visual" "shift-f" 'evil-find-char-backward-visual)
 (define-key "evil-visual" "t" 'evil-till-char-forward-visual)
@@ -1155,4 +1573,6 @@
             evil-find-char-forward-visual evil-find-char-backward-visual
             evil-till-char-forward-visual evil-till-char-backward-visual
             evil-find-repeat evil-find-repeat-reverse
-            evil-find-repeat-visual evil-find-repeat-reverse-visual))
+            evil-find-repeat-visual evil-find-repeat-reverse-visual
+            evil-forward-sentence evil-backward-sentence
+            evil-forward-sentence-visual evil-backward-sentence-visual))

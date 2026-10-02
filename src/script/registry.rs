@@ -2550,6 +2550,17 @@ pub(crate) fn build_engine(
     register_snapshot_read(&mut reg, snapshot, "lsp-server-ready?", |s| s.lsp_ready);
     // `(evil-enabled?)` → #t when modal (evil) editing is active.
     register_snapshot_read(&mut reg, snapshot, "evil-enabled?", |s| s.evil_enabled);
+    // `(evil-state)` → "normal" / "insert" / "visual" / "visual-line" /
+    // "visual-block", or "" when modal editing is off.
+    register_snapshot_read(&mut reg, snapshot, "evil-state", |s| s.evil_state.clone());
+    // `(search-query)` → the active `/` regex ("" if none); `(search-forward?)`
+    // → whether it was a forward (`/`) search. For the `n`/`N` motions.
+    register_snapshot_read(&mut reg, snapshot, "search-query", |s| {
+        s.search_query.clone()
+    });
+    register_snapshot_read(&mut reg, snapshot, "search-forward?", |s| s.search_forward);
+    // `(major-mode)` → the buffer's major mode name ("rust", "org-mode", …).
+    register_snapshot_read(&mut reg, snapshot, "major-mode", |s| s.major_mode.clone());
     // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
     register_snapshot_read(&mut reg, snapshot, "helix-enabled?", |s| s.helix_enabled);
     // `(prefix-count)` → the count typed before a count-aware modal command, 0
@@ -2738,6 +2749,54 @@ pub(crate) fn build_engine(
     register_pos_fn!("bigword-forward-start", |b, p| b.forward_bigword_start(p));
     register_pos_fn!("bigword-backward-start", |b, p| b.backward_bigword_start(p));
     register_pos_fn!("bigword-forward-end", |b, p| b.forward_bigword_end(p));
+    register_pos_fn!("word-backward-end", |b, p| b.backward_word_end(p));
+    register_pos_fn!("bigword-backward-end", |b, p| b.backward_bigword_end(p));
+    {
+        // `(buffer-regex-matches pattern start end)` → a flat list
+        // `(s0 e0 s1 e1 …)` of the BUFFER byte ranges of every match inside
+        // [start, end). Offsets are buffer bytes, so callers never mix the
+        // char-indexed string accessors with regex byte offsets.
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "buffer-regex-matches",
+            move |pattern: String, start: usize, end: usize| -> Vec<usize> {
+                let Ok(re) = Regex::new(&pattern) else {
+                    return Vec::new();
+                };
+                let rope = shared.load().text.clone();
+                let (a, b) = (snap_byte(&rope, start), snap_byte(&rope, end));
+                if a >= b {
+                    return Vec::new();
+                }
+                let text = rope.byte_slice(a..b).to_string();
+                re.find_iter(&text)
+                    .flat_map(|m| [a + m.start(), a + m.end()])
+                    .collect()
+            },
+        );
+    }
+    {
+        // `(regex-search-pos pattern from forward?)` → byte offset of the next
+        // match strictly after (forward) / before (backward) `from`, wrapping
+        // around the buffer like `n`/`N`; -1 when none (or a bad regex).
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "regex-search-pos",
+            move |pattern: String, from: usize, forward: bool| -> isize {
+                let Ok(re) = Regex::new(&pattern) else {
+                    return -1;
+                };
+                let text = shared.load().text.to_string();
+                let starts: Vec<usize> = re.find_iter(&text).map(|m| m.start()).collect();
+                let hit = if forward {
+                    starts.iter().find(|&&s| s > from).or(starts.first())
+                } else {
+                    starts.iter().rev().find(|&&s| s < from).or(starts.last())
+                };
+                hit.map_or(-1, |&h| h as isize)
+            },
+        );
+    }
     register_pos_fn!("line-start-pos", |b, p| b.line_range_at(p).start);
     register_pos_fn!("line-end-pos", |b, p| b.line_range_at(p).end);
     register_pos_fn!("line-of-pos", |b, p| b.line_index_at_byte(p));

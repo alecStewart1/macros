@@ -47,6 +47,7 @@ mod overlays;
 mod panes;
 mod terminal;
 mod undo;
+mod vim;
 
 pub use helm::HelmView;
 use helm::{HelmAction, HelmSession, HelmSource, helm_sources_from_specs, wrap_index};
@@ -138,6 +139,9 @@ enum MinibufferPurpose {
     SearchForward,
     /// evil `?` — regex search backward.
     SearchBackward,
+    /// evil `d/pat` / `d?pat`: the search motion of a pending operator
+    /// (true = forward).
+    OperatorSearch(bool),
     /// Emacs `C-s` / `C-r` — incremental search. The query is read in the
     /// minibuffer and matched live on every keystroke (see `isearch_*`).
     Isearch,
@@ -552,6 +556,8 @@ pub struct Editor {
     evil_replace_pending: bool,
     /// How many chars the pending `r` overwrites (`3rx`).
     evil_replace_count: usize,
+    /// Vim grammar state: pending operator, `%c` capture, … (see vim.rs).
+    vim: vim::VimState,
     /// The count published to Scheme as `(prefix-count)` while a count-aware
     /// command is dispatched (0 otherwise).
     prefix_count: usize,
@@ -1302,6 +1308,7 @@ impl Editor {
             evil: EvilState::Disabled,
             evil_replace_pending: false,
             evil_replace_count: 1,
+            vim: vim::VimState::default(),
             prefix_count: 0,
             count_aware: HashSet::new(),
             count_repeat: None,
@@ -3193,6 +3200,24 @@ impl Editor {
             helix_enabled: self.modal_helix,
             kbd_macro_recording: self.macro_recording.is_some(),
             prefix_count: self.prefix_count,
+            evil_state: match self.evil {
+                EvilState::Disabled => "",
+                EvilState::Normal => "normal",
+                EvilState::Insert => "insert",
+                EvilState::Visual => "visual",
+                EvilState::VisualLine => "visual-line",
+                EvilState::VisualBlock => "visual-block",
+            }
+            .to_string(),
+            search_query: self.search_query.clone().unwrap_or_default(),
+            search_forward: self.evil_search_forward,
+            major_mode: self
+                .active
+                .modes
+                .names()
+                .last()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
         });
     }
 

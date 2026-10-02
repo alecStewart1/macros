@@ -151,6 +151,7 @@ impl Editor {
             Self::key_terminal,
             Self::key_evil_replace,
             Self::key_read_char,
+            Self::key_evil_capture,
             Self::key_evil_modal,
             Self::key_leader,
             Self::key_evil_insert,
@@ -438,6 +439,9 @@ impl Editor {
         if !self.evil_intercepts() || self.active.special.is_some() || ks.modifiers.platform {
             return Handled::No;
         }
+        if self.vim.op.is_some() {
+            return self.key_operator_pending(ks, cx);
+        }
         let chord = chord_string(ks);
         // Vim/Helix count prefix: at the start of a command, a digit is a
         // repeat count, not a command — `3j`, `2dd`, `5w`. `0` keeps its
@@ -477,7 +481,11 @@ impl Editor {
             self.status = SharedString::default();
             // Consume any count prefix (`3dd`, `5G`); see `dispatch_counted`.
             let count = self.modal_count.take();
-            self.dispatch_counted(&expr, count, cx);
+            // An operator (`d`) or a `%c` binding (`m`, `"`) waits for more
+            // input instead of running now.
+            if !self.evil_route_binding(&expr, &candidate, count, cx) {
+                self.dispatch_counted(&expr, count, cx);
+            }
             cx.stop_propagation();
             return Handled::Yes;
         }
@@ -595,7 +603,10 @@ impl Editor {
                 .resolve_mode(self.evil_insert_keymap(), &chord_string(ks))
                 .map(str::to_string)
         {
-            self.run_script(&expr, cx);
+            // `C-r a` (insert register a): wait for the register key.
+            if !self.evil_route_binding(&expr, &chord_string(ks), None, cx) {
+                self.dispatch_recorded(&expr, cx);
+            }
             cx.stop_propagation();
             return Handled::Yes;
         }

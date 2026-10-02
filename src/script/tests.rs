@@ -1065,15 +1065,17 @@ mod engine_tests {
         assert!(bound("evil-normal", "^", "evil-first-non-blank"));
         assert!(bound("evil-normal", "g g", "evil-goto-first-line"));
         assert!(bound("evil-normal", "shift-g", "evil-goto-last-line"));
-        // d / c operators over motions, plus the D / C shorthands.
-        assert!(bound("evil-normal", "d w", "evil-delete-word"));
-        assert!(bound("evil-normal", "d b", "evil-delete-word-back"));
-        assert!(bound("evil-normal", "d $", "evil-delete-to-eol"));
+        // d / c / y are operators (the grammar resolves the motion), plus the
+        // D / C shorthands.
+        assert!(bound("evil-normal", "d", r#"evil-operator "delete""#));
+        assert!(bound("evil-normal", "c", r#"evil-operator "change""#));
+        assert!(bound("evil-normal", "y", r#"evil-operator "yank""#));
+        assert!(bound("evil-normal", ">", r#"evil-operator "indent""#));
+        assert!(bound("evil-operator", "w", r#"evil-motion "w""#));
+        assert!(bound("evil-operator", "$", r#"evil-motion "$""#));
+        assert!(bound("evil-operator", "g g", r#"evil-motion "gg""#));
+        assert!(bound("evil-operator", "f", r#"evil-motion-find "f" %c"#));
         assert!(bound("evil-normal", "shift-d", "evil-delete-to-eol"));
-        assert!(bound("evil-normal", "c c", "evil-change-line"));
-        assert!(bound("evil-normal", "c w", "evil-change-word"));
-        assert!(bound("evil-normal", "c b", "evil-change-word-back"));
-        assert!(bound("evil-normal", "c $", "evil-change-to-eol"));
         assert!(bound("evil-normal", "shift-c", "evil-change-to-eol"));
         // Visual additions: change/substitute, swap-ends, and case folding.
         assert!(bound("evil-visual", "c", "evil-visual-change"));
@@ -1086,11 +1088,13 @@ mod engine_tests {
         assert!(bound("evil-visual-line", "u", "evil-visual-downcase"));
         assert!(bound("evil-visual-line", "shift-u", "evil-visual-upcase"));
         // gq/gw — the format (fill to *fill-column*) operator family.
-        assert!(bound("evil-normal", "g q q", "evil-fill-line"));
-        assert!(bound("evil-normal", "g q g q", "evil-fill-line"));
-        assert!(bound("evil-normal", "g q i p", "evil-fill-paragraph"));
-        assert!(bound("evil-normal", "g q a p", "evil-fill-paragraph"));
-        assert!(bound("evil-normal", "g w w", "evil-fill-line-keep"));
+        assert!(bound("evil-normal", "g q", r#"evil-operator "fill""#));
+        assert!(bound("evil-normal", "g w", r#"evil-operator "fill-keep""#));
+        assert!(bound(
+            "evil-normal",
+            "g shift-u",
+            r#"evil-operator "upcase""#
+        ));
         assert!(bound("evil-visual", "g q", "evil-visual-fill"));
         assert!(bound("evil-visual-line", "g q", "evil-visual-fill"));
         // C-r must redo — unbound it falls through to Emacs isearch-backward.
@@ -1115,32 +1119,19 @@ mod engine_tests {
         assert!(bound("evil-normal", "q", "evil-kbd-macro-toggle"));
         assert!(bound("evil-normal", "@ @", "call-last-kbd-macro"));
         assert!(bound("evil-normal", "g shift-j", "evil-join-line-no-space"));
-        assert!(bound("evil-normal", "g u u", "evil-downcase-line"));
+        assert!(bound("evil-normal", "g u", r#"evil-operator "downcase""#));
         // Visual: paste-over, case toggle, extend-flavored find.
         assert!(bound("evil-visual", "p", "evil-visual-paste"));
         assert!(bound("evil-visual", "~", "evil-visual-toggle-case"));
         assert!(bound("evil-visual", "f", "evil-find-char-forward-visual"));
         assert!(bound("evil-visual-line", "p", "evil-visual-paste"));
-        // Text objects are generated: spot-check the chords and their exprs.
+        // Text objects are generated into the operator keymap: spot-check.
+        assert!(bound("evil-operator", "i w", r#"evil-object "i" "word""#));
+        assert!(bound("evil-operator", "a (", r#"evil-object "a" "paren""#));
         assert!(bound(
-            "evil-normal",
-            "d i w",
-            r#"evil-object-cmd "delete" "i" "word""#
-        ));
-        assert!(bound(
-            "evil-normal",
-            "c a (",
-            r#"evil-object-cmd "change" "a" "paren""#
-        ));
-        assert!(bound(
-            "evil-normal",
-            "y i \"",
-            r#"evil-object-cmd "yank" "i" "dquote""#
-        ));
-        assert!(bound(
-            "evil-normal",
-            "d a p",
-            r#"evil-object-cmd "delete" "a" "para""#
+            "evil-operator",
+            "i \"",
+            r#"evil-object "i" "dquote""#
         ));
         assert!(bound(
             "evil-visual",
@@ -1540,6 +1531,194 @@ mod engine_tests {
             cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(0))),
             "% on the outer ) should jump to the outer (: {cmds:?}"
         );
+    }
+
+    /// The Vim operator grammar: `(evil-operate op count force thunk)` turns a
+    /// motion result into a range with Vim's exclusive / inclusive / linewise
+    /// rules and applies the operator.
+    #[test]
+    fn evil_operator_grammar_ranges() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        let run = |text: &str, point: usize, src: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                selections: vec![(point, point)],
+                evil_state: "normal".into(),
+                visible_lines: (0, 100),
+                ..Default::default()
+            });
+            engine.eval(src).unwrap().commands
+        };
+        let op = |op: &str, count: usize, force: &str, motion: &str| {
+            format!("(evil-operate \"{op}\" {count} \"{force}\" (lambda () {motion}))")
+        };
+        let kill = |c: &[EditorCommand], s: usize, e: usize| {
+            c.iter().any(
+                |c| matches!(c, C::KillRegionBetween { start, end } if *start == s && *end == e),
+            )
+        };
+        // dw / 2d3w (count multiplies) / dw on a line's last word (no join).
+        let c = run("foo bar", 0, &op("delete", 0, "", r#"(evil-motion "w")"#));
+        assert!(kill(&c, 0, 4), "dw: {c:?}");
+        let c = run(
+            "a b c d e f g h",
+            0,
+            &op("delete", 6, "", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 0, 12), "2d3w: {c:?}");
+        let c = run(
+            "foo bar\n  baz",
+            4,
+            &op("delete", 0, "", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 4, 7), "dw at eol: {c:?}");
+        // cw is ce from inside a word, and enters Insert.
+        let c = run(
+            "hello world",
+            0,
+            &op("change", 0, "", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 0, 5), "cw: {c:?}");
+        assert!(c.iter().any(|c| matches!(c, C::EvilInsertState)), "{c:?}");
+        // e is inclusive; ge inclusive backward; $ to the line end.
+        let c = run("foo bar", 0, &op("delete", 0, "", r#"(evil-motion "e")"#));
+        assert!(kill(&c, 0, 3), "de: {c:?}");
+        let c = run("foo bar", 4, &op("delete", 0, "", r#"(evil-motion "ge")"#));
+        assert!(kill(&c, 2, 5), "dge: {c:?}");
+        let c = run(
+            "abc def\nx",
+            2,
+            &op("delete", 0, "", r#"(evil-motion "$")"#),
+        );
+        assert!(kill(&c, 2, 7), "d$: {c:?}");
+        // j / dd / 3dd are linewise.
+        let c = run("a\nb\nc\n", 0, &op("delete", 0, "", r#"(evil-motion "j")"#));
+        assert!(kill(&c, 0, 4), "dj: {c:?}");
+        assert!(c.iter().any(|c| matches!(c, C::EvilSetLinewise)), "{c:?}");
+        let c = run(
+            "a\nb\nc\nd\n",
+            0,
+            &op("delete", 3, "", r#"(evil-motion "line")"#),
+        );
+        assert!(kill(&c, 0, 6), "3dd: {c:?}");
+        // d} from a paragraph's first column turns linewise (Vim's rule).
+        let c = run(
+            "aa\nbb\n\ncc\n",
+            0,
+            &op("delete", 0, "", r#"(evil-motion "}")"#),
+        );
+        assert!(kill(&c, 0, 6), "d}}: {c:?}");
+        // f / t (inclusive, via the captured char), and the search motion.
+        let c = run(
+            "abcdef",
+            0,
+            &op("delete", 0, "", r#"(evil-motion-find "f" "d")"#),
+        );
+        assert!(kill(&c, 0, 4), "dfd: {c:?}");
+        let c = run(
+            "abcdef",
+            0,
+            &op("delete", 0, "", r#"(evil-motion-find "t" "d")"#),
+        );
+        assert!(kill(&c, 0, 3), "dtd: {c:?}");
+        let c = run(
+            "abcdef",
+            5,
+            &op("delete", 0, "", r#"(evil-motion-find "F" "b")"#),
+        );
+        assert!(kill(&c, 1, 5), "dFb: {c:?}");
+        let c = run(
+            "foo bar",
+            0,
+            &op("delete", 0, "", r#"(evil-motion-search "bar" #t)"#),
+        );
+        assert!(kill(&c, 0, 4), "d/bar: {c:?}");
+        // Text objects, case operators, forced linewise.
+        let c = run(
+            "foo bar baz",
+            5,
+            &op("delete", 0, "", r#"(evil-object "i" "word")"#),
+        );
+        assert!(kill(&c, 4, 7), "diw: {c:?}");
+        let c = run(
+            "foo bar",
+            0,
+            &op("upcase", 0, "", r#"(evil-object "i" "word")"#),
+        );
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 0, end: 3, text } if text == "FOO")),
+            "gUiw: {c:?}"
+        );
+        let c = run(
+            "ab cd\nef\n",
+            0,
+            &op("delete", 0, "V", r#"(evil-motion "w")"#),
+        );
+        assert!(kill(&c, 0, 6), "dVw: {c:?}");
+        // dvj: charwise, exclusive, keeping the column.
+        let c = run(
+            "abc\ndef\n",
+            1,
+            &op("delete", 0, "v", r#"(evil-motion "j")"#),
+        );
+        assert!(kill(&c, 1, 5), "dvj: {c:?}");
+        // yy keeps the cursor; >j shifts two lines through the indent command.
+        let c = run("a\nb\nc", 0, &op("yank", 2, "", r#"(evil-motion "line")"#));
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::SetRegion { start: 0, end: 4 })),
+            "2yy: {c:?}"
+        );
+        let c = run("a\nb\nc\n", 0, &op("indent", 0, "", r#"(evil-motion "j")"#));
+        assert!(c.iter().any(|c| matches!(c, C::IndentRegion)), ">j: {c:?}");
+        // A failed motion (dh at column 0) does nothing — and c doesn't insert.
+        let c = run("abc", 0, &op("change", 0, "", r#"(evil-motion "h")"#));
+        assert!(
+            !c.iter()
+                .any(|c| matches!(c, C::EvilInsertState | C::KillRegionBetween { .. })),
+            "ch at bol: {c:?}"
+        );
+        // dG / d3G — linewise to the last / third line.
+        let c = run(
+            "a\nb\nc\nd\n",
+            0,
+            &op("delete", 3, "", r#"(evil-motion "G")"#),
+        );
+        assert!(kill(&c, 0, 6), "d3G: {c:?}");
+        // ) — sentence motion.
+        let c = run(
+            "One two. Three four.",
+            0,
+            &op("delete", 0, "", r#"(evil-motion ")")"#),
+        );
+        assert!(kill(&c, 0, 9), "d): {c:?}");
+        // Visual-mode operator: gU on the selection, then back to Normal.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("abc def"),
+            point: 2,
+            region: Some((0, 3)),
+            evil_state: "visual".into(),
+            ..Default::default()
+        });
+        let c = engine
+            .eval(r#"(evil-visual-operator "upcase")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 0, end: 3, text } if text == "ABC")),
+            "visual gU: {c:?}"
+        );
+        assert!(c.iter().any(|c| matches!(c, C::EvilNormalState)), "{c:?}");
     }
 
     #[test]
