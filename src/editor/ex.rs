@@ -1275,7 +1275,7 @@ impl Editor {
             && !ks.modifiers.control
             && let Some(text) = ks.key_char.clone()
         {
-            self.insert_text(&text, cx);
+            self.type_text(None, &text, cx);
             return;
         }
         self.dispatch_keystroke(&ks, cx);

@@ -1518,7 +1518,7 @@
       (let loop ((ln (line-of-pos (max rb (- re 1)))) (edits '()))
         (if (>= ln (line-of-pos rb))
             (let* ((ls (pos-at-char-column ln 0))
-                   (r (evil-number-at (if (= ln (line-of-pos rb)) (max ls (- rb 1)) (max 0 (- ls 1)))))
+                   (r (evil-number-at (if (= ln (line-of-pos rb)) rb ls)))
                    (r (and r (= (line-of-pos (car r)) ln) r)))
               (loop (- ln 1) (if r (cons r edits) edits)))
             ;; edits are top-down; apply bottom-up so offsets hold
@@ -2170,7 +2170,7 @@
             evil-find-repeat-visual evil-find-repeat-reverse-visual
             evil-forward-sentence evil-backward-sentence
             evil-forward-sentence-visual evil-backward-sentence-visual
-            evil-repeat evil-macro-play
+            evil-repeat evil-macro-play evil-replace-with
             evil-window-top evil-window-bottom
             evil-window-top-visual evil-window-bottom-visual
             evil-increment evil-decrement evil-visual-increment evil-visual-decrement

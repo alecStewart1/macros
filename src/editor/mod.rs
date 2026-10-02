@@ -32,6 +32,8 @@ use crate::theme::Theme;
 mod buffers;
 mod commands;
 mod completion;
+#[cfg(test)]
+mod e2e_tests;
 mod editing_extras;
 mod evil;
 mod ex;
@@ -4906,57 +4908,13 @@ impl Render for Editor {
     }
 }
 
-impl EntityInputHandler for Editor {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let range = clamp_range(
-            self.active.buffer.range_from_utf16(&range_utf16),
-            self.active.buffer.len(),
-        );
-        actual_range.replace(self.active.buffer.range_to_utf16(&range));
-        Some(self.active.buffer.slice_to_string(range))
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: self
-                .active
-                .buffer
-                .range_to_utf16(&self.active.selected_range),
-            reversed: self.active.selection_reversed,
-        })
-    }
-
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        self.active
-            .marked_range
-            .as_ref()
-            .map(|range| self.active.buffer.range_to_utf16(range))
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.active.marked_range = None;
-    }
-
-    fn replace_text_in_range(
+impl Editor {
+    /// Typed text (the IME's `replace_text_in_range`, minus the window) —
+    /// also how `:normal` replays printable keys in Insert state.
+    pub(super) fn type_text(
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
-        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.titlebar_dropdown_open() {
@@ -5047,6 +5005,63 @@ impl EntityInputHandler for Editor {
             self.maybe_auto_complete(new_text, cx);
         }
         cx.notify();
+    }
+}
+
+impl EntityInputHandler for Editor {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = clamp_range(
+            self.active.buffer.range_from_utf16(&range_utf16),
+            self.active.buffer.len(),
+        );
+        actual_range.replace(self.active.buffer.range_to_utf16(&range));
+        Some(self.active.buffer.slice_to_string(range))
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self
+                .active
+                .buffer
+                .range_to_utf16(&self.active.selected_range),
+            reversed: self.active.selection_reversed,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.active
+            .marked_range
+            .as_ref()
+            .map(|range| self.active.buffer.range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.active.marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.type_text(range_utf16, new_text, cx);
     }
 
     fn replace_and_mark_text_in_range(

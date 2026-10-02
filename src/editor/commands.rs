@@ -777,10 +777,18 @@ impl Editor {
             EvilPasteBefore => self.evil_paste(false, cx),
             EvilReplaceChar => {
                 // Arm replace-pending; the dispatcher captures the next key.
+                // The arming command isn't what a macro / `.` should replay
+                // (it would wait for a key) — key_evil_replace records the
+                // resolved `(evil-replace-with "x")` in its place.
+                self.unrecord_last_event();
                 self.evil_replace_pending = true;
                 self.evil_replace_count = self.prefix_count.max(1);
                 self.status = "r-".into();
                 cx.notify();
+            }
+            EvilReplaceWith(ch) => {
+                self.evil_replace_count = self.prefix_count.max(1);
+                self.evil_replace_char(&ch, cx);
             }
             ReadChar { prompt, callback } => {
                 // Arm the capture; the key dispatcher feeds the next key to it.

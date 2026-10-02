@@ -1874,6 +1874,96 @@ mod engine_tests {
         assert!(c.iter().any(|c| matches!(c, C::GotoChar(4))), "]d: {c:?}");
     }
 
+    /// More Scheme-side coverage for the late additions: Lisp function objects
+    /// (by form head), visual C-a progressive, and the fold z-commands.
+    #[test]
+    fn evil_lisp_objects_visual_increment_and_folds() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("a startup script failed to load");
+        }
+        // af in Scheme: the enclosing (define …), not the inner (+ a b).
+        let text = "(define (f a b)\n  (+ a b))\n";
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str(text),
+            point: text.find("+ a").unwrap(),
+            language: "scheme".into(),
+            tree: crate::highlight::parse_for_test("scheme", text),
+            ..Default::default()
+        });
+        assert_eq!(
+            engine
+                .eval(r#"(evil-object-range-typed "a" "function")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(format!("(\"line\" 0 {})", text.len()).as_str())
+        );
+        // ia in Scheme: an operand, not the operator.
+        assert_eq!(
+            engine
+                .eval(r#"(evil-object-range-typed "i" "argument")"#)
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(
+                format!(
+                    "(\"char\" {} {})",
+                    text.rfind("a b)").unwrap(),
+                    text.rfind("a b)").unwrap() + 1
+                )
+                .as_str()
+            )
+        );
+        // Visual g C-a over three lines: +1, +2, +3.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("x 0\nx 0\nx 0\n"),
+            point: 0,
+            region: Some((0, 11)),
+            evil_state: "visual-line".into(),
+            ..Default::default()
+        });
+        let c = engine
+            .eval("(evil-visual-increment-progressive)")
+            .unwrap()
+            .commands;
+        let reps: Vec<(usize, String)> = c
+            .iter()
+            .filter_map(|c| match c {
+                C::ReplaceRegion { start, text, .. } => Some((*start, text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reps,
+            vec![
+                (10, "3".to_string()),
+                (6, "2".to_string()),
+                (2, "1".to_string())
+            ],
+            "{c:?}"
+        );
+        // zc inside an indented block closes its header's fold.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("a:\n  b\n  c\nd\n"),
+            point: 5,
+            line: 1,
+            name: "f.py".into(),
+            ..Default::default()
+        });
+        let c = engine.eval("(fold-close-at-point)").unwrap().commands;
+        assert!(
+            c.iter().any(|c| matches!(c, C::FoldLines { .. })),
+            "zc should fold the block: {c:?}"
+        );
+        // `r` resolves to a replayable, count-aware command.
+        assert!(matches!(
+            engine.eval(r#"(evil-replace-with "x")"#).unwrap().commands.as_slice(),
+            [C::EvilReplaceWith(ch)] if ch == "x"
+        ));
+    }
+
     #[test]
     fn evil_leader_key_configurable() {
         let (engine, _rx) = ScriptEngine::new();

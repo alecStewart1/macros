@@ -574,6 +574,12 @@ pub(crate) fn build_engine(
     register_unary(
         &mut reg,
         queue,
+        "evil-replace-with",
+        EditorCommand::EvilReplaceWith,
+    );
+    register_unary(
+        &mut reg,
+        queue,
         "evil-ex-goto-line",
         EditorCommand::EvilExGotoLine,
     );

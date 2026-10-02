@@ -154,6 +154,7 @@ pub(super) fn native_command(expr: &str) -> Option<EditorCommand> {
         "evil-goto-mark" => EditorCommand::EvilGotoMark(arg, true),
         "evil-goto-mark-line" => EditorCommand::EvilGotoMark(arg, false),
         "evil-ex" => EditorCommand::EvilEx(arg),
+        "evil-replace-with" => EditorCommand::EvilReplaceWith(arg),
         "evil-ex-goto-line" => EditorCommand::EvilExGotoLine(arg),
         _ => return None,
     })
@@ -207,6 +208,10 @@ fn is_repeat_neutral(expr: &str) -> bool {
             | "evil-repeat"
             | "call-last-kbd-macro"
             | "evil-macro-play"
+            // these open a prompt — replaying them would ask again
+            | "evil-ex-command"
+            | "evil-search-forward"
+            | "evil-search-backward"
     )
 }
 

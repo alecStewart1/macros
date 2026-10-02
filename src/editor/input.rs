@@ -386,6 +386,13 @@ impl Editor {
             && !ks.modifiers.alt
             && !ks.modifiers.platform;
         if is_text && let Some(ch) = ks.key_char.clone() {
+            let n = self.evil_replace_count;
+            let expr = format!("(evil-replace-with {})", super::vim::steel_quote(&ch));
+            self.record_event(if n > 1 {
+                MacroEvent::Counted(expr, n)
+            } else {
+                MacroEvent::Command(expr)
+            });
             self.evil_replace_char(&ch, cx);
         }
         cx.notify();
