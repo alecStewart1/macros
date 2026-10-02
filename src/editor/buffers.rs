@@ -699,7 +699,7 @@ impl Editor {
                 cx,
             );
         } else {
-            cx.quit();
+            self.quit_now(cx);
         }
         false
     }

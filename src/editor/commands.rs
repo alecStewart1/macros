@@ -95,6 +95,10 @@ impl Editor {
             Ok(()) => return,
             Err(c) => c,
         };
+        let command = match self.cmd_session(command, cx) {
+            Ok(()) => return,
+            Err(c) => c,
+        };
         debug_assert!(false, "unhandled editor command: {command:?}");
         let _ = command;
     }

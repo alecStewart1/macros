@@ -104,6 +104,7 @@ pub struct ScriptEngine {
     snapshot: SharedSnapshot,
     markers: Markers,
     options: Options,
+    session: SharedSession,
 }
 
 impl ScriptEngine {
@@ -122,6 +123,7 @@ impl ScriptEngine {
         let snapshot: SharedSnapshot = Arc::new(ArcSwap::from_pointee(EditorSnapshot::default()));
         let markers: Markers = Arc::new(Mutex::new(MarkerStore::default()));
         let options: Options = Arc::new(Mutex::new(HashMap::new()));
+        let session: SharedSession = Arc::new(Mutex::new(SessionState::default()));
         let (jobs, jobs_rx) = channel::<Job>();
         let (outcomes, outcomes_rx) = unbounded::<ScriptOutcome>();
         let (names_tx, names_rx) = channel::<Vec<String>>();
@@ -131,6 +133,7 @@ impl ScriptEngine {
         let thread_snapshot = snapshot.clone();
         let thread_markers = markers.clone();
         let thread_options = options.clone();
+        let thread_session = session.clone();
         std::thread::spawn(move || {
             engine_thread(
                 jobs_rx,
@@ -141,6 +144,7 @@ impl ScriptEngine {
                 thread_snapshot,
                 thread_markers,
                 thread_options,
+                thread_session,
             )
         });
 
@@ -156,6 +160,7 @@ impl ScriptEngine {
                 snapshot,
                 markers,
                 options,
+                session,
             },
             outcomes_rx,
         )
@@ -232,6 +237,12 @@ impl ScriptEngine {
     /// `(get-option "name")`. Called after any option change.
     pub fn set_options(&self, options: HashMap<String, crate::settings::OptionValue>) {
         *self.options.lock().unwrap() = options;
+    }
+
+    /// Publish the session-persistence state (rings, buffers, layout) that
+    /// `(session-ring …)` / `(window-layout)` / `(session-file-buffers)` read.
+    pub fn set_session(&self, state: SessionState) {
+        *self.session.lock().unwrap() = state;
     }
 
     /// Publish the active buffer name and point line for `(current-buffer)` /
@@ -413,6 +424,7 @@ pub(crate) fn engine_thread(
     snapshot: SharedSnapshot,
     markers: Markers,
     options: Options,
+    session: SharedSession,
 ) {
     let queue: Queue = Arc::new(Mutex::new(Vec::new()));
     let (mut engine, names) = build_engine(
@@ -422,6 +434,7 @@ pub(crate) fn engine_thread(
         &snapshot,
         &markers,
         &options,
+        &session,
     );
     let _ = names_tx.send(names);
 

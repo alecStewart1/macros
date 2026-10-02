@@ -45,6 +45,7 @@ mod minibuffer;
 mod modeline;
 mod overlays;
 mod panes;
+mod session;
 mod terminal;
 mod undo;
 
@@ -588,6 +589,8 @@ pub struct Editor {
     /// The last completed `C-s` string, so an empty `C-s` recalls it (Emacs).
     /// Lives outside [`Self::isearch`]: it must survive the search closing.
     last_isearch: Option<String>,
+    /// Search ring + command history kept for session persistence (savehist).
+    session: session::SessionRings,
     /// `C-l` (recenter-top-bottom) cycle position: 0 = middle, 1 = top, 2 = bottom.
     /// Advances on each consecutive press; resets when point has moved since.
     recenter_cycle: usize,
@@ -1314,6 +1317,7 @@ impl Editor {
             evil_yank_linewise: false,
             isearch: None,
             last_isearch: None,
+            session: session::SessionRings::default(),
             recenter_cycle: 0,
             recenter_point: usize::MAX,
             image_cache: HashMap::new(),

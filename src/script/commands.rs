@@ -897,6 +897,22 @@ pub enum EditorCommand {
         callback: String,
         sticky: bool,
     },
+    // --- Session persistence (scheme/session.scm: savehist + desktop) -----
+    /// Publish the [`SessionState`] (rings, buffers, layout), then call
+    /// `callback` so it reads fresh values.
+    SessionRefresh(String),
+    /// Replace one history ring wholesale (`"minibuffer"`, `"kill"`,
+    /// `"search"`, `"command"`), oldest entry first — savehist's restore.
+    SetSessionRing {
+        ring: String,
+        items: Vec<String>,
+    },
+    /// Visit `(path, point)` files as background buffers (no switch, no
+    /// find-file-hook); missing/unreadable files are skipped silently, and an
+    /// already-open file just gets its point moved.
+    RestoreFileBuffers(Vec<(String, usize)>),
+    /// Rebuild the window split tree (see [`LayoutSpec`]).
+    SetWindowLayout(LayoutSpec),
 }
 
 /// One row of a transient popup: a key, its description, and the Steel command
@@ -944,4 +960,31 @@ pub struct HelmSourceSpec {
     /// Optional Scheme fn name; given the selected candidate it returns the
     /// preview as a list of lines, shown in a side pane. `None` = no preview.
     pub preview: Option<String>,
+}
+
+/// A window split tree as data — what `(window-layout)` returns and
+/// `(set-window-layout tree)` rebuilds (desktop save/restore). Scheme sees it as
+/// nested lists: `(leaf name path point selected?)` and
+/// `(split vertical? ratio a b)`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutSpec {
+    Leaf {
+        /// Buffer name shown in the pane. On restore, a leaf is resolved by
+        /// `path` first (when non-empty), then by this name.
+        buffer: String,
+        /// The buffer's visited file, or "" for a fileless buffer.
+        path: String,
+        /// The pane's point (byte offset).
+        point: usize,
+        /// Whether this is the selected window.
+        selected: bool,
+    },
+    Split {
+        /// `true` = stacked (split below), `false` = side by side.
+        vertical: bool,
+        /// Fraction of the extent given to `a`.
+        ratio: f32,
+        a: Box<LayoutSpec>,
+        b: Box<LayoutSpec>,
+    },
 }

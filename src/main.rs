@@ -169,6 +169,12 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
                     workspace.update(cx, |w, cx| w.eval(&source, cx)).ok();
                 }
 
+                // Emacs `after-init-hook`: session restore (desktop + savehist)
+                // runs here — after the user's init.scm could opt out, and
+                // synchronously, so the restored windows are in place before
+                // keys are let through and before the reveal.
+                workspace.update(cx, |w, cx| w.run_after_init(cx)).ok();
+
                 // Config (incl. any `(evil-mode)`) is fully applied: let
                 // plain keystrokes through again. Done before the reveal so
                 // the very first key the user can press is already modal.

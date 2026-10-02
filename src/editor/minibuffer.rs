@@ -425,6 +425,7 @@ impl Editor {
                 if input.is_empty() {
                     self.echo("", cx);
                 } else if self.script.command_names().iter().any(|c| c == &input) {
+                    self.note_command(&input);
                     self.run_script(&format!("({input})"), cx);
                 } else {
                     self.echo(format!("[No match: {input}]"), cx);
@@ -452,10 +453,10 @@ impl Editor {
                     // A failed write aborts the quit — the error echo would never
                     // be seen otherwise, and the unsaved buffer would be lost.
                     if self.save_all_modified(cx) {
-                        cx.quit();
+                        self.quit_now(cx);
                     }
                 }
-                "no" | "n" => cx.quit(),
+                "no" | "n" => self.quit_now(cx),
                 _ => self.echo("Cancelled", cx),
             },
             MinibufferPurpose::CompleteAtPoint => {
@@ -469,6 +470,7 @@ impl Editor {
             }
             MinibufferPurpose::SearchForward => {
                 if !input.is_empty() {
+                    self.note_search(&input);
                     self.search_query = Some(input);
                 }
                 self.evil_search_forward = true;
@@ -476,6 +478,7 @@ impl Editor {
             }
             MinibufferPurpose::SearchBackward => {
                 if !input.is_empty() {
+                    self.note_search(&input);
                     self.search_query = Some(input);
                 }
                 self.evil_search_forward = false;
@@ -486,6 +489,7 @@ impl Editor {
                 // the string so a later empty C-s recalls it; keep `search_query`
                 // set so the matches stay highlighted (Emacs lazy-highlight).
                 if !input.is_empty() {
+                    self.note_search(&input);
                     self.last_isearch = Some(input);
                 } else if let Some(prev) = self.last_isearch.clone() {
                     // RET on an empty isearch with a prior string: adopt it.
