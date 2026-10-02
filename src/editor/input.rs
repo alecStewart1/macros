@@ -151,6 +151,7 @@ impl Editor {
             Self::key_terminal,
             Self::key_evil_replace,
             Self::key_read_char,
+            Self::key_read_key,
             Self::key_evil_modal,
             Self::key_leader,
             Self::key_evil_insert,
@@ -416,6 +417,59 @@ impl Editor {
         cx.notify();
         cx.stop_propagation();
         Handled::Yes
+    }
+
+    /// While a sticky `read-key-start` capture is armed (query-replace), EVERY
+    /// keystroke goes to its Scheme callback: printable keys as the character
+    /// itself, anything else as its chord name (`"escape"`, `"ctrl-g"`, …).
+    /// The OS-special keys (RET, DEL, TAB, arrows) arrive via the `act_*`
+    /// handlers instead — see [`read_key_action`](Self::read_key_action).
+    fn key_read_key(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> Handled {
+        let Some(callback) = self.read_key_pending.clone() else {
+            return Handled::No;
+        };
+        let is_text = ks.key_char.is_some()
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+            && !ks.modifiers.platform;
+        let key = match ks.key_char.clone() {
+            Some(ch) if is_text => ch,
+            _ => chord_string(ks),
+        };
+        self.deliver_read_key(&callback, &key, cx);
+        cx.stop_propagation();
+        Handled::Yes
+    }
+
+    /// The `act_*` (gpui action key) side of [`key_read_key`](Self::key_read_key):
+    /// when a capture is armed and no modal surface (minibuffer, Helm, …) owns
+    /// the key, hand `key` to the callback and report it consumed.
+    pub(super) fn read_key_action(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if self.minibuffer.is_some()
+            || self.helm.is_some()
+            || self.transient.is_some()
+            || self.titlebar_dropdown_open()
+        {
+            return false;
+        }
+        let Some(callback) = self.read_key_pending.clone() else {
+            return false;
+        };
+        self.deliver_read_key(&callback, key, cx);
+        true
+    }
+
+    /// Pass `key` to the read-key callback against a fresh snapshot. Escape and
+    /// C-g also disarm the capture (after delivery), so a Scheme error mid-
+    /// dialog can't leave every key swallowed.
+    fn deliver_read_key(&mut self, callback: &str, key: &str, cx: &mut Context<Self>) {
+        if key == "escape" || key == "ctrl-g" {
+            self.read_key_pending = None;
+        }
+        self.status = SharedString::default();
+        self.publish_point();
+        self.script.dispatch_action(callback, Some(key));
+        cx.notify();
     }
 
     /// Evil Normal/Visual: the evil keymap is consulted FIRST for every chord,
@@ -1173,6 +1227,9 @@ impl Editor {
     // --- GPUI action handlers (OS-special keys -> commands) ----------------
 
     pub(super) fn act_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("backspace", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_backspace(cx);
         } else if self.transient.is_some() {
@@ -1197,6 +1254,9 @@ impl Editor {
         }
     }
     pub(super) fn act_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("delete", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_delete(cx);
         } else if self.transient.is_some() {
@@ -1220,6 +1280,9 @@ impl Editor {
         }
     }
     pub(super) fn act_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("left", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_move(-1, cx);
             return;
@@ -1236,6 +1299,9 @@ impl Editor {
         }
     }
     pub(super) fn act_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("right", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_move(1, cx);
             return;
@@ -1252,6 +1318,9 @@ impl Editor {
         }
     }
     pub(super) fn act_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("up", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_move(-1, cx);
             return;
@@ -1274,6 +1343,9 @@ impl Editor {
         }
     }
     pub(super) fn act_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("down", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_move(1, cx);
             return;
@@ -1296,6 +1368,9 @@ impl Editor {
         }
     }
     pub(super) fn act_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("home", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_set(0, cx);
         } else if self.minibuffer.is_some() {
@@ -1309,6 +1384,9 @@ impl Editor {
         }
     }
     pub(super) fn act_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("end", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_cursor_set(usize::MAX, cx);
         } else if let Some(len) = self.minibuffer.as_ref().map(|mb| mb.input.len()) {
@@ -1322,6 +1400,9 @@ impl Editor {
         }
     }
     pub(super) fn act_newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("enter", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             self.titlebar_dropdown_select_current(cx);
             return;
@@ -1353,6 +1434,9 @@ impl Editor {
         }
     }
     pub(super) fn act_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_key_action("tab", cx) {
+            return;
+        }
         if self.titlebar_dropdown_open() {
             return; // dropdown is modal; TAB has no filter binding
         }
