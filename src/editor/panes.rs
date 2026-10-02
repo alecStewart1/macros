@@ -292,6 +292,13 @@ impl Editor {
         icons.get(&line).map(|(col, name)| (*col, name.as_ref()))
     }
 
+    /// Gutter dot faces (breakpoint signs, `set-gutter-dot`) for pane `id` —
+    /// same active/inactive resolution as the faces, so a source file keeps
+    /// its breakpoint dots in an unfocused window.
+    pub fn pane_gutter_dots(&self, id: usize) -> &HashMap<usize, SharedString> {
+        self.pane_field(id, || &self.active.gutter_dots, |d| &d.gutter_dots)
+    }
+
     /// Working-tree-vs-HEAD gutter marks for pane `id` (git-gutter / diff-hl),
     /// resolved active/inactive like the line faces so an unfocused window keeps
     /// its file's marks.

@@ -19,6 +19,22 @@ pub struct GrammarInstall {
     pub subdir: String,
 }
 
+/// Payload of [`EditorCommand::DapStart`]: spawn a debug adapter under `id`.
+/// Every incoming message (response, event, or reverse request) is delivered
+/// to Steel fn `on_message` as raw JSON text; `on_exit` (if present) gets the
+/// exit code as a string. The transport is protocol-free — Scheme stamps
+/// `seq`, correlates responses, and owns the session state machine (dap.scm).
+#[derive(Debug, Clone)]
+pub struct DapStartArgs {
+    pub id: u64,
+    pub program: String,
+    pub args: Vec<String>,
+    /// Working directory; "" = inherit the editor's.
+    pub cwd: String,
+    pub on_message: String,
+    pub on_exit: Option<String>,
+}
+
 /// Payload for [`EditorCommand::HttpStream`]. Boxed in the enum because it's the
 /// largest variant by far (a `Vec` plus several `String`s); see the variant doc.
 #[derive(Debug, Clone)]
@@ -207,6 +223,11 @@ pub enum EditorCommand {
     OpenFileOtherWindow(String),
     SetLineIcon(usize, usize, String),
     ClearLineIcons,
+    /// Put a colored dot (the diagnostic-dot shape) in the gutter of 0-based
+    /// `line` of the active buffer, tinted by theme face `String` — breakpoint
+    /// signs (dap.scm). Mirrors `SetLineIcon`'s per-buffer storage.
+    SetGutterDot(usize, String),
+    ClearGutterDots,
     /// Display a raster image (decoded from `path`) on rows reserved below buffer
     /// `line` — the Org inline-image primitive.
     SetLineImage {
@@ -723,6 +744,29 @@ pub enum EditorCommand {
         args: Vec<String>,
         on_output: String,
         on_exit: Option<String>,
+    },
+    /// Spawn a debug adapter (see [`DapStartArgs`]): Content-Length-framed DAP
+    /// JSON on stdio. Boxed like [`HttpStream`](Self::HttpStream): its payload
+    /// would otherwise bloat every `Result<(), EditorCommand>` (clippy
+    /// `result_large_err`).
+    DapStart(Box<DapStartArgs>),
+    /// Like [`DapStart`](Self::DapStart) but connect to `host:port` for
+    /// adapters that serve DAP over a socket instead of stdio (delve).
+    DapConnect {
+        id: u64,
+        host: String,
+        port: u16,
+        on_message: String,
+        on_exit: Option<String>,
+    },
+    /// Frame one complete DAP JSON message to session `id`'s adapter.
+    DapSend {
+        id: u64,
+        message: String,
+    },
+    /// Kill session `id`'s adapter (its process group) / close its socket.
+    DapKill {
+        id: u64,
     },
     /// Write `text` to process `id`'s stdin (Emacs `process-send-string`).
     SendProcess {

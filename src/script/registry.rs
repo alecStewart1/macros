@@ -687,6 +687,24 @@ pub(crate) fn build_engine(
         );
     }
     {
+        // `(set-gutter-dot line face)` puts a colored dot (the diagnostic-dot
+        // shape) in the gutter of 0-based `line` of the active buffer, tinted
+        // by theme face `face`; `(clear-gutter-dots)` removes them all.
+        // Breakpoint signs (dap.scm).
+        register_binary(
+            &mut reg,
+            queue,
+            "set-gutter-dot",
+            EditorCommand::SetGutterDot,
+        );
+        register_nullary(
+            &mut reg,
+            queue,
+            "clear-gutter-dots",
+            EditorCommand::ClearGutterDots,
+        );
+    }
+    {
         // `(set-line-image line "/abs/path.png" [max-width])` displays a decoded
         // raster image on rows reserved below `line` of the active buffer;
         // `(clear-line-images)` removes them all. `max-width` (px) caps the
@@ -1369,6 +1387,15 @@ pub(crate) fn build_engine(
     reg.register_fn("file-directory?", |path: String| -> bool {
         std::path::Path::new(&path).is_dir()
     });
+    // `(file-truename path)` → the canonical absolute path (symlinks and
+    // `..` resolved — Emacs's `file-truename`), or `path` unchanged when it
+    // doesn't exist. Lets dap.scm match an adapter's frame paths (e.g. macOS
+    // `/private/tmp/…`) against the buffer that visits `/tmp/…`.
+    reg.register_fn("file-truename", |path: String| -> String {
+        std::fs::canonicalize(&path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(path)
+    });
     // `(packages-directory)` → where `package-install` clones git packages:
     // the active config dir's `packages/` subdirectory. Resolved in Rust at call
     // time (the same config-dir logic that finds init.scm), so Scheme needn't
@@ -1750,6 +1777,77 @@ pub(crate) fn build_engine(
     // `id` (its whole process group), like Emacs's process buffer.
     register_binary(&mut reg, queue, "set-process-buffer", |id, name| {
         EditorCommand::SetProcessBuffer { id, name }
+    });
+    // --- DAP (Debug Adapter Protocol) --------------------------------------
+    {
+        // `(dap-start program args cwd on-message on-exit)` → a session id
+        // (used by dap-send / dap-kill). The adapter speaks Content-Length-
+        // framed DAP JSON on stdio; every incoming message — response, event,
+        // or reverse request — reaches `on-message` as raw JSON text (parse
+        // with `string->jsexpr`). The transport is protocol-free: dap.scm
+        // stamps `seq` and owns the whole state machine. `cwd` "" = inherit;
+        // on-exit "" = none (it receives the exit code as a string).
+        let q = queue.clone();
+        let ids = async_ids.clone();
+        reg.register_fn(
+            "dap-start",
+            move |program: String,
+                  args: SteelVal,
+                  cwd: String,
+                  on_message: Callback,
+                  on_exit: Callback|
+                  -> usize {
+                let id = ids.next();
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::DapStart(Box::new(DapStartArgs {
+                        id,
+                        program,
+                        args: steel_string_list(&args),
+                        cwd,
+                        on_message: on_message.0,
+                        on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
+                    })));
+                id as usize
+            },
+        );
+    }
+    {
+        // `(dap-connect host port on-message on-exit)` → a session id, for
+        // adapters that serve DAP over a socket instead of stdio (delve's
+        // `dlv dap`); Scheme spawns the server itself (make-process) and
+        // connects once it announces its port.
+        let q = queue.clone();
+        let ids = async_ids.clone();
+        reg.register_fn(
+            "dap-connect",
+            move |host: String,
+                  port: usize,
+                  on_message: Callback,
+                  on_exit: Callback|
+                  -> Result<usize, String> {
+                // Reject rather than silently wrap (70000 as u16 = 4464).
+                let port = u16::try_from(port)
+                    .ok()
+                    .filter(|&p| p != 0)
+                    .ok_or_else(|| format!("dap-connect: invalid port {port}"))?;
+                let id = ids.next();
+                q.lock().unwrap().push(EditorCommand::DapConnect {
+                    id,
+                    host,
+                    port,
+                    on_message: on_message.0,
+                    on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
+                });
+                Ok(id as usize)
+            },
+        );
+    }
+    register_binary(&mut reg, queue, "dap-send", |id, message| {
+        EditorCommand::DapSend { id, message }
+    });
+    register_unary(&mut reg, queue, "dap-kill", |id| EditorCommand::DapKill {
+        id,
     });
     {
         // `(make-http-stream url headers body on-line on-done)` → a stream id
