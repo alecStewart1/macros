@@ -565,9 +565,23 @@
                                ((blank-line-at? i) (loop (min mx (+ (line-end-pos i) 1))))
                                (else i)))))))))
 
+;; A text object as (type start end), type "line" or "char". The tree-sitter
+;; objects decide their own type; of the rest only paragraphs are linewise.
+(define (evil-object-range-typed kind obj)
+  (let ((inner (equal? kind "i")))
+    (cond ((equal? obj "function") (evil-ts-typed (evil-ts-object "function" inner)))
+          ((equal? obj "class")    (evil-ts-typed (evil-ts-object "class" inner)))
+          ((equal? obj "argument") (evil-ts-typed (evil-ts-argument inner)))
+          ((equal? obj "comment")  (evil-ts-typed (evil-ts-comment inner)))
+          (else
+           (let ((r (evil-object-range kind obj)))
+             (and r (list (if (equal? obj "para") "line" "char") (car r) (cdr r))))))))
+(define (evil-ts-typed r) (and r (list (car r) (cadr r) (cddr r))))
 (define (evil-object-range kind obj)
   (let ((inner (equal? kind "i")))
-    (cond ((equal? obj "word")    (evil-object-word inner))
+    (cond ((member obj '("function" "class" "argument" "comment"))
+           (let ((r (evil-object-range-typed kind obj))) (and r (cons (cadr r) (caddr r)))))
+          ((equal? obj "word")    (evil-object-word inner))
           ((equal? obj "para")    (evil-object-paragraph inner))
           ((equal? obj "dquote")  (evil-object-quote "\"" inner))
           ((equal? obj "squote")  (evil-object-quote "'" inner))
@@ -582,10 +596,11 @@
 ;; Deletes go through kill-region-between (register + clipboard, like d/x);
 ;; yanks select-then-save so the kill ring and OS clipboard both get it.
 (define (evil-object-cmd op kind obj)
-  (let ((r (evil-object-range kind obj)))
+  (let* ((typed (evil-object-range-typed kind obj))
+         (r (and typed (cons (cadr typed) (caddr typed)))))
     (when (and r (< (car r) (cdr r)))
       (let ((s (car r)) (e (cdr r)))
-        (if (equal? obj "para") (evil-set-linewise) (evil-set-charwise))
+        (if (equal? (car typed) "line") (evil-set-linewise) (evil-set-charwise))
         (cond ((equal? op "delete") (kill-region-between s e))
               ((equal? op "change") (kill-region-between s e) (evil-insert-state))
               ((equal? op "yank")   (set-region s e) (kill-ring-save) (goto-char s))
@@ -602,7 +617,9 @@
         (cons "(" "paren") (cons ")" "paren") (cons "b" "paren")
         (cons "{" "brace") (cons "}" "brace") (cons "shift-b" "brace")
         (cons "[" "bracket") (cons "]" "bracket")
-        (cons "<" "angle") (cons ">" "angle")))
+        (cons "<" "angle") (cons ">" "angle")
+        ;; tree-sitter objects (af if ac ic aa ia a/ i/)
+        (cons "f" "function") (cons "c" "class") (cons "a" "argument") (cons "/" "comment")))
 (for-each
  (lambda (to)
    (for-each
@@ -862,9 +879,9 @@
 
 ;; Text objects under an operator: `(evil-object "i" "word")`.
 (define (evil-object kind obj)
-  (let ((r (evil-object-range kind obj)))
-    (and r (< (car r) (cdr r))
-         (list (if (equal? obj "para") "obj-line" "obj-char") (car r) (cdr r)))))
+  (let ((r (evil-object-range-typed kind obj)))
+    (and r (< (cadr r) (caddr r))
+         (list (if (equal? (car r) "line") "obj-line" "obj-char") (cadr r) (caddr r)))))
 
 ;; The range of a motion result: (list kind start end), kind "char" or
 ;; "line" (a line range runs from a line start to past the last line's
@@ -1033,8 +1050,6 @@
         (loop (- ln 1))))
     (goto-char (evil-first-nonblank-pos s))))
 
-;; Placeholder until the comment operator lands (gc).
-(define (evil-comment-lines s e) (message "gc: no comment operator"))
 
 ;; --- the operator-pending keymap -------------------------------------------------
 (define (evil-omap chord expr) (define-key "evil-operator" chord expr))
@@ -1093,6 +1108,432 @@
    (define-key km "g ?" "evil-visual-operator \"rot13\"")
    (define-key km "g c" "evil-visual-operator \"comment\""))
  (list "evil-visual" "evil-visual-line"))
+
+;; --- tree-sitter text objects and motions ---------------------------------------
+;; af/if (function), ac/ic (class / type), aa/ia (argument / parameter), a/ / i/
+;; (comment), and ]m [m ]M [M / ]f [f ]F [F (function starts / ends), ]] [[ ][
+;; [] (class / section starts / ends). Built on the synchronous `ts-*` reads of
+;; the buffer's syntax tree; the node kinds per language live in
+;; `*evil-ts-kinds*` — extend it with `evil-ts-set-kinds`.
+
+;; Group a flat list into k-element lists: (k s e k s e …) → ((k s e) …).
+(define (evil-ts-group flat k)
+  (let loop ((xs flat) (acc '()))
+    (if (< (length xs) k)
+        (reverse acc)
+        (loop (list-tail xs k)
+              (cons (let take ((ys xs) (i 0) (out '()))
+                      (if (= i k) (reverse out) (take (cdr ys) (+ i 1) (cons (car ys) out))))
+                    acc)))))
+(define (evil-ts-triples flat) (evil-ts-group flat 3))   ; (kind start end)
+(define (evil-ts-quads flat) (evil-ts-group flat 4))     ; (kind start end named?)
+(define (evil-ts-pairs flat)
+  (map (lambda (l) (cons (car l) (cadr l))) (evil-ts-group flat 2)))
+(define (evil-named? q) (list-ref q 3))
+
+;; Node kinds per category, with per-language overrides ("lang:category").
+(define *evil-ts-kinds* (hash))
+(define (evil-ts-set-kinds key kinds)
+  (set! *evil-ts-kinds* (hash-insert *evil-ts-kinds* key kinds)))
+(define (evil-ts-kinds category)
+  (let ((specific (hash-try-get *evil-ts-kinds* (string-append (buffer-language) ":" category))))
+    (if specific specific (or (hash-try-get *evil-ts-kinds* category) '()))))
+(evil-ts-set-kinds "function"
+  '("function_item" "function_definition" "function_declaration" "method_declaration"
+    "method_definition" "func_literal" "function_expression" "arrow_function"
+    "generator_function_declaration" "generator_function" "closure_expression"
+    "lambda" "lambda_expression" "constructor_declaration" "method" "singleton_method"
+    "function_signature_item" "fn_declaration" "local_function" "function"
+    "test_declaration" "anonymous_function" "value_definition" "function_clause"))
+(evil-ts-set-kinds "class"
+  '("struct_item" "enum_item" "impl_item" "trait_item" "union_item" "mod_item"
+    "class_definition" "class_declaration" "class" "interface_declaration"
+    "type_alias_declaration" "enum_declaration" "struct_specifier" "class_specifier"
+    "union_specifier" "enum_specifier" "namespace_definition" "type_declaration"
+    "struct_declaration" "union_declaration" "opaque_declaration" "module"
+    "record_declaration" "object_definition" "trait_definition" "class_body_declaration"))
+(evil-ts-set-kinds "arguments"
+  '("arguments" "argument_list" "parameters" "parameter_list" "formal_parameters"
+    "type_arguments" "type_parameters" "closure_parameters" "lambda_parameters"
+    "template_argument_list" "template_parameter_list" "function_parameters"
+    "tuple_type" "type_parameter_list"))
+(evil-ts-set-kinds "comment" '("comment" "line_comment" "block_comment" "doc_comment"))
+(evil-ts-set-kinds "body"
+  '("block" "body" "compound_statement" "statement_block" "function_body"
+    "declaration_list" "class_body" "field_declaration_list" "enum_variant_list"
+    "interface_body" "enum_body" "struct_body" "container_field_list"
+    "field_declaration_list" "do_block" "block_statement"))
+;; Lisps: every form is a `list`; functions/classes are recognized by head.
+(evil-ts-set-kinds "scheme:function" '("list"))
+(evil-ts-set-kinds "racket:function" '("list"))
+(evil-ts-set-kinds "clojure:function" '("list_lit"))
+(define *evil-lisp-function-heads*
+  '("(define " "(define-" "(lambda " "(λ " "(defn " "(fn " "(defun " "(let " "(define(" ))
+(define (evil-ts-lisp?) (member (buffer-language) '("scheme" "racket" "clojure")))
+(define (evil-ts-function-node? n)
+  (if (evil-ts-lisp?)
+      (let ((head (buffer-substring (cadr n) (min (caddr n) (+ (cadr n) 9)))))
+        (let loop ((hs *evil-lisp-function-heads*))
+          (cond ((null? hs) #f)
+                ((starts-with? head (car hs)) #t)
+                (else (loop (cdr hs))))))
+      #t))
+
+;; The innermost node at `pos` of `category` (passing `ok?`), as (kind s e).
+(define (evil-ts-enclosing pos category ok?)
+  (let ((kinds (evil-ts-kinds category)))
+    (let loop ((ns (evil-ts-triples (ts-ancestors pos))))
+      (cond ((null? ns) #f)
+            ((and (member (car (car ns)) kinds) (ok? (car ns))) (car ns))
+            (else (loop (cdr ns)))))))
+(define (evil-ts-any n) #t)
+
+;; A range as a text-object result: linewise when it covers whole lines (from
+;; its line's first non-blank to its line end), charwise otherwise.
+(define (evil-ts-object-range s e)
+  (let ((le (line-end-pos (max s (- e 1)))))
+    (if (and (<= s (evil-first-nonblank-pos s)) (>= e le))
+        (cons "line" (cons (line-start-pos s) (if (< le (point-max)) (+ le 1) le)))
+        (cons "char" (cons s e)))))
+
+;; The "inside" of a function/class node: its body child minus braces (or,
+;; for a Lisp form, everything after the head and name).
+(define (evil-ts-inner node)
+  (let* ((s (cadr node)) (e (caddr node))
+         (kids (evil-ts-quads (ts-children s e)))
+         (bodies (evil-ts-kinds "body"))
+         (body (let loop ((ks kids))
+                 (cond ((null? ks) #f)
+                       ((member (car (car ks)) bodies) (car ks))
+                       (else (loop (cdr ks)))))))
+    (cond
+      (body
+       (let* ((bs (cadr body)) (be (caddr body))
+              (braced (member (buffer-substring bs (+ bs 1)) '("{" "(" "[")))
+              (is (if braced (+ bs 1) bs))
+              (ie (if braced (- be 1) be)))
+         (evil-ts-trim-inner is ie)))
+      ((evil-ts-lisp?)
+       ;; (define (name args) body…) → the body forms
+       (let ((named (filter evil-named? kids)))
+         (if (> (length named) 2)
+             (evil-ts-trim-inner (cadr (list-ref named 2)) (- e 1))
+             #f)))
+      (else #f))))
+;; Shrink [s, e) past surrounding blanks; when it spans several lines, make it
+;; the whole lines strictly inside (Vim `i{` style).
+(define (evil-ts-trim-inner s e)
+  (let* ((s2 (let loop ((i s))
+               (if (and (< i e) (member (buffer-substring i (+ i 1)) '(" " "\t" "\n"))) (loop (+ i 1)) i)))
+         (e2 (let loop ((i e))
+               (if (and (> i s2) (member (buffer-substring (- i 1) i) '(" " "\t" "\n"))) (loop (- i 1)) i))))
+    (and (< s2 e2)
+         (if (> (line-of-pos e2) (line-of-pos s))
+             (let ((ls (line-start-pos s2)) (le (line-end-pos e2)))
+               (cons "line" (cons ls (if (< le (point-max)) (+ le 1) le))))
+             (cons "char" (cons s2 e2))))))
+
+;; af / if, ac / ic.
+(define (evil-ts-object category inner)
+  (let ((n (evil-ts-enclosing (point) category
+                              (if (equal? category "function") evil-ts-function-node? evil-ts-any))))
+    (and n
+         (if inner
+             (evil-ts-inner n)
+             (evil-ts-object-range (cadr n) (caddr n))))))
+
+;; aa / ia — the argument / parameter under point: its node (inner), plus the
+;; separating comma and blanks after it — or, for the last one, before it.
+(define (evil-ts-argument inner)
+  (let* ((p (point))
+         (lisp (evil-ts-lisp?))
+         (container (if lisp
+                        (evil-ts-enclosing p "function" (lambda (n) #t))
+                        (evil-ts-enclosing p "arguments" evil-ts-any)))
+         (container (or container (and lisp (evil-ts-lisp-list p)))))
+    (and container
+         (let* ((kids (filter evil-named?
+                              (evil-ts-quads (ts-children (cadr container) (caddr container)))))
+                ;; a Lisp form's first element is the operator, not an argument
+                (args (if (and lisp (pair? kids)) (cdr kids) kids)))
+           (let loop ((as args) (prev #f))
+             (cond
+               ((null? as) #f)
+               ((or (<= p (caddr (car as))) (null? (cdr as)))
+                (let* ((a (car as)) (s (cadr a)) (e (caddr a))
+                       (next (and (pair? (cdr as)) (cadr as))))
+                  (cond
+                    (inner (cons "char" (cons s e)))
+                    (next (cons "char" (cons s (cadr next))))
+                    (prev (cons "char" (cons (caddr prev) e)))
+                    (else (cons "char" (cons s e))))))
+               (else (loop (cdr as) (car as)))))))))
+(define (evil-ts-lisp-list p)
+  (let loop ((ns (evil-ts-triples (ts-ancestors p))))
+    (cond ((null? ns) #f)
+          ((member (car (car ns)) '("list" "list_lit" "vector")) (car ns))
+          (else (loop (cdr ns))))))
+
+;; a/ / i/ — the comment under point; `a/` takes a run of adjacent line
+;; comments (linewise), `i/` the text inside the comment markers.
+(define (evil-ts-comment inner)
+  (let ((n (evil-ts-enclosing (point) "comment" evil-ts-any)))
+    (and n
+         (let ((s (cadr n)) (e (caddr n)))
+           (if inner
+               (let* ((text (buffer-substring s e))
+                      (lead (let loop ((i s))
+                              (if (and (< i e)
+                                       (member (buffer-substring i (+ i 1))
+                                               '("/" "*" "#" ";" "-" "!" " " "\t" "%")))
+                                  (loop (+ i 1))
+                                  i)))
+                      (tail (let loop ((i e))
+                              (if (and (> i lead)
+                                       (member (buffer-substring (- i 1) i)
+                                               '("/" "*" " " "\t" "\n" "#" "|")))
+                                  (loop (- i 1))
+                                  i))))
+                 (and (< lead tail) (cons "char" (cons lead tail))))
+               ;; extend over adjacent comment-only lines
+               (let* ((first (let loop ((ls (line-start-pos s)))
+                               (if (and (> ls 0) (evil-ts-comment-line? (line-start-pos (- ls 1))))
+                                   (loop (line-start-pos (- ls 1)))
+                                   ls)))
+                      (last (let loop ((le (line-end-pos e)))
+                              (if (and (< (+ le 1) (point-max)) (evil-ts-comment-line? (+ le 1)))
+                                  (loop (line-end-pos (+ le 1)))
+                                  le))))
+                 (if (and (<= s (evil-first-nonblank-pos s)) (>= (line-end-pos (max s (- e 1))) (- e 0)))
+                     (cons "line" (cons first (if (< last (point-max)) (+ last 1) last)))
+                     (cons "char" (cons s e)))))))))
+;; Is the line at `ls` only a comment (its first non-blank starts a comment node)?
+(define (evil-ts-comment-line? ls)
+  (let ((fnb (evil-first-nonblank-pos ls)))
+    (and (< fnb (line-end-pos ls))
+         (let ((n (evil-ts-enclosing fnb "comment" evil-ts-any)))
+           (and n (= (cadr n) fnb))))))
+
+;; Motions: the n-th node start / end of `category` after / before point.
+;; The nearest spot past `p` in direction `forward` (a linear scan, no sort).
+(define (evil-nearest-spot spots p forward)
+  (let loop ((ss spots) (best #f))
+    (if (null? ss)
+        best
+        (let ((x (car ss)))
+          (loop (cdr ss)
+                (if (if forward
+                        (and (> x p) (or (not best) (< x best)))
+                        (and (< x p) (or (not best) (> x best))))
+                    x
+                    best))))))
+(define (evil-ts-motion-target category forward ends n)
+  (let* ((kinds (evil-ts-kinds category))
+         (ranges (filter (lambda (r) (or (not (equal? category "function"))
+                                         (evil-ts-function-node? (list "" (car r) (cdr r)))))
+                         (evil-ts-pairs (ts-ranges-of-kinds kinds))))
+         (spots (map (lambda (r) (if ends (max (car r) (- (cdr r) 1)) (car r))) ranges)))
+    (let loop ((p (point)) (k n))
+      (if (<= k 0)
+          p
+          (let ((next (evil-nearest-spot spots p forward)))
+            (if next (loop next (- k 1)) (if (= k n) #f p)))))))
+(define (evil-ts-goto category forward ends extend)
+  (let ((tg (evil-ts-motion-target category forward ends (evil-count))))
+    (if tg
+        (if extend (select-to tg) (goto-char tg))
+        (message (string-append "No " (if forward "next " "previous ") category)))))
+(define (evil-next-function-start)      (evil-ts-goto "function" #t #f #f))
+(define (evil-previous-function-start)  (evil-ts-goto "function" #f #f #f))
+(define (evil-next-function-end)        (evil-ts-goto "function" #t #t #f))
+(define (evil-previous-function-end)    (evil-ts-goto "function" #f #t #f))
+(define (evil-next-class-start)         (evil-ts-goto "class" #t #f #f))
+(define (evil-previous-class-start)     (evil-ts-goto "class" #f #f #f))
+(define (evil-next-class-end)           (evil-ts-goto "class" #t #t #f))
+(define (evil-previous-class-end)       (evil-ts-goto "class" #f #t #f))
+(define (evil-next-class-start-visual)     (evil-ts-goto "class" #t #f #t))
+(define (evil-previous-class-start-visual) (evil-ts-goto "class" #f #f #t))
+(define (evil-next-class-end-visual)       (evil-ts-goto "class" #t #t #t))
+(define (evil-previous-class-end-visual)   (evil-ts-goto "class" #f #t #t))
+(define (evil-next-function-start-visual)     (evil-ts-goto "function" #t #f #t))
+(define (evil-previous-function-start-visual) (evil-ts-goto "function" #f #f #t))
+(define (evil-next-function-end-visual)       (evil-ts-goto "function" #t #t #t))
+(define (evil-previous-function-end-visual)   (evil-ts-goto "function" #f #t #t))
+;; As operator motions: exclusive to a start, inclusive to an end.
+(define (evil-ts-motion category forward ends)
+  (let ((tg (evil-ts-motion-target category forward ends (evil-mcount))))
+    (and tg (evil-mres (if ends "inclusive" "exclusive") tg))))
+
+;; --- ]d / [d — diagnostics ----------------------------------------------------
+;; The n-th LSP diagnostic after / before point (records "line\tcol\t…").
+(define (evil-diagnostic-positions)
+  (map (lambda (rec)
+         (let ((f (split-many rec "\t")))
+           (pos-at-char-column (string->number (car f)) (string->number (cadr f)))))
+       (diagnostics)))
+(define (evil-diagnostic-goto forward)
+  (let ((spots (evil-diagnostic-positions)))
+    (let loop ((p (point)) (k (evil-count)) (moved #f))
+      (let ((next (and (> k 0) (evil-nearest-spot spots p forward))))
+        (cond (next (loop next (- k 1) #t))
+              (moved (goto-char p))
+              (else (message (if forward "No more diagnostics below" "No more diagnostics above"))))))))
+(define (evil-next-diagnostic)     (evil-diagnostic-goto #t))
+(define (evil-previous-diagnostic) (evil-diagnostic-goto #f))
+
+;; --- gc — comment operator (vim-commentary) -------------------------------------
+;; Toggle line comments over [s, e): when every non-blank line is commented,
+;; uncomment them all; otherwise comment them all at the shallowest indent.
+;; The comment leader is the buffer-local "comment-string" when a mode set
+;; one, else by language.
+(define *evil-comment-strings*
+  (list (cons "python" "# ") (cons "ruby" "# ") (cons "bash" "# ") (cons "yaml" "# ")
+        (cons "toml" "# ") (cons "r" "# ") (cons "elixir" "# ") (cons "makefile" "# ")
+        (cons "lua" "-- ") (cons "sql" "-- ") (cons "haskell" "-- ")
+        (cons "scheme" ";; ") (cons "racket" ";; ") (cons "clojure" ";; ") (cons "steel" ";; ")
+        (cons "latex" "% ") (cons "erlang" "% ") (cons "typst" "// ")
+        (cons "ocaml" "(* ") (cons "html" "<!-- ") (cons "css" "/* ")
+        (cons "markdown" "<!-- ")))
+(define (evil-comment-string)
+  (let ((local (buffer-local-get "comment-string")))
+    (if (not (equal? local ""))
+        local
+        (let ((by-lang (or (alist-ref *evil-comment-strings* (buffer-language))
+                           (alist-ref *evil-comment-strings* (major-mode)))))
+          (if by-lang by-lang "// ")))))
+;; Block-style leaders close the line too.
+(define (evil-comment-closer cs)
+  (cond ((equal? cs "(* ") " *)") ((equal? cs "<!-- ") " -->") ((equal? cs "/* ") " */") (else "")))
+(define (evil-comment-lines s e)
+  (let* ((cs (evil-comment-string))
+         (close (evil-comment-closer cs))
+         (bare (string-trim cs))
+         (ls (line-start-pos s))
+         (le (line-end-pos (max s (- e 1))))
+         (lines (split-many (buffer-substring ls le) "\n"))
+         (blank? (lambda (l) (equal? (string-trim l) "")))
+         (indent-of (lambda (l) (let loop ((i 0) (cs (string->list l)))
+                                  (if (and (pair? cs) (or (char=? (car cs) #\space) (char=? (car cs) #\tab)))
+                                      (loop (+ i 1) (cdr cs))
+                                      i))))
+         (commented? (lambda (l) (starts-with? (trim-start l) bare)))
+         (content (filter (lambda (l) (not (blank? l))) lines))
+         (uncomment (and (pair? content) (all? commented? content)))
+         (col (if (null? content) 0 (apply min (map indent-of content))))
+         (new (map (lambda (l)
+                     (cond ((blank? l) l)
+                           (uncomment (evil-uncomment-line l bare (string-trim close)))
+                           (else (string-append (substring l 0 col) cs
+                                                (substring l col (string-length l)) close))))
+                   lines)))
+    (replace-region ls le (string-join new "\n"))
+    (goto-char (evil-first-nonblank-pos ls))))
+(define (all? pred lst)
+  (cond ((null? lst) #t) ((pred (car lst)) (all? pred (cdr lst))) (else #f)))
+;; Drop the first `bare` leader (and one following space) and a trailing
+;; `closer`, keeping the indentation.
+(define (evil-uncomment-line l bare closer)
+  (let* ((n (string-length l))
+         (ind (- n (string-length (trim-start l))))
+         (after (+ ind (string-length bare)))
+         (after (if (and (< after n) (equal? (substring l after (+ after 1)) " ")) (+ after 1) after))
+         (body (substring l after n))
+         (body (if (and (not (equal? closer "")) (ends-with? (trim-end body) closer))
+                   (trim-end (substring body 0 (- (string-length (trim-end body)) (string-length closer))))
+                   body)))
+    (string-append (substring l 0 ind) body)))
+
+;; --- C-a / C-x — increment / decrement the number at or after the cursor ------
+;; Decimal (with a leading `-`), hex `0x…` (case and width kept) and binary
+;; `0b…`; a count adds that much. Visual: every selected line's first number
+;; (g C-a: progressively, 1×count, 2×count, …).
+(define *evil-number-re* "0[xX][0-9a-fA-F]+|0[bB][01]+|-?[0-9]+")
+(define (evil-digit-value c)
+  (let ((n (char->integer c)))
+    (cond ((and (>= n 48) (<= n 57)) (- n 48))
+          ((and (>= n 97) (<= n 102)) (+ 10 (- n 97)))
+          ((and (>= n 65) (<= n 70)) (+ 10 (- n 65)))
+          (else 0))))
+(define (evil-parse-radix s radix)
+  (let loop ((cs (string->list s)) (acc 0))
+    (if (null? cs) acc (loop (cdr cs) (+ (* acc radix) (evil-digit-value (car cs)))))))
+(define (evil-format-radix n radix upper)
+  (if (= n 0)
+      "0"
+      (let loop ((n n) (acc '()))
+        (if (= n 0)
+            (list->string acc)
+            (let* ((d (modulo n radix))
+                   (c (if (< d 10) (integer->char (+ 48 d))
+                          (integer->char (+ (if upper 65 97) (- d 10))))))
+              (loop (quotient n radix) (cons c acc)))))))
+(define (evil-pad-left s width)
+  (if (>= (string-length s) width) s (evil-pad-left (string-append "0" s) width)))
+;; The new text for number `text` plus `delta`.
+(define (evil-number-add text delta)
+  (cond
+    ((or (starts-with? text "0x") (starts-with? text "0X"))
+     (let* ((digits (substring text 2 (string-length text)))
+            (upper (let loop ((cs (string->list digits)))
+                     (cond ((null? cs) #f)
+                           ((and (char>=? (car cs) #\A) (char<=? (car cs) #\F)) #t)
+                           (else (loop (cdr cs))))))
+            (width (string-length digits))
+            (modulus (expt 16 width))
+            (v (modulo (+ (evil-parse-radix digits 16) delta) (max modulus (expt 16 8)))))
+       (string-append (substring text 0 2) (evil-pad-left (evil-format-radix v 16 upper) width))))
+    ((or (starts-with? text "0b") (starts-with? text "0B"))
+     (let* ((digits (substring text 2 (string-length text)))
+            (v (max 0 (+ (evil-parse-radix digits 2) delta))))
+       (string-append (substring text 0 2)
+                      (evil-pad-left (evil-format-radix v 2 #f) (string-length digits)))))
+    (else (number->string (+ (string->number text) delta)))))
+;; The number at or after `pos` on its line: (start . end), or #f. A `-` only
+;; counts as a sign when it doesn't follow a word character (`x-1` is 1).
+(define (evil-number-at pos)
+  (let* ((ls (line-start-pos pos)) (le (line-end-pos pos)))
+    (let loop ((m (buffer-regex-matches *evil-number-re* ls le)))
+      (cond ((or (null? m) (null? (cdr m))) #f)
+            ((> (cadr m) pos)
+             (let* ((s (car m)) (e (cadr m))
+                    (s (if (and (equal? (buffer-substring s (+ s 1)) "-") (> s ls)
+                                (evil-word-char-pos? (- s 1)))
+                           (+ s 1) s)))
+               (cons s e)))
+            (else (loop (cddr m)))))))
+(define (evil-increment-by delta)
+  (let ((r (evil-number-at (point))))
+    (if (not r)
+        (message "No number on this line")
+        (let* ((s (car r)) (e (cdr r))
+               (new (evil-number-add (buffer-substring s e) delta)))
+          (replace-region s e new)
+          (goto-char (+ s (- (utf8-length new) 1)))))))
+(define (evil-increment) (evil-increment-by (evil-count)))
+(define (evil-decrement) (evil-increment-by (- 0 (evil-count))))
+;; Visual: each selected line's first number at/after the selection start.
+(define (evil-visual-increment-by step progressive)
+  (let ((rb (region-beginning)) (re (region-end)))
+    (when (and (>= rb 0) (< rb re))
+      (let loop ((ln (line-of-pos (max rb (- re 1)))) (edits '()))
+        (if (>= ln (line-of-pos rb))
+            (let* ((ls (pos-at-char-column ln 0))
+                   (r (evil-number-at (if (= ln (line-of-pos rb)) (max ls (- rb 1)) (max 0 (- ls 1)))))
+                   (r (and r (= (line-of-pos (car r)) ln) r)))
+              (loop (- ln 1) (if r (cons r edits) edits)))
+            ;; edits are top-down; apply bottom-up so offsets hold
+            (let go ((es (reverse edits)) (k (length edits)))
+              (when (pair? es)
+                (let* ((r (car es))
+                       (delta (if progressive (* step k) step)))
+                  (replace-region (car r) (cdr r) (evil-number-add (buffer-substring (car r) (cdr r)) delta)))
+                (go (cdr es) (- k 1))))))
+        (goto-char rb)))
+  (evil-normal-state))
+(define (evil-visual-increment)             (evil-visual-increment-by (evil-count) #f))
+(define (evil-visual-decrement)             (evil-visual-increment-by (- 0 (evil-count)) #f))
+(define (evil-visual-increment-progressive) (evil-visual-increment-by (evil-count) #t))
+(define (evil-visual-decrement-progressive) (evil-visual-increment-by (- 0 (evil-count)) #t))
 
 ;; Visual-mode change (charwise selection's exact range) and case folding. Case
 ;; ops work the region text directly (builtins only) rather than via editing.scm.
@@ -1263,6 +1704,73 @@
 (define-key "evil-normal" "ctrl-f" 'scroll-up)          ; full page forward
 (define-key "evil-normal" "ctrl-b" 'scroll-down)        ; full page back
 (define-key "evil-normal" "z z" 'recenter)              ; zz — center cursor line
+;; Folds (scheme/folding.scm; org/markdown use their own fold styles): za
+;; toggle, zc close, zo open, zM fold everything, zR open everything, zj / zk
+;; the next / previous fold header.
+(define-key "evil-normal" "z a" 'fold-toggle-at-point)
+(define-key "evil-normal" "z c" 'fold-close-at-point)
+(define-key "evil-normal" "z o" 'fold-open-at-point)
+(define-key "evil-normal" "z shift-m" 'fold-all)
+(define-key "evil-normal" "z shift-r" 'fold-show-all)
+(define-key "evil-normal" "z j" 'fold-next-header)
+(define-key "evil-normal" "z k" 'fold-previous-header)
+
+;; Structural motions (tree-sitter): ]m [m / ]f [f — next / previous function
+;; start, ]M [M / ]F [F — function end; ]] [[ — next / previous class (section)
+;; start, ][ [] — its end. ]d [d — next / previous diagnostic.
+(for-each
+ (lambda (b)
+   (define-key "evil-normal" (car b) (cadr b))
+   (define-key "evil-visual" (car b) (caddr b))
+   (define-key "evil-visual-line" (car b) (caddr b))
+   (define-key "evil-operator" (car b) (list-ref b 3)))
+ (list
+  (list "] m" "evil-next-function-start" "evil-next-function-start-visual"
+        "evil-ts-motion \"function\" #t #f")
+  (list "[ m" "evil-previous-function-start" "evil-previous-function-start-visual"
+        "evil-ts-motion \"function\" #f #f")
+  (list "] shift-m" "evil-next-function-end" "evil-next-function-end-visual"
+        "evil-ts-motion \"function\" #t #t")
+  (list "[ shift-m" "evil-previous-function-end" "evil-previous-function-end-visual"
+        "evil-ts-motion \"function\" #f #t")
+  (list "] f" "evil-next-function-start" "evil-next-function-start-visual"
+        "evil-ts-motion \"function\" #t #f")
+  (list "[ f" "evil-previous-function-start" "evil-previous-function-start-visual"
+        "evil-ts-motion \"function\" #f #f")
+  (list "] shift-f" "evil-next-function-end" "evil-next-function-end-visual"
+        "evil-ts-motion \"function\" #t #t")
+  (list "[ shift-f" "evil-previous-function-end" "evil-previous-function-end-visual"
+        "evil-ts-motion \"function\" #f #t")
+  (list "] ]" "evil-next-class-start" "evil-next-class-start-visual"
+        "evil-ts-motion \"class\" #t #f")
+  (list "[ [" "evil-previous-class-start" "evil-previous-class-start-visual"
+        "evil-ts-motion \"class\" #f #f")
+  (list "] [" "evil-next-class-end" "evil-next-class-end-visual"
+        "evil-ts-motion \"class\" #t #t")
+  (list "[ ]" "evil-previous-class-end" "evil-previous-class-end-visual"
+        "evil-ts-motion \"class\" #f #t")))
+(define-key "evil-normal" "] d" 'evil-next-diagnostic)
+(define-key "evil-normal" "[ d" 'evil-previous-diagnostic)
+
+;; C-a — increment the number at/after the cursor (decimal, hex, binary; a count
+;; adds that much). Visual: C-a on each selected line, g C-a / g C-x
+;; progressively. Vim's C-x (decrement) is off by default because C-x is the
+;; Emacs prefix (C-x C-s, C-x b, …) that stays live in Normal state — turn it
+;; on with (evil-enable-ctrl-x-decrement); `g -` decrements regardless.
+(define-key "evil-normal" "ctrl-a" 'evil-increment)
+(define-key "evil-normal" "g -" 'evil-decrement)
+(define-key "evil-visual" "ctrl-a" 'evil-visual-increment)
+(define-key "evil-visual" "g ctrl-a" 'evil-visual-increment-progressive)
+(define-key "evil-visual" "g ctrl-x" 'evil-visual-decrement-progressive)
+(define-key "evil-visual" "g -" 'evil-visual-decrement)
+(define-key "evil-visual-line" "ctrl-a" 'evil-visual-increment)
+(define-key "evil-visual-line" "g ctrl-a" 'evil-visual-increment-progressive)
+(define-key "evil-visual-line" "g ctrl-x" 'evil-visual-decrement-progressive)
+(define-key "evil-visual-line" "g -" 'evil-visual-decrement)
+(define (evil-enable-ctrl-x-decrement)
+  (define-key "evil-normal" "ctrl-x" 'evil-decrement)
+  (define-key "evil-visual" "ctrl-x" 'evil-visual-decrement)
+  (define-key "evil-visual-line" "ctrl-x" 'evil-visual-decrement))
 
 ;; (`>>` / `<<` and every other operator + motion pair live in the operator
 ;; grammar above: `>` / `<` are operators, doubled for the current line.)
@@ -1664,7 +2172,18 @@
             evil-forward-sentence-visual evil-backward-sentence-visual
             evil-repeat evil-macro-play
             evil-window-top evil-window-bottom
-            evil-window-top-visual evil-window-bottom-visual))
+            evil-window-top-visual evil-window-bottom-visual
+            evil-increment evil-decrement evil-visual-increment evil-visual-decrement
+            evil-visual-increment-progressive evil-visual-decrement-progressive
+            evil-next-diagnostic evil-previous-diagnostic
+            evil-next-function-start evil-previous-function-start
+            evil-next-function-end evil-previous-function-end
+            evil-next-class-start evil-previous-class-start
+            evil-next-class-end evil-previous-class-end
+            evil-next-function-start-visual evil-previous-function-start-visual
+            evil-next-function-end-visual evil-previous-function-end-visual
+            evil-next-class-start-visual evil-previous-class-start-visual
+            evil-next-class-end-visual evil-previous-class-end-visual))
 
 ;; --- jumps ---------------------------------------------------------------------
 ;; Commands that are "jumps" in Vim's sense: run from a key, they record the
@@ -1678,4 +2197,6 @@
             evil-forward-sentence evil-backward-sentence
             evil-window-top evil-window-middle evil-window-bottom
             lsp-find-definition lsp-find-references lsp-find-implementation
-            lsp-find-type-definition imenu))
+            lsp-find-type-definition imenu
+            evil-next-class-start evil-previous-class-start
+            evil-next-diagnostic evil-previous-diagnostic))

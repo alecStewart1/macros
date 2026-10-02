@@ -100,6 +100,12 @@ pub struct EditorSnapshot {
     pub major_mode: String,
     /// The buffer's Vim marks `(name, byte)`, for `(mark-position "a")`.
     pub marks: Vec<(String, usize)>,
+    /// The buffer's highlighting language ("rust", "python", …; "" when none),
+    /// for `(buffer-language)`.
+    pub language: String,
+    /// The buffer's current syntax tree (a refcounted copy), for the
+    /// synchronous `ts-*` reads behind tree-sitter text objects and motions.
+    pub tree: Option<tree_sitter::Tree>,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the

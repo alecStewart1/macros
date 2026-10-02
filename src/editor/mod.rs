@@ -3237,6 +3237,17 @@ impl Editor {
             search_query: self.search_query.clone().unwrap_or_default(),
             search_forward: self.evil_search_forward,
             marks: self.active_marks(),
+            language: self
+                .active
+                .modes
+                .active_language()
+                .unwrap_or("")
+                .to_string(),
+            tree: self
+                .active
+                .highlighter
+                .as_ref()
+                .and_then(|h| h.tree().cloned()),
             major_mode: self
                 .active
                 .modes

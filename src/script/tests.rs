@@ -1730,6 +1730,150 @@ mod engine_tests {
         assert!(c.iter().any(|c| matches!(c, C::EvilNormalState)), "{c:?}");
     }
 
+    /// Tree-sitter text objects and motions, the gc comment operator, ]d,
+    /// and C-a / C-x — against real parse trees.
+    #[test]
+    fn evil_tree_sitter_objects_and_extras() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        let src = "fn alpha(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n// one\n// two\nstruct S {\n    x: i32,\n}\n\nfn beta() {}\n";
+        let set = |lang: &str, text: &str, point: usize| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                selections: vec![(point, point)],
+                language: lang.into(),
+                major_mode: lang.into(),
+                tree: crate::highlight::parse_for_test(lang, text),
+                ..Default::default()
+            });
+        };
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap_or_default();
+        let at = |needle: &str| src.find(needle).unwrap();
+        // af: the whole function, linewise; if: the body lines.
+        set("rust", src, at("a + b"));
+        let fn_end = at("}\n\n// one") + 2;
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "function")"#),
+            format!("(\"line\" 0 {fn_end})")
+        );
+        assert_eq!(
+            val(r#"(evil-object-range-typed "i" "function")"#),
+            format!("(\"line\" {} {})", at("    a + b"), at("}\n\n// one"))
+        );
+        // aa / ia on a parameter: the last one takes the comma before it.
+        set("rust", src, at("b: i32"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "i" "argument")"#),
+            format!("(\"char\" {} {})", at("b: i32"), at("b: i32") + 6)
+        );
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "argument")"#),
+            format!("(\"char\" {} {})", at(", b: i32"), at("b: i32") + 6)
+        );
+        set("rust", src, at("a: i32"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "argument")"#),
+            format!("(\"char\" {} {})", at("a: i32"), at("b: i32"))
+        );
+        // ac: the struct; a/: both adjacent line comments.
+        set("rust", src, at("x: i32"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "class")"#),
+            format!("(\"line\" {} {})", at("struct S"), at("}\n\nfn beta") + 2)
+        );
+        set("rust", src, at("one"));
+        assert_eq!(
+            val(r#"(evil-object-range-typed "a" "comment")"#),
+            format!("(\"line\" {} {})", at("// one"), at("struct S"))
+        );
+        // ]m from the top lands on beta; daf deletes alpha linewise.
+        set("rust", src, 0);
+        assert_eq!(
+            val(r#"(evil-ts-motion-target "function" #t #f 1)"#),
+            at("fn beta").to_string()
+        );
+        set("rust", src, at("a + b"));
+        let c = engine
+            .eval(r#"(evil-operate "delete" 0 "" (lambda () (evil-object "a" "function")))"#)
+            .unwrap()
+            .commands;
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::KillRegionBetween { start: 0, end } if *end == fn_end)),
+            "daf: {c:?}"
+        );
+        // gc / gcc: comment at the shallowest indent, then uncomment.
+        set("python", "a\n  b\n", 0);
+        let c = engine.eval("(evil-comment-lines 0 6)").unwrap().commands;
+        assert!(
+            c.iter().any(
+                |c| matches!(c, C::ReplaceRegion { start: 0, end: 5, text } if text == "# a\n#   b")
+            ),
+            "gc: {c:?}"
+        );
+        set("python", "# a\n  # b\n", 0);
+        let c = engine.eval("(evil-comment-lines 0 10)").unwrap().commands;
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { text, .. } if text == "a\n  b")),
+            "gc uncomment: {c:?}"
+        );
+        // C-a / C-x: decimal (signed), hex keeping width/case, x-1 is not -1.
+        let inc = |text: &str, point: usize, delta: i64| {
+            set("rust", text, point);
+            engine
+                .eval(&format!("(evil-increment-by {delta})"))
+                .unwrap()
+                .commands
+        };
+        let c = inc("x = 9;", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 4, end: 5, text } if text == "10")),
+            "{c:?}"
+        );
+        let c = inc("v -5 w", 0, 3);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 2, end: 4, text } if text == "-2")),
+            "{c:?}"
+        );
+        let c = inc("n = 0x0f", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { text, .. } if text == "0x10")),
+            "{c:?}"
+        );
+        let c = inc("n = 0xFF", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { text, .. } if text == "0x100")),
+            "{c:?}"
+        );
+        let c = inc("x-1", 0, 1);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::ReplaceRegion { start: 2, end: 3, text } if text == "2")),
+            "{c:?}"
+        );
+        // ]d: the next diagnostic's position.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("aaa\nbbb\nccc\n"),
+            point: 0,
+            diagnostics: vec!["2\t1\terror\tboom".into(), "1\t0\twarning\tw".into()],
+            ..Default::default()
+        });
+        let c = engine.eval("(evil-next-diagnostic)").unwrap().commands;
+        assert!(c.iter().any(|c| matches!(c, C::GotoChar(4))), "]d: {c:?}");
+    }
+
     #[test]
     fn evil_leader_key_configurable() {
         let (engine, _rx) = ScriptEngine::new();
@@ -2063,6 +2207,34 @@ mod engine_tests {
         assert!(bound("evil-normal", "&", r#"evil-ex "s""#));
         assert!(bound("evil-normal", "g &", r#"evil-ex "%&&""#));
         assert!(bound("evil-visual-line", ":", "evil-ex-command"));
+        // Tree-sitter motions / objects, diagnostics, folds, C-a, gc.
+        assert!(bound("evil-normal", "] m", "evil-next-function-start"));
+        assert!(bound("evil-normal", "[ [", "evil-previous-class-start"));
+        assert!(bound(
+            "evil-operator",
+            "] m",
+            r#"evil-ts-motion "function" #t #f"#
+        ));
+        assert!(bound(
+            "evil-operator",
+            "a f",
+            r#"evil-object "a" "function""#
+        ));
+        assert!(bound(
+            "evil-visual",
+            "i a",
+            r#"evil-object-cmd "select" "i" "argument""#
+        ));
+        assert!(bound("evil-normal", "] d", "evil-next-diagnostic"));
+        assert!(bound("evil-normal", "z c", "fold-close-at-point"));
+        assert!(bound("evil-normal", "z shift-m", "fold-all"));
+        assert!(bound("evil-normal", "ctrl-a", "evil-increment"));
+        assert!(bound(
+            "evil-visual",
+            "g ctrl-a",
+            "evil-visual-increment-progressive"
+        ));
+        assert!(bound("evil-normal", "g c", r#"evil-operator "comment""#));
         for jump in [
             "evil-goto-last-line",
             "evil-search-next",

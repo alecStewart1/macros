@@ -794,6 +794,12 @@ impl Highlighter {
     /// `(kind, start_byte, end_byte)`. Empty when there's no tree yet. Lets a
     /// script ask "what am I inside?" — e.g. skip a bracket that sits in a string
     /// or comment node.
+    /// The current syntax tree (a cheap refcounted copy is published to
+    /// Scheme for the synchronous `ts-*` reads).
+    pub fn tree(&self) -> Option<&Tree> {
+        self.tree.as_ref()
+    }
+
     pub fn node_at(&self, byte: usize) -> Vec<(String, usize, usize)> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
@@ -1058,6 +1064,80 @@ impl Highlighter {
 
 /// Parse `rope` by feeding tree-sitter chunks straight from the rope (no
 /// whole-buffer string allocation), reusing `old_tree` for incremental reparse.
+/// Parse `text` as `language` from scratch (tests drive the `ts-*` reads with
+/// a real tree).
+#[cfg(test)]
+pub fn parse_for_test(language: &str, text: &str) -> Option<Tree> {
+    let (lang, _) = grammar(language)?;
+    let mut parser = Parser::new();
+    parser.set_language(&lang.into()).ok()?;
+    parser.parse(text, None)
+}
+
+/// `(kind, start, end)` of every node containing `byte`, innermost first —
+/// the chain behind `(ts-ancestors pos)`.
+pub fn tree_ancestors(tree: &Tree, byte: usize) -> Vec<(String, usize, usize)> {
+    let mut node = tree.root_node().descendant_for_byte_range(byte, byte);
+    let mut chain = Vec::new();
+    while let Some(n) = node {
+        chain.push((n.kind().to_string(), n.start_byte(), n.end_byte()));
+        node = n.parent();
+    }
+    chain
+}
+
+/// The children `(kind, start, end, named)` of the innermost node spanning
+/// exactly `[start, end)` — `(ts-children s e)`.
+pub fn tree_children(tree: &Tree, start: usize, end: usize) -> Vec<(String, usize, usize, bool)> {
+    let mut node = tree.root_node().descendant_for_byte_range(start, end);
+    while let Some(n) = node {
+        if n.start_byte() == start && n.end_byte() == end {
+            let mut cursor = n.walk();
+            return n
+                .children(&mut cursor)
+                .map(|c| {
+                    (
+                        c.kind().to_string(),
+                        c.start_byte(),
+                        c.end_byte(),
+                        c.is_named(),
+                    )
+                })
+                .collect();
+        }
+        if n.start_byte() < start || n.end_byte() > end {
+            break;
+        }
+        node = n.parent();
+    }
+    Vec::new()
+}
+
+/// `(start, end)` of every node whose kind is in `kinds`, in document order —
+/// `(ts-ranges-of-kinds kinds)`, behind `]m` / `[[` style motions.
+pub fn tree_ranges_of_kinds(tree: &Tree, kinds: &[String]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    'walk: loop {
+        let n = cursor.node();
+        if kinds.iter().any(|k| k == n.kind()) {
+            out.push((n.start_byte(), n.end_byte()));
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                continue 'walk;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    out
+}
+
 fn parse(parser: &mut Parser, rope: &Rope, old_tree: Option<&Tree>) -> Option<Tree> {
     let mut callback = |byte: usize, _: Point| -> &[u8] {
         if byte >= rope.len_bytes() {
