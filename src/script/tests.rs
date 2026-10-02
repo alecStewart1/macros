@@ -1737,6 +1737,55 @@ mod engine_tests {
     }
 
     #[test]
+    fn negative_offsets_never_reach_the_editor() {
+        // Steel wraps a negative int converted to `usize` (-1 → usize::MAX),
+        // which the editor then clamped to the buffer END — `(delete-region -5
+        // 2)` deleted from 2 to the end. Position primitives clamp negatives
+        // to 0 at the boundary instead.
+        let (engine, _rx) = ScriptEngine::new();
+        let (commands, error) = engine.eval_collecting(
+            "(goto-char -1) (delete-region -5 2) (replace-region 0 -1 \"x\") \
+             (insert-at -1 \"x\") (set-region -1 3) (select-to -2)",
+        );
+        assert!(error.is_none(), "{error:?}");
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    EditorCommand::GotoChar(0),
+                    EditorCommand::DeleteRegion { start: 0, end: 2 },
+                    EditorCommand::ReplaceRegion {
+                        start: 0,
+                        end: 0,
+                        ..
+                    },
+                    EditorCommand::InsertAt { pos: 0, .. },
+                    EditorCommand::SetRegion { start: 0, end: 3 },
+                    EditorCommand::SelectTo(0),
+                ]
+            ),
+            "got {commands:?}"
+        );
+        // Pure reads clamp the same way (no snapshot published → empty text).
+        assert_eq!(
+            engine
+                .eval("(buffer-substring -3 2)")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"\"")
+        );
+        assert_eq!(
+            engine
+                .eval("(grapheme-backward -1)")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
     fn evil_visual_block_commands_resolve() {
         let (engine, _rx) = ScriptEngine::new();
         // `C-v` enters block-wise Visual.

@@ -187,19 +187,23 @@ impl Editor {
                 self.move_to(offset, cx);
             }
             ScrollCursorToRow(row) => self.scroll_cursor_to_row(row, cx),
+            // Scheme-supplied offsets: clamp AND floor to a char boundary, so a
+            // byte-arithmetic position inside a multibyte char can't become a
+            // point the rope later refuses to slice at.
             GotoChar(n) => {
-                let offset = n.min(self.active.buffer.len());
+                let offset = self.active.buffer.snap(n);
                 self.move_to(offset, cx);
             }
             SelectTo(n) => {
-                let offset = n.min(self.active.buffer.len());
+                let offset = self.active.buffer.snap(n);
                 self.select_to(offset, cx);
             }
             SetRegion { start, end } => {
-                let len = self.active.buffer.len();
+                // Inverted ends are a backwards region: point at `end`.
+                let range = self.active.buffer.clamp_range(start..end);
                 self.active.mark_active = true;
-                self.active.selected_range = start.min(len)..end.min(len);
-                self.active.selection_reversed = false;
+                self.active.selected_range = range;
+                self.active.selection_reversed = end < start;
                 self.ensure_cursor_visible();
                 cx.notify();
             }
@@ -261,7 +265,10 @@ impl Editor {
                 self.script.dispatch_action(&callback, Some(&dump));
             }
             DeleteRegion { start, end } => self.delete_region(start, end, cx),
-            KillRegionBetween { start, end } => self.kill_range(start.min(end)..start.max(end), cx),
+            KillRegionBetween { start, end } => {
+                let range = self.active.buffer.clamp_range(start..end);
+                self.kill_range(range, cx)
+            }
             ReplaceRegion { start, end, text } => self.replace_region(start, end, &text, cx),
             InsertAt { pos, text } => self.insert_at(pos, &text, cx),
             UndoBoundary => self.undo_boundary(),

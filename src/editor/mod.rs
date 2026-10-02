@@ -1979,6 +1979,10 @@ impl Editor {
         // computed against is gone. Eager clearing here (every mutation funnels
         // through `edit`) is what keeps the ghost free of any byte bookkeeping.
         self.active.ghost = None;
+        // Normalize once, up front, so the undo record, the highlighter's
+        // InputEdit, LSP sync, and overlay shifts all agree with what the rope
+        // actually does (it repairs bad ranges itself — see `Buffer::replace`).
+        let range = self.active.buffer.clamp_range(range);
         let (range_start, range_end) = (range.start, range.end);
         let removed = self.active.buffer.slice_to_string(range.clone());
         let removed_newlines = removed.matches('\n').count();
@@ -2826,26 +2830,27 @@ impl Editor {
         cx.notify();
     }
 
+    // The explicitly-addressed primitives below take offsets straight from
+    // Scheme, so they normalize (swap inverted ends, clamp, floor to a char
+    // boundary) rather than trust them — Emacs accepts `(delete-region 9 3)`.
     fn delete_region(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
-        let len = self.active.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        if start < end {
-            let cursor = self.edit(start..end, "");
+        let range = self.active.buffer.clamp_range(start..end);
+        if !range.is_empty() {
+            let cursor = self.edit(range, "");
             self.collapse_to(cursor);
             cx.notify();
         }
     }
 
     fn replace_region(&mut self, start: usize, end: usize, text: &str, cx: &mut Context<Self>) {
-        let len = self.active.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        let cursor = self.edit(start..end, text);
+        let range = self.active.buffer.clamp_range(start..end);
+        let cursor = self.edit(range, text);
         self.collapse_to(cursor);
         cx.notify();
     }
 
     fn insert_at(&mut self, pos: usize, text: &str, cx: &mut Context<Self>) {
-        let pos = pos.min(self.active.buffer.len());
+        let pos = self.active.buffer.snap(pos);
         let cursor = self.edit(pos..pos, text);
         self.collapse_to(cursor);
         cx.notify();
