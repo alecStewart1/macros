@@ -918,6 +918,10 @@ impl Editor {
             self.active.line_icons.clear();
             let line = self.active.buffer.line_index_at_byte(self.point());
             self.active.buffer = Buffer::new(&text);
+            // The old undo records address the replaced text; replaying one
+            // against the new text corrupts it (or panics). Start fresh.
+            self.active.reset_undo();
+            self.undo_group_started = false;
             self.active.line_faces = faces;
             self.lines.clear();
             let last = self.active.buffer.line_count().saturating_sub(1);
@@ -938,6 +942,7 @@ impl Editor {
                 .map(|pt| doc.buffer.line_index_at_byte(pt.min(doc.buffer.len())))
                 .unwrap_or(0);
             doc.buffer = Buffer::new(&text);
+            doc.reset_undo(); // see the active branch above
             doc.line_faces = faces;
             doc.line_icons.clear();
             doc.overlays = Overlays::default();
@@ -1132,6 +1137,7 @@ impl Editor {
                 let doc = &mut self.inactive[idx];
                 let (s, e) = line_span(&doc.buffer, ds, de);
                 doc.buffer.replace(s..e, &text);
+                doc.reset_undo(); // unrecorded edit: old records are stale
                 doc.modified = true;
                 if let Some(h) = doc.highlighter.as_mut() {
                     h.set_text(doc.buffer.rope());

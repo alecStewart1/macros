@@ -3006,6 +3006,8 @@ impl Editor {
             if lines > LOG_BUFFER_LINES_CAP {
                 let cut = doc.buffer.line_range(lines - LOG_BUFFER_LINES_CAP).start;
                 doc.buffer.replace(0..cut, "");
+                doc.reset_undo(); // unrecorded edit: old records are stale
+                doc.selected_range = doc.buffer.clamp_range(doc.selected_range.clone());
             }
         } else {
             self.inactive
