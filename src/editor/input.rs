@@ -483,6 +483,7 @@ impl Editor {
             // it changed the buffer, becomes what `.` repeats).
             if self.evil == EvilState::Normal {
                 self.dot_boundary(&expr);
+                self.register_boundary(&expr);
             }
             // An operator (`d`) or a `%c` binding (`m`, `"`) waits for more
             // input instead of running now.

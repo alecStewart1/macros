@@ -135,6 +135,9 @@ impl Editor {
         // undoes as one step, as in Vim.
         if was_insert {
             self.squash_insert_session();
+            // `".` — the text typed in the session.
+            let typed = std::mem::take(&mut self.vim.insert_acc);
+            self.vim.registers.set('.', &typed, false);
         }
         // Collapse any block-insert cursors (vim leaves a single cursor after a
         // blockwise `I`/`A` once you press Escape). No-op without extras.
@@ -158,6 +161,7 @@ impl Editor {
 
     pub(super) fn evil_insert_state(&mut self, cx: &mut Context<Self>) {
         self.evil = EvilState::Insert;
+        self.vim.insert_acc.clear();
         self.active.mark_active = false;
         cx.notify();
     }
@@ -253,6 +257,8 @@ impl Editor {
         };
         let killed = self.block_text(top, bottom, left, right);
         self.set_clipboard(&killed, cx);
+        let reg = self.take_kill_register();
+        self.note_register_kill(super::registers::KillKind::Delete, reg, &killed);
         self.push_kill(killed);
         // Delete bottom-up so earlier edits don't shift later rows' offsets.
         self.begin_undo_group();
@@ -322,6 +328,8 @@ impl Editor {
         };
         let text = self.block_text(top, bottom, left, right);
         self.set_clipboard(&text, cx);
+        let reg = self.take_kill_register();
+        self.note_register_kill(super::registers::KillKind::Yank, reg, &text);
         self.push_kill(text);
         self.evil_yank_linewise = false;
         let top_line = self.active.buffer.line_range(top);
@@ -476,6 +484,23 @@ impl Editor {
     /// line-wise or character-wise placement from the flag set by the last
     /// yank/delete (`evil_yank_linewise`).
     pub(super) fn evil_paste(&mut self, after: bool, cx: &mut Context<Self>) {
+        // `"ap` / `"+p` / `"0p`: paste a register instead of the kill ring.
+        // Peeked, not taken, so `"a3p` pastes it three times; the register
+        // prefix expires at the next command boundary.
+        let reg = (self.evil != EvilState::Disabled && !self.modal_helix)
+            .then_some(self.vim.pending_register)
+            .flatten();
+        if let Some(r) = reg {
+            if r == '_' {
+                return;
+            }
+            match self.evil_register_value(r, cx) {
+                Some(v) if v.linewise => self.evil_paste_linewise(&v.text, after, cx),
+                Some(v) => self.evil_paste_charwise(&v.text, after, cx),
+                None => self.echo(format!("Register {r} is empty"), cx),
+            }
+            return;
+        }
         // Reconcile with the system clipboard before pasting, so `p` pastes what
         // was last copied anywhere. External text carries no line-wise marker, so
         // paste it char-wise.
@@ -627,6 +652,10 @@ impl Editor {
     /// `q`, `wq`/`x`, `q!`.
     pub(super) fn run_ex_command(&mut self, input: &str, cx: &mut Context<Self>) {
         let cmd = input.trim();
+        if !cmd.is_empty() {
+            self.vim.last_ex = cmd.to_string();
+            self.vim.registers.set(':', cmd, false);
+        }
         if let Some(rest) = cmd.strip_prefix("%s") {
             self.ex_substitute(true, rest, cx);
         } else if let Some(rest) = cmd.strip_prefix('s').filter(|r| r.starts_with('/')) {
@@ -686,6 +715,7 @@ impl Editor {
                 "vsplit" | "vs" | "vsp" | "vspl" => self.split_window(false, cx),
                 "only" | "on" => self.delete_other_windows(cx),
                 "close" | "clo" => self.delete_window(cx),
+                "reg" | "registers" | "di" | "display" => self.show_registers(arg, cx),
                 other => self.echo(format!("Unknown ex command: {other}"), cx),
             }
         }

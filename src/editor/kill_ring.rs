@@ -69,10 +69,16 @@ impl Editor {
         if self.terminal_copy(cx) {
             return;
         }
+        let reg = self.take_kill_register();
+        if reg == Some('_') {
+            self.active.mark_active = false;
+            return;
+        }
         match self.region() {
             Some(range) => {
                 let text = self.active.buffer.slice_to_string(range);
                 self.set_clipboard(&text, cx); // sync the system clipboard
+                self.note_register_kill(super::registers::KillKind::Yank, reg, &text);
                 self.push_kill(text);
                 self.active.mark_active = false;
                 self.echo("Saved to kill ring", cx);

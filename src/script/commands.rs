@@ -443,6 +443,15 @@ pub enum EditorCommand {
     ReplayStep,
     /// Vim `.` — repeat the last change (count-aware: `3.`).
     EvilRepeat,
+    /// `"x` — the next yank/delete/paste uses register x.
+    EvilUseRegister(String),
+    /// Insert-state `C-r x` — insert register x's text.
+    EvilInsertRegister(String),
+    /// `qx` — start recording a keyboard macro into register x.
+    EvilMacroRecord(String),
+    /// `@x` — replay the macro in register x (`@@` the last one, `@:` the
+    /// last ex command); count-aware.
+    EvilMacroPlay(String),
     /// Visual-block `r<char>`: overwrite every char of the rectangle.
     EvilBlockReplace(String),
     /// Helix `p` / `P`: paste after / before every selection.

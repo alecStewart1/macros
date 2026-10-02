@@ -1123,7 +1123,10 @@ mod engine_tests {
         assert!(bound("evil-normal", "g d", "lsp-find-definition"));
         assert!(bound("evil-normal", "shift-k", "lsp-hover"));
         assert!(bound("evil-normal", "q", "evil-kbd-macro-toggle"));
-        assert!(bound("evil-normal", "@ @", "call-last-kbd-macro"));
+        assert!(bound("evil-normal", "@", "evil-macro-play %c"));
+        assert!(bound("evil-normal", "\"", "evil-use-register %c"));
+        assert!(bound("evil-visual", "\"", "evil-use-register %c"));
+        assert!(bound("evil-insert", "ctrl-r", "evil-insert-register %c"));
         assert!(bound("evil-normal", "g shift-j", "evil-join-line-no-space"));
         assert!(bound("evil-normal", "g u", r#"evil-operator "downcase""#));
         // Visual: paste-over, case toggle, extend-flavored find.
@@ -1985,6 +1988,39 @@ mod engine_tests {
             engine.eval("(evil-append)").unwrap().commands.as_slice(),
             [EditorCommand::ForwardChar, EditorCommand::EvilInsertState]
         ));
+    }
+
+    /// Registers and register macros: `"x`, `C-r x`, `qx` / `q`, `@x` reach
+    /// their editor commands.
+    #[test]
+    fn evil_registers_and_macro_commands() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm");
+        let c = engine.eval(r#"(evil-use-register "a")"#).unwrap().commands;
+        assert!(matches!(c.as_slice(), [EditorCommand::EvilUseRegister(r)] if r == "a"));
+        let c = engine.eval(r#"(evil-macro-play "q")"#).unwrap().commands;
+        assert!(matches!(c.as_slice(), [EditorCommand::EvilMacroPlay(r)] if r == "q"));
+        // `q` arms a register read when idle, and stops a recording otherwise.
+        engine.set_snapshot(EditorSnapshot::default());
+        let c = engine.eval("(evil-kbd-macro-toggle)").unwrap().commands;
+        assert!(
+            c.iter().any(|c| matches!(c, EditorCommand::ReadChar { callback, .. } if callback == "evil-macro-record")),
+            "{c:?}"
+        );
+        engine.set_snapshot(EditorSnapshot {
+            kbd_macro_recording: true,
+            ..Default::default()
+        });
+        let c = engine.eval("(evil-kbd-macro-toggle)").unwrap().commands;
+        assert!(
+            matches!(c.as_slice(), [EditorCommand::EndKbdMacro]),
+            "{c:?}"
+        );
     }
 
     #[test]

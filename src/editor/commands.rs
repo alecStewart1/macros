@@ -808,8 +808,18 @@ impl Editor {
             EvilBlockReplace(ch) => self.evil_block_replace(&ch, cx),
             HelixPasteAfter => self.helix_paste(true, cx),
             HelixPasteBefore => self.helix_paste(false, cx),
-            EvilSetLinewise => self.evil_yank_linewise = true,
-            EvilSetCharwise => self.evil_yank_linewise = false,
+            EvilSetLinewise => {
+                self.evil_yank_linewise = true;
+                self.vim.registers.set_linewise_last(true);
+            }
+            EvilSetCharwise => {
+                self.evil_yank_linewise = false;
+                self.vim.registers.set_linewise_last(false);
+            }
+            EvilUseRegister(r) => self.evil_use_register(&r, cx),
+            EvilInsertRegister(r) => self.evil_insert_register(&r, cx),
+            EvilMacroRecord(r) => self.evil_macro_record(&r, cx),
+            EvilMacroPlay(r) => self.evil_macro_play(&r, cx),
             EvilExCommand => {
                 self.open_minibuffer(":", MinibufferPurpose::ExCommand, "", cx);
             }

@@ -45,6 +45,7 @@ mod minibuffer;
 mod modeline;
 mod overlays;
 mod panes;
+mod registers;
 mod terminal;
 mod undo;
 mod vim;
@@ -2176,8 +2177,15 @@ impl Editor {
         if range.is_empty() {
             return;
         }
+        // Vim `"_d`: the black hole register swallows the text.
+        let reg = self.take_kill_register();
+        if reg == Some('_') {
+            self.delete_range(range, cx);
+            return;
+        }
         let killed = self.active.buffer.slice_to_string(range.clone());
         self.set_clipboard(&killed, cx); // C-k/C-w/M-d also feed the OS clipboard
+        self.note_register_kill(registers::KillKind::Delete, reg, &killed);
         self.push_kill(killed);
         self.delete_range(range, cx);
     }
@@ -4039,6 +4047,13 @@ impl Editor {
     /// argument calls) is dispatched to the engine thread so a slow script can't
     /// freeze the UI — its commands arrive via `apply_script_outcome`.
     fn run_script(&mut self, source: &str, cx: &mut Context<Self>) {
+        // Vim-grammar commands with string arguments (`(evil-use-register
+        // "a")`, …) apply synchronously, like builtins: the next keystroke or
+        // replayed command depends on their state.
+        if let Some(command) = vim::native_command(source) {
+            self.apply_command(command, cx);
+            return;
+        }
         if let Some(commands) = self.script.builtins_for(source) {
             // One builtin: apply directly (motions/edits manage their own undo).
             // A sequence: group it so the compound binding undoes as one unit.
@@ -4090,11 +4105,14 @@ impl Editor {
     /// The unrecorded body of [`Self::dispatch_counted`] (macro replay calls
     /// it directly).
     fn run_counted(&mut self, expr: &str, n: usize, cx: &mut Context<Self>) {
+        // The command name: the call's first token (`(evil-macro-play "a")`).
         let name = expr
             .trim()
             .trim_start_matches('(')
             .trim_end_matches(')')
-            .trim();
+            .split(char::is_whitespace)
+            .next()
+            .unwrap_or("");
         if self.count_aware.contains(name) {
             self.prefix_count = n;
             self.run_script(expr, cx);
@@ -4217,12 +4235,24 @@ impl Editor {
     // --- Keyboard macros --------------------------------------------------
 
     fn start_kbd_macro(&mut self, cx: &mut Context<Self>) {
+        self.vim.macro_register = None;
         self.macro_recording = Some(Vec::new());
         self.echo("Recording keyboard macro…", cx);
     }
 
     fn end_kbd_macro(&mut self, cx: &mut Context<Self>) {
         if let Some(rec) = self.macro_recording.take() {
+            // `qa … q` stores it in register a too (`qA` appends).
+            if let Some(r) = self.vim.macro_register.take() {
+                let lower = r.to_ascii_lowercase();
+                let stored = self.vim.macros.entry(lower).or_default();
+                if r.is_ascii_uppercase() {
+                    stored.extend(rec.iter().cloned());
+                } else {
+                    *stored = rec.clone();
+                }
+                self.vim.last_macro_register = Some(lower);
+            }
             self.last_macro = rec;
             self.echo("Keyboard macro defined", cx);
         }

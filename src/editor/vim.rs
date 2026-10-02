@@ -64,6 +64,47 @@ pub(super) struct VimState {
     /// Undo state when the current Normal-state command began, so the Insert
     /// session it opens squashes into one undo step on Escape.
     pub cmd_undo_base: Option<UndoBase>,
+    /// Vim registers (named, numbered, small-delete, read-only).
+    pub registers: super::registers::Registers,
+    /// `"x` typed: the register the next yank/delete/paste uses.
+    pub pending_register: Option<char>,
+    /// The register prefix was just typed — it survives one command boundary
+    /// (the command it prefixes).
+    pub register_armed: bool,
+    /// `qx`: the register the macro being recorded goes to.
+    pub macro_register: Option<char>,
+    /// Macros by register (`qa` … `q`, `@a`).
+    pub macros: std::collections::HashMap<char, Vec<MacroEvent>>,
+    /// For `@@`.
+    pub last_macro_register: Option<char>,
+    /// The last ex command line (`":`, `@:`).
+    pub last_ex: String,
+    /// Text typed in the current Insert session (`".`).
+    pub insert_acc: String,
+}
+
+/// A Vim-grammar call that must apply synchronously — `(name "arg")` for the
+/// register / macro commands. `None` for anything else.
+pub(super) fn native_command(expr: &str) -> Option<EditorCommand> {
+    let (name, mut args) = parse_string_call(expr)?;
+    if args.len() != 1 {
+        return None;
+    }
+    let arg = args.pop()?;
+    Some(match name.as_str() {
+        "evil-use-register" => EditorCommand::EvilUseRegister(arg),
+        "evil-insert-register" => EditorCommand::EvilInsertRegister(arg),
+        "evil-macro-record" => EditorCommand::EvilMacroRecord(arg),
+        "evil-macro-play" => EditorCommand::EvilMacroPlay(arg),
+        _ => return None,
+    })
+}
+
+/// The first char of a register argument.
+fn reg_char(r: &str) -> Option<char> {
+    let mut chars = r.chars();
+    let c = chars.next()?;
+    chars.next().is_none().then_some(c)
 }
 
 /// The command `.` may repeat, as it is being recorded.
@@ -253,9 +294,232 @@ impl Editor {
         if !macro_ctl && let Some(events) = self.macro_recording.as_mut() {
             events.push(ev.clone());
         }
+        if self.evil == EvilState::Insert
+            && let MacroEvent::Text(t) = &ev
+        {
+            self.vim.insert_acc.push_str(t);
+        }
         if let Some(dot) = self.vim.dot.as_mut() {
             dot.events.push(ev);
         }
+    }
+
+    // --- registers ---------------------------------------------------------
+
+    /// The register the next kill/paste targets (consumed), under evil only.
+    pub(super) fn take_kill_register(&mut self) -> Option<char> {
+        if self.evil == EvilState::Disabled || self.modal_helix {
+            return None;
+        }
+        self.vim.register_armed = false;
+        self.vim.pending_register.take()
+    }
+
+    /// File a yank/delete into the Vim registers (`0`, `1`–`9`, `-`, named).
+    pub(super) fn note_register_kill(
+        &mut self,
+        kind: super::registers::KillKind,
+        reg: Option<char>,
+        text: &str,
+    ) {
+        if self.evil == EvilState::Disabled || self.modal_helix {
+            return;
+        }
+        if self.kill_append {
+            self.vim.registers.append_last(text);
+        } else {
+            let named = reg.filter(|c| c.is_ascii_alphabetic());
+            self.vim.registers.record(kind, named, text);
+        }
+    }
+
+    /// A Normal-state command boundary: a register prefix lives for exactly
+    /// the one command after it.
+    pub(super) fn register_boundary(&mut self, expr: &str) {
+        if expr.trim_start().starts_with("(evil-use-register") {
+            return;
+        }
+        if expr.trim() == "(keyboard-quit)" {
+            self.vim.register_armed = false;
+        }
+        if self.vim.register_armed {
+            self.vim.register_armed = false;
+        } else {
+            self.vim.pending_register = None;
+        }
+    }
+
+    /// `"x`: select the register for the next yank/delete/paste.
+    pub(super) fn evil_use_register(&mut self, r: &str, cx: &mut Context<Self>) {
+        match reg_char(r).filter(|c| super::registers::is_register(*c)) {
+            Some(c) => {
+                self.vim.pending_register = Some(c);
+                self.vim.register_armed = true;
+                self.status = format!("\"{c}").into();
+                cx.notify();
+            }
+            None => self.echo(format!("Invalid register: {r}"), cx),
+        }
+    }
+
+    /// A register's contents (the clipboard for `+`/`*`, the read-only `/`
+    /// and `%`, the kill ring top for `"`).
+    pub(super) fn evil_register_value(
+        &mut self,
+        r: char,
+        cx: &mut Context<Self>,
+    ) -> Option<super::registers::RegValue> {
+        use super::registers::RegValue;
+        let v = |text: String, linewise: bool| {
+            (!text.is_empty()).then_some(RegValue { text, linewise })
+        };
+        match r {
+            '+' | '*' => {
+                let text = cx.read_from_clipboard().and_then(|i| i.text())?;
+                let lw = text.ends_with('\n');
+                v(text, lw)
+            }
+            '/' => v(self.search_query.clone().unwrap_or_default(), false),
+            '%' => v(
+                self.active
+                    .path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.active.name.clone()),
+                false,
+            ),
+            '"' => {
+                if self.sync_clipboard_into_kill_ring(cx) {
+                    self.evil_yank_linewise = false;
+                }
+                let text = self.kill_ring.last().cloned().unwrap_or_default();
+                v(text, self.evil_yank_linewise)
+            }
+            _ => self
+                .vim
+                .registers
+                .get(r)
+                .cloned()
+                .filter(|v| !v.text.is_empty()),
+        }
+    }
+
+    /// Insert-state `C-r x`: insert register x's text at point.
+    pub(super) fn evil_insert_register(&mut self, r: &str, cx: &mut Context<Self>) {
+        let Some(c) = reg_char(r) else {
+            return;
+        };
+        match self.evil_register_value(c, cx) {
+            Some(v) => self.insert_text(&v.text, cx),
+            None => self.echo(format!("Register {c} is empty"), cx),
+        }
+    }
+
+    /// `:registers` (`:reg abc` limits to those names).
+    pub(super) fn show_registers(&mut self, only: &str, cx: &mut Context<Self>) {
+        let want = |c: char| only.is_empty() || only.contains(c);
+        let mut lines = vec!["Type Name Content".to_string()];
+        let mut push = |c: char, v: &super::registers::RegValue| {
+            if want(c) {
+                let ty = if v.linewise { "  l " } else { "  c " };
+                lines.push(format!(
+                    "{ty} \"{c}   {}",
+                    super::registers::display_value(&v.text)
+                ));
+            }
+        };
+        if let Some(top) = self.kill_ring.last() {
+            push(
+                '"',
+                &super::registers::RegValue {
+                    text: top.clone(),
+                    linewise: self.evil_yank_linewise,
+                },
+            );
+        }
+        for (c, v) in self.vim.registers.listing() {
+            push(c, &v);
+        }
+        if let Some(q) = self.search_query.clone() {
+            push(
+                '/',
+                &super::registers::RegValue {
+                    text: q,
+                    linewise: false,
+                },
+            );
+        }
+        let mut macro_regs: Vec<char> = self.vim.macros.keys().copied().collect();
+        macro_regs.sort_unstable();
+        for c in macro_regs {
+            if want(c) {
+                let n = self.vim.macros[&c].len();
+                lines.push(format!("  m  @{c}   <keyboard macro: {n} commands>"));
+            }
+        }
+        let text = lines.join("\n") + "\n";
+        self.render_buffer(
+            "*registers*".into(),
+            "help-mode".into(),
+            text,
+            Vec::new(),
+            cx,
+        );
+    }
+
+    // --- macros ------------------------------------------------------------
+
+    /// `qx`: record a keyboard macro into register x (`qA` appends to a).
+    pub(super) fn evil_macro_record(&mut self, r: &str, cx: &mut Context<Self>) {
+        let Some(c) = reg_char(r).filter(|c| c.is_ascii_alphanumeric() || *c == '"') else {
+            self.echo(format!("Invalid macro register: {r}"), cx);
+            return;
+        };
+        self.start_kbd_macro(cx);
+        self.vim.macro_register = Some(c);
+        self.echo(format!("recording @{c}"), cx);
+    }
+
+    /// `@x` (count-aware): replay the macro in register x; `@@` repeats the
+    /// last one played, `@:` the last ex command.
+    pub(super) fn evil_macro_play(&mut self, r: &str, cx: &mut Context<Self>) {
+        let n = self.prefix_count.max(1);
+        let Some(mut c) = reg_char(r) else {
+            return;
+        };
+        if c == ':' {
+            let ex = self.vim.last_ex.clone();
+            if ex.is_empty() {
+                self.echo("No previous command line", cx);
+            }
+            for _ in 0..n {
+                if ex.is_empty() {
+                    break;
+                }
+                self.run_ex_command(&ex, cx);
+            }
+            return;
+        }
+        if c == '@' {
+            match self.vim.last_macro_register {
+                Some(last) => c = last,
+                None => {
+                    // No register macro yet: the anonymous `C-x (` one.
+                    let events = self.last_macro.clone();
+                    let all: Vec<MacroEvent> = (0..n).flat_map(|_| events.clone()).collect();
+                    self.replay_events(all, false, cx);
+                    return;
+                }
+            }
+        }
+        let lower = c.to_ascii_lowercase();
+        let Some(events) = self.vim.macros.get(&lower).cloned() else {
+            self.echo(format!("Register {lower} holds no macro"), cx);
+            return;
+        };
+        self.vim.last_macro_register = Some(lower);
+        let all: Vec<MacroEvent> = (0..n).flat_map(|_| events.clone()).collect();
+        self.replay_events(all, false, cx);
     }
 
     /// Drop the event just recorded (a `read-char` arming command — the
@@ -768,5 +1032,21 @@ mod tests {
         assert!(is_repeat_neutral("(undo)"));
         assert!(is_repeat_neutral("(evil-repeat)"));
         assert!(!is_repeat_neutral("(evil-delete-char)"));
+    }
+
+    #[test]
+    fn native_register_and_macro_commands() {
+        assert!(matches!(
+            native_command(r#"(evil-use-register "a")"#),
+            Some(EditorCommand::EvilUseRegister(r)) if r == "a"
+        ));
+        assert!(matches!(
+            native_command(r#"(evil-macro-play "@")"#),
+            Some(EditorCommand::EvilMacroPlay(r)) if r == "@"
+        ));
+        assert!(native_command("(evil-repeat)").is_none());
+        assert!(native_command(r#"(evil-operate "delete")"#).is_none());
+        assert_eq!(reg_char("a"), Some('a'));
+        assert_eq!(reg_char("ab"), None);
     }
 }

@@ -313,16 +313,16 @@
       (evil-paste-before)))
   (evil-normal-state))
 
-;; --- q / @@ — keyboard macros ---------------------------------------------------
-;; Vim-style recording on the Emacs kbd-macro engine (C-x ( / C-x ) / C-x e):
-;; one anonymous register, `q` toggles recording, `@@` (or `@q`) replays. The
-;; name contains "kbd-macro" so the key recorder skips the closing toggle
-;; (exprs mentioning kbd-macro are never recorded into the macro itself).
-;; The recording flag is READ FROM THE EDITOR, not tracked here: a Scheme-side
-;; boolean desynced the moment you used the Emacs chords (C-x ( / C-x )) instead
-;; of `q`, after which `q` did the opposite of what the modeline said.
+;; --- q / @ — keyboard macros in registers -----------------------------------
+;; Vim-style recording on the kbd-macro engine (C-x ( / C-x ) / C-x e): `qa`
+;; records into register a (`qA` appends), `q` again stops, `@a` replays it
+;; (`3@a` three times), `@@` replays the last one, `@:` the last ex command.
+;; The toggle's name contains "kbd-macro" so the recorder skips it (exprs
+;; mentioning kbd-macro are never recorded into the macro itself). The
+;; recording flag is READ FROM THE EDITOR, not tracked here, so `q` stays right
+;; when the Emacs chords (C-x ( / C-x )) are used instead.
 (define (evil-kbd-macro-toggle)
-  (if (kbd-macro-recording?) (end-kbd-macro) (start-kbd-macro)))
+  (if (kbd-macro-recording?) (end-kbd-macro) (read-char "q-" 'evil-macro-record)))
 
 ;; --- f / F / t / T char find (+ ; and , repeat) ---------------------------------
 ;; Built on the core `read-char` primitive: pressing `f` arms a one-keystroke
@@ -1192,8 +1192,13 @@
 (define-key "evil-normal" "g d" 'lsp-find-definition)    ; gd — go to definition (LSP)
 (define-key "evil-normal" "shift-k" 'lsp-hover)          ; K  — doc at point (LSP)
 (define-key "evil-normal" "q" 'evil-kbd-macro-toggle)    ; q — record macro (toggle)
-(define-key "evil-normal" "@ @" 'call-last-kbd-macro)    ; @@ — replay macro
-(define-key "evil-normal" "@ q" 'call-last-kbd-macro)    ; @q — same (one register)
+(define-key "evil-normal" "@" "evil-macro-play %c")     ; @a — replay macro a (@@ last, @: ex)
+;; "x — use register x for the next yank / delete / put ("_ black hole, "+ / "*
+;; clipboard, "0 last yank, "1-"9 deletes, "- small delete, ". : / read-only).
+(define-key "evil-normal" "\"" "evil-use-register %c")
+(define-key "evil-visual" "\"" "evil-use-register %c")
+(define-key "evil-visual-line" "\"" "evil-use-register %c")
+(define-key "evil-visual-block" "\"" "evil-use-register %c")
 (define-key "evil-normal" "shift-d" 'evil-delete-to-eol) ; D  (= d$)
 (define-key "evil-normal" "shift-c" 'evil-change-to-eol) ; C  (= c$)
 (define-key "evil-normal" "shift-y" 'evil-yank-line)     ; Y (= yy)
@@ -1245,6 +1250,7 @@
 
 ;; --- insert state -----------------------------------------------------------
 (define-key "evil-insert" "escape" 'evil-normal-state)
+(define-key "evil-insert" "ctrl-r" "evil-insert-register %c") ; C-r x — insert register x
 
 ;; --- visual state (motions extend; the mark is active) ----------------------
 (define-key "evil-visual" "h" 'backward-char)
@@ -1577,4 +1583,4 @@
             evil-find-repeat-visual evil-find-repeat-reverse-visual
             evil-forward-sentence evil-backward-sentence
             evil-forward-sentence-visual evil-backward-sentence-visual
-            evil-repeat))
+            evil-repeat evil-macro-play))

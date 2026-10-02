@@ -522,6 +522,30 @@ pub(crate) fn build_engine(
         "evil-block-replace",
         EditorCommand::EvilBlockReplace,
     );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-use-register",
+        EditorCommand::EvilUseRegister,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-insert-register",
+        EditorCommand::EvilInsertRegister,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-macro-record",
+        EditorCommand::EvilMacroRecord,
+    );
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-macro-play",
+        EditorCommand::EvilMacroPlay,
+    );
     {
         // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
         // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
