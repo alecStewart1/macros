@@ -669,7 +669,7 @@ mod tests {
     fn replace_normalizes_bad_ranges_instead_of_aborting() {
         let mut b = Buffer::new("héllo");
         // Inverted → swapped.
-        assert_eq!(b.replace(3..1, "X"), 2);
+        assert_eq!(b.replace(Range { start: 3, end: 1 }, "X"), 2);
         assert_eq!(b.full_text(), "hXllo");
         // Past the end → clamped.
         let mut b = Buffer::new("abc");
@@ -679,7 +679,7 @@ mod tests {
         let mut b = Buffer::new("é");
         assert_eq!(b.replace(1..1, "x"), 1);
         assert_eq!(b.full_text(), "xé");
-        assert_eq!(b.clamp_range(9..2), 1..3); // "xé": 2 is inside é
+        assert_eq!(b.clamp_range(Range { start: 9, end: 2 }), 1..3); // "xé": 2 is inside é
         assert_eq!(b.snap(usize::MAX), b.len());
         // Out-of-range line index clamps rather than panicking.
         assert_eq!(b.line_range(99), 0..3);
