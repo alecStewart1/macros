@@ -523,11 +523,12 @@ impl Editor {
                     return;
                 };
                 let name = doc.name.clone();
-                match std::fs::write(&path, doc.buffer.full_text()) {
+                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
                     Ok(()) => {
                         doc.modified = false;
                         self.echo(format!("Wrote {name}"), cx);
                         self.lsp_did_save(uri);
+                        self.rewatch_file(&path, cx);
                     }
                     Err(err) => self.echo(format!("Save of {name} failed: {err}"), cx),
                 }
@@ -1767,13 +1768,14 @@ impl Editor {
                 if updated != current {
                     self.replace_inactive_text(idx, &updated);
                 }
-                match std::fs::write(&path, &updated) {
+                match crate::save::write_now(&path, updated.as_bytes()) {
                     // Only a successful write makes the buffer clean; on failure
                     // it keeps its (edited) unsaved state so nothing is lost.
                     Ok(()) => {
                         self.inactive[idx].modified = false;
                         let doc_uri = document_uri(&self.inactive[idx]);
                         self.lsp_did_save(&doc_uri);
+                        self.rewatch_file(&path, cx);
                     }
                     Err(err) => {
                         self.inactive[idx].modified = true;
@@ -1792,7 +1794,7 @@ impl Editor {
                     }
                 };
                 let updated = lsp::apply_edits_to_text(&current, edits);
-                if let Err(err) = std::fs::write(&path, &updated) {
+                if let Err(err) = crate::save::write_now(&path, updated.as_bytes()) {
                     failed.push(format!("{}: {err}", path.display()));
                     continue;
                 }

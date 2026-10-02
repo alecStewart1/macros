@@ -129,8 +129,10 @@ enum MinibufferPurpose {
     /// A yes/no confirmation gating `action`.
     Confirm(PendingAction),
     /// Quit-time save offer: `yes` saves all modified buffers then quits, `no`
-    /// quits discarding changes, `C-g` cancels the quit.
-    QuitSave,
+    /// quits discarding changes, `C-g` cancels the quit. `relaunch`: the quit
+    /// was requested by the update pill, so relaunch into the staged build
+    /// once (and only once) the quit actually goes ahead.
+    QuitSave { relaunch: bool },
     /// LSP completion: replace the word at `completion_range` with the choice.
     CompleteAtPoint,
     /// evil `/` — regex search forward.
@@ -510,6 +512,10 @@ pub struct Editor {
     /// the fallback `default-directory` for fileless buffers so `publish_point`
     /// doesn't make a `current_dir` syscall on every snapshot publish.
     process_cwd: String,
+    /// Files whose async `find_file` read is in flight, by canonical path — a
+    /// second visit of the same file meanwhile is dropped instead of racing
+    /// to create a duplicate buffer.
+    pending_opens: HashSet<PathBuf>,
     /// Other open buffers (snapshots), most-recently-used last.
     inactive: Vec<Document>,
 
@@ -1322,6 +1328,7 @@ impl Editor {
             process_cwd: std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            pending_opens: HashSet::new(),
             inactive: Vec::new(),
             lsp_commands: HashMap::new(),
             extensions: HashMap::new(),
@@ -2029,6 +2036,10 @@ impl Editor {
         // computed against is gone. Eager clearing here (every mutation funnels
         // through `edit`) is what keeps the ghost free of any byte bookkeeping.
         self.active.ghost = None;
+        // Normalize once, up front, so the undo record, the highlighter's
+        // InputEdit, LSP sync, and overlay shifts all agree with what the rope
+        // actually does (it repairs bad ranges itself — see `Buffer::replace`).
+        let range = self.active.buffer.clamp_range(range);
         let (range_start, range_end) = (range.start, range.end);
         let removed = self.active.buffer.slice_to_string(range.clone());
         let removed_newlines = removed.matches('\n').count();
@@ -2876,26 +2887,27 @@ impl Editor {
         cx.notify();
     }
 
+    // The explicitly-addressed primitives below take offsets straight from
+    // Scheme, so they normalize (swap inverted ends, clamp, floor to a char
+    // boundary) rather than trust them — Emacs accepts `(delete-region 9 3)`.
     fn delete_region(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
-        let len = self.active.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        if start < end {
-            let cursor = self.edit(start..end, "");
+        let range = self.active.buffer.clamp_range(start..end);
+        if !range.is_empty() {
+            let cursor = self.edit(range, "");
             self.collapse_to(cursor);
             cx.notify();
         }
     }
 
     fn replace_region(&mut self, start: usize, end: usize, text: &str, cx: &mut Context<Self>) {
-        let len = self.active.buffer.len();
-        let (start, end) = (start.min(len), end.min(len));
-        let cursor = self.edit(start..end, text);
+        let range = self.active.buffer.clamp_range(start..end);
+        let cursor = self.edit(range, text);
         self.collapse_to(cursor);
         cx.notify();
     }
 
     fn insert_at(&mut self, pos: usize, text: &str, cx: &mut Context<Self>) {
-        let pos = pos.min(self.active.buffer.len());
+        let pos = self.active.buffer.snap(pos);
         let cursor = self.edit(pos..pos, text);
         self.collapse_to(cursor);
         cx.notify();
@@ -3051,6 +3063,8 @@ impl Editor {
             if lines > LOG_BUFFER_LINES_CAP {
                 let cut = doc.buffer.line_range(lines - LOG_BUFFER_LINES_CAP).start;
                 doc.buffer.replace(0..cut, "");
+                doc.reset_undo(); // unrecorded edit: old records are stale
+                doc.selected_range = doc.buffer.clamp_range(doc.selected_range.clone());
             }
         } else {
             self.inactive

@@ -192,6 +192,15 @@ pub(crate) fn steel_string_list(value: &SteelVal) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A buffer position from Scheme. Position primitives take `isize`, not
+/// `usize`: Steel converts a negative int to `usize` by wrapping (`-1` →
+/// `usize::MAX`), which the editor would then clamp to the END of the buffer —
+/// so `(delete-region -5 2)` deleted from 2 to the end. Negative clamps to 0
+/// (the high side is clamped against the live buffer by the editor).
+pub(crate) fn scheme_pos(n: isize) -> usize {
+    n.max(0) as usize
+}
+
 /// A list of non-negative integers (anything else dropped). Used by
 /// `(set-selections …)` to read its flat anchor/head offset list.
 pub(crate) fn steel_usize_list(value: &SteelVal) -> Vec<usize> {

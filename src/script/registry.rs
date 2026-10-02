@@ -919,7 +919,9 @@ pub(crate) fn build_engine(
     // auto-refresh).
     register_render_buffer(&mut reg, queue, "render-buffer", false);
     register_render_buffer(&mut reg, queue, "render-buffer-quiet", true);
-    register_unary(&mut reg, queue, "goto-line", EditorCommand::GotoLine);
+    register_unary(&mut reg, queue, "goto-line", |n: isize| {
+        EditorCommand::GotoLine(scheme_pos(n))
+    });
     register_unary(
         &mut reg,
         queue,
@@ -1004,15 +1006,32 @@ pub(crate) fn build_engine(
         "transient-quit",
         EditorCommand::TransientQuit,
     );
-    register_unary(&mut reg, queue, "goto-char", EditorCommand::GotoChar);
-    register_binary(&mut reg, queue, "delete-region", |start, end| {
-        EditorCommand::DeleteRegion { start, end }
+    register_unary(&mut reg, queue, "goto-char", |n: isize| {
+        EditorCommand::GotoChar(scheme_pos(n))
     });
-    register_binary(&mut reg, queue, "kill-region-between", |start, end| {
-        EditorCommand::KillRegionBetween { start, end }
-    });
-    register_binary(&mut reg, queue, "set-region", |start, end| {
-        EditorCommand::SetRegion { start, end }
+    register_binary(
+        &mut reg,
+        queue,
+        "delete-region",
+        |start: isize, end: isize| EditorCommand::DeleteRegion {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+        },
+    );
+    register_binary(
+        &mut reg,
+        queue,
+        "kill-region-between",
+        |start: isize, end: isize| EditorCommand::KillRegionBetween {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+        },
+    );
+    register_binary(&mut reg, queue, "set-region", |start: isize, end: isize| {
+        EditorCommand::SetRegion {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+        }
     });
     {
         // `(set-selections '(a0 h0 a1 h1 …))` — replace the whole selection set
@@ -1039,11 +1058,21 @@ pub(crate) fn build_engine(
         "lsp-semantic-tokens",
         EditorCommand::LspSemanticTokens,
     );
-    register_ternary(&mut reg, queue, "replace-region", |start, end, text| {
-        EditorCommand::ReplaceRegion { start, end, text }
-    });
-    register_binary(&mut reg, queue, "insert-at", |pos, text| {
-        EditorCommand::InsertAt { pos, text }
+    register_ternary(
+        &mut reg,
+        queue,
+        "replace-region",
+        |start: isize, end: isize, text| EditorCommand::ReplaceRegion {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+            text,
+        },
+    );
+    register_binary(&mut reg, queue, "insert-at", |pos: isize, text| {
+        EditorCommand::InsertAt {
+            pos: scheme_pos(pos),
+            text,
+        }
     });
     register_unary(
         &mut reg,
@@ -1167,7 +1196,9 @@ pub(crate) fn build_engine(
     );
     // `(select-to pos)` — extend the selection to byte `pos` (goto-char
     // collapses; this is its extend-flavored twin for visual-mode motions).
-    register_unary(&mut reg, queue, "select-to", EditorCommand::SelectTo);
+    register_unary(&mut reg, queue, "select-to", |n: isize| {
+        EditorCommand::SelectTo(scheme_pos(n))
+    });
     // `(set-search-query "regex" forward?)` — store the query + direction the
     // way `/` and `?` do, without prompting, so evil-search-next/-previous
     // repeat it (evil `*`/`#`).
@@ -2642,7 +2673,8 @@ pub(crate) fn build_engine(
     {
         // Bytes `[a, b)` of the buffer, clamped (Emacs `(buffer-substring a b)`).
         let shared = snapshot.clone();
-        reg.register_fn("buffer-substring", move |a: usize, b: usize| -> String {
+        reg.register_fn("buffer-substring", move |a: isize, b: isize| -> String {
+            let (a, b) = (scheme_pos(a), scheme_pos(b));
             let rope = shared.load().text.clone();
             // Snap to char boundaries so we never slice mid-codepoint.
             let (start, end) = (snap_byte(&rope, a), snap_byte(&rope, b));
@@ -2706,8 +2738,8 @@ pub(crate) fn build_engine(
     {
         // `(make-marker pos)` → a marker id (allocated synchronously).
         let m = markers.clone();
-        reg.register_fn("make-marker", move |pos: usize| -> usize {
-            m.lock().unwrap().alloc(pos) as usize
+        reg.register_fn("make-marker", move |pos: isize| -> usize {
+            m.lock().unwrap().alloc(scheme_pos(pos)) as usize
         });
     }
     {
@@ -2723,8 +2755,8 @@ pub(crate) fn build_engine(
     }
     {
         let m = markers.clone();
-        reg.register_fn("set-marker", move |id: u64, pos: usize| {
-            m.lock().unwrap().positions.insert(id, pos);
+        reg.register_fn("set-marker", move |id: u64, pos: isize| {
+            m.lock().unwrap().positions.insert(id, scheme_pos(pos));
         });
     }
     {
@@ -2742,7 +2774,8 @@ pub(crate) fn build_engine(
     macro_rules! register_pos_fn {
         ($name:literal, $f:expr) => {{
             let shared = snapshot.clone();
-            reg.register_fn($name, move |pos: usize| -> usize {
+            reg.register_fn($name, move |pos: isize| -> usize {
+                let pos = scheme_pos(pos);
                 let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
                 let f: fn(&crate::buffer::Buffer, usize) -> usize = $f;
                 f(&buf, pos.min(buf.len()))
