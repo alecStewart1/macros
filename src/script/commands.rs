@@ -268,6 +268,8 @@ pub enum EditorCommand {
     LspDocumentSymbols,
     LspCodeAction,
     LspFormatBuffer,
+    /// Kill the active buffer's language server (if any) and spawn a fresh one.
+    LspRestart,
     LspCallHierarchyIncoming,
     LspCallHierarchyOutgoing,
     /// Validate + prompt rename (`prepareRename` then `rename`).

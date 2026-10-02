@@ -98,6 +98,7 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("lsp-document-symbols", LspDocumentSymbols),
         ("lsp-code-action", LspCodeAction),
         ("lsp-format-buffer", LspFormatBuffer),
+        ("lsp-restart", LspRestart),
         ("lsp-call-hierarchy-incoming", LspCallHierarchyIncoming),
         ("lsp-call-hierarchy-outgoing", LspCallHierarchyOutgoing),
         ("lsp-rename", LspPrepareRename),

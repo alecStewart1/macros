@@ -42,9 +42,16 @@ impl Editor {
         };
 
         // Already have a server for this language: just open the buffer in it.
-        if self.servers.contains_key(&language) {
-            self.lsp_open_active(&language);
-            return;
+        // A server whose process died is replaced by a fresh spawn below.
+        match self.servers.get(&language) {
+            Some(server) if !server.exited => {
+                self.lsp_open_active(&language);
+                return;
+            }
+            Some(_) => {
+                self.servers.remove(&language);
+            }
+            None => {}
         }
 
         let Some(command) = self.lsp_commands.get(&language).cloned() else {
@@ -92,13 +99,15 @@ impl Editor {
         let lang = language.clone();
         let task = cx.spawn(async move |this, cx| {
             while let Some(message) = rx.next().await {
+                let exited = message["method"] == lsp::EXITED_METHOD;
                 if this
                     .update(cx, |editor, cx| {
                         editor.on_lsp_message(lang.clone(), message, cx)
                     })
                     .is_err()
+                    || exited
                 {
-                    break; // editor dropped
+                    break; // editor dropped, or the server is gone
                 }
             }
         });
@@ -108,6 +117,9 @@ impl Editor {
             LspServer {
                 client,
                 ready: false,
+                exited: false,
+                save: None,
+                code_action_resolve: false,
                 sync_kind: lsp::SyncKind::Full,
                 open: HashSet::new(),
                 versions: HashMap::new(),
@@ -222,6 +234,10 @@ impl Editor {
         let Some((language, uri)) = self.lsp_fullsync_dirty.take() else {
             return;
         };
+        // Belt and braces: never ship one buffer's text under another's URI.
+        if self.active_uri().as_deref() != Some(uri.as_str()) {
+            return;
+        }
         let full = self.active.buffer.full_text();
         if let Some(server) = self.servers.get_mut(&language) {
             if !server.open.contains(&uri) {
@@ -243,9 +259,11 @@ impl Editor {
         // Notifications and server→client requests.
         if let Some(method) = message["method"].as_str() {
             if let Some(id) = message.get("id").cloned() {
-                if let Some(server) = self.servers.get_mut(&language) {
-                    server.client.respond_null(id);
-                }
+                self.on_lsp_server_request(&language, id, method, &message["params"], cx);
+            } else if method == lsp::EXITED_METHOD {
+                self.on_lsp_server_exit(&language, cx);
+            } else if method == "$/progress" {
+                self.on_lsp_progress(&language, &message["params"]);
             } else if method == "textDocument/publishDiagnostics" {
                 let (uri, diagnostics) = lsp::parse_diagnostics(&message["params"]);
                 // Diagnostics are keyed only by URI, and each server runs its own
@@ -284,8 +302,15 @@ impl Editor {
             let legend = lsp::parse_semantic_legend(&message["result"]);
             let prepare_rename = lsp::parse_prepare_rename_support(&message["result"]);
             let completion_triggers = lsp::parse_completion_triggers(&message["result"]);
+            let save = lsp::parse_save_option(&message["result"]);
+            let code_action_resolve =
+                message["result"]["capabilities"]["codeActionProvider"]["resolveProvider"]
+                    .as_bool()
+                    .unwrap_or(false);
             if let Some(server) = self.servers.get_mut(&language) {
                 server.ready = true;
+                server.save = save;
+                server.code_action_resolve = code_action_resolve;
                 server.sync_kind = sync_kind;
                 server.semantic_legend = legend;
                 server.prepare_rename = prepare_rename;
@@ -322,20 +347,296 @@ impl Editor {
                 .get_mut(&language)
                 .and_then(|server| server.pending.remove(&id))
         });
-        if let Some(kind) = pending {
-            self.handle_lsp_response(kind, &message["result"], cx);
+        if let Some((kind, target)) = pending {
+            self.handle_lsp_response(&language, kind, target, &message["result"], cx);
         }
     }
 
+    /// Answer a server→client request. `workspace/applyEdit` edits buffers, so
+    /// it's handled here; everything else gets the stateless default reply
+    /// (`MethodNotFound` for methods we don't implement).
+    fn on_lsp_server_request(
+        &mut self,
+        language: &str,
+        id: Value,
+        method: &str,
+        params: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        if method == "workspace/applyEdit" {
+            let edit = lsp::parse_workspace_edit(&params["edit"]);
+            let failed = self.apply_workspace_edit(edit, cx);
+            if let Some(server) = self.servers.get_mut(language) {
+                let result = if failed.is_empty() {
+                    json!({ "applied": true })
+                } else {
+                    json!({ "applied": false, "failureReason": failed.join("; ") })
+                };
+                server.client.respond(id, result);
+            }
+            return;
+        }
+        let reply = lsp::default_server_reply(method, params);
+        if let Some(server) = self.servers.get_mut(language) {
+            match reply {
+                Ok(result) => server.client.respond(id, result),
+                Err((code, message)) => server.client.respond_error(id, code, &message),
+            }
+        }
+    }
+
+    /// A `$/progress` notification → the `lsp-progress` mode-line slot. Shows
+    /// the most recently begun still-running task; cleared when all end.
+    fn on_lsp_progress(&mut self, language: &str, params: &Value) {
+        let key = format!("{language}:{}", params["token"]);
+        let value = &params["value"];
+        match value["kind"].as_str() {
+            Some("begin") => {
+                let title = value["title"].as_str().unwrap_or_default().to_string();
+                let text = lsp::progress_text(language, &title, value);
+                self.lsp_progress.retain(|(k, ..)| *k != key);
+                self.lsp_progress.push((key, title, text));
+            }
+            Some("report") => {
+                if let Some(entry) = self.lsp_progress.iter_mut().find(|(k, ..)| *k == key) {
+                    entry.2 = lsp::progress_text(language, &entry.1, value);
+                }
+            }
+            Some("end") => self.lsp_progress.retain(|(k, ..)| *k != key),
+            _ => return,
+        }
+        self.show_lsp_progress();
+    }
+
+    /// Mirror the newest in-flight progress report into its mode-line slot.
+    fn show_lsp_progress(&mut self) {
+        let shown = self
+            .lsp_progress
+            .last()
+            .map(|(.., text)| text.clone())
+            .unwrap_or_default();
+        self.set_mode_line_slot("lsp-progress".into(), shown);
+    }
+
+    /// The server's process is gone (its stdout closed). Fail everything in
+    /// flight — a format-on-save waiting on it saves unformatted right away —
+    /// and mark the entry exited so the next `maybe_start_lsp` (or
+    /// `lsp-restart`) spawns a fresh one.
+    fn on_lsp_server_exit(&mut self, language: &str, cx: &mut Context<Self>) {
+        if self.servers.get(language).is_none_or(|s| s.exited) {
+            return;
+        }
+        self.lsp_abandon_server(language, cx);
+        if let Some(server) = self.servers.get_mut(language) {
+            server.exited = true;
+        }
+        let line = format!("[{language}] server exited");
+        push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
+        self.append_to_log_buffer("*lsp-log*", &line);
+        self.echo(
+            format!("Language server for {language} exited — M-x lsp-restart to restart it"),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Drop all per-document and in-flight state of `language`'s server (it's
+    /// exiting or being replaced): not ready, nothing open, every pending
+    /// request failed. Saves waiting on its formatting proceed unformatted.
+    fn lsp_abandon_server(&mut self, language: &str, cx: &mut Context<Self>) {
+        let Some(server) = self.servers.get_mut(language) else {
+            return;
+        };
+        server.ready = false;
+        let open: Vec<String> = server.open.drain().collect();
+        server.versions.clear();
+        server.semantic_state.clear();
+        let had_completion = server.pending_completion.take().is_some();
+        let pending = std::mem::take(&mut server.pending);
+        if had_completion {
+            self.completion_auto_pending = false;
+        }
+        for uri in &open {
+            self.diagnostics.remove(uri);
+            if self
+                .lsp_fullsync_dirty
+                .as_ref()
+                .is_some_and(|(l, u)| l == language && u == uri)
+            {
+                self.lsp_fullsync_dirty = None;
+            }
+        }
+        let prefix = format!("{language}:");
+        self.lsp_progress.retain(|(k, ..)| !k.starts_with(&prefix));
+        self.show_lsp_progress();
+        for (kind, target) in pending.into_values() {
+            if let PendingRequest::Format { save: Some(token) } = kind {
+                self.finish_format_on_save(&target.uri, token, cx);
+            }
+        }
+    }
+
+    /// `M-x lsp-restart`: kill the active buffer's language server (if any)
+    /// and spawn a fresh one. Buffers re-`didOpen` into it as they're shown.
+    pub(super) fn lsp_restart(&mut self, cx: &mut Context<Self>) {
+        let Some(language) = self.active_language() else {
+            self.echo(NO_LSP_FOR_BUFFER, cx);
+            return;
+        };
+        if !self.lsp_commands.contains_key(&language) {
+            self.echo(format!("No language server configured for {language}"), cx);
+            return;
+        }
+        if self.servers.contains_key(&language) {
+            self.lsp_abandon_server(&language, cx);
+            // Dropping the entry kills the process and its reader task.
+            self.servers.remove(&language);
+        }
+        self.maybe_start_lsp(cx);
+    }
+
+    /// Complete a format-on-save: if `token` is still the pending save for
+    /// `uri` (not already completed by the response/timeout), write that
+    /// document. Returns whether it was still pending.
+    pub(super) fn finish_format_on_save(
+        &mut self,
+        uri: &str,
+        token: u64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.formatting_for_save.get(uri) != Some(&token) {
+            return false;
+        }
+        self.formatting_for_save.remove(uri);
+        self.write_document_to_disk(uri, cx);
+        true
+    }
+
+    /// Write the document visiting `uri` — active (async, hooks) or inactive
+    /// (synchronous, like `save-some-buffers`). No-op if it was killed.
+    pub(super) fn write_document_to_disk(&mut self, uri: &str, cx: &mut Context<Self>) {
+        match self.document_for_uri(uri) {
+            Some(None) => self.write_active_to_disk(cx),
+            Some(Some(idx)) => {
+                let doc = &mut self.inactive[idx];
+                let Some(path) = doc.path.clone() else {
+                    return;
+                };
+                let name = doc.name.clone();
+                match std::fs::write(&path, doc.buffer.full_text()) {
+                    Ok(()) => {
+                        doc.modified = false;
+                        self.echo(format!("Wrote {name}"), cx);
+                        self.lsp_did_save(uri);
+                    }
+                    Err(err) => self.echo(format!("Save of {name} failed: {err}"), cx),
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Where the document visiting `uri` lives: `Some(None)` = the active
+    /// buffer, `Some(Some(i))` = `inactive[i]`, `None` = not open (killed).
+    pub(super) fn document_for_uri(&self, uri: &str) -> Option<Option<usize>> {
+        if document_uri(&self.active) == uri {
+            return Some(None);
+        }
+        self.inactive
+            .iter()
+            .position(|d| document_uri(d) == uri)
+            .map(Some)
+    }
+
+    /// Whether `target`'s document is the active buffer with its text unchanged
+    /// since the request went out — the precondition for applying a response
+    /// that decorates or prompts in the active buffer.
+    fn target_is_active_and_current(&self, target: &RequestTarget) -> bool {
+        document_uri(&self.active) == target.uri && self.active.buffer.tick() == target.tick
+    }
+
+    /// `textDocument/didSave` for `uri` to every server that has it open and
+    /// asked for save notifications (with the text when it asked for that).
+    pub(super) fn lsp_did_save(&mut self, uri: &str) {
+        let wants_text = self
+            .servers
+            .values()
+            .any(|s| s.save == Some(true) && s.open.contains(uri));
+        let text = if wants_text {
+            match self.document_for_uri(uri) {
+                Some(None) => Some(self.active.buffer.full_text()),
+                Some(Some(i)) => Some(self.inactive[i].buffer.full_text()),
+                None => None,
+            }
+        } else {
+            None
+        };
+        for server in self.servers.values_mut() {
+            if let Some(include_text) = server.save
+                && server.ready
+                && server.open.contains(uri)
+            {
+                let text = text.as_deref().filter(|_| include_text);
+                server.client.did_save(uri, text);
+            }
+        }
+    }
+
+    /// Tell every server that has `uri` open that its whole text is now
+    /// `text` — for edits made to a buffer that isn't active (workspace edits,
+    /// formatting, auto-revert), which bypass the active-buffer `didChange`
+    /// path. A full-text change is valid for incremental servers too.
+    pub(super) fn lsp_sync_document(&mut self, uri: &str, text: &str) {
+        for server in self.servers.values_mut() {
+            if server.sync_kind == lsp::SyncKind::None || !server.open.contains(uri) {
+                continue;
+            }
+            let version = server.versions.entry(uri.to_string()).or_insert(1);
+            *version += 1;
+            let version = *version;
+            server.client.did_change(uri, version, text);
+        }
+    }
+
+    /// The buffer visiting `uri` is being killed: `didClose` it in every
+    /// server that has it open and forget its per-document state, so reopening
+    /// the file later sends a fresh `didOpen`. Any pending full-sync for it is
+    /// discarded (the replacement buffer's text must never go out under this
+    /// URI), as is a format-on-save waiting on it.
+    pub(super) fn lsp_close_document(&mut self, uri: &str) {
+        if self
+            .lsp_fullsync_dirty
+            .as_ref()
+            .is_some_and(|(_, u)| u == uri)
+        {
+            self.lsp_fullsync_dirty = None;
+        }
+        for server in self.servers.values_mut() {
+            if server.open.remove(uri) {
+                server.client.did_close(uri);
+            }
+            server.versions.remove(uri);
+            server.semantic_state.remove(uri);
+        }
+        self.diagnostics.remove(uri);
+        self.formatting_for_save.remove(uri);
+    }
+
     /// Dispatch a finished LSP request's `result` to the right handler.
+    /// `target` is the document the request was issued against.
     pub(super) fn handle_lsp_response(
         &mut self,
+        language: &str,
         kind: PendingRequest,
+        target: RequestTarget,
         result: &Value,
         cx: &mut Context<Self>,
     ) {
         use PendingRequest::*;
         match kind {
+            // Scheme callbacks act on the current buffer (overlays, inlay
+            // suffixes, point): after a switch they'd hit the wrong one.
+            Script(_) if document_uri(&self.active) != target.uri => {}
             Script(callback) => {
                 // Deliver the raw result JSON to the Steel callback; Scheme
                 // parses it with `string->jsexpr` and renders however it likes.
@@ -351,8 +652,7 @@ impl Editor {
                 self.goto_locations("references", locations, cx);
             }
             DocumentSymbols | WorkspaceSymbols => {
-                let uri = self.active_uri().unwrap_or_default();
-                let symbols = lsp::parse_symbols(result, &uri);
+                let symbols = lsp::parse_symbols(result, &target.uri);
                 self.show_symbols(symbols, cx);
             }
             Hover => match lsp::parse_hover(result) {
@@ -364,23 +664,42 @@ impl Editor {
                 None => self.echo("No signature help", cx),
             },
             Rename => {
+                // Positions in the edit are relative to the text the rename was
+                // computed against; if the buffer moved on, they'd land wrong.
+                if self.target_tick(&target) != Some(target.tick) {
+                    self.echo("Buffer changed during rename; not applied", cx);
+                    return;
+                }
                 let edit = lsp::parse_workspace_edit(result);
                 self.apply_workspace_edit(edit, cx);
             }
-            Format => {
+            Format { save } => {
                 let edits = lsp::parse_text_edits(result);
-                self.apply_format_edits(edits, cx);
+                self.apply_format_response(edits, &target, save, cx);
             }
             CodeAction => {
                 let actions = lsp::parse_code_actions(result);
                 self.show_code_actions(actions, cx);
             }
+            ResolveCodeAction(original) => {
+                // Resolved once: never round-trip it again. A null/error result
+                // (nothing to add) applies the original as it stood.
+                let mut action = lsp::parse_code_actions(&json!([result]))
+                    .into_iter()
+                    .next()
+                    .unwrap_or(*original);
+                action.resolve = None;
+                self.apply_code_action(action, cx);
+            }
             SemanticTokens { callback, kind } => {
-                let (Some(language), Some(uri)) = (self.active_language(), self.active_uri())
-                else {
-                    return;
-                };
-                let Some(server) = self.servers.get_mut(&language) else {
+                // Tokens only paint the active buffer, and only while its text
+                // is the text they were computed for. The cache below is
+                // updated either way: it mirrors the server's resultId state.
+                let fresh = self.target_is_active_and_current(&target);
+                // The answering server, not the active buffer's — the active
+                // buffer may belong to another language by now.
+                let uri = target.uri.clone();
+                let Some(server) = self.servers.get_mut(language) else {
                     return;
                 };
                 // Resolve the packed token data per request kind, caching it (with
@@ -408,6 +727,9 @@ impl Editor {
                         merged
                     }
                 };
+                if !fresh {
+                    return;
+                }
                 let tokens = lsp::decode_semantic_data(&data, &server.semantic_legend);
                 let records: Vec<String> = tokens
                     .iter()
@@ -416,6 +738,9 @@ impl Editor {
                 self.script
                     .dispatch_action(&callback, Some(&records.join("\n")));
             }
+            // The prompt (and the placeholder's range) belong to the buffer the
+            // rename started in; after a switch or an edit, drop it quietly.
+            PrepareRename if !self.target_is_active_and_current(&target) => {}
             PrepareRename => match lsp::parse_prepare_rename(result) {
                 None => self.echo("Cannot rename this symbol", cx),
                 Some(prep) => {
@@ -443,6 +768,9 @@ impl Editor {
                     cx.notify();
                 }
             }
+            // Lenses are line-keyed decorations of the requesting buffer: stale
+            // (switched away / edited since) ones are dropped, not misplaced.
+            CodeLens | ResolveCodeLens(..) if !self.target_is_active_and_current(&target) => {}
             CodeLens => self.render_code_lenses(result, cx),
             ResolveCodeLens(line, character) => {
                 if let Some(title) = lsp::parse_code_lens_title(result) {
@@ -758,16 +1086,49 @@ impl Editor {
         let (Some(language), Some(uri)) = (self.active_language(), self.active_uri()) else {
             return false;
         };
-        self.servers
+        let target = RequestTarget {
+            uri: uri.clone(),
+            tick: self.active.buffer.tick(),
+        };
+        let Some(server) = self
+            .servers
             .get_mut(&language)
             .filter(|s| s.ready && s.open.contains(&uri))
-            .and_then(|server| {
-                server
-                    .client
-                    .request(method, params)
-                    .map(|id| server.pending.insert(id, kind))
-            })
-            .is_some()
+        else {
+            return false;
+        };
+        // A new semantic-tokens request for a document supersedes any still in
+        // flight for it (they'd paint the same buffer, staler): cancel them.
+        if matches!(kind, PendingRequest::SemanticTokens { .. }) {
+            let superseded: Vec<i64> = server
+                .pending
+                .iter()
+                .filter(|(_, (k, t))| {
+                    matches!(k, PendingRequest::SemanticTokens { .. }) && t.uri == uri
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in superseded {
+                server.pending.remove(&id);
+                server.client.cancel(id);
+            }
+        }
+        match server.client.request(method, params) {
+            Some(id) => {
+                server.pending.insert(id, (kind, target));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The current edit tick of `target`'s document, or `None` once it's
+    /// been killed — compared against `target.tick` to detect stale results.
+    fn target_tick(&self, target: &RequestTarget) -> Option<u64> {
+        Some(match self.document_for_uri(&target.uri)? {
+            None => self.active.buffer.tick(),
+            Some(i) => self.inactive[i].buffer.tick(),
+        })
     }
 
     /// Like [`lsp_dispatch`](Self::lsp_dispatch) but builds position params from
@@ -883,10 +1244,16 @@ impl Editor {
 
     /// Format the active buffer (`textDocument/formatting`).
     pub(super) fn lsp_format(&mut self, cx: &mut Context<Self>) {
+        self.lsp_format_request(None, cx);
+    }
+
+    /// Send `textDocument/formatting` for the active buffer; `save` carries
+    /// the format-on-save token. Returns whether the request went out.
+    pub(super) fn lsp_format_request(&mut self, save: Option<u64>, cx: &mut Context<Self>) -> bool {
         let tab_width = cx.global::<crate::settings::Settings>().tab_width();
         self.lsp_send(
             "textDocument/formatting",
-            PendingRequest::Format,
+            PendingRequest::Format { save },
             move |uri, _, _| {
                 json!({
                     "textDocument": { "uri": uri },
@@ -894,7 +1261,7 @@ impl Editor {
                 })
             },
             cx,
-        );
+        )
     }
 
     /// Request code actions for the selection (or the point's line), passing any
@@ -911,22 +1278,21 @@ impl Editor {
         };
         let start_pos = self.active.buffer.byte_to_position(start);
         let end_pos = self.active.buffer.byte_to_position(end);
+        // The overlapping diagnostics exactly as the server published them —
+        // servers match quick fixes on `code`/`source`/`data`, which a
+        // re-serialized range+message would drop.
+        let buffer = &self.active.buffer;
         let context_diags: Vec<Value> = self
-            .active_diagnostics()
+            .active_uri()
+            .and_then(|uri| self.diagnostics.get(&uri))
             .into_iter()
-            .filter(|d| d.range.start < end && d.range.end > start || d.range.start == start)
-            .map(|d| {
-                let s = self.active.buffer.byte_to_position(d.range.start);
-                let e = self.active.buffer.byte_to_position(d.range.end);
-                json!({
-                    "range": {
-                        "start": { "line": s.0, "character": s.1 },
-                        "end": { "line": e.0, "character": e.1 }
-                    },
-                    "severity": d.severity as u8,
-                    "message": d.message
-                })
+            .flatten()
+            .filter(|d| {
+                let s = buffer.position_to_byte(d.start.0, d.start.1);
+                let e = buffer.position_to_byte(d.end.0, d.end.1).max(s);
+                s < end && e > start || s == start
             })
+            .map(|d| d.raw.clone())
             .collect();
         self.lsp_send(
             "textDocument/codeAction",
@@ -1267,39 +1633,110 @@ impl Editor {
         }
     }
 
-    /// Apply the formatting edits to the active buffer (whole-buffer replace,
-    /// one undo step), keeping point clamped. When this format was triggered by
-    /// format-on-save, the write is re-entered afterwards.
+    /// `(lsp-apply-text-edits json)`'s worker: apply `edits` to the active
+    /// buffer (whole-buffer replace, one undo step), keeping point clamped.
     pub(super) fn apply_format_edits(&mut self, edits: Vec<lsp::TextEdit>, cx: &mut Context<Self>) {
+        self.apply_format_edits_active(&edits, false, cx);
+    }
+
+    fn apply_format_edits_active(
+        &mut self,
+        edits: &[lsp::TextEdit],
+        quiet: bool,
+        cx: &mut Context<Self>,
+    ) {
         let current = self.active.buffer.full_text();
-        let formatted = lsp::apply_edits_to_text(&current, &edits);
+        let formatted = lsp::apply_edits_to_text(&current, edits);
         if edits.is_empty() || formatted == current {
-            if !self.formatting_for_save {
+            if !quiet {
                 self.echo("No formatting changes", cx);
             }
         } else {
             let point = self.point();
             self.replace_whole_buffer(&formatted, point, cx);
-            if !self.formatting_for_save {
+            if !quiet {
                 self.echo("Formatted buffer", cx);
             }
         }
-        // Re-enter the deferred save (the flag stops it formatting again).
-        if self.formatting_for_save {
-            self.save_buffer(cx);
+    }
+
+    /// A `textDocument/formatting` response: apply it to the document it was
+    /// requested for — active or not — unless that document changed since
+    /// (the edits' positions would be stale) or was killed. For format-on-save
+    /// (`save` = its token) the formatted document is then written, unless
+    /// the timeout already saved it unformatted.
+    fn apply_format_response(
+        &mut self,
+        edits: Vec<lsp::TextEdit>,
+        target: &RequestTarget,
+        save: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(token) = save
+            && self.formatting_for_save.get(&target.uri) != Some(&token)
+        {
+            return; // timed out (saved unformatted) or the buffer was killed
+        }
+        match self.target_tick(target) {
+            Some(tick) if tick == target.tick => match self.document_for_uri(&target.uri) {
+                Some(None) => self.apply_format_edits_active(&edits, save.is_some(), cx),
+                Some(Some(idx)) => {
+                    let current = self.inactive[idx].buffer.full_text();
+                    let formatted = lsp::apply_edits_to_text(&current, &edits);
+                    if formatted != current {
+                        self.replace_inactive_text(idx, &formatted);
+                    }
+                }
+                None => {}
+            },
+            Some(_) if save.is_some() => {
+                self.echo("Buffer changed while formatting; saving unformatted", cx)
+            }
+            Some(_) => self.echo("Buffer changed while formatting; edits discarded", cx),
+            None => {}
+        }
+        if let Some(token) = save {
+            self.finish_format_on_save(&target.uri, token, cx);
         }
     }
 
-    /// Apply a workspace edit (rename / code action): the active buffer in place
-    /// (undoable), other files on disk (and refreshed if open).
+    /// Replace all of `inactive[idx]`'s text with `new` as one undoable step
+    /// (recorded in that document's own undo tree, so undo stays consistent
+    /// when it's next shown), and sync it to its language servers.
+    fn replace_inactive_text(&mut self, idx: usize, new: &str) {
+        let doc = &mut self.inactive[idx];
+        let len = doc.buffer.len();
+        let record = UndoRecord {
+            at: 0,
+            removed: doc.buffer.full_text(),
+            inserted: new.to_string(),
+        };
+        let node = doc.undo_tree.len();
+        let parent = doc.undo_current;
+        doc.undo_tree.push(UndoNode {
+            parent: Some(parent),
+            children: Vec::new(),
+            edit: vec![record],
+        });
+        doc.undo_tree[parent].children.push(node);
+        doc.undo_current = node;
+        doc.buffer.replace(0..len, new);
+        doc.modified = true;
+        let uri = document_uri(doc);
+        self.lsp_sync_document(&uri, new);
+    }
+
+    /// Apply a workspace edit (rename / code action / `workspace/applyEdit`):
+    /// the active buffer in place (undoable), other files on disk (and
+    /// refreshed if open). Returns the per-file failures (empty = all applied).
     pub(super) fn apply_workspace_edit(
         &mut self,
         edit: lsp::WorkspaceEdit,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Vec<String> {
         if edit.changes.is_empty() {
             self.echo("Nothing to change", cx);
-            return;
+            return Vec::new();
         }
         let mut files = 0;
         let mut total = 0;
@@ -1317,22 +1754,29 @@ impl Editor {
                     let point = self.point();
                     self.replace_whole_buffer(&updated, point, cx);
                 }
-            } else if let Some(doc) = self
+            } else if let Some(idx) = self
                 .inactive
-                .iter_mut()
-                .find(|d| d.path.as_deref() == Some(path.as_path()))
+                .iter()
+                .position(|d| d.path.as_deref() == Some(path.as_path()))
             {
-                // Open but not active: rewrite its buffer and persist to disk.
-                let current = doc.buffer.full_text();
+                // Open but not active: rewrite its buffer (undoably, and synced
+                // to its servers — they'd otherwise keep the pre-edit text) and
+                // persist to disk.
+                let current = self.inactive[idx].buffer.full_text();
                 let updated = lsp::apply_edits_to_text(&current, edits);
-                let len = doc.buffer.len();
-                doc.buffer.replace(0..len, &updated);
+                if updated != current {
+                    self.replace_inactive_text(idx, &updated);
+                }
                 match std::fs::write(&path, &updated) {
                     // Only a successful write makes the buffer clean; on failure
                     // it keeps its (edited) unsaved state so nothing is lost.
-                    Ok(()) => doc.modified = false,
+                    Ok(()) => {
+                        self.inactive[idx].modified = false;
+                        let doc_uri = document_uri(&self.inactive[idx]);
+                        self.lsp_did_save(&doc_uri);
+                    }
                     Err(err) => {
-                        doc.modified = true;
+                        self.inactive[idx].modified = true;
                         failed.push(format!("{}: {err}", path.display()));
                     }
                 }
@@ -1364,6 +1808,7 @@ impl Editor {
             ));
         }
         self.echo(message, cx);
+        failed
     }
 
     /// List code actions in `*lsp-actions*` (RET applies). Edit-only actions
@@ -1450,6 +1895,21 @@ impl Editor {
     /// and/or the server `command`. The caller must have the source buffer
     /// active.
     pub(super) fn apply_code_action(&mut self, action: lsp::CodeAction, cx: &mut Context<Self>) {
+        // A literal without its edit may be lazily filled in: when the server
+        // supports it, resolve first (the response re-enters here with
+        // `resolve` cleared); otherwise apply it as it stands.
+        let can_resolve = self
+            .active_language()
+            .and_then(|l| self.servers.get(&l))
+            .is_some_and(|s| s.code_action_resolve);
+        if can_resolve && let Some(raw) = action.resolve.clone() {
+            let mut original = action.clone();
+            original.resolve = None;
+            let kind = PendingRequest::ResolveCodeAction(Box::new(original));
+            if self.lsp_dispatch("codeAction/resolve", raw, kind) {
+                return;
+            }
+        }
         let had_edit = action.edit.is_some();
         if let Some(edit) = action.edit {
             self.apply_workspace_edit(edit, cx);
