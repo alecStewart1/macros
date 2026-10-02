@@ -660,20 +660,16 @@ impl Editor {
             self.vim.last_ex = cmd.to_string();
             self.vim.registers.set(':', cmd, false);
         }
-        if let Some(rest) = cmd.strip_prefix("%s") {
-            self.ex_substitute(true, rest, cx);
-        } else if let Some(rest) = cmd.strip_prefix('s').filter(|r| r.starts_with('/')) {
-            self.ex_substitute(false, rest, cx);
-        } else if let Ok(n) = cmd.parse::<usize>() {
-            // `:N` — jump to (1-based) line N.
-            let last = self.active.buffer.line_count().saturating_sub(1);
-            let offset = self
-                .active
-                .buffer
-                .line_range(n.saturating_sub(1).min(last))
-                .start;
-            self.move_to(offset, cx);
-        } else {
+        // Ranges and the line commands (`:%s`, `:'<,'>d`, `:g/…/`, `:12`, …).
+        let parsed = super::ex::parse_ex_line(cmd);
+        if self.ex_dispatch(&parsed, cx) {
+            return;
+        }
+        if parsed.range.is_some() {
+            self.echo(format!("E481: No range allowed: {cmd}"), cx);
+            return;
+        }
+        {
             // Split a verb from its optional argument (`:e file`, `:b name`, …).
             let (verb, arg) = match cmd.split_once(char::is_whitespace) {
                 Some((v, a)) => (v, a.trim()),
@@ -735,52 +731,5 @@ impl Editor {
                 other => self.echo(format!("Unknown ex command: {other}"), cx),
             }
         }
-    }
-
-    /// `:%s/pat/rep/[g]` (whole buffer) or `:s/pat/rep/[g]` (current line).
-    /// `g` replaces every match on a line; otherwise the first per line. Vim
-    /// backreferences (`\1`) are translated to the regex crate's `${1}`.
-    pub(super) fn ex_substitute(&mut self, whole_buffer: bool, spec: &str, cx: &mut Context<Self>) {
-        let body = spec.strip_prefix('/').unwrap_or(spec);
-        let mut parts = body.splitn(3, '/');
-        let pattern = parts.next().unwrap_or("");
-        let replacement = translate_backrefs(parts.next().unwrap_or(""));
-        let global = parts.next().unwrap_or("").contains('g');
-        if pattern.is_empty() {
-            self.echo("Empty pattern", cx);
-            return;
-        }
-        let regex = match Regex::new(pattern) {
-            Ok(r) => r,
-            Err(err) => {
-                self.echo(format!("Invalid regex: {err}"), cx);
-                return;
-            }
-        };
-
-        let substitute = |line: &str| -> String {
-            if global {
-                regex.replace_all(line, replacement.as_str()).into_owned()
-            } else {
-                regex.replace(line, replacement.as_str()).into_owned()
-            }
-        };
-
-        if whole_buffer {
-            let text = self.active.buffer.full_text();
-            // split('\n') preserves the line structure (incl. a trailing empty).
-            let new: Vec<String> = text.split('\n').map(substitute).collect();
-            let new = new.join("\n");
-            let len = self.active.buffer.len();
-            let cursor = self.edit(0..len, &new);
-            self.collapse_to(cursor.min(self.active.buffer.len()));
-        } else {
-            let range = self.active.buffer.line_range_at(self.point());
-            let line = self.active.buffer.slice_to_string(range.clone());
-            let new = substitute(&line);
-            let cursor = self.edit(range, &new);
-            self.collapse_to(cursor);
-        }
-        cx.notify();
     }
 }

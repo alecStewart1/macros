@@ -94,6 +94,13 @@ pub(super) struct VimState {
     pub jump_commands: std::collections::HashSet<String>,
     /// The last Visual state, for `gv`.
     pub last_visual: Option<EvilState>,
+    /// The last `:s` (for `:s`, `&`, `:&&`, `g&`).
+    pub last_sub: Option<super::ex::LastSub>,
+    /// An interactive `:s///c` in progress.
+    pub sub_confirm: Option<super::ex::SubConfirm>,
+    /// `:g` line anchors: line starts that shift with edits; `None` once the
+    /// line was deleted.
+    pub ex_anchors: Vec<Option<usize>>,
 }
 
 /// A file mark (`mA`).
@@ -146,6 +153,8 @@ pub(super) fn native_command(expr: &str) -> Option<EditorCommand> {
         "evil-set-mark" => EditorCommand::EvilSetMark(arg),
         "evil-goto-mark" => EditorCommand::EvilGotoMark(arg, true),
         "evil-goto-mark-line" => EditorCommand::EvilGotoMark(arg, false),
+        "evil-ex" => EditorCommand::EvilEx(arg),
+        "evil-ex-goto-line" => EditorCommand::EvilExGotoLine(arg),
         _ => return None,
     })
 }
@@ -230,7 +239,7 @@ pub(super) fn override_count(events: &mut [MacroEvent], n: usize) {
                 *ev = MacroEvent::Counted(expr.clone(), n);
                 return;
             }
-            MacroEvent::Text(_) => {}
+            MacroEvent::Text(_) | MacroEvent::Key(_) => {}
         }
     }
 }
@@ -537,6 +546,16 @@ impl Editor {
         for j in self.vim.jumps.iter_mut() {
             if &j.buffer == name {
                 j.pos = shift_pos(j.pos, start, old_end, new_len);
+            }
+        }
+        for a in self.vim.ex_anchors.iter_mut() {
+            if let Some(p) = *a {
+                // A removal covering the line start deletes the line.
+                *a = if old_end > start && start <= p && p < old_end {
+                    None
+                } else {
+                    Some(shift_pos(p, start, old_end, new_len))
+                };
             }
         }
     }
@@ -1014,7 +1033,7 @@ impl Editor {
             .is_some_and(|t| t != rec.tick);
         let neutral = rec.events.iter().any(|e| match e {
             MacroEvent::Command(x) | MacroEvent::Counted(x, _) => is_repeat_neutral(x),
-            MacroEvent::Text(_) => false,
+            MacroEvent::Text(_) | MacroEvent::Key(_) => false,
         });
         if changed && !neutral {
             self.vim.last_change = rec.events;
@@ -1139,6 +1158,7 @@ impl Editor {
             self.vim.went_async = false;
             match ev {
                 MacroEvent::Text(text) => self.insert_text(&text, cx),
+                MacroEvent::Key(tok) => self.replay_key(&tok, cx),
                 MacroEvent::Command(expr) => self.run_script(&expr, cx),
                 MacroEvent::Counted(expr, n) => {
                     let name = expr

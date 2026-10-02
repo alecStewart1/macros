@@ -461,6 +461,10 @@ pub enum EditorCommand {
     SetJumpCommand(String),
     /// `gv` — reselect the last Visual area.
     EvilReselectVisual,
+    /// Run an ex command line (`(evil-ex "%s/a/b/g")`; `&` / `g&` use it).
+    EvilEx(String),
+    /// Move to the start of (1-based) line N — a `:normal` replay step.
+    EvilExGotoLine(String),
     /// C-o / C-i — older / newer jump-list position.
     EvilJumpBackward,
     EvilJumpForward,

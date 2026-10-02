@@ -136,13 +136,19 @@ impl Editor {
         // Any keystroke is cursor activity: keep the cursor solid and restart the
         // blink cycle (no-op timer when `cursor-blink` is off).
         self.reset_blink(cx);
+        self.dispatch_keystroke(ks, cx);
+    }
 
+    /// Route one keystroke through the modal layers (see [`Self::on_key_down`]);
+    /// also how `:normal` feeds its keys.
+    pub(super) fn dispatch_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
         // Precedence: startup gate → transient → helm → minibuffer → completion
         // popup → terminal → evil replace-pending → evil Normal/Visual → modal
         // leader → evil Insert → special-buffer chord overlay → special buffer →
         // universal argument → Emacs dispatch.
         let layers = [
             Self::key_config_pending,
+            Self::key_sub_confirm,
             Self::key_titlebar_dropdown,
             Self::key_transient,
             Self::key_helm,

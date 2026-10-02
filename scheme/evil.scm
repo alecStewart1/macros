@@ -1230,6 +1230,8 @@
 (define-key "evil-normal" "'" "evil-goto-mark-line %c")
 (define-key "evil-normal" "`" "evil-goto-mark %c")
 (define-key "evil-normal" "g v" 'evil-reselect-visual)
+(define-key "evil-normal" "&" "evil-ex \"s\"")         ; & — repeat the last :s on this line
+(define-key "evil-normal" "g &" "evil-ex \"%&&\"")     ; g& — …on every line, same flags
 (define-key "evil-normal" "shift-h" 'evil-window-top)     ; H / M / L — screen lines
 (define-key "evil-normal" "shift-m" 'evil-window-middle)
 (define-key "evil-normal" "shift-l" 'evil-window-bottom)
@@ -1241,6 +1243,10 @@
 (define-key "evil-normal" "shift-v" 'evil-visual-line-state) ; V (line-wise visual)
 (define-key "evil-normal" "ctrl-v" 'evil-visual-block-state) ; C-v (block-wise)
 (define-key "evil-normal" ":" 'evil-ex-command)          ; :  (e.g. :%s/a/b/g)
+;; From Visual, `:` starts on the selected lines (`:'<,'>`).
+(define-key "evil-visual" ":" 'evil-ex-command)
+(define-key "evil-visual-line" ":" 'evil-ex-command)
+(define-key "evil-visual-block" ":" 'evil-ex-command)
 (define-key "evil-normal" "escape" 'keyboard-quit)
 ;; search
 (define-key "evil-normal" "/" 'evil-search-forward)

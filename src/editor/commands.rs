@@ -826,6 +826,8 @@ impl Editor {
                 self.vim.jump_commands.insert(name);
             }
             EvilReselectVisual => self.evil_reselect_visual(cx),
+            EvilEx(line) => self.run_ex_command(&line, cx),
+            EvilExGotoLine(n) => self.evil_ex_goto_line(&n, cx),
             EvilJumpBackward => self.evil_jump(false, cx),
             EvilJumpForward => self.evil_jump(true, cx),
             WindmoveLeft => self.window_move(panes::Dir::Left, cx),
@@ -849,7 +851,18 @@ impl Editor {
             NewWindowBelow => self.new_window_buffer(true, cx),
             NewWindowRight => self.new_window_buffer(false, cx),
             EvilExCommand => {
-                self.open_minibuffer(":", MinibufferPurpose::ExCommand, "", cx);
+                // From Visual, the command line starts on the selected lines
+                // (`:'<,'>`), and Visual ends — as in Vim.
+                let visual = matches!(
+                    self.evil,
+                    EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
+                ) && !self.modal_helix;
+                if visual {
+                    self.note_visual_exit();
+                    self.evil_normal_state(cx);
+                }
+                let initial = if visual { "'<,'>" } else { "" };
+                self.open_minibuffer(":", MinibufferPurpose::ExCommand, initial, cx);
             }
             IsearchForward => self.isearch_start(true, cx),
             IsearchBackward => self.isearch_start(false, cx),

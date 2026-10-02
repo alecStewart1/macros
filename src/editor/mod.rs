@@ -34,6 +34,7 @@ mod commands;
 mod completion;
 mod editing_extras;
 mod evil;
+mod ex;
 mod grammars;
 mod helm;
 mod input;
@@ -794,6 +795,8 @@ enum MacroEvent {
     /// A modal command run under a count (`3dd`), replayed with that count.
     Counted(String, usize),
     Text(String),
+    /// A key token typed by `:normal` (`x`, `<Esc>`, `<CR>`, …).
+    Key(String),
 }
 
 /// Overlays / text properties on a buffer (the Emacs overlay + text-property
@@ -2748,6 +2751,43 @@ impl Editor {
         cx.notify();
     }
 
+    /// Shift (0-based) lines `first..=last` one `step` right (`dir` >= 0) or
+    /// left, skipping blank lines; outdenting removes up to `step` columns of
+    /// leading whitespace (a tab counts as the whole step). No undo grouping —
+    /// callers group.
+    fn shift_line_range(&mut self, first: usize, last: usize, dir: isize, step: usize) {
+        let pad = " ".repeat(step);
+        // Bottom-up, so an earlier line's edit can't shift the offsets of the
+        // lines still to come.
+        for line in (first..=last).rev() {
+            let lr = self.active.buffer.line_range(line);
+            if lr.end <= lr.start {
+                continue; // blank line: vim leaves it alone
+            }
+            if dir >= 0 {
+                self.edit(lr.start..lr.start, &pad);
+            } else {
+                let text = self.active.buffer.slice_to_string(lr.clone());
+                let mut cols = 0;
+                let mut bytes = 0;
+                for c in text.chars() {
+                    if cols >= step {
+                        break;
+                    }
+                    match c {
+                        ' ' => cols += 1,
+                        '\t' => cols = step,
+                        _ => break,
+                    }
+                    bytes += c.len_utf8();
+                }
+                if bytes > 0 {
+                    self.edit(lr.start..lr.start + bytes, "");
+                }
+            }
+        }
+    }
+
     /// Shift the lines spanned by the region (or, with no region, the current
     /// line) one indent step right (`dir` +1) or left (`dir` -1) — vim `>>` /
     /// `<<` and visual `>` / `<`, Helix `>` / `<`. Outdenting removes up to
@@ -2774,39 +2814,8 @@ impl Editor {
             last = (first + self.prefix_count - 1)
                 .min(self.active.buffer.line_count().saturating_sub(1));
         }
-        let pad = " ".repeat(step);
         self.begin_undo_group();
-        // Bottom-up, so an earlier line's edit can't shift the offsets of the
-        // lines still to come.
-        for line in (first..=last).rev() {
-            let lr = self.active.buffer.line_range(line);
-            if lr.end <= lr.start {
-                continue; // blank line: vim leaves it alone
-            }
-            if dir >= 0 {
-                self.edit(lr.start..lr.start, &pad);
-            } else {
-                // Drop up to `step` columns of leading whitespace. A tab counts
-                // as the whole step, so it's removed outright.
-                let text = self.active.buffer.slice_to_string(lr.clone());
-                let mut cols = 0;
-                let mut bytes = 0;
-                for c in text.chars() {
-                    if cols >= step {
-                        break;
-                    }
-                    match c {
-                        ' ' => cols += 1,
-                        '\t' => cols = step,
-                        _ => break,
-                    }
-                    bytes += c.len_utf8();
-                }
-                if bytes > 0 {
-                    self.edit(lr.start..lr.start + bytes, "");
-                }
-            }
-        }
+        self.shift_line_range(first, last, dir, step);
         self.end_undo_group();
         if had_region {
             self.active.selected_range =
@@ -4329,29 +4338,6 @@ fn next_grapheme(s: &str, cursor: usize) -> usize {
         .map_or(cursor, |g| cursor + g.len())
 }
 
-/// Translate Vim-style backreferences (`\1`..`\9`, `\0`) in a substitution
-/// replacement to the regex crate's `${N}` form. Other `\x` escapes pass through.
-fn translate_backrefs(replacement: &str) -> String {
-    let mut out = String::with_capacity(replacement.len());
-    let mut chars = replacement.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.peek() {
-                Some(d) if d.is_ascii_digit() => {
-                    out.push_str("${");
-                    out.push(*d);
-                    out.push('}');
-                    chars.next();
-                }
-                Some(_) | None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// Compose the trailing-token indent rules with the structural result. A line
 /// ending in an `indent-after` token opens the next line at least one `step` past
 /// the current line (`max`, so it never *reduces* a deeper structural indent). A
@@ -5164,7 +5150,7 @@ mod tests {
         Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
         file_completions, is_repeatable, language_for_path, last_sexp, line_span, prefix_arg_value,
         push_capped, scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at,
-        top_level_form_at, translate_backrefs,
+        top_level_form_at,
     };
 
     #[test]
@@ -5371,14 +5357,6 @@ mod tests {
         assert_eq!(pretty_sequence("alt-g n"), "M-g n");
         assert_eq!(pretty_sequence("ctrl-c shift-p"), "C-c P");
         assert_eq!(pretty_sequence("ctrl-x"), "C-x");
-    }
-
-    #[test]
-    fn backref_translation_for_substitute() {
-        assert_eq!(translate_backrefs(r"\1-\2"), "${1}-${2}");
-        assert_eq!(translate_backrefs("plain"), "plain");
-        // Non-digit escapes pass through unchanged.
-        assert_eq!(translate_backrefs(r"a\tb"), r"a\tb");
     }
 
     #[test]

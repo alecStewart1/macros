@@ -570,6 +570,13 @@ pub(crate) fn build_engine(
         EditorCommand::EvilMacroPlay,
     );
     register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
+    register_unary(&mut reg, queue, "evil-ex", EditorCommand::EvilEx);
+    register_unary(
+        &mut reg,
+        queue,
+        "evil-ex-goto-line",
+        EditorCommand::EvilExGotoLine,
+    );
     register_unary(&mut reg, queue, "evil-goto-mark", |m: String| {
         EditorCommand::EvilGotoMark(m, true)
     });

@@ -2059,6 +2059,10 @@ mod engine_tests {
             "evil-window-move-very-top"
         ));
         assert!(bound("evil-normal", "ctrl-w o", "delete-other-windows"));
+        // Ex: & / g& repeat the last :s; `:` from Visual.
+        assert!(bound("evil-normal", "&", r#"evil-ex "s""#));
+        assert!(bound("evil-normal", "g &", r#"evil-ex "%&&""#));
+        assert!(bound("evil-visual-line", ":", "evil-ex-command"));
         for jump in [
             "evil-goto-last-line",
             "evil-search-next",
