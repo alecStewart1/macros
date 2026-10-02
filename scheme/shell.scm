@@ -193,7 +193,9 @@
 (define (shell)
   (append-to-buffer "*shell*" "")          ; create/switch to a normal buffer
   (set-major-mode "shell-mode")            ; so RET is rebound below
-  (set! *shell-proc* (make-process "/bin/sh" (list) 'shell-output 'shell-exit)))
+  (set! *shell-proc* (make-process "/bin/sh" (list) 'shell-output 'shell-exit))
+  ;; Killing *shell* takes its /bin/sh (and children) down with it.
+  (set-process-buffer *shell-proc* "*shell*"))
 (define (shell-output line) (append-to-buffer "*shell*" (string-append line "\n")))
 (define (shell-exit code) (append-to-buffer "*shell*" (string-append "[exited " code "]\n")))
 (define (shell-send-input)

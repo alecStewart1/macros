@@ -5017,6 +5017,14 @@ mod magit_tests {
         ));
         assert!(matches!(
             engine
+                .eval(r#"(set-process-buffer 1 "*shell*")"#)
+                .unwrap()
+                .commands
+                .as_slice(),
+            [EditorCommand::SetProcessBuffer { id: 1, name }] if name == "*shell*"
+        ));
+        assert!(matches!(
+            engine
                 .eval("(start-kbd-macro)")
                 .unwrap()
                 .commands

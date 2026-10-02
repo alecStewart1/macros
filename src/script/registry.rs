@@ -1714,6 +1714,11 @@ pub(crate) fn build_engine(
     register_unary(&mut reg, queue, "kill-process", |id| {
         EditorCommand::KillProcess { id }
     });
+    // `(set-process-buffer id name)`: killing buffer `name` terminates process
+    // `id` (its whole process group), like Emacs's process buffer.
+    register_binary(&mut reg, queue, "set-process-buffer", |id, name| {
+        EditorCommand::SetProcessBuffer { id, name }
+    });
     {
         // `(make-http-stream url headers body on-line on-done)` → a stream id
         // (used by http-stream-cancel). `headers` is a flat list of alternating

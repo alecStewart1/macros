@@ -731,6 +731,12 @@ pub enum EditorCommand {
     KillProcess {
         id: u64,
     },
+    /// Bind process `id` to buffer `name`: killing the buffer terminates the
+    /// process (Emacs `set-process-buffer`).
+    SetProcessBuffer {
+        id: u64,
+        name: String,
+    },
     /// Open a streaming HTTP POST (see [`HttpStreamArgs`]); the transport for
     /// talking directly to a model provider's SSE endpoint (e.g. Anthropic) from
     /// Steel — the HTTP analogue of `make-process`. Boxed: its payload is far
