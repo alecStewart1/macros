@@ -76,6 +76,8 @@ impl Editor {
         }
         match self.region() {
             Some(range) => {
+                self.set_auto_mark('[', range.start);
+                self.set_auto_mark(']', range.end.saturating_sub(1).max(range.start));
                 let text = self.active.buffer.slice_to_string(range);
                 self.set_clipboard(&text, cx); // sync the system clipboard
                 self.note_register_kill(super::registers::KillKind::Yank, reg, &text);

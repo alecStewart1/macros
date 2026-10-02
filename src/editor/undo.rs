@@ -51,6 +51,7 @@ impl Editor {
             );
             self.script
                 .adjust_markers(record.at, old_end, record.removed.len());
+            self.shift_vim_positions(record.at, old_end, record.removed.len());
             cursor = record.at + record.removed.len();
         }
         self.active.undo_current = parent;
@@ -107,6 +108,7 @@ impl Editor {
             );
             self.script
                 .adjust_markers(record.at, old_end, record.inserted.len());
+            self.shift_vim_positions(record.at, old_end, record.inserted.len());
             cursor = record.at + record.inserted.len();
         }
         self.active.undo_current = child;

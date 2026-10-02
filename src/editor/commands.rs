@@ -820,6 +820,12 @@ impl Editor {
             EvilInsertRegister(r) => self.evil_insert_register(&r, cx),
             EvilMacroRecord(r) => self.evil_macro_record(&r, cx),
             EvilMacroPlay(r) => self.evil_macro_play(&r, cx),
+            EvilSetMark(r) => self.evil_set_mark(&r, cx),
+            EvilGotoMark(r, exact) => self.evil_goto_mark(&r, exact, cx),
+            SetJumpCommand(name) => {
+                self.vim.jump_commands.insert(name);
+            }
+            EvilReselectVisual => self.evil_reselect_visual(cx),
             EvilExCommand => {
                 self.open_minibuffer(":", MinibufferPurpose::ExCommand, "", cx);
             }

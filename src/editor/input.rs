@@ -485,6 +485,17 @@ impl Editor {
                 self.dot_boundary(&expr);
                 self.register_boundary(&expr);
             }
+            // Visual keys keep `'<` / `'>` (and `gv`) current before they act.
+            if matches!(
+                self.evil,
+                EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
+            ) {
+                self.note_visual_exit();
+            }
+            // Jump commands (G, %, n, …) remember where they started.
+            if self.evil_intercepts() && self.is_jump_expr(&expr) {
+                self.record_jump();
+            }
             // An operator (`d`) or a `%c` binding (`m`, `"`) waits for more
             // input instead of running now.
             if !self.evil_route_binding(&expr, &candidate, count, cx) {

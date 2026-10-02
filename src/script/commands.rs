@@ -452,6 +452,15 @@ pub enum EditorCommand {
     /// `@x` — replay the macro in register x (`@@` the last one, `@:` the
     /// last ex command); count-aware.
     EvilMacroPlay(String),
+    /// `mx` — set mark x at point.
+    EvilSetMark(String),
+    /// `` `x `` (exact = true) / `'x` (line) — jump to mark x.
+    EvilGotoMark(String, bool),
+    /// Mark a command name as a jump (`set-jump-command!`): running it from a
+    /// key records the jump list and the `''` mark first.
+    SetJumpCommand(String),
+    /// `gv` — reselect the last Visual area.
+    EvilReselectVisual,
     /// Visual-block `r<char>`: overwrite every char of the rectangle.
     EvilBlockReplace(String),
     /// Helix `p` / `P`: paste after / before every selection.

@@ -2051,6 +2051,11 @@ impl Editor {
         // Move any markers tracking positions in this buffer.
         self.script
             .adjust_markers(range_start, range_end, new_text.len());
+        // …and the Vim marks / jump list, then the change marks `[ ] .`.
+        self.shift_vim_positions(range_start, range_end, new_text.len());
+        self.set_auto_mark('[', range_start);
+        self.set_auto_mark(']', range_start + new_text.len().saturating_sub(1));
+        self.set_auto_mark('.', range_start);
         // Shift byte-range overlays the same way so they stay aligned until the
         // debounced re-fontify runs — otherwise hidden ranges / faces below the
         // edit point at stale bytes for a frame and visibly flicker (e.g. an Org
@@ -3219,6 +3224,7 @@ impl Editor {
             .to_string(),
             search_query: self.search_query.clone().unwrap_or_default(),
             search_forward: self.evil_search_forward,
+            marks: self.active_marks(),
             major_mode: self
                 .active
                 .modes

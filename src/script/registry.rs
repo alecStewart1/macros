@@ -155,6 +155,7 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("count-repeat-step", CountRepeatStep),
         ("replay-step", ReplayStep),
         ("evil-repeat", EvilRepeat),
+        ("evil-reselect-visual", EvilReselectVisual),
         ("helix-paste-after", HelixPasteAfter),
         ("helix-paste-before", HelixPasteBefore),
         ("isearch-forward", IsearchForward),
@@ -546,6 +547,34 @@ pub(crate) fn build_engine(
         "evil-macro-play",
         EditorCommand::EvilMacroPlay,
     );
+    register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
+    register_unary(&mut reg, queue, "evil-goto-mark", |m: String| {
+        EditorCommand::EvilGotoMark(m, true)
+    });
+    register_unary(&mut reg, queue, "evil-goto-mark-line", |m: String| {
+        EditorCommand::EvilGotoMark(m, false)
+    });
+    {
+        // `(set-jump-command! 'name)` — running `name` from a key is a jump:
+        // the jump list and `''` record where it started (G, /, %, gd, …).
+        let q = queue.clone();
+        reg.register_fn("set-jump-command!", move |value: SteelVal| {
+            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
+            q.lock().unwrap().push(EditorCommand::SetJumpCommand(name));
+        });
+    }
+    {
+        // `(mark-position "a")` → byte offset of mark a in this buffer, or -1.
+        let shared = snapshot.clone();
+        reg.register_fn("mark-position", move |m: String| -> isize {
+            shared
+                .load()
+                .marks
+                .iter()
+                .find(|(c, _)| *c == m)
+                .map_or(-1, |(_, p)| *p as isize)
+        });
+    }
     {
         // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
         // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other

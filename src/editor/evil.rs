@@ -130,6 +130,10 @@ impl Editor {
 
     pub(super) fn evil_normal_state(&mut self, cx: &mut Context<Self>) {
         let was_insert = matches!(self.evil, EvilState::Insert);
+        if was_insert {
+            let p = self.point();
+            self.set_auto_mark('^', p);
+        }
         self.evil = EvilState::Normal;
         // One insert session (with the command that opened it: `cw`, `o`, …)
         // undoes as one step, as in Vim.
@@ -716,6 +720,10 @@ impl Editor {
                 "only" | "on" => self.delete_other_windows(cx),
                 "close" | "clo" => self.delete_window(cx),
                 "reg" | "registers" | "di" | "display" => self.show_registers(arg, cx),
+                "marks" => self.show_marks(arg, cx),
+                "delm" | "delmarks" => self.delete_marks(arg, false, cx),
+                "delm!" | "delmarks!" => self.delete_marks(arg, true, cx),
+                "k" | "mark" | "ma" => self.evil_set_mark(arg, cx),
                 other => self.echo(format!("Unknown ex command: {other}"), cx),
             }
         }

@@ -81,6 +81,53 @@ pub(super) struct VimState {
     pub last_ex: String,
     /// Text typed in the current Insert session (`".`).
     pub insert_acc: String,
+    /// Buffer-local marks by buffer name: `a`–`z` plus the automatic ones
+    /// (`'` previous context, `[` `]` last change/yank, `<` `>` last visual,
+    /// `.` last change, `^` last insert). Byte positions, shifted on edits.
+    pub marks: std::collections::HashMap<String, std::collections::HashMap<char, usize>>,
+    /// File marks `A`–`Z`: buffer (and file, to reopen it) + position.
+    pub global_marks: std::collections::HashMap<char, GlobalMark>,
+    /// The jump list (oldest first) and the C-o / C-i cursor into it.
+    pub jumps: Vec<Jump>,
+    pub jump_idx: usize,
+    /// Command names whose execution is a jump (`set-jump-command!`).
+    pub jump_commands: std::collections::HashSet<String>,
+    /// The last Visual state, for `gv`.
+    pub last_visual: Option<EvilState>,
+}
+
+/// A file mark (`mA`).
+#[derive(Clone, Debug)]
+pub(super) struct GlobalMark {
+    pub buffer: String,
+    pub path: Option<std::path::PathBuf>,
+    pub pos: usize,
+}
+
+/// One jump-list entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Jump {
+    pub buffer: String,
+    pub path: Option<std::path::PathBuf>,
+    pub pos: usize,
+}
+
+/// Where a position lands after the edit replacing `[start, old_end)` with
+/// `new_len` bytes: after it shifts by the size change, inside it collapses to
+/// `start` (the same rule as Emacs markers).
+pub(super) fn shift_pos(pos: usize, start: usize, old_end: usize, new_len: usize) -> usize {
+    if pos >= old_end {
+        (pos + new_len).saturating_sub(old_end - start)
+    } else if pos > start {
+        start
+    } else {
+        pos
+    }
+}
+
+/// Whether `c` names a settable / jumpable mark.
+pub(super) fn is_mark(c: char) -> bool {
+    c.is_ascii_alphabetic() || matches!(c, '\'' | '`' | '[' | ']' | '<' | '>' | '.' | '^')
 }
 
 /// A Vim-grammar call that must apply synchronously — `(name "arg")` for the
@@ -96,6 +143,9 @@ pub(super) fn native_command(expr: &str) -> Option<EditorCommand> {
         "evil-insert-register" => EditorCommand::EvilInsertRegister(arg),
         "evil-macro-record" => EditorCommand::EvilMacroRecord(arg),
         "evil-macro-play" => EditorCommand::EvilMacroPlay(arg),
+        "evil-set-mark" => EditorCommand::EvilSetMark(arg),
+        "evil-goto-mark" => EditorCommand::EvilGotoMark(arg, true),
+        "evil-goto-mark-line" => EditorCommand::EvilGotoMark(arg, false),
         _ => return None,
     })
 }
@@ -465,6 +515,332 @@ impl Editor {
             Vec::new(),
             cx,
         );
+    }
+
+    // --- marks & jumps ------------------------------------------------------
+
+    /// Keep marks and jump positions in the active buffer aligned with an
+    /// edit of `[start, old_end)` → `new_len` bytes (called from every edit
+    /// and undo/redo step).
+    pub(super) fn shift_vim_positions(&mut self, start: usize, old_end: usize, new_len: usize) {
+        let name = &self.active.name;
+        if let Some(m) = self.vim.marks.get_mut(name) {
+            for p in m.values_mut() {
+                *p = shift_pos(*p, start, old_end, new_len);
+            }
+        }
+        for g in self.vim.global_marks.values_mut() {
+            if &g.buffer == name {
+                g.pos = shift_pos(g.pos, start, old_end, new_len);
+            }
+        }
+        for j in self.vim.jumps.iter_mut() {
+            if &j.buffer == name {
+                j.pos = shift_pos(j.pos, start, old_end, new_len);
+            }
+        }
+    }
+
+    /// Set an automatic mark in the active buffer (no-op unless evil is on).
+    pub(super) fn set_auto_mark(&mut self, c: char, pos: usize) {
+        if self.evil == EvilState::Disabled || self.modal_helix {
+            return;
+        }
+        // Runs on every edit: avoid cloning the buffer name once its map exists.
+        if let Some(m) = self.vim.marks.get_mut(&self.active.name) {
+            m.insert(c, pos);
+        } else {
+            self.vim
+                .marks
+                .entry(self.active.name.clone())
+                .or_default()
+                .insert(c, pos);
+        }
+    }
+
+    /// The active buffer's marks, for the snapshot (`mark-position`): the
+    /// local ones plus any file mark that points into this buffer.
+    pub(super) fn active_marks(&self) -> Vec<(String, usize)> {
+        let mut out: Vec<(String, usize)> = self
+            .vim
+            .marks
+            .get(&self.active.name)
+            .map(|m| m.iter().map(|(c, p)| (c.to_string(), *p)).collect())
+            .unwrap_or_default();
+        for (c, g) in &self.vim.global_marks {
+            if g.buffer == self.active.name {
+                out.push((c.to_string(), g.pos));
+            }
+        }
+        out
+    }
+
+    /// `m{x}`.
+    pub(super) fn evil_set_mark(&mut self, r: &str, cx: &mut Context<Self>) {
+        let Some(c) = reg_char(r).filter(|c| is_mark(*c)) else {
+            self.echo(format!("Invalid mark: {r}"), cx);
+            return;
+        };
+        let pos = self.point();
+        let c = if c == '`' { '\'' } else { c };
+        if c.is_ascii_uppercase() {
+            self.vim.global_marks.insert(
+                c,
+                GlobalMark {
+                    buffer: self.active.name.clone(),
+                    path: self.active.path.clone(),
+                    pos,
+                },
+            );
+        } else {
+            self.vim
+                .marks
+                .entry(self.active.name.clone())
+                .or_default()
+                .insert(c, pos);
+        }
+    }
+
+    /// Where mark `c` is, switching to its buffer first for a file mark in
+    /// another buffer. `None` (with an echo) when unset.
+    fn resolve_mark(&mut self, c: char, cx: &mut Context<Self>) -> Option<usize> {
+        let c = if c == '`' { '\'' } else { c };
+        if c.is_ascii_uppercase() {
+            let Some(g) = self.vim.global_marks.get(&c).cloned() else {
+                self.echo(format!("Mark not set: {c}"), cx);
+                return None;
+            };
+            if g.buffer != self.active.name {
+                if self.inactive.iter().any(|d| d.name == g.buffer) {
+                    self.switch_to_buffer(&g.buffer, cx);
+                } else if let Some(path) = &g.path {
+                    self.find_file(&path.to_string_lossy(), cx);
+                }
+                if self.active.name != g.buffer && self.active.path.as_ref() != g.path.as_ref() {
+                    self.echo(format!("Mark {c}: buffer is gone"), cx);
+                    return None;
+                }
+                // The buffer may have been reopened under a new name.
+                if let Some(m) = self.vim.global_marks.get_mut(&c) {
+                    m.buffer = self.active.name.clone();
+                }
+            }
+            return Some(g.pos.min(self.active.buffer.len()));
+        }
+        match self
+            .vim
+            .marks
+            .get(&self.active.name)
+            .and_then(|m| m.get(&c))
+        {
+            Some(&p) => Some(p.min(self.active.buffer.len())),
+            None => {
+                self.echo(format!("Mark not set: {c}"), cx);
+                None
+            }
+        }
+    }
+
+    /// `` `x `` (exact) / `'x` (line, first non-blank): jump to a mark. The
+    /// jump is recorded, so `''` comes back.
+    pub(super) fn evil_goto_mark(&mut self, r: &str, exact: bool, cx: &mut Context<Self>) {
+        let Some(c) = reg_char(r) else {
+            return;
+        };
+        let from_buffer = self.active.name.clone();
+        let from = self.point();
+        let Some(pos) = self.resolve_mark(c, cx) else {
+            return;
+        };
+        let target = if exact {
+            pos
+        } else {
+            self.first_non_blank(pos)
+        };
+        // Record the jump in the buffer we left (it may differ now).
+        self.push_jump(Jump {
+            buffer: from_buffer.clone(),
+            path: None,
+            pos: from,
+        });
+        if from_buffer == self.active.name {
+            self.set_auto_mark('\'', from);
+        }
+        self.goto(target, cx);
+        self.evil_clamp_cursor();
+    }
+
+    /// Add a jump-list entry (deduplicating the same line) and reset the
+    /// C-o cursor to the end, as Vim does.
+    pub(super) fn push_jump(&mut self, mut jump: Jump) {
+        if jump.path.is_none() {
+            jump.path = if jump.buffer == self.active.name {
+                self.active.path.clone()
+            } else {
+                self.inactive
+                    .iter()
+                    .find(|d| d.name == jump.buffer)
+                    .and_then(|d| d.path.clone())
+            };
+        }
+        let line_of = |ed: &Self, j: &Jump| -> Option<usize> {
+            (j.buffer == ed.active.name).then(|| ed.active.buffer.line_index_at_byte(j.pos))
+        };
+        let new_line = line_of(self, &jump);
+        let jumps = std::mem::take(&mut self.vim.jumps);
+        let mut kept: Vec<Jump> = jumps
+            .into_iter()
+            .filter(|j| {
+                !(j.buffer == jump.buffer && new_line.is_some() && line_of(self, j) == new_line)
+            })
+            .collect();
+        kept.push(jump);
+        if kept.len() > 100 {
+            kept.remove(0);
+        }
+        self.vim.jump_idx = kept.len();
+        self.vim.jumps = kept;
+    }
+
+    /// A jump command is about to run: remember where we were (jump list and
+    /// the `''` mark).
+    pub(super) fn record_jump(&mut self) {
+        if self.evil == EvilState::Disabled {
+            return;
+        }
+        let pos = self.point();
+        self.set_auto_mark('\'', pos);
+        self.push_jump(Jump {
+            buffer: self.active.name.clone(),
+            path: None,
+            pos,
+        });
+    }
+
+    /// Whether `expr` runs a registered jump command.
+    pub(super) fn is_jump_expr(&self, expr: &str) -> bool {
+        let name = expr
+            .trim()
+            .trim_start_matches('(')
+            .split(|c: char| c.is_whitespace() || c == ')')
+            .next()
+            .unwrap_or("");
+        self.vim.jump_commands.contains(name)
+    }
+
+    /// `:marks [names]`.
+    pub(super) fn show_marks(&mut self, only: &str, cx: &mut Context<Self>) {
+        let want = |c: char| only.is_empty() || only.contains(c);
+        let mut rows: Vec<(char, String, usize, usize, String)> = Vec::new();
+        if let Some(m) = self.vim.marks.get(&self.active.name) {
+            for (&c, &p) in m {
+                let p = p.min(self.active.buffer.len());
+                let (line, col) = self.active.buffer.byte_to_position(p);
+                let text = self
+                    .active
+                    .buffer
+                    .slice_to_string(self.active.buffer.line_range(line));
+                rows.push((c, String::new(), line + 1, col, text.trim().to_string()));
+            }
+        }
+        for (&c, g) in &self.vim.global_marks {
+            let file = g
+                .path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| g.buffer.clone());
+            let (line, col) = if g.buffer == self.active.name {
+                self.active
+                    .buffer
+                    .byte_to_position(g.pos.min(self.active.buffer.len()))
+            } else {
+                self.inactive
+                    .iter()
+                    .find(|d| d.name == g.buffer)
+                    .map(|d| d.buffer.byte_to_position(g.pos.min(d.buffer.len())))
+                    .unwrap_or((0, 0))
+            };
+            rows.push((c, file, line + 1, col, String::new()));
+        }
+        rows.retain(|r| want(r.0));
+        rows.sort_by_key(|r| (r.0.is_ascii_alphabetic(), r.0.is_ascii_uppercase(), r.0));
+        let mut lines = vec!["mark line  col file/text".to_string()];
+        for (c, file, line, col, text) in rows {
+            let what = if file.is_empty() { text } else { file };
+            lines.push(format!(" {c} {line:>6} {col:>4} {what}"));
+        }
+        let text = lines.join("\n") + "\n";
+        self.render_buffer("*marks*".into(), "help-mode".into(), text, Vec::new(), cx);
+    }
+
+    /// `:delmarks a b` / `:delm!` (all lowercase marks of this buffer).
+    pub(super) fn delete_marks(&mut self, arg: &str, bang: bool, cx: &mut Context<Self>) {
+        if bang {
+            if let Some(m) = self.vim.marks.get_mut(&self.active.name) {
+                m.retain(|c, _| !c.is_ascii_lowercase());
+            }
+            return;
+        }
+        let mut names: Vec<char> = Vec::new();
+        let chars: Vec<char> = arg.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if i + 2 < chars.len() && chars[i + 1] == '-' {
+                for c in chars[i]..=chars[i + 2] {
+                    names.push(c);
+                }
+                i += 3;
+            } else {
+                names.push(chars[i]);
+                i += 1;
+            }
+        }
+        if names.is_empty() {
+            self.echo("Argument required", cx);
+            return;
+        }
+        for c in names {
+            if c.is_ascii_uppercase() {
+                self.vim.global_marks.remove(&c);
+            } else if let Some(m) = self.vim.marks.get_mut(&self.active.name) {
+                m.remove(&c);
+            }
+        }
+    }
+
+    /// `gv`: reselect the last Visual area (from the `<` `>` marks).
+    pub(super) fn evil_reselect_visual(&mut self, cx: &mut Context<Self>) {
+        let marks = self.vim.marks.get(&self.active.name);
+        let (Some(&s), Some(&e)) = (
+            marks.and_then(|m| m.get(&'<')),
+            marks.and_then(|m| m.get(&'>')),
+        ) else {
+            self.echo("No previous visual selection", cx);
+            return;
+        };
+        let len = self.active.buffer.len();
+        let (s, e) = (s.min(len), e.min(len));
+        self.evil = self.vim.last_visual.unwrap_or(EvilState::Visual);
+        self.active.mark_active = true;
+        self.active.selected_range = s..e;
+        self.active.selection_reversed = false;
+        self.ensure_cursor_visible();
+        cx.notify();
+    }
+
+    /// In a Visual state: remember the area for `'<` `'>` and `gv`.
+    pub(super) fn note_visual_exit(&mut self) {
+        if !matches!(
+            self.evil,
+            EvilState::Visual | EvilState::VisualLine | EvilState::VisualBlock
+        ) || self.modal_helix
+        {
+            return;
+        }
+        let r = self.active.selected_range.clone();
+        self.vim.last_visual = Some(self.evil);
+        self.set_auto_mark('<', r.start);
+        self.set_auto_mark('>', r.end);
     }
 
     // --- macros ------------------------------------------------------------
@@ -1048,5 +1424,22 @@ mod tests {
         assert!(native_command(r#"(evil-operate "delete")"#).is_none());
         assert_eq!(reg_char("a"), Some('a'));
         assert_eq!(reg_char("ab"), None);
+    }
+
+    #[test]
+    fn mark_positions_shift_with_edits() {
+        // insert 3 bytes at 5: later marks shift, earlier stay.
+        assert_eq!(shift_pos(10, 5, 5, 3), 13);
+        assert_eq!(shift_pos(2, 5, 5, 3), 2);
+        assert_eq!(shift_pos(5, 5, 5, 3), 8);
+        // delete [4, 8): a mark inside collapses to 4; after shifts back.
+        assert_eq!(shift_pos(6, 4, 8, 0), 4);
+        assert_eq!(shift_pos(9, 4, 8, 0), 5);
+        assert!(is_mark('a') && is_mark('Z') && is_mark('\'') && is_mark('<'));
+        assert!(!is_mark('1'));
+        assert!(matches!(
+            native_command(r#"(evil-goto-mark-line "a")"#),
+            Some(EditorCommand::EvilGotoMark(m, false)) if m == "a"
+        ));
     }
 }

@@ -2023,6 +2023,70 @@ mod engine_tests {
         );
     }
 
+    /// Marks: bindings, the mark motions under an operator (`d'a` linewise,
+    /// `` d`a `` exclusive), and the jump-command registry.
+    #[test]
+    fn evil_marks_and_jump_commands() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        let cmds = engine
+            .eval(include_str!("../../scheme/evil.scm"))
+            .expect("evil.scm")
+            .commands;
+        let bound = |mode: &str, chord: &str, to: &str| {
+            cmds.iter().any(
+                |c| matches!(c, C::DefineKey(m, s, cmd) if m == mode && s == chord && cmd == to),
+            )
+        };
+        assert!(bound("evil-normal", "m", "evil-set-mark %c"));
+        assert!(bound("evil-normal", "'", "evil-goto-mark-line %c"));
+        assert!(bound("evil-normal", "`", "evil-goto-mark %c"));
+        assert!(bound("evil-operator", "'", "evil-motion-mark %c #f"));
+        assert!(bound("evil-normal", "g v", "evil-reselect-visual"));
+        for jump in [
+            "evil-goto-last-line",
+            "evil-search-next",
+            "evil-matchit",
+            "lsp-find-definition",
+        ] {
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, C::SetJumpCommand(n) if n == jump)),
+                "{jump} should be a jump command"
+            );
+        }
+        let run = |src: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str("aa\nbb\ncc\ndd\n"),
+                point: 1,
+                marks: vec![("a".into(), 7)],
+                ..Default::default()
+            });
+            engine.eval(src).unwrap().commands
+        };
+        let c = run(r#"(evil-operate "delete" 0 "" (lambda () (evil-motion-mark "a" #f)))"#);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::KillRegionBetween { start: 0, end: 9 })),
+            "d'a: {c:?}"
+        );
+        let c = run(r#"(evil-operate "delete" 0 "" (lambda () (evil-motion-mark "a" #t)))"#);
+        assert!(
+            c.iter()
+                .any(|c| matches!(c, C::KillRegionBetween { start: 1, end: 7 })),
+            "d`a: {c:?}"
+        );
+        // An unset mark fails the motion: nothing happens.
+        let c = run(r#"(evil-operate "delete" 0 "" (lambda () (evil-motion-mark "b" #t)))"#);
+        assert!(
+            !c.iter().any(|c| matches!(c, C::KillRegionBetween { .. })),
+            "{c:?}"
+        );
+    }
+
     #[test]
     fn evil_visual_line_commands_resolve() {
         let (engine, _rx) = ScriptEngine::new();

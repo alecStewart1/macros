@@ -824,6 +824,24 @@
        (let ((tg (evil-find-nth (point) *evil-find-char* *evil-find-till* forward n)))
          (and tg (evil-mres (if forward "inclusive" "exclusive") tg)))))
 
+;; Mark motions under an operator: `d'a` (linewise) / `` d`a `` (exclusive).
+(define (evil-motion-mark m exact)
+  (let ((pos (mark-position (if (equal? m "`") "'" m))))
+    (and (>= pos 0)
+         (if exact (evil-mres "exclusive" pos) (list "line" (point) pos)))))
+
+;; H / M / L in Normal / Visual: the top / middle / bottom screen line (with a
+;; count, that many lines in from the top / bottom), on its first non-blank.
+(define (evil-screen-goto which extend)
+  (let ((pos (evil-first-nonblank-pos (pos-at-char-column (evil-screen-line which (evil-count)) 0))))
+    (if extend (select-to pos) (goto-char pos))))
+(define (evil-window-top)           (evil-screen-goto "H" #f))
+(define (evil-window-middle)        (evil-screen-goto "M" #f))
+(define (evil-window-bottom)        (evil-screen-goto "L" #f))
+(define (evil-window-top-visual)    (evil-screen-goto "H" #t))
+(define (evil-window-middle-visual) (evil-screen-goto "M" #t))
+(define (evil-window-bottom-visual) (evil-screen-goto "L" #t))
+
 ;; Search motions (`d/foo`, `dn`): exclusive, to the n-th match.
 (define (evil-search-motion pattern forward n)
   (and (not (equal? pattern ""))
@@ -1037,6 +1055,8 @@
 (evil-omap "t" "evil-motion-find \"t\" %c")
 (evil-omap "shift-t" "evil-motion-find \"T\" %c")
 (evil-omap "/" "evil-op-search \"/\"")
+(evil-omap "'" "evil-motion-mark %c #f")
+(evil-omap "`" "evil-motion-mark %c #t")
 (evil-omap "?" "evil-op-search \"?\"")
 ;; Text objects: `d i w`, `c a (`, … (and the visual `i w` selections below).
 (for-each
@@ -1204,6 +1224,15 @@
 (define-key "evil-normal" "shift-y" 'evil-yank-line)     ; Y (= yy)
 (define-key "evil-normal" "p" 'evil-paste-after)        ; p  (line-wise → below)
 (define-key "evil-normal" "shift-p" 'evil-paste-before) ; P  (line-wise → above)
+;; marks: ma sets (mA = file mark), 'a jumps to its line, `a to the exact spot;
+;; '' / `` return to before the last jump. gv reselects the last Visual area.
+(define-key "evil-normal" "m" "evil-set-mark %c")
+(define-key "evil-normal" "'" "evil-goto-mark-line %c")
+(define-key "evil-normal" "`" "evil-goto-mark %c")
+(define-key "evil-normal" "g v" 'evil-reselect-visual)
+(define-key "evil-normal" "shift-h" 'evil-window-top)     ; H / M / L — screen lines
+(define-key "evil-normal" "shift-m" 'evil-window-middle)
+(define-key "evil-normal" "shift-l" 'evil-window-bottom)
 (define-key "evil-normal" "u" 'undo)
 (define-key "evil-normal" "." 'evil-repeat)              ; . — repeat the last change (3. = new count)
 (define-key "evil-normal" "ctrl-r" 'redo)               ; C-r — redo (else it falls
@@ -1300,6 +1329,14 @@
 (define-key "evil-visual" "shift-v" 'evil-visual-line-state)  ; switch to line-wise
 (define-key "evil-visual" "ctrl-v" 'evil-visual-block-state)  ; switch to block-wise
 (define-key "evil-visual" "escape" 'evil-normal-state)
+(for-each
+ (lambda (km)
+   (define-key km "'" "evil-goto-mark-line %c")
+   (define-key km "`" "evil-goto-mark %c")
+   (define-key km "shift-h" 'evil-window-top-visual)
+   (define-key km "shift-m" 'evil-window-middle-visual)
+   (define-key km "shift-l" 'evil-window-bottom-visual))
+ (list "evil-visual" "evil-visual-line"))
 
 ;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
 ;; The selection is rounded out to whole lines in the core, so the motions here
@@ -1583,4 +1620,20 @@
             evil-find-repeat-visual evil-find-repeat-reverse-visual
             evil-forward-sentence evil-backward-sentence
             evil-forward-sentence-visual evil-backward-sentence-visual
-            evil-repeat evil-macro-play))
+            evil-repeat evil-macro-play
+            evil-window-top evil-window-bottom
+            evil-window-top-visual evil-window-bottom-visual))
+
+;; --- jumps ---------------------------------------------------------------------
+;; Commands that are "jumps" in Vim's sense: run from a key, they record the
+;; jump list (C-o / C-i) and the '' mark first. Extend with your own
+;; `(set-jump-command! 'my-command)`.
+(for-each set-jump-command!
+          '(evil-goto-first-line evil-goto-last-line beginning-of-buffer end-of-buffer
+            evil-search-forward evil-search-backward evil-search-next evil-search-previous
+            evil-search-word-forward evil-search-word-backward
+            evil-matchit evil-forward-paragraph evil-backward-paragraph
+            evil-forward-sentence evil-backward-sentence
+            evil-window-top evil-window-middle evil-window-bottom
+            lsp-find-definition lsp-find-references lsp-find-implementation
+            lsp-find-type-definition imenu))

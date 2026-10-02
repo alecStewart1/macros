@@ -98,6 +98,8 @@ pub struct EditorSnapshot {
     pub search_forward: bool,
     /// The buffer's major mode (top of its mode stack), for `(major-mode)`.
     pub major_mode: String,
+    /// The buffer's Vim marks `(name, byte)`, for `(mark-position "a")`.
+    pub marks: Vec<(String, usize)>,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the
