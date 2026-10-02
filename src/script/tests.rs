@@ -91,6 +91,29 @@ mod engine_tests {
     }
 
     #[test]
+    fn out_of_range_ports_and_sizes_raise_instead_of_wrapping() {
+        let (engine, _rx) = ScriptEngine::new();
+        // 70000 used to truncate to port 4464 and -1 to 65535; both now raise.
+        for src in [
+            r#"(tcp-listen "127.0.0.1" 70000)"#,
+            r#"(tcp-listen "127.0.0.1" -1)"#,
+            r#"(tcp-connect "127.0.0.1" 65536 10 10)"#,
+            r#"(tcp-connect "127.0.0.1" 1 -5 10)"#,
+            r#"(http-serve "127.0.0.1" 99999 "text/plain" "" 'cb)"#,
+            "(http-server-stop -1)",
+            "(random-bytes -1)",
+            "(udp-recv 1 -1)",
+        ] {
+            assert!(engine.eval(src).is_err(), "{src} should raise");
+        }
+        // In range still works.
+        let ok = engine
+            .eval(r#"(tcp-listener-close (tcp-listen "127.0.0.1" 0))"#)
+            .unwrap();
+        assert_eq!(ok.value.as_deref(), Some("#true"));
+    }
+
+    #[test]
     fn tls_connect_reports_failure_cleanly() {
         let (engine, _rx) = ScriptEngine::new();
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();

@@ -76,6 +76,37 @@ impl steel::rvals::FromSteelVal for Callback {
     }
 }
 
+/// Steel's own integer→`u16`/`usize` conversions are bare `as` casts, so a
+/// Scheme `-1` or `70000` silently wraps. These argument types validate the
+/// range instead and raise a Scheme conversion error when it's violated.
+fn int_in_range(val: &SteelVal, what: &str, max: u64) -> steel::rvals::Result<u64> {
+    match val {
+        SteelVal::IntV(n) if *n >= 0 && (*n as u64) <= max => Ok(*n as u64),
+        _ => Err(steel::SteelErr::new(
+            steel::rerrs::ErrorKind::ConversionError,
+            format!("expected {what} (0..={max}), found: {val}"),
+        )),
+    }
+}
+
+/// A TCP/UDP port argument: an integer in `0..=65535`.
+pub(crate) struct Port(pub(crate) u16);
+
+impl steel::rvals::FromSteelVal for Port {
+    fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
+        int_in_range(val, "a port", u16::MAX as u64).map(|n| Port(n as u16))
+    }
+}
+
+/// A non-negative integer argument (a count, size or timeout).
+pub(crate) struct NonNeg(pub(crate) usize);
+
+impl steel::rvals::FromSteelVal for NonNeg {
+    fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
+        int_in_range(val, "a non-negative integer", isize::MAX as u64).map(|n| NonNeg(n as usize))
+    }
+}
+
 pub(crate) fn steel_string(value: &SteelVal) -> Option<String> {
     match value {
         SteelVal::StringV(s) => Some(s.to_string()),
