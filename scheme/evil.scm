@@ -1267,11 +1267,13 @@
 ;; EDIT the buffer, and in Normal state a vim user pressing them expects
 ;; something else entirely — `C-o` above all, which is vim's jump-back and Emacs's
 ;; `open-line`, so it silently inserted a newline. Shadow them:
-;;   C-o  → pop the xref marker stack (the nearest thing to vim's jump list)
-;;   C-k / C-w / C-y / C-t → undefined, like vim (beep instead of edit)
+;;   C-o / C-i (and TAB, the same key in a terminal) → the jump list: back
+;;        to where G, /, n, %, '', gd, … started, and forward again
+;;   C-k / C-y / C-t → undefined, like vim (beep instead of edit)
 (define (evil-undefined)
   (message "Not a Normal-state command (Emacs binding shadowed by evil)"))
-(define-key "evil-normal" "ctrl-o" 'xref-pop-marker)    ; jump back (≈ vim C-o)
+(define-key "evil-normal" "ctrl-o" 'evil-jump-backward) ; C-o — older jump position
+(define-key "evil-normal" "ctrl-i" 'evil-jump-forward)  ; C-i — newer (TAB too, unless a mode binds it)
 (define-key "evil-normal" "ctrl-k" 'evil-undefined)     ; was kill-line
 (define-key "evil-normal" "ctrl-w" 'evil-undefined)     ; was kill-region
 (define-key "evil-normal" "ctrl-y" 'evil-undefined)     ; was yank

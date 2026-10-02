@@ -721,6 +721,11 @@ impl Editor {
                 "close" | "clo" => self.delete_window(cx),
                 "reg" | "registers" | "di" | "display" => self.show_registers(arg, cx),
                 "marks" => self.show_marks(arg, cx),
+                "ju" | "jumps" => self.show_jumps(cx),
+                "cle" | "clearjumps" => {
+                    self.vim.jumps.clear();
+                    self.vim.jump_idx = 0;
+                }
                 "delm" | "delmarks" => self.delete_marks(arg, false, cx),
                 "delm!" | "delmarks!" => self.delete_marks(arg, true, cx),
                 "k" | "mark" | "ma" => self.evil_set_mark(arg, cx),

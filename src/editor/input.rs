@@ -1413,14 +1413,22 @@ impl Editor {
         } else if self.modal_action_key("tab", cx) {
             // an evil/helix keymap binding for TAB wins (before the mode map,
             // so a modal user's explicit binding isn't shadowed by org-tab)
-        } else if !self.mode_key("tab", cx) && !self.evil_intercepts() {
+        } else if !self.mode_key("tab", cx) {
             // A mode binding (e.g. org-mode's `org-tab` heading cycle) wins in
             // every state, including evil Normal/Visual — TAB is a gpui action
             // key that never reaches the evil keymap, so consult the mode map
             // here or modal users lose it. The plain indent fallback still only
-            // runs when evil isn't intercepting.
-            self.record_event(MacroEvent::Command("(indent-for-tab-command)".into()));
-            self.apply_command(EditorCommand::IndentForTab, cx);
+            // runs when evil isn't intercepting; in evil Normal, TAB is Vim's
+            // C-i (jump forward) — the same key on a terminal.
+            if !self.evil_intercepts() {
+                self.record_event(MacroEvent::Command("(indent-for-tab-command)".into()));
+                self.apply_command(EditorCommand::IndentForTab, cx);
+            } else if self.evil == EvilState::Normal
+                && !self.modal_helix
+                && self.active.special.is_none()
+            {
+                self.evil_jump(true, cx);
+            }
         }
     }
     pub(super) fn act_select_left(

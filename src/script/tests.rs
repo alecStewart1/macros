@@ -2046,6 +2046,9 @@ mod engine_tests {
         assert!(bound("evil-normal", "`", "evil-goto-mark %c"));
         assert!(bound("evil-operator", "'", "evil-motion-mark %c #f"));
         assert!(bound("evil-normal", "g v", "evil-reselect-visual"));
+        // The jump list: C-o back, C-i forward (TAB falls back to it in Rust).
+        assert!(bound("evil-normal", "ctrl-o", "evil-jump-backward"));
+        assert!(bound("evil-normal", "ctrl-i", "evil-jump-forward"));
         for jump in [
             "evil-goto-last-line",
             "evil-search-next",

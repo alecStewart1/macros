@@ -156,6 +156,8 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("replay-step", ReplayStep),
         ("evil-repeat", EvilRepeat),
         ("evil-reselect-visual", EvilReselectVisual),
+        ("evil-jump-backward", EvilJumpBackward),
+        ("evil-jump-forward", EvilJumpForward),
         ("helix-paste-after", HelixPasteAfter),
         ("helix-paste-before", HelixPasteBefore),
         ("isearch-forward", IsearchForward),

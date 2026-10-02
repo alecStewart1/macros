@@ -461,6 +461,9 @@ pub enum EditorCommand {
     SetJumpCommand(String),
     /// `gv` — reselect the last Visual area.
     EvilReselectVisual,
+    /// C-o / C-i — older / newer jump-list position.
+    EvilJumpBackward,
+    EvilJumpForward,
     /// Visual-block `r<char>`: overwrite every char of the rectangle.
     EvilBlockReplace(String),
     /// Helix `p` / `P`: paste after / before every selection.

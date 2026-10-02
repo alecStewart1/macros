@@ -826,6 +826,8 @@ impl Editor {
                 self.vim.jump_commands.insert(name);
             }
             EvilReselectVisual => self.evil_reselect_visual(cx),
+            EvilJumpBackward => self.evil_jump(false, cx),
+            EvilJumpForward => self.evil_jump(true, cx),
             EvilExCommand => {
                 self.open_minibuffer(":", MinibufferPurpose::ExCommand, "", cx);
             }

@@ -728,6 +728,83 @@ impl Editor {
         self.vim.jump_commands.contains(name)
     }
 
+    /// C-o (`forward` false) / C-i, Tab (`forward` true): walk the jump list.
+    /// The first C-o from the newest end records where you are, so C-i can
+    /// come back to it.
+    pub(super) fn evil_jump(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let target = if forward {
+            let t = self.vim.jump_idx + 1;
+            if t >= self.vim.jumps.len() {
+                self.echo("At the newest jump", cx);
+                return;
+            }
+            t
+        } else {
+            if self.vim.jump_idx >= self.vim.jumps.len() {
+                let pos = self.point();
+                self.push_jump(Jump {
+                    buffer: self.active.name.clone(),
+                    path: None,
+                    pos,
+                });
+                // Now the newest entry is where we stand; step past it.
+                self.vim.jump_idx = self.vim.jumps.len() - 1;
+            }
+            if self.vim.jump_idx == 0 {
+                self.echo("At the oldest jump", cx);
+                return;
+            }
+            self.vim.jump_idx - 1
+        };
+        let jump = self.vim.jumps[target].clone();
+        if jump.buffer != self.active.name {
+            if self.inactive.iter().any(|d| d.name == jump.buffer) {
+                self.switch_to_buffer(&jump.buffer, cx);
+            } else if let Some(path) = &jump.path {
+                self.find_file(&path.to_string_lossy(), cx);
+            }
+            if self.active.name != jump.buffer && self.active.path != jump.path {
+                // The buffer is gone: drop the entry and keep walking.
+                self.vim.jumps.remove(target);
+                if !forward {
+                    self.vim.jump_idx = target;
+                }
+                self.echo("Jump target buffer is gone", cx);
+                return;
+            }
+        }
+        self.vim.jump_idx = target;
+        let pos = jump.pos.min(self.active.buffer.len());
+        self.move_to(pos, cx);
+        self.evil_clamp_cursor();
+    }
+
+    /// `:jumps`.
+    pub(super) fn show_jumps(&mut self, cx: &mut Context<Self>) {
+        let mut lines = vec![" jump line  col file/text".to_string()];
+        let cur = self.vim.jump_idx;
+        for (i, j) in self.vim.jumps.iter().enumerate() {
+            let dist = i.abs_diff(cur);
+            let (line, col, what) = if j.buffer == self.active.name {
+                let p = j.pos.min(self.active.buffer.len());
+                let (l, c) = self.active.buffer.byte_to_position(p);
+                let text = self
+                    .active
+                    .buffer
+                    .slice_to_string(self.active.buffer.line_range(l));
+                (l + 1, c, text.trim().to_string())
+            } else {
+                (0, 0, j.buffer.clone())
+            };
+            lines.push(format!("{dist:>5} {line:>5} {col:>4} {what}"));
+        }
+        if cur >= self.vim.jumps.len() {
+            lines.push(">".into());
+        }
+        let text = lines.join("\n") + "\n";
+        self.render_buffer("*jumps*".into(), "help-mode".into(), text, Vec::new(), cx);
+    }
+
     /// `:marks [names]`.
     pub(super) fn show_marks(&mut self, only: &str, cx: &mut Context<Self>) {
         let want = |c: char| only.is_empty() || only.contains(c);
