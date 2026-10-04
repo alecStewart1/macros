@@ -1552,8 +1552,9 @@ impl SteelLsp {
         let mut diagnostics = match self.try_compile(text) {
             CompileResult::Ok => Vec::new(),
             CompileResult::Error(err) => vec![steel_error_diagnostic(text, &err)],
-            // Steel's compiler can panic on some malformed-but-balanced input
-            // (e.g. `(define)`), which is common while typing. We catch it (see
+            // Steel's compiler has panicked on malformed-but-balanced input
+            // (`(define)` did before steel-core 0.8.3), which is common while
+            // typing. We catch it (see
             // `try_compile`) and report nothing for that transient state rather
             // than crash the editor.
             CompileResult::Panicked => Vec::new(),
@@ -2609,14 +2610,16 @@ mod tests {
 
     #[test]
     fn steel_lsp_survives_compiler_panics() {
-        // `(define)` is balanced but panics Steel's compiler — the sandbox must
-        // catch it (no diagnostic, no crash) and the server must keep working.
+        // `(define)` is balanced but malformed. It panicked Steel's compiler
+        // before steel-core 0.8.3 (caught by `try_compile`'s sandbox); it is
+        // now a plain compile error. Either way: no crash, and the server must
+        // keep working.
         let (mut server, mut rx) = SteelLsp::start(false, &[]);
         let _init = futures::executor::block_on(rx.next()).unwrap();
 
         server.did_open("file:///p.scm", "(define)");
         let msg = futures::executor::block_on(rx.next()).unwrap();
-        assert!(msg["params"]["diagnostics"].as_array().unwrap().is_empty());
+        assert!(msg["params"]["diagnostics"].is_array(), "{msg}");
 
         // Still alive: a subsequent real error is still reported.
         server.did_change("file:///p.scm", "(if 1 2 3 4)");

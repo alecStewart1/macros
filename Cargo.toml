@@ -150,7 +150,7 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 # macros-email-client; also usable by any package wanting a real database). The
 # `bundled` feature compiles SQLite from source — no system libsqlite3 — and
 # includes FTS5, the full-text search engine those primitives expose.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
 # for staging update downloads and compiled user grammars (src/grammar.rs).
 dirs = "5"

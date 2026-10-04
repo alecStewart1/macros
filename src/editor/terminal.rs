@@ -1379,8 +1379,32 @@ mod process_tests {
     use super::*;
 
     /// Is any process left in group `pgid`?
+    #[cfg(not(target_os = "linux"))]
     fn group_alive(pgid: i32) -> bool {
         unsafe { libc::kill(-pgid, 0) == 0 }
+    }
+
+    /// Is any *live* process left in group `pgid`? Zombies don't count: a
+    /// killed, orphaned child is reparented to PID 1, and in a CI container
+    /// PID 1 often never reaps, so the zombie keeps `kill(-pgid, 0)` succeeding.
+    #[cfg(target_os = "linux")]
+    fn group_alive(pgid: i32) -> bool {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return unsafe { libc::kill(-pgid, 0) == 0 };
+        };
+        entries.flatten().any(|e| {
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+                return false;
+            };
+            // `pid (comm) state ppid pgrp …` — comm may contain spaces/parens.
+            let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+                return false;
+            };
+            let mut fields = rest.split_whitespace();
+            let state = fields.next();
+            let pgrp = fields.nth(1).and_then(|f| f.parse::<i32>().ok());
+            pgrp == Some(pgid) && state != Some("Z")
+        })
     }
 
     fn wait_until(mut done: impl FnMut() -> bool) -> bool {
