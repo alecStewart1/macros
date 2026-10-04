@@ -86,6 +86,7 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
         ("mc-mark-next-like-this", McMarkNext),
         ("mc-clear", McClear),
         ("kill-buffer", KillBuffer),
+        ("mcp-server-info", McpServerInfo),
         ("kill-buffer-and-window", KillBufferAndWindow),
         ("quit", Quit),
         ("lsp-find-definition", LspDefinition),

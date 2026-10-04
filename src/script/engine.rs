@@ -402,6 +402,23 @@ pub struct ActionHandle {
 }
 
 impl ActionHandle {
+    /// Blocking eval from any thread (the MCP server's): returns the editor
+    /// commands queued — including those queued before an error — plus the
+    /// printed value and the error, if any. The caller applies the commands
+    /// on the editor's foreground; nothing here touches editor state.
+    pub fn eval_sync(&self, source: &str) -> (Vec<EditorCommand>, Option<String>, Option<String>) {
+        let (tx, rx) = channel();
+        let sent = self.jobs.send(Job {
+            task: Task::Eval(source.to_string()),
+            interactive: false,
+            reply: Reply::Sync(tx),
+        });
+        match sent.ok().and_then(|_| rx.recv().ok()) {
+            Some(raw) => (raw.commands, raw.value, raw.error),
+            None => (Vec::new(), None, Some("script engine stopped".to_string())),
+        }
+    }
+
     /// Async action call, identical to [`ScriptEngine::dispatch_action`].
     pub fn dispatch_action(&self, name: &str, candidate: Option<&str>) {
         let _ = self.jobs.send(Job {

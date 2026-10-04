@@ -8,6 +8,7 @@ mod element;
 mod grammar;
 mod highlight;
 mod lsp;
+mod mcp;
 mod mode;
 mod runtime;
 mod save;

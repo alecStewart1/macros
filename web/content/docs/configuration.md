@@ -72,6 +72,10 @@ Set options with `(set-option "name" value)`. Values are **typed** — pass a nu
 ;; Helm selection UI — see Helm
 (set-option "helm-fuzzy"  #t)       ; fuzzy (nucleo) vs substring matching
 (set-option "helm-height" 0.5)      ; fraction of the window height
+
+;; MCP server for AI-assisted debugging — off by default; see MCP server
+(set-option "mcp-server"      #f)
+(set-option "mcp-server-port" 7811)
 ```
 
 ### Reading an option

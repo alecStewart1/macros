@@ -275,6 +275,8 @@ pub enum EditorCommand {
     /// `ghost` keymap binds TAB to this.
     GhostAccept,
     KillBuffer,
+    /// Show the MCP server's status, connection command, and log.
+    McpServerInfo,
     /// Kill the active buffer and close its window (Emacs `kill-buffer-and-window`).
     KillBufferAndWindow,
     Quit,
