@@ -72,4 +72,5 @@ The chart functions are built on a few Rust primitives you can call directly:
 - `(textplot-render width height mode ops)` draws a list of operations on a `width × height` character grid and returns one `(text spans)` row per line. `mode` is `braille`, `block`, `quadrant`, or `half`. Operations use dot coordinates (top-left origin, y grows downward): `("point" x y face)`, `("line" x0 y0 x1 y1 face)`, `("rect" x0 y0 x1 y1 face)`, `("polyline" face (x0 y0 x1 y1 …))`, and `("text" col row string face)` in character cells.
 - `(textplot-sparkline values lo hi)` and `(textplot-hbar value max width)` return glyph strings.
 - `(textplot-ticks lo hi n)` returns about `n` evenly spaced `(value label)` axis ticks.
+- `(textplot-nice-range lo hi n)` widens `(lo hi)` to whole tick steps, so both axis ends get a label. Line, scatter and histogram axes do this unless you pass `'y-min` or `'y-max`.
 - `(textplot-format v)` formats a number compactly: `950`, `12.3k`, `3.4M`.

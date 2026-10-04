@@ -164,6 +164,11 @@
 
 ;; --- axes ----------------------------------------------------------------------
 
+;; Widen lo…hi outward to whole tick steps, so the axis ends land on labeled
+;; ticks (data spanning -0.9997…1.0 gets an axis of -1…1, not one labeled
+;; only at 0). Used when the caller didn't pin the range.
+(define (plot--nice-range lo hi nticks) (textplot-nice-range lo hi nticks))
+
 ;; Dots per cell for a canvas mode, (columns rows).
 (define (plot--mode-dots mode)
   (cond ((eq? mode 'block) (list 1 8))
@@ -271,8 +276,12 @@
          (all (apply append (map cadr series)))
          (xr (plot--range (plot--num (plot--opt opts 'x-min (plot--min (map car all))))
                           (plot--num (plot--opt opts 'x-max (plot--max (map car all))))))
-         (yr (plot--range (plot--num (plot--opt opts 'y-min (plot--min (map cadr all))))
-                          (plot--num (plot--opt opts 'y-max (plot--max (map cadr all))))))
+         (nticks (max 2 (quotient height 3)))
+         (yr (let ((r (plot--range (plot--num (plot--opt opts 'y-min (plot--min (map cadr all))))
+                                   (plot--num (plot--opt opts 'y-max (plot--max (map cadr all)))))))
+               (if (or (plot--opt opts 'y-min #f) (plot--opt opts 'y-max #f))
+                   r
+                   (plot--nice-range (car r) (cadr r) nticks))))
          (xlo (car xr)) (xhi (cadr xr)) (ylo (car yr)) (yhi (cadr yr))
          (dot (lambda (p) (list (plot--scale (car p) xlo xhi dw)
                                 (plot--y->dot (cadr p) ylo yhi dh))))
@@ -290,7 +299,7 @@
          (names (map car series))
          (legend? (plot--opt opts 'legend (> (length series) 1))))
     (plot--frame (textplot-render width height mode ops)
-                 ylo yhi (cadr dots) (max 2 (quotient height 3))
+                 ylo yhi (cadr dots) nticks
                  (textplot-format xlo) (textplot-format xhi)
                  (plot--opt opts 'title #f)
                  (if legend? (plot--legend names) #f))))
@@ -327,7 +336,8 @@
                    (if (< k 0)
                        acc
                        (loop (- k 1) (cons (length (filter (lambda (i) (= i k)) idx)) acc)))))
-         (cmax (max 1 (apply max counts)))
+         (nticks (max 2 (min (max 1 (apply max counts)) (quotient height 2))))
+         (cmax (cadr (plot--nice-range 0.0 (plot--num (max 1 (apply max counts))) nticks)))
          (dh (* height 8))
          (gap (if (> bw 1) 1 0))
          (ops (let loop ((cs counts) (k 0) (acc '()))
@@ -341,7 +351,7 @@
                                       acc)
                                 acc)))))))
     (plot--frame (textplot-render (* bins bw) height 'block ops)
-                 0.0 (plot--num cmax) 8 (max 2 (min cmax (quotient height 2)))
+                 0.0 cmax 8 nticks
                  (textplot-format lo) (textplot-format hi)
                  (plot--opt opts 'title #f) #f)))
 

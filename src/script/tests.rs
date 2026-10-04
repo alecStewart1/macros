@@ -10405,11 +10405,12 @@ mod plot_tests {
         let h = "(plot-histogram (list 0 0 0 0 1 1 9) 'bins 2 'bin-width 2 'height 2)";
         assert_eq!(value(&e, &format!("(plot-test-valid? {h})")), "#true");
         let text = value(&e, &format!("(plot-text {h})"));
-        // 6 values in the low bin (full height), 1 in the high bin (1/6).
+        // 6 values in the low bin, 1 in the high bin; the count axis rounds
+        // up to 10 so its top is labeled (6/10 and 1/10 of 16 eighths).
         let lines: Vec<&str> = text.trim_matches('"').split("\\n").collect();
         assert_eq!(
             lines,
-            vec!["5 ┤█   ", "0 ┤█ ▃ ", "  └────", "   0  9"],
+            vec!["10 ┤▂   ", " 0 ┤█ ▂ ", "   └────", "    0  9"],
             "{text}"
         );
     }

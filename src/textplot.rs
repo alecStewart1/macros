@@ -347,6 +347,16 @@ pub fn ticks(lo: f64, hi: f64, n: usize) -> Vec<(f64, String)> {
         .collect()
 }
 
+/// `[lo, hi]` widened outward to whole multiples of the step [`ticks`] would
+/// use for ~`n` ticks, so both axis ends get a labeled tick.
+pub fn nice_range(lo: f64, hi: f64, n: usize) -> (f64, f64) {
+    if !lo.is_finite() || !hi.is_finite() || hi <= lo {
+        return (lo, hi);
+    }
+    let step = nice_step((hi - lo) / n.max(1) as f64);
+    ((lo / step).floor() * step, (hi / step).ceil() * step)
+}
+
 fn nice_step(raw: f64) -> f64 {
     let mag = 10f64.powf(raw.log10().floor());
     let frac = raw / mag;
@@ -525,6 +535,11 @@ mod tests {
         assert_eq!(t, vec!["-2", "0", "2"]);
         // Flat range still yields a tick.
         assert!(!ticks(4.0, 4.0, 4).is_empty());
+        // Ends round outward to the tick step: the one tick (0) inside
+        // -0.9997…0.9975 becomes -1, 0, 1 over the widened range.
+        assert_eq!(nice_range(-0.9997, 0.9975, 2), (-1.0, 1.0));
+        assert_eq!(nice_range(0.0, 6.0, 2), (0.0, 10.0));
+        assert_eq!(nice_range(3.0, 3.0, 2), (3.0, 3.0));
     }
 
     #[test]

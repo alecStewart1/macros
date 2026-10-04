@@ -583,6 +583,16 @@ pub(crate) fn build_engine(
                 )
             },
         );
+        // `(textplot-nice-range lo hi n)` → `(lo hi)` widened to the tick step.
+        reg.register_fn(
+            "textplot-nice-range",
+            |lo: SteelVal, hi: SteelVal, n: usize| -> SteelVal {
+                let lo = steel_f64(&lo).unwrap_or(0.0);
+                let hi = steel_f64(&hi).unwrap_or(0.0);
+                let (a, b) = crate::textplot::nice_range(lo, hi, n.clamp(1, 100));
+                SteelVal::ListV(vec![SteelVal::NumV(a), SteelVal::NumV(b)].into())
+            },
+        );
         // `(textplot-format v)` → compact label: 950, 12.3k, 3.4M, 0.25.
         reg.register_fn("textplot-format", |v: SteelVal| -> String {
             steel_f64(&v)
