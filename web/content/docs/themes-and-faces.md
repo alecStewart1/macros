@@ -26,6 +26,22 @@ Override or define a face with `set-face`:
 
 Faces are referenced by name throughout the editor — syntax categories, diff lines, headings, diagnostics severities, and the rainbow-delimiter palette are all faces. A theme that doesn't define a particular face falls back to the default foreground, so partial themes are fine.
 
+## Face attributes
+
+Beyond a foreground color, a face can carry extra attributes. Each is its own call, so set them after `set-face`:
+
+```scheme
+(set-face-bold "occur-match" #t)                  ; bold weight
+(set-face-underline "link" #t)                    ; straight underline
+(set-face-wavy "spell-error" #t)                  ; wavy underline (colors only the squiggle)
+(set-face-background "plot-heat-3-bg" "#277f8e")  ; background painted behind the text
+(set-face-font "plot-series-0" "Macros Plot")     ; font family for text under the face
+```
+
+A face with **only** a background (no `set-face` color) keeps the text color it lands on, so it can be layered under another face. The bundled **Macros Plot** font holds the [text chart](/docs/plotting) glyphs (braille, blocks, `■`) at exactly the editor font's cell width; the built-in themes point the `plot-*` faces at it.
+
+Like colors, attributes are reset by `load-theme`, so a theme file must declare every attribute it relies on.
+
 ## The overlay-face layer
 
 Some features paint **overlay faces** — sub-line color spans layered on top of the buffer. [Rainbow delimiters](/docs/rainbow-delimiters), LSP semantic tokens, [Org](/docs/org-mode) heading colors, and Magit diff accents all share this one layer. Two features that both want it in the same buffer will fight, so enable just one per buffer (e.g. disable rainbow for a buffer where you turn on semantic tokens).

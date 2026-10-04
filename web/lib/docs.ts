@@ -73,6 +73,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { slug: "languages", label: "Languages & modes", blurb: "Tree-sitter highlighting and major modes" },
       { slug: "packages", label: "Packages", blurb: "Install Steel extensions from git with package-install" },
       { slug: "themes-and-faces", label: "Themes & faces", blurb: "Load themes, set faces, line numbers" },
+      { slug: "plotting", label: "Text charts", blurb: "Sparklines, bars, line plots, histograms, heatmaps in any buffer" },
       { slug: "rainbow-delimiters", label: "Rainbow & tree-sitter", blurb: "Depth-colored brackets via tree-sitter" },
     ],
   },

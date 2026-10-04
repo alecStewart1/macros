@@ -162,6 +162,16 @@ pub(crate) fn option_to_steelval(v: &crate::settings::OptionValue) -> SteelVal {
     }
 }
 
+/// A number from Scheme as `f64`: ints, floats, and exact rationals alike.
+pub(crate) fn steel_f64(value: &SteelVal) -> Option<f64> {
+    match value {
+        SteelVal::IntV(n) => Some(*n as f64),
+        SteelVal::NumV(f) => Some(*f),
+        SteelVal::Rational(r) => Some(*r.numer() as f64 / *r.denom() as f64),
+        _ => None,
+    }
+}
+
 pub(crate) fn steel_list(value: &SteelVal) -> Option<Vec<SteelVal>> {
     match value {
         SteelVal::ListV(list) => Some(list.iter().cloned().collect()),

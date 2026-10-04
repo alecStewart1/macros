@@ -10284,3 +10284,190 @@ mod search_replace_tests {
         }
     }
 }
+
+/// Text plotting: scheme/plot.scm over the textplot-* primitives.
+#[cfg(test)]
+mod plot_tests {
+    use super::*;
+
+    fn engine_with(text: &str, point: usize) -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine.set_snapshot(EditorSnapshot {
+            name: "notes.txt".into(),
+            text: Rope::from_str(text),
+            point,
+            ..Default::default()
+        });
+        // Every span of a plot must lie inside its row, on char boundaries.
+        engine
+            .eval(
+                r#"(define (plot-test-all? ok? xs)
+                     (or (null? xs) (and (ok? (car xs)) (plot-test-all? ok? (cdr xs)))))
+                   (define (plot-test-valid? p)
+                     (plot-test-all?
+                       (lambda (row)
+                         (let ((n (utf8-length (plot-row-text row))))
+                           (plot-test-all?
+                             (lambda (s) (and (<= 0 (car s)) (< (car s) (cadr s))
+                                              (<= (cadr s) n) (string? (nth s 2))))
+                             (plot-row-spans row))))
+                       p))"#,
+            )
+            .unwrap();
+        engine
+    }
+
+    fn value(engine: &ScriptEngine, q: &str) -> String {
+        match engine.eval(q) {
+            Ok(r) => r.value.unwrap_or_default(),
+            Err(e) => panic!("{q}: {e}"),
+        }
+    }
+
+    #[test]
+    fn sparkline_and_bars() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            value(&e, "(plot-sparkline-string (list 0 1 2 3 4 5 6 7))"),
+            r#""▁▂▃▄▅▆▇█""#
+        );
+        assert_eq!(
+            value(&e, "(plot-sparkline (list 1 2) 'face \"x\")"),
+            r#"(("▁█" ((0 6 "x"))))"#
+        );
+        // Labels padded to the widest; bar at ⅛ resolution; value after.
+        assert_eq!(
+            value(
+                &e,
+                "(map plot-row-text (plot-bars (list (list \"a\" 4) (list \"bb\" 1)) 'width 4))"
+            ),
+            r#"("a  ████ 4" "bb █    1")"#
+        );
+        assert_eq!(
+            value(
+                &e,
+                "(plot-test-valid? (plot-bars (list (list \"a\" 4) (list 'b 1.5)) 'colors #t))"
+            ),
+            "#true"
+        );
+    }
+
+    #[test]
+    fn insert_offsets_spans_by_bytes_after_multibyte_text() {
+        // "héllo " is 7 bytes (é is 2) but 6 chars: spans must start at byte 7.
+        let e = engine_with("héllo ", 7);
+        let cmds = e
+            .eval("(plot-insert (plot-sparkline (list 1 2)))")
+            .unwrap()
+            .commands;
+        assert!(
+            matches!(&cmds[0], EditorCommand::Insert(t) if t == "▁█"),
+            "{cmds:?}"
+        );
+        assert!(
+            matches!(&cmds[1], EditorCommand::OverlayFace { start: 7, end: 13, face } if face == "plot-series-0"),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn line_and_scatter_frame_axes() {
+        let e = engine_with("", 0);
+        let rows = |q: &str| value(&e, &format!("(length {q})"));
+        let lines = "(plot-lines (list (list \"a\" (list 0 1 2 3)) (list \"b\" (list 3 2 1 0))) 'width 20 'height 5 'title \"t\")";
+        // title + 5 canvas rows + axis + x labels + legend
+        assert_eq!(rows(lines), "9");
+        assert_eq!(value(&e, &format!("(plot-test-valid? {lines})")), "#true");
+        let text = value(&e, &format!("(plot-text {lines})"));
+        assert!(text.contains('┤') && text.contains('└'), "{text}");
+        assert!(text.contains("■ a") && text.contains("■ b"), "{text}");
+        // Both series' faces are used.
+        let spans = value(&e, &format!("(plot-spans {lines} 0)"));
+        assert!(
+            spans.contains("plot-series-0") && spans.contains("plot-series-1"),
+            "{spans}"
+        );
+
+        // (x y) points; one named series → no legend by default.
+        let scatter = "(plot-scatter (list (list \"s\" (list (list 0 0) (list 5 5) (list 10 2)))) 'width 10 'height 3)";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {scatter})")), "#true");
+        assert_eq!(rows(scatter), "5");
+        // Bare y-values are a single unnamed series with no legend.
+        assert_eq!(rows("(plot-lines (list 5 5 5) 'width 10 'height 3)"), "5");
+    }
+
+    #[test]
+    fn histogram_counts_land_in_bins() {
+        let e = engine_with("", 0);
+        let h = "(plot-histogram (list 0 0 0 0 1 1 9) 'bins 2 'bin-width 2 'height 2)";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {h})")), "#true");
+        let text = value(&e, &format!("(plot-text {h})"));
+        // 6 values in the low bin (full height), 1 in the high bin (1/6).
+        let lines: Vec<&str> = text.trim_matches('"').split("\\n").collect();
+        assert_eq!(
+            lines,
+            vec!["5 ┤█   ", "0 ┤█ ▃ ", "  └────", "   0  9"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn heatmap_cell_and_half_modes() {
+        let e = engine_with("", 0);
+        let cell = "(plot-heatmap (list (list 0 5) (list 10 #f)) 'row-labels (list \"r1\" \"r2\") 'col-labels (list \"a\" \"b\"))";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {cell})")), "#true");
+        let spans = value(&e, &format!("(plot-spans {cell} 0)"));
+        assert!(
+            spans.contains("plot-heat-0-bg") && spans.contains("plot-heat-7-bg"),
+            "{spans}"
+        );
+        // header + 2 rows + scale
+        assert_eq!(value(&e, &format!("(length {cell})")), "4");
+
+        let half = "(plot-heatmap (list (list 0 1) (list 1 0) (list 0 0)) 'mode 'half 'scale #f)";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {half})")), "#true");
+        // 3 data rows → 2 text rows; the first pairs distinct top/bottom faces.
+        assert_eq!(
+            value(&e, &format!("(map plot-row-text {half})")),
+            r#"("▀▀" "▀▀")"#
+        );
+        let spans = value(&e, &format!("(plot-spans {half} 0)"));
+        assert!(spans.contains("plot-heat-7-bg"), "{spans}");
+    }
+
+    #[test]
+    fn themes_define_plot_faces_backgrounds_and_font() {
+        for theme in ["macros-dark", "macros-light"] {
+            let e = engine_with("", 0);
+            let cmds = e
+                .eval(crate::runtime::theme_script(theme).unwrap())
+                .unwrap()
+                .commands;
+            let font = cmds.iter().filter(|c| matches!(c, EditorCommand::SetFaceFont(f, fam) if f.starts_with("plot-") && fam == "Macros Plot")).count();
+            let bg = cmds.iter().filter(|c| matches!(c, EditorCommand::SetFaceBackground(f, _) if f.starts_with("plot-heat-"))).count();
+            assert_eq!((font, bg), (14, 8), "{theme}");
+        }
+    }
+
+    #[test]
+    fn demo_renders_and_face_background_is_a_command() {
+        let e = engine_with("", 0);
+        let cmds = e.eval("(plot-demo)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*plot-demo*")
+            ),
+            "{cmds:?}"
+        );
+        let cmds = e
+            .eval("(set-face-background \"x-bg\" \"#123456\")")
+            .unwrap()
+            .commands;
+        assert!(
+            matches!(&cmds[..], [EditorCommand::SetFaceBackground(f, c)] if f == "x-bg" && c == "#123456")
+        );
+    }
+}

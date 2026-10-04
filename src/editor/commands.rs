@@ -1334,6 +1334,17 @@ impl Editor {
                 }
                 None => self.echo(format!("Invalid color: {color}"), cx),
             },
+            SetFaceBackground(face, color) => match crate::theme::parse_color(&color) {
+                Some(c) => {
+                    cx.update_global::<Theme, ()>(|theme, _| theme.set_background(face, c));
+                    cx.notify();
+                }
+                None => self.echo(format!("Invalid color: {color}"), cx),
+            },
+            SetFaceFont(face, family) => {
+                cx.update_global::<Theme, ()>(|theme, _| theme.set_font(face, family));
+                cx.notify();
+            }
             SetFaceUnderline(face, on) => {
                 cx.update_global::<Theme, ()>(|theme, _| theme.set_underline(face, on));
                 cx.notify();

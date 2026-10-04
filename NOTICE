@@ -24,6 +24,15 @@ Authors), licensed under the **SIL Open Font License, Version 1.1**. The full
 license text ships in the repository at
 [`assets/fonts/Lilex-OFL.txt`](assets/fonts/Lilex-OFL.txt).
 
+## Macros Plot font
+
+[`assets/fonts/MacrosPlot-Regular.ttf`](assets/fonts/MacrosPlot-Regular.ttf)
+holds the text-chart glyphs (braille, block elements, U+25A0). It is original
+work — every outline is generated geometry from
+[`scripts/gen-plot-font.py`](scripts/gen-plot-font.py), copying nothing from
+Lilex or any other typeface — and is covered by the MIT License like the rest
+of Macros.
+
 ## Vendored tree-sitter Mermaid grammar
 
 Macros bundles the C source of the **tree-sitter-mermaid** grammar

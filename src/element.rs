@@ -1552,6 +1552,18 @@ impl Element for EditorElement {
             if let Some(quad) = prepaint.hl_line.take() {
                 window.paint_quad(quad);
             }
+            // Face backgrounds (`set-face-background` overlay faces) sit just
+            // above the hl-line band, under search/paren/selection highlights.
+            // `paint` doesn't draw run backgrounds — they need this pass.
+            for line in &prepaint.lines {
+                let origin = point(
+                    line_x + line.indent,
+                    bounds.top() + line.top + line.content_dy,
+                );
+                line.wrapped
+                    .paint_background(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
+            }
             // Search highlights sit behind the selection and the text.
             for quad in prepaint.search.drain(..) {
                 window.paint_quad(quad);
@@ -1982,6 +1994,44 @@ fn build_popup(
     PopupLayout { quads, labels, hit }
 }
 
+/// One styled stretch of a line, before it becomes a `TextRun`.
+#[derive(Clone)]
+struct Seg {
+    start: usize,
+    end: usize,
+    color: Hsla,
+    /// `None`, or `Some((wavy, color))` — the underline carries its own color
+    /// so a squiggle can be tinted without recoloring the text under it.
+    underline: Option<(bool, Hsla)>,
+    bold: bool,
+    /// Background painted behind the run (`set-face-background`).
+    background: Option<Hsla>,
+    /// Font family override (`set-face-font`); `None` = the editor font.
+    family: Option<SharedString>,
+}
+
+impl Seg {
+    fn plain(start: usize, end: usize, color: Hsla, bold: bool) -> Seg {
+        Seg {
+            start,
+            end,
+            color,
+            underline: None,
+            bold,
+            background: None,
+            family: None,
+        }
+    }
+
+    fn with_range(&self, start: usize, end: usize) -> Seg {
+        Seg {
+            start,
+            end,
+            ..self.clone()
+        }
+    }
+}
+
 /// Build the `TextRun`s for one line: tile it with the buffer's tree-sitter
 /// highlight spans, then let sub-line overlay faces override on top (the Emacs
 /// overlay model). With no overlays this is exactly the old syntax-only path.
@@ -1994,13 +2044,9 @@ fn line_runs(
     default_bold: bool,
     theme: &Theme,
 ) -> Vec<TextRun> {
-    // 1. Base segments `(start, end, color, underline, bold)` from syntax
-    //    spans. The underline slot is `None` or `Some((wavy, color))` — the
-    //    underline carries its own color so a squiggle can be tinted without
-    //    recoloring the text under it. `default_bold` styles the face-less
+    // 1. Base segments from syntax spans. `default_bold` styles the face-less
     //    base — a whole-line face is resolved to `default` by the caller, so
     //    its bold flag arrives here.
-    type Seg = (usize, usize, Hsla, Option<(bool, Hsla)>, bool);
     let mut segs: Vec<Seg> = Vec::new();
     let mut covered = line.start;
     for span in spans {
@@ -2013,76 +2059,99 @@ fn line_runs(
         let start = span.range.start.max(line.start);
         let end = span.range.end.min(line.end);
         if start > covered {
-            segs.push((covered, start, default, None, default_bold));
+            segs.push(Seg::plain(covered, start, default, default_bold));
         }
-        let (color, ul, bold) = span.face.map_or((default, None, default_bold), |i| {
+        let mut seg = Seg::plain(start, end, default, default_bold);
+        if let Some(i) = span.face {
             let name = face_name(i);
-            let color = theme.color(name, default);
-            (
-                color,
-                theme.underline(name).map(|wavy| (wavy, color)),
-                theme.is_bold(name),
-            )
-        });
-        segs.push((start, end, color, ul, bold));
+            seg.color = theme.color(name, default);
+            seg.underline = theme.underline(name).map(|wavy| (wavy, seg.color));
+            seg.bold = theme.is_bold(name);
+        }
+        segs.push(seg);
         covered = end;
     }
     if covered < line.end {
-        segs.push((covered, line.end, default, None, default_bold));
+        segs.push(Seg::plain(covered, line.end, default, default_bold));
     }
     if segs.is_empty() {
-        segs.push((line.start, line.end, default, None, default_bold));
+        segs.push(Seg::plain(line.start, line.end, default, default_bold));
     }
 
     // 2. Overlay faces override their sub-range, splitting base segments. An
     //    overlay face may also carry underline (e.g. web-reader link markers)
     //    or bold. A WAVY overlay face colors only its squiggle (spellcheck
     //    style: the word keeps the color it already had); a straight-underline
-    //    or plain face recolors the text as before.
+    //    or plain face recolors the text as before. A face with a background
+    //    (`set-face-background`) paints it; one with ONLY a background keeps
+    //    everything else it lands on, so it layers under a foreground face
+    //    (text-plot half-blocks: `plot-heat-3` + `plot-heat-5-bg`). A face
+    //    font (`set-face-font`) switches the run's family.
     for (range, face) in overlays {
         let os = range.start.max(line.start);
         let oe = range.end.min(line.end);
         if os >= oe {
             continue;
         }
+        let face_bg = theme.background_of(face);
+        let bg_only = face_bg.is_some() && !theme.has_color(face);
+        let family = theme
+            .font_of(face)
+            .map(|f| SharedString::from(f.to_string()));
         let fcolor = theme.color(face, default);
         let ul = theme.underline(face).map(|wavy| (wavy, fcolor));
         let wavy_only = matches!(ul, Some((true, _)));
         let bold = theme.is_bold(face);
         let mut next = Vec::with_capacity(segs.len() + 2);
-        for (s, e, c, u, b) in segs.drain(..) {
-            if e <= os || s >= oe {
-                next.push((s, e, c, u, b));
+        for seg in segs.drain(..) {
+            if seg.end <= os || seg.start >= oe {
+                next.push(seg);
                 continue;
             }
-            if s < os {
-                next.push((s, os, c, u, b));
+            if seg.start < os {
+                next.push(seg.with_range(seg.start, os));
             }
-            let text_color = if wavy_only { c } else { fcolor };
-            next.push((s.max(os), e.min(oe), text_color, ul, bold));
-            if e > oe {
-                next.push((oe, e, c, u, b));
+            let mut mid = seg.with_range(seg.start.max(os), seg.end.min(oe));
+            if bg_only {
+                mid.background = face_bg;
+            } else {
+                if !wavy_only {
+                    mid.color = fcolor;
+                }
+                mid.underline = ul;
+                mid.bold = bold;
+                mid.background = face_bg.or(mid.background);
+            }
+            if family.is_some() {
+                mid.family = family.clone();
+            }
+            next.push(mid);
+            if seg.end > oe {
+                next.push(seg.with_range(oe, seg.end));
             }
         }
         segs = next;
     }
 
-    // 3. Emit runs (skip any empty segment), underlining/bolding where the
-    //    face asked.
+    // 3. Emit runs (skip any empty segment), styled as the segment asked.
     segs.into_iter()
-        .filter(|(s, e, _, _, _)| e > s)
-        .map(|(s, e, color, ul, bold)| {
-            let mut run = plain_run(e - s, font.clone(), color);
-            if let Some((wavy, ul_color)) = ul {
+        .filter(|seg| seg.end > seg.start)
+        .map(|seg| {
+            let mut run = plain_run(seg.end - seg.start, font.clone(), seg.color);
+            if let Some((wavy, ul_color)) = seg.underline {
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.),
                     color: Some(ul_color),
                     wavy,
                 });
             }
-            if bold {
+            if seg.bold {
                 run.font.weight = FontWeight::BOLD;
             }
+            if let Some(family) = seg.family {
+                run.font.family = family;
+            }
+            run.background_color = seg.background;
             run
         })
         .collect()
@@ -2438,6 +2507,52 @@ mod tests {
         assert_eq!(runs[1].color, red, "overlay colors its sub-range");
         assert_eq!(runs[0].color, default);
         assert_eq!(runs[2].color, default);
+    }
+
+    #[test]
+    fn background_face_layers_under_foreground_face() {
+        let red: Hsla = rgb(0xff0000).into();
+        let blue: Hsla = rgb(0x0000ff).into();
+        let mut theme = Theme::default();
+        theme.set("heat-7", red);
+        theme.set_background("heat-2-bg", blue);
+        let font = font("Lilex");
+        let default: Hsla = rgb(0x000000).into();
+        // Text-plot half-block: a fg face over [0,6), a bg-only face over
+        // [3,6) — the overlap keeps red text AND gets the blue background.
+        let overlays = vec![
+            (0usize..6usize, SharedString::from("heat-7")),
+            (3usize..6usize, SharedString::from("heat-2-bg")),
+        ];
+        let runs = line_runs(&[], &overlays, 0..9, &font, default, false, &theme);
+        assert_eq!(
+            runs.iter().map(|r| r.len).collect::<Vec<_>>(),
+            vec![3, 3, 3]
+        );
+        assert_eq!((runs[0].color, runs[0].background_color), (red, None));
+        assert_eq!((runs[1].color, runs[1].background_color), (red, Some(blue)));
+        assert_eq!((runs[2].color, runs[2].background_color), (default, None));
+
+        // A bg-only face alone leaves the text color untouched.
+        let overlays = vec![(0usize..3usize, SharedString::from("heat-2-bg"))];
+        let runs = line_runs(&[], &overlays, 0..3, &font, default, false, &theme);
+        assert_eq!(
+            (runs[0].color, runs[0].background_color),
+            (default, Some(blue))
+        );
+    }
+
+    #[test]
+    fn face_font_switches_the_run_family() {
+        let mut theme = Theme::default();
+        theme.set("plot-series-0", rgb(0x87c3ff).into());
+        theme.set_font("plot-series-0", "Macros Plot");
+        let font = font("Lilex");
+        let default: Hsla = rgb(0x000000).into();
+        let overlays = vec![(3usize..9usize, SharedString::from("plot-series-0"))];
+        let runs = line_runs(&[], &overlays, 0..12, &font, default, false, &theme);
+        let families: Vec<&str> = runs.iter().map(|r| r.font.family.as_ref()).collect();
+        assert_eq!(families, vec!["Lilex", "Macros Plot", "Lilex"]);
     }
 
     #[test]
