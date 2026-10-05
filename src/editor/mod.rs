@@ -43,6 +43,7 @@ mod isearch;
 mod kill_ring;
 mod lisp_indent;
 mod lsp_methods;
+mod mcp;
 mod minibuffer;
 mod modeline;
 mod overlays;
@@ -424,6 +425,10 @@ pub struct Editor {
     /// Scrollback of echo-area messages (Emacs `*Messages*`), capped. Every
     /// `echo` appends here so transient status can be reviewed later.
     messages: Vec<String>,
+    /// The MCP server (src/mcp.rs), when the `mcp-server` option is on.
+    mcp: Option<mcp::McpState>,
+    /// Its request log, shown by `M-x mcp-server-info` (capped).
+    mcp_log: Vec<String>,
     /// Captured stderr from external language servers (Emacs-style `*lsp-log*`),
     /// capped — the only window into why a server failed/crashed.
     lsp_log: Vec<String>,
@@ -1316,6 +1321,8 @@ impl Editor {
             status: "Macros ready".into(),
             is_selecting: false,
             messages: Vec::new(),
+            mcp: None,
+            mcp_log: Vec::new(),
             lsp_log: Vec::new(),
             hover_message: None,
             electric_pair: false,

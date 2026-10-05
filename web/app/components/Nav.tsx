@@ -23,16 +23,16 @@ export function Nav() {
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 26,
+            gap: 22,
           }}
         >
           <Link className="nav-link" href="/docs">
             Docs
           </Link>
-          <Link className="nav-link" href="/docs/getting-started">
+          <Link className="nav-link nav-hide-sm" href="/docs/getting-started">
             Get started
           </Link>
-          <a className="nav-link" href={REPO} target="_blank" rel="noreferrer">
+          <a className="nav-link nav-hide-sm" href={REPO} target="_blank" rel="noreferrer">
             Codeberg
           </a>
           <Link className="nav-pill nav-pill-dark" href="/download">

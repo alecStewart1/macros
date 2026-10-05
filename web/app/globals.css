@@ -2,67 +2,53 @@
 @import "tailwindcss";
 
 /* ── Theme variables ──────────────────────────────────────────────────────
-   Macros brand: warm tan "paper" with near-black ink (mirrors the logo's
-   #f1ece2 → #e2d9c8 squircle and #16140f parentheses), a monospace wordmark,
-   and a single rust accent. Structure follows tukeysheets.com / cursor.com:
-   warm off-white background, content as rounded cards, restrained color. */
+   "Spectrum": a near-black ink base and the editor's viridis heat ramp
+   (the same eight colors as its plot-heat faces). The ramp is decoration;
+   reading surfaces stay calm: soft off-white text, one bright accent. */
 
 :root {
-  --bg:            #f3efe6;   /* warm paper */
-  --surface:       #ece6d9;   /* panels / toolbars */
-  --card:          #fbf9f4;   /* raised cards */
-  --card-hover:    #f3efe6;
-  --border:        #ded6c7;
-  --border2:       #cfc5b2;
-  --border3:       #b2a78f;
-  --text:          #1a1813;   /* near-black ink */
-  --text2:         #6a6253;   /* muted */
-  --text3:         #b2a78f;   /* faint / placeholder */
-  --accent:        #b4541e;   /* rust */
-  --accent2:       #cf7440;
-  --accent-dark:   #8f400f;
-  --accent-dim:    rgba(180,84,30,0.10);
-  --accent-border: rgba(180,84,30,0.28);
-  --accent-shadow: rgba(180,84,30,0.28);
-  --hero-glow:     rgba(180,84,30,0.06);
-  --green:         #4a7c2f;
-  --blue:          #2c5d82;
-  --red:           #b3261e;
-  --grid:          rgba(26,24,19,0.05);
-  --grid2:         rgba(26,24,19,0.09);
-  --nav-bg:        rgba(243,239,230,0.82);
-  --code-bg:       #f6f2e9;
-  --code-border:   #e3dbcb;
-}
+  /* viridis ramp, low → high */
+  --v0: #440154;
+  --v1: #46327e;
+  --v2: #365c8d;
+  --v3: #277f8e;
+  --v4: #1fa187;
+  --v5: #4ac16d;
+  --v6: #a0da39;
+  --v7: #fde725;
+  --ramp: linear-gradient(90deg,
+    var(--v0) 0 12.5%, var(--v1) 0 25%, var(--v2) 0 37.5%, var(--v3) 0 50%,
+    var(--v4) 0 62.5%, var(--v5) 0 75%, var(--v6) 0 87.5%, var(--v7) 0);
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:            #16140f;   /* logo ink */
-    --surface:       #1c1a13;
-    --card:          #211e17;
-    --card-hover:    #2a261d;
-    --border:        rgba(236,230,217,0.10);
-    --border2:       rgba(236,230,217,0.18);
-    --border3:       rgba(236,230,217,0.30);
-    --text:          #ece6d9;
-    --text2:         #a59c89;
-    --text3:         #5c5648;
-    --accent:        #e0915c;
-    --accent2:       #efad81;
-    --accent-dark:   #c2702f;
-    --accent-dim:    rgba(224,145,92,0.12);
-    --accent-border: rgba(224,145,92,0.30);
-    --accent-shadow: rgba(224,145,92,0.30);
-    --hero-glow:     rgba(224,145,92,0.07);
-    --green:         #8fce6a;
-    --blue:          #6fa8d6;
-    --red:           #ef8a82;
-    --grid:          rgba(236,230,217,0.05);
-    --grid2:         rgba(236,230,217,0.09);
-    --nav-bg:        rgba(22,20,15,0.85);
-    --code-bg:       #1b1912;
-    --code-border:   rgba(236,230,217,0.10);
-  }
+  --bg:            #0b0a10;   /* ink */
+  --surface:       #13111b;   /* panels / table heads */
+  --card:          #1b1826;   /* raised cards */
+  --card-hover:    #232031;
+  --border:        rgba(242,239,247,0.09);
+  --border2:       rgba(242,239,247,0.16);
+  --border3:       rgba(242,239,247,0.30);
+  --text:          #f2eff7;
+  --text2:         #b9b2c8;   /* 9.6:1 on --bg */
+  --text3:         #8f88a0;   /* 5.9:1 on --bg */
+  --prose:         #dcd7e6;   /* long-form body text, a touch softer than --text */
+  --accent:        #fde725;   /* viridis yellow: CTAs, active states */
+  --accent2:       #fff27a;
+  --accent-dark:   #e6d10f;
+  --accent-ink:    #0b0a10;   /* text on an --accent fill */
+  --accent-dim:    rgba(253,231,37,0.09);
+  --accent-border: rgba(253,231,37,0.32);
+  --accent-shadow: rgba(253,231,37,0.25);
+  --link:          #a0da39;   /* viridis lime: inline links, 11:1 on --bg */
+  --link-border:   rgba(160,218,57,0.35);
+  --green:         #4ac16d;
+  --blue:          #6fa8d6;
+  --red:           #ef8a82;
+  --grid:          rgba(242,239,247,0.04);
+  --grid2:         rgba(242,239,247,0.08);
+  --nav-bg:        rgba(11,10,16,0.82);
+  --code-bg:       #13111b;
+  --code-border:   rgba(242,239,247,0.09);
+  color-scheme: dark;
 }
 
 /* ── Base ──────────────────────────────────────────────────────────────── */
@@ -84,7 +70,7 @@ html, body { overflow-x: clip; max-width: 100%; }
 
 a { color: inherit; }
 
-::selection { background: var(--accent-dim); color: var(--text); }
+::selection { background: rgba(253,231,37,0.28); color: var(--text); }
 
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -101,8 +87,19 @@ a { color: inherit; }
   position: sticky;
   top: 0;
   z-index: 100;
-  backdrop-filter: saturate(140%) blur(12px);
+  backdrop-filter: saturate(140%) blur(14px);
+  -webkit-backdrop-filter: saturate(140%) blur(14px);
   background: var(--nav-bg);
+  border-bottom: 1px solid var(--border);
+}
+/* The heat ramp as a 2px rule under the nav: the one loud stripe on docs pages. */
+.topnav::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  background: var(--ramp);
+  opacity: 0.85;
 }
 
 .nav-link {
@@ -134,11 +131,13 @@ a { color: inherit; }
 }
 .nav-pill-light:hover { background-color: var(--card-hover); }
 .nav-pill-dark {
-  color: var(--bg);
-  background-color: var(--text);
-  border: 1px solid var(--text);
+  color: var(--accent-ink);
+  background-color: var(--accent);
+  border: 1px solid var(--accent);
+  font-weight: 600;
+  border-radius: 8px;
 }
-.nav-pill-dark:hover { opacity: 0.88; }
+.nav-pill-dark:hover { background-color: var(--accent2); border-color: var(--accent2); }
 
 /* ── Buttons ───────────────────────────────────────────────────────────── */
 
@@ -149,17 +148,17 @@ a { color: inherit; }
   gap: 8px;
   font-size: 14px;
   font-weight: 600;
-  color: #fff;
+  color: var(--accent-ink);
   background-color: var(--accent);
   border: 1px solid var(--accent);
   padding: 10px 20px;
-  border-radius: 3px;
+  border-radius: 8px;
   text-decoration: none;
   white-space: nowrap;
   cursor: pointer;
   transition: background-color 0.15s, border-color 0.15s;
 }
-.btn-accent:hover { background-color: var(--accent-dark); border-color: var(--accent-dark); }
+.btn-accent:hover { background-color: var(--accent2); border-color: var(--accent2); }
 
 .btn-ghost {
   display: inline-flex;
@@ -172,7 +171,7 @@ a { color: inherit; }
   background-color: var(--card);
   border: 1px solid var(--border2);
   padding: 10px 20px;
-  border-radius: 3px;
+  border-radius: 8px;
   text-decoration: none;
   white-space: nowrap;
   cursor: pointer;
@@ -189,110 +188,227 @@ a { color: inherit; }
   transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
 }
 .feature-card:hover {
-  border-color: var(--border3);
+  border-color: var(--accent-border);
+  background: var(--card-hover);
   transform: translateY(-2px);
 }
 
 /* ── Code (shared by docs + landing) ───────────────────────────────────── */
 
-code, pre, .mono { font-family: 'IBM Plex Mono', monospace; }
+/* --font-plot only covers braille/block glyphs (unicode-range), so text
+   charts in code blocks line up while every letter stays Plex Mono. */
+code, pre, .mono, kbd { font-family: var(--font-plot), 'IBM Plex Mono', monospace; font-variant-ligatures: none; }
 
 /* ── Docs side rail ────────────────────────────────────────────────────── */
 
+.docs-group-title {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text3);
+  padding: 0 10px;
+  margin-bottom: 6px;
+}
 .docs-nav-link {
+  position: relative;
+  display: block;
+  padding: 6px 10px 6px 12px;
+  border-radius: 7px;
+  font-size: 13.5px;
+  text-decoration: none;
+  color: var(--text2);
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 .docs-nav-link:not([aria-current="page"]):hover {
-  background-color: var(--card-hover);
+  background-color: var(--card);
   color: var(--text);
+}
+.docs-nav-link[aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+  background: linear-gradient(90deg, rgba(253,231,37,0.10), rgba(253,231,37,0) 85%);
+}
+/* Active page: a tiny vertical slice of the heat ramp. */
+.docs-nav-link[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 6px; bottom: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(var(--v7), var(--v5), var(--v3));
 }
 .docs-search-input::placeholder { color: var(--text3); }
 .docs-search-input:focus {
   outline: none;
   border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px rgba(253,231,37,0.22);
+}
+
+/* A faint viridis glow behind the top of the docs: atmosphere only, it sits
+   well below the text contrast budget. */
+.docs-shell {
+  background:
+    radial-gradient(900px 340px at 78% -120px, rgba(70,50,126,0.28), transparent 70%),
+    radial-gradient(700px 300px at 18% -160px, rgba(31,161,135,0.16), transparent 70%);
+}
+
+/* Per-page heat strip above the title (generated text art, decorative). */
+.doc-strip {
+  display: block;
+  font-family: var(--font-plot), 'IBM Plex Mono', monospace;
+  font-size: 14px;
+  line-height: 1.3;
+  letter-spacing: 0;
+  white-space: pre;
+  overflow: hidden;
+  margin-bottom: 18px;
+  border-radius: 3px;
+  max-width: 100%;
+}
+.doc-eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--v6);
+  margin-bottom: 12px;
 }
 
 /* ── Markdown article (rendered docs body) ─────────────────────────────── */
 
-.prose { color: var(--text); font-size: 15.5px; line-height: 1.72; }
+.prose { color: var(--prose); font-size: 16px; line-height: 1.75; }
 .prose > :first-child { margin-top: 0; }
 .prose h1 {
-  font-size: 34px; font-weight: 700; letter-spacing: -0.6px;
-  margin: 0 0 18px; line-height: 1.15;
+  font-size: clamp(32px, 5vw, 44px); font-weight: 700; letter-spacing: -1.2px;
+  margin: 0 0 14px; line-height: 1.08; color: var(--text);
 }
+/* The first paragraph after the title reads as a lede. */
+.prose h1 + p { font-size: 18px; line-height: 1.65; color: var(--text2); margin-bottom: 26px; }
 .prose h2 {
-  font-size: 23px; font-weight: 650; letter-spacing: -0.3px;
-  margin: 44px 0 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  position: relative;
+  font-size: 25px; font-weight: 650; letter-spacing: -0.4px; line-height: 1.25;
+  color: var(--text);
+  margin: 52px 0 14px; padding-top: 22px;
   scroll-margin-top: 84px;
+}
+/* A short ramp bar above each section heading instead of a full rule. */
+.prose h2::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0;
+  width: 48px; height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--v3), var(--v5), var(--v7));
 }
 .prose h3 {
-  font-size: 18px; font-weight: 600; margin: 30px 0 10px;
+  font-size: 19px; font-weight: 600; margin: 34px 0 10px; color: var(--text);
   scroll-margin-top: 84px;
 }
-.prose h4 { font-size: 15.5px; font-weight: 600; margin: 22px 0 8px; }
-.prose p { margin: 0 0 16px; }
-.prose ul, .prose ol { margin: 0 0 16px; padding-left: 24px; }
-.prose li { margin: 6px 0; }
+.prose h4 { font-size: 16px; font-weight: 600; margin: 24px 0 8px; color: var(--text); }
+.prose p { margin: 0 0 18px; }
+.prose ul, .prose ol { margin: 0 0 18px; padding-left: 24px; }
+.prose li { margin: 7px 0; }
+.prose li::marker { color: var(--v4); }
 .prose li > ul, .prose li > ol { margin: 6px 0; }
-.prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-border); }
-.prose a:hover { border-bottom-color: var(--accent); }
-.prose strong { font-weight: 600; }
-.prose hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+.prose a {
+  color: var(--link); text-decoration: none;
+  border-bottom: 1px solid var(--link-border);
+  transition: border-color 0.12s, color 0.12s;
+}
+.prose a:hover { color: var(--v7); border-bottom-color: var(--v7); }
+.prose strong { font-weight: 600; color: var(--text); }
+.prose hr { border: none; height: 1px; background: var(--border2); margin: 40px 0; }
 .prose blockquote {
-  margin: 0 0 16px; padding: 2px 18px;
-  border-left: 3px solid var(--accent-border);
+  margin: 0 0 18px; padding: 12px 18px;
+  border-left: 3px solid var(--v4);
+  background: rgba(31,161,135,0.07);
+  border-radius: 0 8px 8px 0;
   color: var(--text2);
 }
+.prose blockquote > :last-child { margin-bottom: 0; }
 .prose code {
-  font-size: 0.88em;
-  background: var(--code-bg);
-  border: 1px solid var(--code-border);
+  font-size: 0.86em;
+  color: #e9e4f2;
+  background: var(--card);
+  border: 1px solid var(--border);
   border-radius: 5px;
   padding: 1.5px 6px;
 }
 .prose pre {
+  position: relative;
   background: var(--code-bg);
   border: 1px solid var(--code-border);
   border-radius: 10px;
-  padding: 16px 18px;
+  padding: 18px 20px;
   overflow-x: auto;
-  margin: 0 0 18px;
+  margin: 0 0 22px;
   line-height: 1.6;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+}
+/* A faint ramp along the top edge of every code block. */
+.prose pre::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 2px;
+  border-radius: 10px 10px 0 0;
+  background: var(--ramp);
+  opacity: 0.35;
 }
 .prose pre code {
-  background: none; border: none; padding: 0; font-size: 13.5px;
+  background: none; border: none; padding: 0; font-size: 13.5px; color: #e4dfee;
 }
 .prose table {
   width: 100%;
-  border-collapse: collapse;
-  margin: 0 0 20px;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0 0 24px;
   font-size: 14.5px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
 }
 .prose th, .prose td {
-  border: 1px solid var(--border);
-  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 14px;
   text-align: left;
   vertical-align: top;
 }
-.prose th { background: var(--surface); font-weight: 600; }
+.prose tr:last-child td { border-bottom: none; }
+.prose th {
+  background: var(--surface); font-weight: 600; color: var(--text);
+  font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.prose tbody tr:hover td { background: rgba(242,239,247,0.025); }
 .prose td code { white-space: nowrap; }
 .prose kbd {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.82em;
-  background: var(--card);
+  font-size: 0.8em;
+  color: var(--text);
+  background: linear-gradient(var(--card-hover), var(--card));
   border: 1px solid var(--border2);
   border-bottom-width: 2px;
-  border-radius: 5px;
-  padding: 1px 6px;
+  border-radius: 6px;
+  padding: 1px 7px;
   white-space: nowrap;
+}
+.prose img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); }
+
+/* Mobile: wide tables and code scroll inside themselves, never the page. */
+@media (max-width: 700px) {
+  .prose table { display: block; overflow-x: auto; }
+  .prose { font-size: 15.5px; }
 }
 
 /* ── Responsive ────────────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
-  .lp-hero-title { font-size: 42px !important; letter-spacing: -1px !important; }
-  .lp-grid-2, .lp-grid-3 { grid-template-columns: 1fr !important; }
-  .docs-shell { flex-direction: column !important; }
+  .docs-shell { flex-direction: column !important; align-items: stretch !important; }
+  .doc-article { padding: 28px 18px 20px !important; }
+  .doc-pager { flex-direction: column; }
+  .doc-pager > a { max-width: 100% !important; }
   .docs-rail {
     position: static !important;
     width: 100% !important;
@@ -301,4 +417,29 @@ code, pre, .mono { font-family: 'IBM Plex Mono', monospace; }
     border-bottom: 1px solid var(--border) !important;
   }
   .docs-toc { display: none !important; }
+  .docs-rail { padding: 14px 16px !important; }
+  .docs-menu-toggle { display: flex !important; }
+  .docs-nav-groups[data-open="false"] { display: none; }
 }
+
+/* Phones: keep the nav to the logo, Docs, and Download. */
+@media (max-width: 560px) {
+  .nav-hide-sm { display: none !important; }
+}
+
+/* The docs menu toggle only exists on narrow screens. */
+.docs-menu-toggle {
+  display: none;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border2);
+  background: var(--surface);
+  color: var(--text);
+  font: 500 13.5px 'IBM Plex Sans', sans-serif;
+  cursor: pointer;
+}
+.docs-menu-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

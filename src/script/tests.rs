@@ -9047,6 +9047,49 @@ mod dap_lib {
         engine
     }
 
+    /// Every Scheme-side state file resolves into the per-engine test sandbox,
+    /// never the developer's real ~/.config/macros (regression: the DAP tests
+    /// below once left breakpoints in the real dap-breakpoints file).
+    #[test]
+    fn state_files_resolve_outside_real_config() {
+        let engine = engine_with_libs();
+        let s = |q: &str| {
+            engine
+                .eval(q)
+                .unwrap()
+                .value
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        };
+        let sandbox = crate::runtime::persistence_directory();
+        let real = format!(
+            "{}/.config/macros",
+            std::env::var("HOME").unwrap_or_default()
+        );
+        for q in [
+            "(persistence-dir)",
+            "(dap--bp-file)",
+            "(saveplace-file)",
+            "(recentf-file)",
+        ] {
+            let path = s(q);
+            assert!(
+                !path.starts_with(&real),
+                "{q} → {path} is the real config dir"
+            );
+            assert!(
+                path.starts_with(std::env::temp_dir().to_str().unwrap()),
+                "{q} → {path} not sandboxed"
+            );
+            // Per-engine: not the test thread's own sandbox.
+            assert!(
+                !path.starts_with(sandbox.to_str().unwrap()),
+                "{q} shares a sandbox"
+            );
+        }
+    }
+
     /// dap-request stamps sequential `seq`s and dap--on-message routes a
     /// response body back to the stored Scheme callback by `request_seq`.
     #[test]
@@ -9622,6 +9665,30 @@ mod session_lib {
             .eval("(savehist-mode #f) (desktop-save-mode #f)")
             .unwrap();
         assert_eq!(v(&engine, "(desktop-auto-save?)"), "#false");
+    }
+
+    /// Launched on explicit files: the saved desktop is neither restored nor
+    /// overwritten by the quit/autosave path.
+    #[test]
+    fn file_launch_leaves_the_saved_desktop_alone() {
+        let (engine, _rx, dir) = engine();
+        let file = format!("{dir}/desktop");
+        std::fs::write(&file, "saved desktop").unwrap();
+        engine
+            .eval(r#"(session-set-launch-files! (list "notes.txt"))"#)
+            .unwrap();
+        let out = engine.eval("(session-startup)").unwrap();
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RestoreFileBuffers(_))),
+            "restored the desktop: {:?}",
+            out.commands
+        );
+        assert_eq!(v(&engine, "(desktop-auto-save?)"), "#false");
+        engine.set_session(SessionState::default());
+        engine.eval("(session-save-all)").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "saved desktop");
     }
 
     #[test]
@@ -10282,5 +10349,408 @@ mod search_replace_tests {
             let q = format!(r#"(if (member "{cmd}" *interactive-commands*) "y" "n")"#);
             assert_eq!(value(&e, &q), r#""y""#, "{cmd} not registered");
         }
+    }
+}
+
+/// Text plotting: scheme/plot.scm over the textplot-* primitives.
+#[cfg(test)]
+mod plot_tests {
+    use super::*;
+
+    fn engine_with(text: &str, point: usize) -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine.set_snapshot(EditorSnapshot {
+            name: "notes.txt".into(),
+            text: Rope::from_str(text),
+            point,
+            ..Default::default()
+        });
+        // Every span of a plot must lie inside its row, on char boundaries.
+        engine
+            .eval(
+                r#"(define (plot-test-all? ok? xs)
+                     (or (null? xs) (and (ok? (car xs)) (plot-test-all? ok? (cdr xs)))))
+                   (define (plot-test-valid? p)
+                     (plot-test-all?
+                       (lambda (row)
+                         (let ((n (utf8-length (plot-row-text row))))
+                           (plot-test-all?
+                             (lambda (s) (and (<= 0 (car s)) (< (car s) (cadr s))
+                                              (<= (cadr s) n) (string? (nth s 2))))
+                             (plot-row-spans row))))
+                       p))"#,
+            )
+            .unwrap();
+        engine
+    }
+
+    fn value(engine: &ScriptEngine, q: &str) -> String {
+        match engine.eval(q) {
+            Ok(r) => r.value.unwrap_or_default(),
+            Err(e) => panic!("{q}: {e}"),
+        }
+    }
+
+    #[test]
+    fn sparkline_and_bars() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            value(&e, "(plot-sparkline-string (list 0 1 2 3 4 5 6 7))"),
+            r#""▁▂▃▄▅▆▇█""#
+        );
+        assert_eq!(
+            value(&e, "(plot-sparkline (list 1 2) 'face \"x\")"),
+            r#"(("▁█" ((0 6 "x"))))"#
+        );
+        // Labels padded to the widest; bar at ⅛ resolution; value after.
+        assert_eq!(
+            value(
+                &e,
+                "(map plot-row-text (plot-bars (list (list \"a\" 4) (list \"bb\" 1)) 'width 4))"
+            ),
+            r#"("a  ████ 4" "bb █    1")"#
+        );
+        assert_eq!(
+            value(
+                &e,
+                "(plot-test-valid? (plot-bars (list (list \"a\" 4) (list 'b 1.5)) 'colors #t))"
+            ),
+            "#true"
+        );
+    }
+
+    #[test]
+    fn insert_offsets_spans_by_bytes_after_multibyte_text() {
+        // "héllo " is 7 bytes (é is 2) but 6 chars: spans must start at byte 7.
+        let e = engine_with("héllo ", 7);
+        let cmds = e
+            .eval("(plot-insert (plot-sparkline (list 1 2)))")
+            .unwrap()
+            .commands;
+        assert!(
+            matches!(&cmds[0], EditorCommand::Insert(t) if t == "▁█"),
+            "{cmds:?}"
+        );
+        assert!(
+            matches!(&cmds[1], EditorCommand::OverlayFace { start: 7, end: 13, face } if face == "plot-series-0"),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn line_and_scatter_frame_axes() {
+        let e = engine_with("", 0);
+        let rows = |q: &str| value(&e, &format!("(length {q})"));
+        let lines = "(plot-lines (list (list \"a\" (list 0 1 2 3)) (list \"b\" (list 3 2 1 0))) 'width 20 'height 5 'title \"t\")";
+        // title + 5 canvas rows + axis + x labels + legend
+        assert_eq!(rows(lines), "9");
+        assert_eq!(value(&e, &format!("(plot-test-valid? {lines})")), "#true");
+        let text = value(&e, &format!("(plot-text {lines})"));
+        assert!(text.contains('┤') && text.contains('└'), "{text}");
+        assert!(text.contains("■ a") && text.contains("■ b"), "{text}");
+        // Both series' faces are used.
+        let spans = value(&e, &format!("(plot-spans {lines} 0)"));
+        assert!(
+            spans.contains("plot-series-0") && spans.contains("plot-series-1"),
+            "{spans}"
+        );
+
+        // (x y) points; one named series → no legend by default.
+        let scatter = "(plot-scatter (list (list \"s\" (list (list 0 0) (list 5 5) (list 10 2)))) 'width 10 'height 3)";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {scatter})")), "#true");
+        assert_eq!(rows(scatter), "5");
+        // Bare y-values are a single unnamed series with no legend.
+        assert_eq!(rows("(plot-lines (list 5 5 5) 'width 10 'height 3)"), "5");
+    }
+
+    #[test]
+    fn histogram_counts_land_in_bins() {
+        let e = engine_with("", 0);
+        let h = "(plot-histogram (list 0 0 0 0 1 1 9) 'bins 2 'bin-width 2 'height 2)";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {h})")), "#true");
+        let text = value(&e, &format!("(plot-text {h})"));
+        // 6 values in the low bin, 1 in the high bin; the count axis rounds
+        // up to 10 so its top is labeled (6/10 and 1/10 of 16 eighths).
+        let lines: Vec<&str> = text.trim_matches('"').split("\\n").collect();
+        assert_eq!(
+            lines,
+            vec!["10 ┤▂   ", " 0 ┤█ ▂ ", "   └────", "    0  9"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn heatmap_cell_and_half_modes() {
+        let e = engine_with("", 0);
+        let cell = "(plot-heatmap (list (list 0 5) (list 10 #f)) 'row-labels (list \"r1\" \"r2\") 'col-labels (list \"a\" \"b\"))";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {cell})")), "#true");
+        let spans = value(&e, &format!("(plot-spans {cell} 0)"));
+        assert!(
+            spans.contains("plot-heat-0-bg") && spans.contains("plot-heat-7-bg"),
+            "{spans}"
+        );
+        // header + 2 rows + scale
+        assert_eq!(value(&e, &format!("(length {cell})")), "4");
+
+        let half = "(plot-heatmap (list (list 0 1) (list 1 0) (list 0 0)) 'mode 'half 'scale #f)";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {half})")), "#true");
+        // 3 data rows → 2 text rows; the first pairs distinct top/bottom faces.
+        assert_eq!(
+            value(&e, &format!("(map plot-row-text {half})")),
+            r#"("▀▀" "▀▀")"#
+        );
+        let spans = value(&e, &format!("(plot-spans {half} 0)"));
+        assert!(spans.contains("plot-heat-7-bg"), "{spans}");
+    }
+
+    #[test]
+    fn normal_pdf_and_cdf() {
+        let e = engine_with("", 0);
+        let num = |q: &str| value(&e, q).parse::<f64>().unwrap();
+        assert!((num("(plot-normal-pdf 0 0 1)") - 0.398_942).abs() < 1e-5);
+        assert!((num("(plot-normal-pdf 7 5 2)") - 0.120_985).abs() < 1e-5);
+        assert!((num("(plot-normal-cdf 0 0 1)") - 0.5).abs() < 1e-6);
+        assert!((num("(plot-normal-cdf 1.96 0 1)") - 0.975_002).abs() < 1e-6);
+        assert!((num("(plot-normal-cdf -1 0 1)") - 0.158_655).abs() < 1e-6);
+        assert!((num("(plot-normal-cdf 13 10 3)") - 0.841_345).abs() < 1e-6);
+        assert_eq!(value(&e, "(plot--percent 0.6826894)"), r#""68.3%""#);
+        assert_eq!(value(&e, "(plot--percent 0.99999)"), r#""100.0%""#);
+    }
+
+    #[test]
+    fn function_plot_shades_under_the_first_curve() {
+        let e = engine_with("", 0);
+        // y = x over 0…10, shaded 5…10: the fill sits only in the right half.
+        let p = "(plot-function (lambda (x) x) 0 10 'width 10 'height 2 'shade (list 5 10))";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {p})")), "#true");
+        let text = value(&e, &format!("(plot-text {p})"));
+        let lines: Vec<&str> = text.trim_matches('"').split("\\n").collect();
+        // 2 canvas rows + axis + x labels; y axis rounded out to 0…10.
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(
+            lines[0].starts_with("10 ┤") && lines[1].starts_with(" 0 ┤"),
+            "{text}"
+        );
+        assert_eq!(lines[3], "    0       10", "{text}");
+        let spans = value(&e, &format!("(plot-spans {p} 0)"));
+        assert!(
+            spans.contains("plot-shade") && spans.contains("plot-series-0"),
+            "{spans}"
+        );
+        // Every plot-shade cell is in the right half of the canvas (col >= 5).
+        let shaded = value(
+            &e,
+            &format!(
+                "(map (lambda (row) (map car (filter (lambda (s) (equal? (nth s 2) \"plot-shade\")) (plot-row-spans row)))) {p})"
+            ),
+        );
+        // Row prefix "10 ┤" is 2+1+3 = 6 bytes; braille cells are 3 bytes.
+        for start in shaded
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|n| n.parse::<usize>().ok())
+        {
+            assert!(start >= 6 + 5 * 3, "shade at byte {start}: {shaded}");
+        }
+
+        // No shading → no plot-shade; a per-range face overrides the default.
+        let plain = value(
+            &e,
+            "(plot-spans (plot-function (lambda (x) x) 0 1 'width 8 'height 2) 0)",
+        );
+        assert!(!plain.contains("plot-shade"), "{plain}");
+        let custom = value(
+            &e,
+            "(plot-spans (plot-function (lambda (x) 1) 0 1 'width 8 'height 6 'shade (list (list 0 1 \"hot\"))) 0)",
+        );
+        assert!(custom.contains("hot"), "{custom}");
+    }
+
+    #[test]
+    fn function_plot_skips_undefined_samples_and_multiple_functions() {
+        let e = engine_with("", 0);
+        // 1/x is ±inf at 0 and sqrt of a negative isn't real: both become gaps,
+        // and the y range comes only from the finite samples.
+        let p = "(plot-function (list (list \"inv\" (lambda (x) (if (= x 0) (/ 1.0 0.0) (/ 1.0 x)))) (list \"half\" (lambda (x) (if (< x 0) #f (* 0.5 x))))) -2 2 'width 12 'height 4)";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {p})")), "#true");
+        let text = value(&e, &format!("(plot-text {p})"));
+        assert!(text.contains("■ inv") && text.contains("■ half"), "{text}");
+        let spans = value(&e, &format!("(plot-spans {p} 0)"));
+        assert!(
+            spans.contains("plot-series-0") && spans.contains("plot-series-1"),
+            "{spans}"
+        );
+    }
+
+    #[test]
+    fn normal_plot_titles_ticks_and_probability() {
+        let e = engine_with("", 0);
+        let p = "(plot-normal 0 1 'width 49 'height 6 'shade (list -1 1))";
+        assert_eq!(value(&e, &format!("(plot-test-valid? {p})")), "#true");
+        let text = value(&e, &format!("(plot-text {p})"));
+        let lines: Vec<&str> = text.trim_matches('"').split("\\n").collect();
+        assert!(
+            lines[0].contains("N(μ=0, σ=1)") && lines[0].contains("shaded: 68.3%"),
+            "{text}"
+        );
+        // Whole-sigma ticks −4…4 along the axis, each marked ┬.
+        let axis = lines[lines.len() - 2];
+        assert_eq!(axis.matches('┬').count(), 9, "{text}");
+        let labels = lines[lines.len() - 1];
+        for t in ["-4", "-2", "0", "2", "4"] {
+            assert!(labels.split_whitespace().any(|w| w == t), "{t}: {text}");
+        }
+        // y starts at 0 and tops out at a whole tick at or above the 0.399 peak.
+        assert!(lines[1].trim_start().starts_with("0.4"), "{text}");
+
+        // Two tails; ranges past the x range are clamped (P = 5%).
+        let tails = value(
+            &e,
+            "(plot-text (plot-normal 100 15 'shade (list (list -1000 70.6) (list 129.4 1000))))",
+        );
+        assert!(
+            tails.contains("N(μ=100, σ=15)") && tails.contains("shaded: 5.0%"),
+            "{tails}"
+        );
+        // A caller's title wins over the generated one.
+        let titled = value(&e, "(plot-text (plot-normal 0 1 'title \"IQ\"))");
+        assert!(titled.contains("IQ") && !titled.contains("μ="), "{titled}");
+    }
+
+    #[test]
+    fn frame_end_labels_still_separate_when_crowded() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            value(
+                &e,
+                "(plot--place-labels (plot--end-labels 4 \"-100\" \"200\"))"
+            ),
+            r#""-100 200""#
+        );
+        assert_eq!(
+            value(
+                &e,
+                "(plot--place-labels (plot--centred-labels 10 (list (list 0 \"a\") (list 5 \"bb\") (list 9 \"c\"))))"
+            ),
+            r#""a   bb   c""#
+        );
+    }
+
+    #[test]
+    fn plots_tolerate_bad_data_and_ranges() {
+        let e = engine_with("", 0);
+        let valid = |q: &str| value(&e, &format!("(plot-test-valid? {q})"));
+        // Infinite values are dropped, not crashes or squashed axes.
+        assert_eq!(valid("(plot-histogram (list 1 2 (/ 1.0 0.0)))"), "#true");
+        let lines = value(
+            &e,
+            "(plot-text (plot-lines (list 1 (/ 1.0 0.0) 3) 'width 10 'height 3))",
+        );
+        assert!(lines.contains('┤'), "y axis lost its labels: {lines}");
+        // A pinned y-min above every data point, and a reversed x range.
+        assert_eq!(
+            valid("(plot-lines (list 1 2 3) 'y-min 5 'width 10 'height 3)"),
+            "#true"
+        );
+        assert_eq!(
+            valid("(plot-function sin 6 -6 'width 10 'height 3)"),
+            "#true"
+        );
+        // All-equal values at a magnitude where ±1 rounds away.
+        assert_eq!(
+            valid("(plot-lines (list 1e17 1e17) 'width 10 'height 3)"),
+            "#true"
+        );
+        // A normal with no spread is an error, not a blank chart.
+        assert!(e.eval("(plot-normal 0 0)").is_err());
+        assert!(e.eval("(plot-normal 0 -1)").is_err());
+    }
+
+    #[test]
+    fn plot_options_are_normalised() {
+        let e = engine_with("", 0);
+        // Unsorted x-ticks still label left to right under their marks.
+        let text = value(
+            &e,
+            "(plot-text (plot-function sin -6 6 'width 40 'height 3 'x-ticks (list 6 0 -6)))",
+        );
+        let lines: Vec<&str> = text.trim_matches('"').split("\\n").collect();
+        let labels = lines[lines.len() - 1];
+        let (a, b, c) = (
+            labels.find("-6").unwrap(),
+            labels.find(" 0 ").unwrap(),
+            labels.rfind('6').unwrap(),
+        );
+        assert!(
+            a < b && b < c && labels.chars().count() <= 4 + 40 + 1,
+            "{text}"
+        );
+        // A reversed shade range is the same range.
+        let rev = value(&e, "(plot-text (plot-normal 0 1 'shade (list 1.96 -1.96)))");
+        assert!(rev.contains("shaded: 95.0%"), "{rev}");
+        // The percentage covers the whole distribution, even off the plot.
+        let off = value(
+            &e,
+            "(plot-text (plot-normal 0 1 'x-max 1 'shade (list 0 1000)))",
+        );
+        assert!(off.contains("shaded: 50.0%"), "{off}");
+    }
+
+    #[test]
+    fn histogram_count_axis_and_flat_data() {
+        let e = engine_with("", 0);
+        // Tallest bin holds 1: the count axis steps by whole numbers.
+        let text = value(
+            &e,
+            "(plot-text (plot-histogram (list 1 2 3) 'bins 3 'height 6))",
+        );
+        assert!(!text.contains("0.5"), "{text}");
+        // All-equal values land mid-axis, labeled around the value.
+        let flat = value(
+            &e,
+            "(map plot-row-text (plot-histogram (list 5 5 5) 'bins 3 'bin-width 1 'height 2))",
+        );
+        assert!(flat.contains(" █ ") || flat.contains("┤ █"), "{flat}");
+        // Half-height heatmaps ignore 'row-labels instead of leaving a blank margin.
+        let half = value(
+            &e,
+            "(map plot-row-text (plot-heatmap (list (list 0 1) (list 1 0)) 'mode 'half 'scale #f 'row-labels (list \"a\" \"b\")))",
+        );
+        assert_eq!(half, r#"("▀▀")"#);
+    }
+
+    #[test]
+    fn themes_define_plot_faces_backgrounds_and_font() {
+        for theme in ["macros-dark", "macros-light"] {
+            let e = engine_with("", 0);
+            let cmds = e
+                .eval(crate::runtime::theme_script(theme).unwrap())
+                .unwrap()
+                .commands;
+            let font = cmds.iter().filter(|c| matches!(c, EditorCommand::SetFaceFont(f, fam) if f.starts_with("plot-") && fam == "Macros Plot")).count();
+            let bg = cmds.iter().filter(|c| matches!(c, EditorCommand::SetFaceBackground(f, _) if f.starts_with("plot-heat-"))).count();
+            assert_eq!((font, bg), (15, 8), "{theme}");
+        }
+    }
+
+    #[test]
+    fn demo_renders_and_face_background_is_a_command() {
+        let e = engine_with("", 0);
+        let cmds = e.eval("(plot-demo)").unwrap().commands;
+        assert!(
+            cmds.iter().any(
+                |c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*plot-demo*")
+            ),
+            "{cmds:?}"
+        );
+        let cmds = e
+            .eval("(set-face-background \"x-bg\" \"#123456\")")
+            .unwrap()
+            .commands;
+        assert!(
+            matches!(&cmds[..], [EditorCommand::SetFaceBackground(f, c)] if f == "x-bg" && c == "#123456")
+        );
     }
 }

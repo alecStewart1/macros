@@ -1,18 +1,29 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img">
-  <title>Macros — parentheses</title>
-  <desc>Near-black "()" on a light tan squircle.</desc>
+  <title>Macros — heat parentheses</title>
+  <desc>"()" stroked with the viridis heat ramp (teal to yellow, bottom to top) on a dark ink squircle.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#f1ece2"/>
-      <stop offset="1" stop-color="#e2d9c8"/>
+      <stop offset="0" stop-color="#1b1826"/>
+      <stop offset="1" stop-color="#0b0a10"/>
     </linearGradient>
-    <linearGradient id="em" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1b1916"/>
-      <stop offset="1" stop-color="#100f0d"/>
+    <!-- The editor's plot-heat ramp, low (bottom) to high (top). Pinned to user
+         space so both parentheses shade identically in every renderer. -->
+    <linearGradient id="heat" gradientUnits="userSpaceOnUse" x1="0" y1="774" x2="0" y2="250">
+      <stop offset="0" stop-color="#365c8d"/>
+      <stop offset="0.35" stop-color="#1fa187"/>
+      <stop offset="0.7" stop-color="#a0da39"/>
+      <stop offset="1" stop-color="#fde725"/>
     </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.5">
+      <stop offset="0" stop-color="#1fa187" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#1fa187" stop-opacity="0"/>
+    </radialGradient>
   </defs>
   <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
-  <g fill="none" stroke="url(#em)" stroke-width="64" stroke-linecap="round">
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#glow)"/>
+  <!-- Hairline edge so the dark squircle still separates from a dark dock. -->
+  <rect x="33.5" y="33.5" width="957" height="957" rx="222.5" fill="none" stroke="#f2eff7" stroke-opacity="0.10" stroke-width="3"/>
+  <g fill="none" stroke="url(#heat)" stroke-width="76" stroke-linecap="round">
     <path d="M430,288 Q260,512 430,736"/>
     <path d="M594,288 Q764,512 594,736"/>
   </g>

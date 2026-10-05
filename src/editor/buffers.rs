@@ -1162,6 +1162,10 @@ impl Editor {
             // Active: identical to the in-place branch of `render_buffer`.
             self.active.line_icons.clear();
             let line = self.active.buffer.line_index_at_byte(self.point());
+            // A refresh keeps the view where the user left it: restoring point's
+            // line must not scroll back to point (they may have wheel-scrolled
+            // away from it, which leaves point off-screen on purpose).
+            let scroll = self.active.scroll_offset;
             self.active.buffer = Buffer::new(&text);
             // The old undo records address the replaced text; replaying one
             // against the new text corrupts it (or panics). Start fresh.
@@ -1172,6 +1176,9 @@ impl Editor {
             let last = self.active.buffer.line_count().saturating_sub(1);
             let offset = self.active.buffer.line_range(line.min(last)).start;
             self.move_to(offset, cx);
+            self.cursor_follow_pending = false;
+            let max = self.max_scroll_offset(f32::from(self.viewport_height));
+            self.active.scroll_offset = px(f32::from(scroll).clamp(0.0, max.max(0.0)));
             self.active.modified = false;
             self.render_redirect = None;
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {

@@ -275,6 +275,8 @@ pub enum EditorCommand {
     /// `ghost` keymap binds TAB to this.
     GhostAccept,
     KillBuffer,
+    /// Show the MCP server's status, connection command, and log.
+    McpServerInfo,
     /// Kill the active buffer and close its window (Emacs `kill-buffer-and-window`).
     KillBufferAndWindow,
     Quit,
@@ -585,6 +587,12 @@ pub enum EditorCommand {
     // Theming
     /// Set a face's color: `(set-face "comment" "#6a9955")`.
     SetFace(String, String),
+    /// Set a face's background color, painted behind overlay text that uses
+    /// it: `(set-face-background "plot-heat-3-bg" "#f4a261")`.
+    SetFaceBackground(String, String),
+    /// Set the font family text under a face shapes with:
+    /// `(set-face-font "plot-series-0" "Macros Plot")`.
+    SetFaceFont(String, String),
     /// Toggle a face's underline attribute: `(set-face-underline "link" #t)`.
     SetFaceUnderline(String, bool),
     /// Toggle a face's bold attribute: `(set-face-bold "feeds-unread" #t)`.

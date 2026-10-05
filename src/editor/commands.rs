@@ -561,6 +561,7 @@ impl Editor {
             RevertBuffer => self.revert_buffer(cx),
             OpenFileOtherWindow(path) => self.open_file_other_window(path, cx),
             KillBuffer => self.kill_buffer(cx),
+            McpServerInfo => self.show_mcp_server_info(cx),
             KillBufferAndWindow => self.kill_buffer_and_window(cx),
             Quit => self.quit(cx),
             SetExtension(ext, language) => {
@@ -1276,6 +1277,8 @@ impl Editor {
             SetOption(key, value) => {
                 // Toggling auto-revert changes which buffer files we watch.
                 let touched_auto_revert = key == "auto-revert";
+                // The mcp-server* options start/stop/restart the MCP server.
+                let touched_mcp = key.starts_with("mcp-server");
                 cx.update_global::<crate::settings::Settings, _>(|settings, _| {
                     settings.set(key, value);
                 });
@@ -1283,6 +1286,9 @@ impl Editor {
                     .set_options(cx.global::<crate::settings::Settings>().snapshot());
                 if touched_auto_revert {
                     self.reconcile_watches(cx);
+                }
+                if touched_mcp {
+                    self.reconcile_mcp_server(cx);
                 }
                 cx.notify();
             }
@@ -1334,6 +1340,17 @@ impl Editor {
                 }
                 None => self.echo(format!("Invalid color: {color}"), cx),
             },
+            SetFaceBackground(face, color) => match crate::theme::parse_color(&color) {
+                Some(c) => {
+                    cx.update_global::<Theme, ()>(|theme, _| theme.set_background(face, c));
+                    cx.notify();
+                }
+                None => self.echo(format!("Invalid color: {color}"), cx),
+            },
+            SetFaceFont(face, family) => {
+                cx.update_global::<Theme, ()>(|theme, _| theme.set_font(face, family));
+                cx.notify();
+            }
             SetFaceUnderline(face, on) => {
                 cx.update_global::<Theme, ()>(|theme, _| theme.set_underline(face, on));
                 cx.notify();

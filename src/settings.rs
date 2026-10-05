@@ -138,6 +138,9 @@ const OPTIONS: &[OptionSpec] = &[
     opt("auto-revert", Kind::Bool, None, None),
     opt("electric-indent", Kind::Bool, None, None),
     opt("show-paren", Kind::Bool, None, None),
+    opt("mcp-server", Kind::Bool, None, None),
+    opt("mcp-server-port", Kind::Int, Some(1.0), Some(65535.0)),
+    opt("mcp-server-token", Kind::Str, None, None),
 ];
 
 /// The names in [`OPTIONS`], as a const array so [`KNOWN_OPTIONS`] keeps its
@@ -584,6 +587,24 @@ impl Settings {
     /// always-on dired-sidebar/dired directory refresh, which watches dirs, not buffers.
     pub fn auto_revert(&self) -> bool {
         self.bool_or("auto-revert", false)
+    }
+
+    /// The MCP server (src/mcp.rs) for debugging and package development: lets
+    /// an AI assistant eval Steel in the live editor. OFF by default — enable
+    /// with `(set-option "mcp-server" #t)` or `M-x mcp-server-start`.
+    pub fn mcp_server(&self) -> bool {
+        self.bool_or("mcp-server", false)
+    }
+
+    /// Loopback port for the MCP server (default 7811).
+    pub fn mcp_server_port(&self) -> u16 {
+        u16::try_from(self.usize_or("mcp-server-port", 7811)).unwrap_or(7811)
+    }
+
+    /// A fixed bearer token for the MCP server; `None` (the default) means a
+    /// random one generated once and kept in the config dir's `mcp-token`.
+    pub fn mcp_server_token(&self) -> Option<&str> {
+        Some(self.str_or("mcp-server-token", "").trim()).filter(|t| !t.is_empty())
     }
 
     /// Bevel edge width (px) for one side, default 1 (minimum 0 enforced on set).

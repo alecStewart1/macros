@@ -28,6 +28,14 @@ pub struct Theme {
     /// model as `underlined`. A face here underlines even without an
     /// `underlined` entry — wavy implies underline.
     wavy: HashSet<String>,
+    /// Face background colors (`set-face-background`). Painted behind overlay
+    /// text that uses the face; a face with ONLY a background leaves the text
+    /// color it lands on unchanged (so it can layer under a foreground face).
+    backgrounds: HashMap<String, Hsla>,
+    /// Face font families (`set-face-font`): text under the face shapes with
+    /// this family instead of the editor font — the plot faces use the bundled
+    /// "Macros Plot" glyph font so chart columns stay on the editor's grid.
+    fonts: HashMap<String, String>,
 }
 
 impl Global for Theme {}
@@ -61,6 +69,29 @@ impl Theme {
     /// Set (or override) a face color — drives `set-face` from Steel.
     pub fn set(&mut self, name: impl Into<String>, color: Hsla) {
         self.faces.insert(name.into(), color);
+    }
+
+    /// Whether `name` has a foreground color of its own (vs. a caller default).
+    pub fn has_color(&self, name: &str) -> bool {
+        self.faces.contains_key(name)
+    }
+
+    pub fn set_background(&mut self, name: impl Into<String>, color: Hsla) {
+        self.backgrounds.insert(name.into(), color);
+    }
+
+    /// The face's background color, if one was set.
+    pub fn background_of(&self, name: &str) -> Option<Hsla> {
+        self.backgrounds.get(name).copied()
+    }
+
+    pub fn set_font(&mut self, name: impl Into<String>, family: impl Into<String>) {
+        self.fonts.insert(name.into(), family.into());
+    }
+
+    /// The face's font family, if one was set.
+    pub fn font_of(&self, name: &str) -> Option<&str> {
+        self.fonts.get(name).map(String::as_str)
     }
 
     /// Turn a face's underline attribute on or off — drives `set-face-underline`

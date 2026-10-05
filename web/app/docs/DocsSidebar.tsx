@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { NavGroup } from "@/lib/docs";
@@ -8,6 +8,15 @@ import type { NavGroup } from "@/lib/docs";
 export function DocsSidebar({ groups }: { groups: NavGroup[] }) {
   const pathname = usePathname();
   const [q, setQ] = useState("");
+  // Phones only (CSS hides the toggle on wider screens): the page list starts
+  // collapsed so the article is on the first screen. Searching always shows it.
+  const [open, setOpen] = useState(false);
+  // The docs layout (and this sidebar) stays mounted across client
+  // navigations, so collapse the menu once a page link is followed.
+  useEffect(() => setOpen(false), [pathname]);
+  const current = groups.flatMap((g) => g.items).find(
+    (i) => pathname === `/docs/${i.slug}` || pathname === `/docs/${i.slug}/`,
+  );
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -37,28 +46,34 @@ export function DocsSidebar({ groups }: { groups: NavGroup[] }) {
           width: "100%",
           fontSize: 13.5,
           padding: "8px 12px",
-          marginBottom: 22,
           borderRadius: 8,
           border: "1px solid var(--border2)",
-          background: "var(--card)",
+          background: "var(--surface)",
           color: "var(--text)",
           fontFamily: "'IBM Plex Sans', sans-serif",
         }}
       />
 
+      <button
+        type="button"
+        className="docs-menu-toggle"
+        aria-expanded={open}
+        aria-controls="docs-nav-groups"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span>{current ? current.label : "All pages"}</span>
+        <span aria-hidden="true">{open ? "▴" : "▾"}</span>
+      </button>
+
+      <div
+        id="docs-nav-groups"
+        className="docs-nav-groups"
+        data-open={open || q.trim() !== "" ? "true" : "false"}
+        style={{ marginTop: 18 }}
+      >
       {filtered.map((group) => (
         <div key={group.title} style={{ marginBottom: 22 }}>
-          <div
-            style={{
-              fontSize: 11.5,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: "0.07em",
-              color: "var(--text3)",
-              padding: "0 10px",
-              marginBottom: 6,
-            }}
-          >
+          <div className="docs-group-title">
             {group.title}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -72,16 +87,6 @@ export function DocsSidebar({ groups }: { groups: NavGroup[] }) {
                   href={href}
                   className="docs-nav-link"
                   aria-current={active ? "page" : undefined}
-                  style={{
-                    display: "block",
-                    padding: "6px 10px",
-                    borderRadius: 7,
-                    fontSize: 13.5,
-                    textDecoration: "none",
-                    color: active ? "var(--accent)" : "var(--text2)",
-                    background: active ? "var(--accent-dim)" : "transparent",
-                    fontWeight: active ? 600 : 400,
-                  }}
                 >
                   {item.label}
                 </Link>
@@ -90,6 +95,8 @@ export function DocsSidebar({ groups }: { groups: NavGroup[] }) {
           </div>
         </div>
       ))}
+
+      </div>
 
       {filtered.length === 0 && (
         <p style={{ color: "var(--text3)", fontSize: 13, padding: "0 10px" }}>

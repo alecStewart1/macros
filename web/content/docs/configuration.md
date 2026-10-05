@@ -72,6 +72,10 @@ Set options with `(set-option "name" value)`. Values are **typed** — pass a nu
 ;; Helm selection UI — see Helm
 (set-option "helm-fuzzy"  #t)       ; fuzzy (nucleo) vs substring matching
 (set-option "helm-height" 0.5)      ; fraction of the window height
+
+;; MCP server for AI-assisted debugging — off by default; see MCP server
+(set-option "mcp-server"      #f)
+(set-option "mcp-server-port" 7811)
 ```
 
 ### Reading an option
@@ -128,8 +132,26 @@ Some state persists across restarts automatically, no configuration required:
 
 - **Cursor position** — when you reopen a file, point jumps back to where you left it (Emacs `save-place-mode`).
 - **Recent files** — the recent-files ring survives a restart (Emacs `recentf`).
+- **Histories** — minibuffer, search, and <kbd>M-x</kbd> command history, and the kill ring (Emacs `savehist-mode`).
+- **Open buffers and windows** — the files you had open, where point was in each, the window splits, and the current perspective (Emacs `desktop-save-mode`). When you launch Macros on specific files, you get just those files: the saved buffers and windows are neither restored nor overwritten, so they're still there next time you launch without files.
+- **Projects and perspectives** — recent projects for the welcome screen, and the [perspective](/docs/projects#names-and-persistence) list.
+- **Breakpoints** — debugger breakpoints and their conditions.
 
-Both are stored in your config directory, in `~/.config/macros/saveplace` and `~/.config/macros/recentf`, and updated as you save.
+| File in `~/.config/macros/` | Holds | Written |
+|---|---|---|
+| `saveplace`, `recentf` | cursor positions, recent files | when you save a file |
+| `savehist`, `desktop` | histories and kill ring, buffers and windows | on quit, and every 5 minutes |
+| `projects`, `perspectives` | recent projects, perspectives | when a project is opened or changed |
+| `dap-breakpoints` | breakpoints | when breakpoints change |
+
+These always live in `~/.config/macros`, even when `$XDG_CONFIG_HOME` points your `init.scm` somewhere else. From Scheme, `(persistence-directory)` returns the path. To opt out of the histories or the buffer and window restore, add any of these to `init.scm`:
+
+```scheme
+(savehist-mode #f)              ; don't save or restore histories
+(savehist-save-kill-ring #f)    ; keep histories, but never write the kill ring to disk
+(savehist-set-max 500)          ; entries kept per history (default 300)
+(desktop-save-mode #f)          ; don't save or restore buffers and windows
+```
 
 ## Turning on modal editing
 

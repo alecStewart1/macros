@@ -443,3 +443,141 @@ fn marks_search_and_ex_extras(cx: &mut TestAppContext) {
     keys(&ed, cx, "ctrl-v j l d");
     assert_eq!(text(&ed, cx), "c\nf\n");
 }
+
+/// The MCP server, end to end: options start it, and over real HTTP an
+/// `eval` edits the buffer and reports its value and messages, which
+/// `buffer_text` then sees. Turning the option off stops it.
+#[gpui::test]
+fn mcp_server_eval_and_buffer_text(cx: &mut TestAppContext) {
+    use std::io::{Read as _, Write as _};
+
+    let editor = setup(cx, "");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            &format!(
+                r#"(set-option "mcp-server-token" "test-token")
+                   (set-option "mcp-server-port" {port})
+                   (set-option "mcp-server" #t)"#
+            ),
+            cx,
+        )
+    });
+    settle(&editor, cx);
+    assert!(
+        editor.read_with(cx, |e, _| e.mcp.is_some()),
+        "server should be running"
+    );
+
+    // POST one tools/call from a worker thread, pumping the editor's executor
+    // until it answers (the server blocks on foreground replies).
+    let call = |cx: &mut TestAppContext,
+                tool: &str,
+                args: serde_json::Value|
+     -> serde_json::Value {
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": {"name": tool, "arguments": args}})
+        .to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                s,
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer test-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            tx.send(out).unwrap();
+        });
+        for _ in 0..1000 {
+            cx.run_until_parked();
+            if let Ok(out) = rx.try_recv() {
+                let json = out.split("\r\n\r\n").nth(1).unwrap();
+                return serde_json::from_str(json).unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("no MCP response");
+    };
+    let reply = |r: &serde_json::Value| {
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let r = call(
+        cx,
+        "eval",
+        serde_json::json!({"code": r#"(insert "hi from mcp") (message "inserted") (+ 40 2)"#}),
+    );
+    let out = reply(&r);
+    assert!(out.starts_with("=> 42"), "{out}");
+    assert!(out.contains("inserted"), "{out}");
+    assert_eq!(text(&editor, cx), "hi from mcp");
+
+    let r = call(cx, "buffer_text", serde_json::json!({}));
+    let out = reply(&r);
+    assert!(
+        out.contains("buffer: test.txt") && out.ends_with("---\nhi from mcp"),
+        "{out}"
+    );
+
+    let r = call(cx, "eval", serde_json::json!({"code": "(car '())"}));
+    assert_eq!(r["result"]["isError"], true, "{r}");
+
+    let r = call(
+        cx,
+        "describe",
+        serde_json::json!({"name": "plot-sparkline"}),
+    );
+    assert!(reply(&r).starts_with("plot-sparkline"), "{r}");
+
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(r#"(set-option "mcp-server" #f)"#, cx)
+    });
+    settle(&editor, cx);
+    assert!(
+        editor.read_with(cx, |e, _| e.mcp.is_none()),
+        "server should stop"
+    );
+}
+
+/// Refreshing a special buffer in place keeps the view where the user left
+/// it, even when they wheel-scrolled away from point (dashboards that
+/// auto-refresh used to snap back to the cursor on every redraw).
+#[gpui::test]
+fn render_buffer_refresh_keeps_scroll_position(cx: &mut TestAppContext) {
+    let ed = setup(cx, "");
+    let body: String = (0..300).map(|i| format!("row {i}\\n")).collect();
+    let render = format!("(render-buffer \"*rows*\" \"rows-mode\" \"{body}\" '())");
+    ed.update(cx, |e, cx| e.run_script_blocking(&render, cx));
+    settle(&ed, cx);
+    let wheel = ed.update(cx, |e, _| {
+        // The headless platform never lays out, so give the view real geometry.
+        e.viewport_height = px(400.);
+        e.line_height = px(20.);
+        // Wheel-scroll far down without moving point (it stays on line 0).
+        let to = px(20. * 120.);
+        e.active.scroll_offset = to;
+        e.cursor_follow_pending = false;
+        to
+    });
+    ed.update(cx, |e, cx| e.run_script_blocking(&render, cx));
+    settle(&ed, cx);
+    ed.read_with(cx, |e, _| {
+        assert_eq!(e.active.name, "*rows*");
+        assert_eq!(e.active.scroll_offset, wheel, "refresh scrolled the view");
+        assert_eq!(
+            e.active.buffer.line_index_at_byte(e.point()),
+            0,
+            "point kept its line"
+        );
+    });
+}

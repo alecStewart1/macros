@@ -324,11 +324,21 @@
   (run-with-timer *session-autosave-ms* "session-autosave-tick"))
 
 ;; after-init-hook: restore, then start the autosave timer. Only the first window
-;; of the process restores the desktop, and not when launched on explicit files.
+;; of the process owns the desktop. A launch on explicit files doesn't take it
+;; at all: it neither restores the saved desktop nor overwrites it on quit or
+;; autosave (an explicit desktop-read / desktop-save still claims it).
+;; The launch's explicit files. Tests override them through the setter, since
+;; the real list comes from the process arguments. (The setter must live in
+;; this file: Steel treats a global its own file never set!s as a constant, so
+;; a set! from outside wouldn't reach session-launch-files.)
+(define *session-launch-files-override* #f)
+(define (session-set-launch-files! files) (set! *session-launch-files-override* files))
+(define (session-launch-files) (or *session-launch-files-override* (command-line-files)))
+
 (define (session-startup)
   (savehist-load)
-  (set! *desktop-primary* (session-claim-primary!))
-  (when (and *desktop-save-mode* *desktop-primary* (null? (command-line-files)))
+  (set! *desktop-primary* (and (null? (session-launch-files)) (session-claim-primary!)))
+  (when (and *desktop-save-mode* *desktop-primary*)
     (desktop-read-file))
   (when (> *session-autosave-ms* 0)
     (run-with-timer *session-autosave-ms* "session-autosave-tick")))
