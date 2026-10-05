@@ -4106,8 +4106,10 @@ fn textplot_op(canvas: &mut crate::textplot::Canvas, op: &SteelVal) {
             // A non-finite (or non-numeric) point breaks the line into runs,
             // the way a gap in the data should look.
             let points: Vec<Option<(i64, i64)>> = coords
-                .chunks_exact(2)
-                .map(|p| match (p[0], p[1]) {
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[x, y]| match (x, y) {
                     (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
                         Some((x.round() as i64, y.round() as i64))
                     }

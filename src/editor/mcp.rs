@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use futures::StreamExt as _;
 use gpui::{Context, Task};
 
 use super::*;
