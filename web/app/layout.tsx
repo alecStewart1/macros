@@ -8,7 +8,7 @@ const DESCRIPTION =
 export const metadata: Metadata = {
   metadataBase: new URL("https://macros.dev"),
   title: {
-    default: "Macros — rewrite it while it runs",
+    default: "Macros — Emacs ideas, a modern engine",
     template: "%s — Macros",
   },
   description: DESCRIPTION,
@@ -36,13 +36,13 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "Macros",
-    title: "Macros — rewrite it while it runs",
+    title: "Macros — Emacs ideas, a modern engine",
     description: DESCRIPTION,
     url: "https://macros.dev",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Macros — rewrite it while it runs",
+    title: "Macros — Emacs ideas, a modern engine",
     description: DESCRIPTION,
   },
   icons: {

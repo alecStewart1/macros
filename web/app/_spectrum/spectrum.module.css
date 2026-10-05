@@ -215,7 +215,7 @@
   max-width: 100%;
   color: var(--ink);
   font-weight: 700;
-  font-size: clamp(52px, 12.5vw, 188px);
+  font-size: clamp(38px, 10.4vw, 156px); /* "A modern engine." fits at 375px and 1440px */
   line-height: 0.86;
   letter-spacing: -0.055em;
   display: flex;

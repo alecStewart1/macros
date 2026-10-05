@@ -331,8 +331,8 @@ export function SpectrumHero() {
           <span aria-hidden="true"> →</span>
         </Link>
         <h1 id="spectrum-title" ref={titleRef} className={s.heroTitle}>
-          <span>Rewrite it</span>{" "}
-          <span>while it runs.</span>
+          <span>Emacs ideas.</span>{" "}
+          <span>A modern engine.</span>
         </h1>
       </div>
 
