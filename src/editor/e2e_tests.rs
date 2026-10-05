@@ -548,3 +548,36 @@ fn mcp_server_eval_and_buffer_text(cx: &mut TestAppContext) {
         "server should stop"
     );
 }
+
+/// Refreshing a special buffer in place keeps the view where the user left
+/// it, even when they wheel-scrolled away from point (dashboards that
+/// auto-refresh used to snap back to the cursor on every redraw).
+#[gpui::test]
+fn render_buffer_refresh_keeps_scroll_position(cx: &mut TestAppContext) {
+    let ed = setup(cx, "");
+    let body: String = (0..300).map(|i| format!("row {i}\\n")).collect();
+    let render = format!("(render-buffer \"*rows*\" \"rows-mode\" \"{body}\" '())");
+    ed.update(cx, |e, cx| e.run_script_blocking(&render, cx));
+    settle(&ed, cx);
+    let wheel = ed.update(cx, |e, _| {
+        // The headless platform never lays out, so give the view real geometry.
+        e.viewport_height = px(400.);
+        e.line_height = px(20.);
+        // Wheel-scroll far down without moving point (it stays on line 0).
+        let to = px(20. * 120.);
+        e.active.scroll_offset = to;
+        e.cursor_follow_pending = false;
+        to
+    });
+    ed.update(cx, |e, cx| e.run_script_blocking(&render, cx));
+    settle(&ed, cx);
+    ed.read_with(cx, |e, _| {
+        assert_eq!(e.active.name, "*rows*");
+        assert_eq!(e.active.scroll_offset, wheel, "refresh scrolled the view");
+        assert_eq!(
+            e.active.buffer.line_index_at_byte(e.point()),
+            0,
+            "point kept its line"
+        );
+    });
+}
