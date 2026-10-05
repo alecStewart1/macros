@@ -138,6 +138,9 @@
 (set-face "plot-series-3" "#9e4fc0")
 (set-face "plot-series-4" "#9a6700")
 (set-face "plot-series-5" "#b31b3f")
+;; Area under a curve (plot-function / plot-normal 'shade): a dimmer
+;; plot-series-0, so the curve drawn over it stays legible.
+(set-face "plot-shade" "#a9c8e4")
 (set-face "plot-axis" "#b0b0b0")
 (set-face "plot-label" "#6f6f6f")
 (set-face "plot-title" "#141414")
@@ -167,6 +170,7 @@
 (set-face-font "plot-series-3" "Macros Plot")
 (set-face-font "plot-series-4" "Macros Plot")
 (set-face-font "plot-series-5" "Macros Plot")
+(set-face-font "plot-shade" "Macros Plot")
 (set-face-font "plot-heat-0" "Macros Plot")
 (set-face-font "plot-heat-1" "Macros Plot")
 (set-face-font "plot-heat-2" "Macros Plot")

@@ -8,7 +8,8 @@
 ;; at startup. Full savehist (search ring, kill ring, minibuffer history) needs
 ;; Rust primitives to expose those rings, which don't exist yet.
 
-(define (persistence-dir) (string-append (getenv "HOME") "/.config/macros"))
+;; ~/.config/macros, resolved in Rust (a per-engine temp dir under `cargo test`).
+(define (persistence-dir) (persistence-directory))
 (define (saveplace-file)  (string-append (persistence-dir) "/saveplace"))
 (define (recentf-file)    (string-append (persistence-dir) "/recentf"))
 

@@ -220,11 +220,60 @@ fn config_dirs() -> Vec<PathBuf> {
     };
     let mut dirs = Vec::new();
     dirs.extend(from_env("XDG_CONFIG_HOME"));
-    if let Some(home) = home_dir() {
-        dirs.push(home.join(".config").join("macros"));
+    // Tests must never read the developer's real init.scm or write into their
+    // real config dir (MCP token, grammar trust list, packages/): swap the
+    // home/APPDATA candidates for a per-process sandbox.
+    #[cfg(test)]
+    dirs.push(test_sandbox("config"));
+    #[cfg(not(test))]
+    {
+        if let Some(home) = home_dir() {
+            dirs.push(home.join(".config").join("macros"));
+        }
+        dirs.extend(from_env("APPDATA"));
     }
-    dirs.extend(from_env("APPDATA"));
     dirs
+}
+
+/// A test-only sandbox directory under the system temp dir, unique to this
+/// process and `kind` (created on demand by whoever writes into it).
+#[cfg(test)]
+fn test_sandbox(kind: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("macros-test-{kind}-{}", std::process::id()))
+}
+
+/// Where session state persists — saveplace, recentf, savehist, desktop,
+/// perspectives, projects, dap-breakpoints — exposed to Scheme as
+/// `(persistence-directory)`. Always `~/.config/macros` (deliberately NOT
+/// `$XDG_CONFIG_HOME`), matching where that state has always lived.
+///
+/// Under `cfg(test)` it is instead a fresh temp dir per thread. Each
+/// `ScriptEngine` runs on its own thread, so every test engine (and every
+/// test `Editor`) gets an isolated, initially-empty state dir: `cargo test`
+/// never touches the real config, and parallel tests can't leak state into
+/// each other.
+pub fn persistence_directory() -> PathBuf {
+    #[cfg(test)]
+    {
+        thread_local! {
+            static DIR: PathBuf = {
+                static SEQ: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let dir = test_sandbox("persist").join(n.to_string());
+                let _ = std::fs::remove_dir_all(&dir);
+                dir
+            };
+        }
+        DIR.with(PathBuf::clone)
+    }
+    #[cfg(not(test))]
+    {
+        home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config")
+            .join("macros")
+    }
 }
 
 /// The user's `init.scm` and the directory it lives in, if present. Absent =
@@ -300,6 +349,29 @@ pub fn include_prelude(dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: `cargo test` once wrote test breakpoints into the
+    /// developer's real ~/.config/macros/dap-breakpoints. Under `cfg(test)`
+    /// neither the persistence dir nor the config dir may resolve under the
+    /// real home config, and each thread (= each `ScriptEngine`) gets its own
+    /// persistence dir.
+    #[test]
+    fn test_state_dirs_never_touch_real_home_config() {
+        let real = home_dir().map(|h| h.join(".config").join("macros"));
+        let mine = persistence_directory();
+        let other = std::thread::spawn(persistence_directory).join().unwrap();
+        assert_ne!(mine, other, "each engine thread gets its own state dir");
+        assert_eq!(mine, persistence_directory(), "stable within a thread");
+        for dir in [&mine, &other, &config_directory()] {
+            assert!(
+                dir.starts_with(std::env::temp_dir()),
+                "{dir:?} not sandboxed"
+            );
+            if let Some(real) = &real {
+                assert!(!dir.starts_with(real), "{dir:?} is the real config dir");
+            }
+        }
+    }
 
     #[test]
     fn registered_local_dir_is_macros_scheme_path() {

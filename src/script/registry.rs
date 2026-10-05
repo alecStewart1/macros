@@ -1733,6 +1733,15 @@ pub(crate) fn build_engine(
             .to_string_lossy()
             .into_owned()
     });
+    // `(persistence-directory)` → where session state (saveplace, recentf,
+    // savehist, desktop, perspectives, dap-breakpoints, …) is saved. Resolved
+    // in Rust so test builds can sandbox it per engine (see
+    // `runtime::persistence_directory`).
+    reg.register_fn("persistence-directory", || -> String {
+        crate::runtime::persistence_directory()
+            .to_string_lossy()
+            .into_owned()
+    });
     // `(register-macros-scheme-dir dir)` → treat `*.scm` under `dir` as editor
     // extension code (the `macros-steel` mode + editor-aware `macros-scheme` LSP),
     // even though it's outside the config dir. `package-install-local` calls this
@@ -4058,7 +4067,16 @@ fn textplot_op(canvas: &mut crate::textplot::Canvas, op: &SteelVal) {
     let Some(kind) = items.first().and_then(steel_string) else {
         return;
     };
-    let n = |i: usize| items.get(i).and_then(steel_f64).map(|v| v.round() as i64);
+    // NaN/±inf coordinates make the op a no-op (NaN would otherwise cast to
+    // 0 and draw at the origin). Finite but huge values saturate, and the
+    // canvas clips them.
+    let n = |i: usize| {
+        items
+            .get(i)
+            .and_then(steel_f64)
+            .filter(|v| v.is_finite())
+            .map(|v| v.round() as i64)
+    };
     let face = |i: usize| items.get(i).and_then(steel_string);
     match kind.as_str() {
         "point" => {
@@ -4078,21 +4096,33 @@ fn textplot_op(canvas: &mut crate::textplot::Canvas, op: &SteelVal) {
         }
         "polyline" => {
             let f = face(1);
-            let coords: Vec<i64> = items
+            let coords: Vec<Option<f64>> = items
                 .get(2)
                 .and_then(steel_list)
                 .unwrap_or_default()
                 .iter()
-                .filter_map(steel_f64)
-                .map(|v| v.round() as i64)
+                .map(steel_f64)
                 .collect();
-            let points: Vec<(i64, i64)> = coords.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-            if let [(x, y)] = points.as_slice() {
-                canvas.set(*x, *y, f.as_deref());
-            }
-            for pair in points.windows(2) {
-                let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
-                canvas.line(x0, y0, x1, y1, f.as_deref());
+            // A non-finite (or non-numeric) point breaks the line into runs,
+            // the way a gap in the data should look.
+            let points: Vec<Option<(i64, i64)>> = coords
+                .chunks_exact(2)
+                .map(|p| match (p[0], p[1]) {
+                    (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
+                        Some((x.round() as i64, y.round() as i64))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for run in points.split(Option::is_none) {
+                let run: Vec<(i64, i64)> = run.iter().flatten().copied().collect();
+                if let [(x, y)] = run.as_slice() {
+                    canvas.set(*x, *y, f.as_deref());
+                }
+                for pair in run.windows(2) {
+                    let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+                    canvas.line(x0, y0, x1, y1, f.as_deref());
+                }
             }
         }
         "text" => {

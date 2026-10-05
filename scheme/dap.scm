@@ -423,7 +423,7 @@
       (dap--sync-file-breakpoints path))))
 
 ;; --- persistence (self-contained: persistence.scm loads after this file) -------
-(define (dap--bp-file) (string-append (getenv "HOME") "/.config/macros/dap-breakpoints"))
+(define (dap--bp-file) (string-append (persistence-directory) "/dap-breakpoints"))
 (define (dap--save-breakpoints)
   (write-file (dap--bp-file)
     (join-lines (map (lambda (bp) (string-append (car bp) "\t"

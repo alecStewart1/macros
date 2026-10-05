@@ -1,5 +1,6 @@
-;; plot.scm — text charts (sparklines, bars, line/scatter plots, histograms,
-;; heatmaps) built on the textplot-* primitives in src/textplot.rs.
+;; plot.scm — text charts (sparklines, bars, line/scatter plots, function and
+;; normal-distribution plots with shaded areas, histograms, heatmaps) built on
+;; the textplot-* primitives in src/textplot.rs.
 ;;
 ;; A PLOT is a list of rows; a row is (text spans), each span a
 ;; (start end face) BYTE range within that row's text. Rust rasterizes and
@@ -13,7 +14,8 @@
 ;;
 ;; Options are a flat plist after the data: (plot-lines s 'width 60 'height 10).
 ;; Colors are faces defined in scheme/themes/*.scm: plot-series-0…5,
-;; plot-axis, plot-label, plot-title, plot-heat-0…7 (+ their -bg backgrounds).
+;; plot-axis, plot-label, plot-title, plot-shade (area under a curve),
+;; plot-heat-0…7 (+ their -bg backgrounds).
 ;;
 ;; Loads after core.scm and lib-section.scm (alphabetical), so it can use
 ;; utf8-length / pad-right / string-repeat / section-line.
@@ -98,14 +100,22 @@
 
 (define (plot--num v) (exact->inexact v))
 (define (plot--int v) (inexact->exact (round v)))
-(define (plot--finite? v) (and (number? v) (not (nan? (exact->inexact v)))))
+;; A usable data value: a real number that isn't NaN, ±inf, or so large that
+;; arithmetic on it overflows (1e300 leaves headroom for scaling).
+(define (plot--finite? v)
+  (and (number? v) (real? v)
+       (let ((x (exact->inexact v))) (and (not (nan? x)) (< (abs x) 1e300)))))
 (define (plot--numbers vals) (map plot--num (filter plot--finite? vals)))
 (define (plot--min nums) (if (null? nums) 0.0 (apply min nums)))
 (define (plot--max nums) (if (null? nums) 0.0 (apply max nums)))
 
-;; Widen a degenerate (lo = hi) range so scaling never divides by zero.
+;; An increasing range: a reversed one is swapped, and a degenerate (lo = hi)
+;; one is widened so scaling never divides by zero. The widening scales with
+;; magnitude, since lo ± 1 rounds back to lo above about 1e16.
 (define (plot--range lo hi)
-  (if (> hi lo) (list lo hi) (list (- lo 1.0) (+ hi 1.0))))
+  (cond ((> hi lo) (list lo hi))
+        ((< hi lo) (list hi lo))
+        (else (let ((d (max 1.0 (* 1e-6 (abs lo))))) (list (- lo d) (+ hi d))))))
 
 (define (plot--label x)
   (cond ((string? x) x)
@@ -137,7 +147,8 @@
 
 ;; Horizontal bar chart from (label value) items. Options: 'width (bar cells
 ;; at full scale, 40), 'max (default: largest value), 'face (plot-series-0),
-;; 'colors #t (cycle series faces per bar), 'values #t (print each value).
+;; 'colors #t (cycle series faces per bar), 'values #f (hide the printed
+;; values, shown by default). Values ≤ 0 get no bar, only their printed value.
 (define (plot-bars items . opts)
   (let* ((width (plot--opt opts 'width 40))
          (vals (map (lambda (it) (plot--num (cadr it))) items))
@@ -186,8 +197,34 @@
         ((= (car (car tick-rows)) r) (cadr (car tick-rows)))
         (else (plot--row-label (cdr tick-rows) r))))
 
-;; Frame canvas `rows` with a y axis (ticks over ylo…yhi), an x axis, x range
-;; labels, and an optional title / legend row (a row, or #f).
+;; Lay labels out along a row: `placements` is ((col label) …) in column
+;; order; each label starts at its col, or just past the previous label if
+;; they'd collide (so nothing is ever dropped or overwritten).
+(define (plot--place-labels placements)
+  (let loop ((ps placements) (pos 0) (acc ""))
+    (if (null? ps)
+        acc
+        (let* ((label (cadr (car ps)))
+               (col (max (car (car ps)) (if (= pos 0) 0 (+ pos 1)))))
+          (loop (cdr ps) (+ col (string-length label))
+                (string-append acc (string-repeat " " (- col pos)) label))))))
+
+;; Labels at both ends of an x axis `width` columns wide.
+(define (plot--end-labels width lo-label hi-label)
+  (list (list 0 lo-label)
+        (list (max 0 (- width (string-length hi-label))) hi-label)))
+
+;; Labels centred on columns: ((col label) …) → placements.
+(define (plot--centred-labels width ticks)
+  (map (lambda (t)
+         (let ((len (string-length (cadr t))))
+           (list (max 0 (min (- width len) (- (car t) (quotient len 2)))) (cadr t))))
+       ticks))
+
+;; Frame canvas `rows` with a y axis (ticks over ylo…yhi), an x axis, x labels,
+;; and an optional title / legend row (a row, or #f). `xlo-label`/`xhi-label`
+;; label the axis ends; when `xhi-label` is #f, `xlo-label` is instead a list
+;; of ((col label) …) ticks, each centred on its column and marked ┬ on the axis.
 (define (plot--frame rows ylo yhi dy nticks xlo-label xhi-label title legend)
   (if (null? rows)
       '()
@@ -213,15 +250,21 @@
                                              (list (if label " ┤" " │") "plot-axis")))
                                      (car rows))
                                    acc))))))
+             (tick-cols (if xhi-label '() (map car xlo-label)))
              (axis (plot--segments
                      (list (list (string-repeat " " lw) #f)
-                           (list (string-append " └" (string-repeat "─" width)) "plot-axis"))))
-             (room (- width (string-length xlo-label) (string-length xhi-label)))
+                           (list (string-append
+                                   " └"
+                                   (list->string
+                                     (map (lambda (c) (if (member c tick-cols) #\┬ #\─))
+                                          (range 0 width))))
+                                 "plot-axis"))))
              (xlabels (plot--segments
                         (list (list indent #f)
-                              (list (string-append xlo-label
-                                                   (string-repeat " " (max 1 room))
-                                                   xhi-label)
+                              (list (plot--place-labels
+                                      (if xhi-label
+                                          (plot--end-labels width xlo-label xhi-label)
+                                          (plot--centred-labels width xlo-label)))
                                     "plot-label")))))
         (append (if title (list (plot--segments (list (list indent #f) (list title "plot-title"))))
                     '())
@@ -314,6 +357,180 @@
 ;; Scatter plot: same arguments as plot-lines, points unconnected.
 (define (plot-scatter series . opts) (plot--xy series opts #t))
 
+;; --- functions & distributions ---------------------------------------------------------
+
+;; Same test as plot--finite?, named for function samples.
+(define (plot--real? v) (plot--finite? v))
+
+;; Functions as ((name f) …): a bare procedure is one unnamed function.
+(define (plot--functions fns)
+  (if (procedure? fns) (list (list "" fns)) fns))
+
+;; Shade ranges as ((a b face) …): one (a b) / (a b face), or a list of them.
+(define (plot--shades shade default-face)
+  (let ((norm (lambda (r)
+                ;; Either order: (1.96 -1.96) means the same range as (-1.96 1.96).
+                (let ((a (plot--num (car r))) (b (plot--num (cadr r))))
+                  (list (min a b) (max a b)
+                        (if (> (length r) 2) (nth r 2) default-face))))))
+    (cond ((or (not shade) (null? shade)) '())
+          ((number? (car shade)) (list (norm shade)))
+          (else (map norm shade)))))
+
+;; Split dot points ((dx dy|#f) …) into runs of defined points, each a flat
+;; (x0 y0 x1 y1 …) polyline — a gap (an undefined sample) breaks the curve.
+(define (plot--runs pts)
+  (let loop ((ps pts) (run '()) (acc '()))
+    (cond ((null? ps)
+           (reverse (if (null? run) acc (cons (reverse run) acc))))
+          ((cadr (car ps))
+           (loop (cdr ps) (cons (cadr (car ps)) (cons (car (car ps)) run)) acc))
+          (else
+           (loop (cdr ps) '() (if (null? run) acc (cons (reverse run) acc)))))))
+
+;; Plot y = f(x) over lo…hi, sampled once per dot column. `fns` is a procedure
+;; or ((name f) …). Options: 'width 60 'height 12, 'y-min 'y-max, 'title,
+;; 'legend (default: when >1 function), 'x-ticks (x values to label along the
+;; axis instead of just its ends),
+;;   'shade (a b) or ((a b) (a b face) …) — fill the area between the FIRST
+;;          function and the baseline (y = 0, or the nearer axis edge) over
+;;          each x range, clamped to lo…hi; 'shade-face (default plot-shade).
+;; Samples where f returns a non-number, NaN or ±inf are left as gaps.
+(define (plot-function fns lo hi . opts)
+  (let* ((fns (plot--functions fns))
+         (width (plot--opt opts 'width 60))
+         (height (plot--opt opts 'height 12))
+         (dw (* width 2))
+         (dh (* height 4))
+         (xr (plot--range (plot--num lo) (plot--num hi)))
+         (xlo (car xr)) (xhi (cadr xr))
+         (xs (map (lambda (i) (+ xlo (* (- xhi xlo) (/ i (- dw 1.0))))) (range 0 dw)))
+         ;; Per function: its y sample at each x, #f where undefined.
+         (samples
+           (map (lambda (func)
+                  (map (lambda (x)
+                         (let ((y ((cadr func) x)))
+                           (if (plot--real? y) (plot--num y) #f)))
+                       xs))
+                fns))
+         (ys (filter (lambda (y) y) (apply append samples)))
+         (nticks (max 2 (quotient height 3)))
+         (yr (let ((r (plot--range (plot--num (plot--opt opts 'y-min (plot--min ys)))
+                                   (plot--num (plot--opt opts 'y-max (plot--max ys))))))
+               (if (or (plot--opt opts 'y-min #f) (plot--opt opts 'y-max #f))
+                   r
+                   (plot--nice-range (car r) (cadr r) nticks))))
+         (ylo (car yr)) (yhi (cadr yr))
+         ;; Clamp to just outside the canvas: pinned y ranges may cut the curve.
+         (ydot (lambda (y) (max -1.0 (min (plot--num dh) (plot--y->dot y ylo yhi dh)))))
+         (xdot (lambda (x) (plot--scale x xlo xhi dw)))
+         (base (ydot (max ylo (min yhi 0.0))))
+         (shade-ops
+           (if (null? samples)
+               '()
+               (apply append
+                 (map (lambda (sh)
+                        (let loop ((xs xs) (ys (car samples)) (i 0) (acc '()))
+                          (if (null? xs)
+                              (reverse acc)
+                              (loop (cdr xs) (cdr ys) (+ i 1)
+                                    (if (and (car ys) (>= (car xs) (car sh)) (<= (car xs) (cadr sh)))
+                                        (cons (list "line" i base i (ydot (car ys)) (nth sh 2)) acc)
+                                        acc)))))
+                      (plot--shades (plot--opt opts 'shade #f)
+                                    (plot--opt opts 'shade-face "plot-shade"))))))
+         (curve-ops
+           (let loop ((ss samples) (k 0) (acc '()))
+             (if (null? ss)
+                 (reverse acc)
+                 (loop (cdr ss) (+ k 1)
+                       (append (reverse
+                                 (map (lambda (run) (list "polyline" (plot--series-face k) run))
+                                      (plot--runs
+                                        (map (lambda (x y) (list (xdot x) (and y (ydot y))))
+                                             xs (car ss)))))
+                               acc)))))
+         (x-ticks (plot--opt opts 'x-ticks #f))
+         (legend? (plot--opt opts 'legend (> (length fns) 1))))
+    (plot--frame (textplot-render width height 'braille (append shade-ops curve-ops))
+                 ylo yhi 4 nticks
+                 (if x-ticks
+                     (map (lambda (x)
+                            (list (quotient (plot--int (xdot (plot--num x))) 2) (plot--label x)))
+                          ;; Label placement walks left to right, so sort.
+                          (sort (filter (lambda (x) (and (plot--finite? x) (>= x xlo) (<= x xhi)))
+                                        x-ticks)
+                                <))
+                     (textplot-format xlo))
+                 (if x-ticks #f (textplot-format xhi))
+                 (plot--opt opts 'title #f)
+                 (if legend? (plot--legend (map car fns)) #f))))
+
+(define plot--pi 3.141592653589793)
+
+;; Density of the normal distribution N(mu, sigma) at x.
+(define (plot-normal-pdf x mu sigma)
+  (let ((z (/ (- x mu) sigma)))
+    (/ (exp (* -0.5 z z)) (* sigma (sqrt (* 2.0 plot--pi))))))
+
+;; erf via Abramowitz & Stegun 7.1.26 (|error| < 1.5e-7) — plenty for a chart.
+(define (plot--erf x)
+  (let* ((s (if (< x 0) -1.0 1.0))
+         (x (abs x))
+         (t (/ 1.0 (+ 1.0 (* 0.3275911 x))))
+         (poly (* t (+ 0.254829592
+                       (* t (+ -0.284496736
+                               (* t (+ 1.421413741
+                                       (* t (+ -1.453152027 (* t 1.061405429)))))))))))
+    (* s (- 1.0 (* poly (exp (- (* x x))))))))
+
+;; P(X <= x) for X ~ N(mu, sigma), accurate to about 1.5e-7. The probability
+;; of a range a…b is (- (plot-normal-cdf b mu sigma) (plot-normal-cdf a mu sigma)).
+(define (plot-normal-cdf x mu sigma)
+  (* 0.5 (+ 1.0 (plot--erf (/ (- x mu) (* sigma (sqrt 2.0)))))))
+
+;; "68.3%" — a probability to one decimal place, without float noise.
+(define (plot--percent p)
+  (let ((n (plot--int (* 1000.0 (max 0.0 (min 1.0 p))))))
+    (string-append (number->string (quotient n 10)) "." (number->string (remainder n 10)) "%")))
+
+;; Normal distribution N(mu, sigma) as a density curve. Options are
+;; plot-function's ('width 'height 'shade 'shade-face 'title 'x-ticks …) plus
+;; 'x-min 'x-max (default mu ± 4 sigma). Defaults: x ticks at every whole
+;; sigma, y from 0, and a title giving the parameters and — when shaded — the
+;; total probability of the shaded ranges, over the whole distribution even
+;; where a range runs past the plot (overlapping ranges count twice). Your own
+;; 'title replaces it. Errors unless sigma > 0.
+;;   (plot-normal 0 1 'shade (list -1.96 1.96))   ; the central 95%
+(define (plot-normal mu sigma . opts)
+  (unless (and (plot--finite? mu) (plot--finite? sigma) (> sigma 0))
+    (error "plot-normal: needs a finite mean and a positive standard deviation, got" mu sigma))
+  (let* ((mu (plot--num mu))
+         (sigma (plot--num sigma))
+         (lo (plot--num (plot--opt opts 'x-min (- mu (* 4 sigma)))))
+         (hi (plot--num (plot--opt opts 'x-max (+ mu (* 4 sigma)))))
+         (shades (plot--shades (plot--opt opts 'shade #f) "plot-shade"))
+         ;; The whole distribution's share, not just the part inside the
+         ;; plotted x range (a range running off the plot still counts).
+         (p (apply + (map (lambda (sh)
+                            (- (plot-normal-cdf (cadr sh) mu sigma)
+                               (plot-normal-cdf (car sh) mu sigma)))
+                          shades)))
+         (title (string-append "N(μ=" (textplot-format mu) ", σ=" (textplot-format sigma) ")"
+                               (if (null? shades) "" (string-append "   shaded: " (plot--percent p)))))
+         (ticks (filter (lambda (x) (and (>= x lo) (<= x hi)))
+                        (map (lambda (k) (+ mu (* (- k 6) sigma))) (range 0 13)))))
+    (apply plot-function
+           (lambda (x) (plot-normal-pdf x mu sigma)) lo hi
+           (append opts
+                   (list 'title title
+                         'x-ticks ticks
+                         'y-min 0.0
+                         ;; The peak, rounded up to a whole tick so the top is labeled.
+                         'y-max (cadr (plot--nice-range
+                                        0.0 (plot-normal-pdf mu mu sigma)
+                                        (max 2 (quotient (plot--opt opts 'height 12) 3)))))))))
+
 ;; --- histogram ---------------------------------------------------------------------
 
 (define (plot--bin-index v lo span bins)
@@ -327,16 +544,21 @@
          (height (plot--opt opts 'height 8))
          (bw (max 1 (plot--opt opts 'bin-width 3)))
          (face (plot--opt opts 'face "plot-series-0"))
-         (lo (plot--num (plot--opt opts 'min (plot--min nums))))
-         (hi (plot--num (plot--opt opts 'max (plot--max nums))))
-         (span (if (> hi lo) (- hi lo) 1.0))
+         (r (plot--range (plot--num (plot--opt opts 'min (plot--min nums)))
+                         (plot--num (plot--opt opts 'max (plot--max nums)))))
+         ;; All-equal data widens around the value, so it lands mid-axis.
+         (lo (car r))
+         (hi (cadr r))
+         (span (- hi lo))
          (idx (map (lambda (v) (plot--bin-index v lo span bins))
                    (filter (lambda (v) (and (>= v lo) (<= v hi))) nums)))
          (counts (let loop ((k (- bins 1)) (acc '()))
                    (if (< k 0)
                        acc
                        (loop (- k 1) (cons (length (filter (lambda (i) (= i k)) idx)) acc)))))
-         (nticks (max 2 (min (max 1 (apply max counts)) (quotient height 2))))
+         ;; Counts are whole numbers: never more ticks than the tallest count,
+         ;; or the axis steps by fractions (0, 0.5, 1).
+         (nticks (max 1 (min (max 1 (apply max counts)) (quotient height 2))))
          (cmax (cadr (plot--nice-range 0.0 (plot--num (max 1 (apply max counts))) nticks)))
          (dh (* height 8))
          (gap (if (> bw 1) 1 0))
@@ -358,8 +580,9 @@
 ;; --- heatmap -----------------------------------------------------------------------
 
 (define (plot--heat-level v lo hi)
+  ;; Eight equal-width buckets (round(7t) would give the end colors half-width ones).
   (if (> hi lo)
-      (plot--int (* 7 (max 0.0 (min 1.0 (/ (- v lo) (- hi lo))))))
+      (min 7 (inexact->exact (floor (* 8 (max 0.0 (min 1.0 (/ (- v lo) (- hi lo))))))))
       0))
 
 (define (plot--heat-face level) (string-append "plot-heat-" (number->string level)))
@@ -369,7 +592,8 @@
 ;;          color — robust with any font and line height) or 'half (two data
 ;;          rows per text row via ▀ foreground + background; denser, but the
 ;;          two halves look uneven when the line height exceeds the glyph)
-;;   'cell-width 2, 'min 'max, 'row-labels, 'col-labels ('cell mode), 'title,
+;;   'cell-width 2, 'min 'max, 'row-labels and 'col-labels ('cell mode only:
+;;   a 'half text row holds two data rows), 'title,
 ;;   'scale #t (a min…max color-scale row).
 ;; Colors: plot-heat-0…7 (foreground) / plot-heat-0…7-bg (background).
 (define (plot-heatmap matrix . opts)
@@ -378,7 +602,7 @@
          (nums (plot--numbers (apply append matrix)))
          (lo (plot--num (plot--opt opts 'min (plot--min nums))))
          (hi (plot--num (plot--opt opts 'max (plot--max nums))))
-         (row-labels (map plot--label (plot--opt opts 'row-labels '())))
+         (row-labels (if (eq? mode 'half) '() (map plot--label (plot--opt opts 'row-labels '()))))
          (lw (if (null? row-labels) 0 (+ 1 (apply max (map string-length row-labels)))))
          (indent (string-repeat " " lw))
          (cell (string-repeat " " cw))
@@ -474,6 +698,15 @@
       (plot-scatter (list (list "a" (plot--demo-wave 40 (lambda (x) (list x (* x (sin x))))))
                           (list "b" (plot--demo-wave 40 (lambda (x) (list x (* 0.5 x x 0.1))))))
                     'width 50 'height 8))
+    (heading "plot-normal ('shade the central 95%)")
+    (plot-section-emit
+      (plot-normal 0 1 'width 60 'height 10 'shade (list -1.96 1.96)))
+    (heading "plot-function (two functions, shaded tails)")
+    (plot-section-emit
+      (plot-function (list (list "sin x" sin) (list "x/4" (lambda (x) (/ x 4.0))))
+                     -6.3 6.3 'width 60 'height 8
+                     'shade (list (list -6.3 -3.14) (list 3.14 6.3))
+                     'x-ticks (list -6 -3 0 3 6)))
     (heading "plot-histogram")
     (plot-section-emit
       (plot-histogram (plot--demo-wave 400 (lambda (x) (+ (sin x) (sin (* 1.7 x)) (cos (* 0.3 x)))))

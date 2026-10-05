@@ -17,8 +17,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -28,6 +28,14 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Largest request body accepted (an `eval` of a whole package file fits).
 const MAX_BODY: usize = 8 << 20;
+/// Request line + headers. Read before authentication, so it is kept small.
+const MAX_HEAD: u64 = 64 << 10;
+/// Connections served at once; more are closed immediately. Clients send one
+/// request per connection, so this only bites a flood.
+const MAX_CONNECTIONS: usize = 16;
+/// Wall-clock budget for a whole request to arrive (a slow-drip client can't
+/// hold a connection slot by sending a byte every few seconds).
+const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
 
 /// What the server needs from the editor. Every method may block; each runs
 /// on the connection's own thread, never on the UI thread.
@@ -48,7 +56,7 @@ pub trait Backend: Send + Sync + 'static {
     fn list_buffers(&self) -> Result<String, String>;
     /// The last `count` echo-area messages.
     fn messages(&self, count: usize) -> Result<String, String>;
-    /// Record one line in the editor's `*mcp-log*` buffer.
+    /// Record one line in the editor's `*mcp-server*` buffer.
     fn log(&self, line: String);
 }
 
@@ -71,18 +79,22 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// Bind 127.0.0.1:`port` and serve on a background thread.
+    /// Bind 127.0.0.1:`port` and serve on a background thread. `restarting`
+    /// means a server of ours just let go of this port, so a brief `AddrInUse`
+    /// is our own listener still closing: wait it out. Otherwise the port
+    /// belongs to someone else, so fail at once rather than stall the caller
+    /// (the editor calls this on its UI thread).
     pub fn start(
         port: u16,
         token: String,
         backend: Arc<dyn Backend>,
+        restarting: bool,
     ) -> std::io::Result<McpServer> {
-        // A restart on the same port races the old listener's thread
-        // closing it; give that a moment rather than failing outright.
+        let retries = if restarting { 20 } else { 0 };
         let mut attempt = 0;
         let listener = loop {
             match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempt < 20 => {
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempt < retries => {
                     attempt += 1;
                     std::thread::sleep(Duration::from_millis(25));
                 }
@@ -93,6 +105,7 @@ impl McpServer {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let token = Arc::new(token);
+        let active = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new()
             .name("mcp-server".into())
             .spawn(move || {
@@ -100,13 +113,32 @@ impl McpServer {
                     if flag.load(Ordering::SeqCst) {
                         break;
                     }
-                    let Ok(stream) = stream else { continue };
-                    let (backend, token) = (backend.clone(), token.clone());
+                    let stream = match stream {
+                        Ok(stream) => stream,
+                        Err(_) => {
+                            // Out of file descriptors and the like: back off
+                            // instead of spinning on a failing accept.
+                            std::thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                    };
+                    if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        continue; // dropping `stream` closes it
+                    }
+                    let (backend, token, active) = (backend.clone(), token.clone(), active.clone());
                     // One thread per connection: a long `eval` mustn't block
                     // a concurrent `messages` call.
-                    let _ = std::thread::Builder::new()
-                        .name("mcp-conn".into())
-                        .spawn(move || serve_connection(stream, &token, backend.as_ref()));
+                    let spawned = std::thread::Builder::new().name("mcp-conn".into()).spawn({
+                        let active = active.clone();
+                        move || {
+                            serve_connection(stream, &token, backend.as_ref());
+                            active.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    });
+                    if spawned.is_err() {
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    }
                 }
             })?;
         Ok(McpServer { port, stop })
@@ -130,12 +162,12 @@ impl Drop for McpServer {
     }
 }
 
-/// A parsed HTTP request: method, path, lowercase header names, body.
+/// A parsed HTTP request head: method, path, lowercase header names. The
+/// body is read separately, and only once the head has passed [`reject`].
 struct Request {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
 }
 
 impl Request {
@@ -147,8 +179,36 @@ impl Request {
     }
 }
 
-fn read_request(stream: &TcpStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream);
+/// Reads from the socket against one wall-clock deadline for the whole
+/// request, rather than a timeout that restarts with every byte received.
+struct DeadlineReader {
+    stream: TcpStream,
+    until: Instant,
+}
+
+impl Read for DeadlineReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
+type Body = std::io::Take<BufReader<DeadlineReader>>;
+
+/// Read the request line and headers (at most [`MAX_HEAD`] bytes). Returns
+/// the head and the reader positioned at the body.
+fn read_head(stream: &TcpStream) -> Option<(Request, Body)> {
+    let reader = DeadlineReader {
+        stream: stream.try_clone().ok()?,
+        until: Instant::now() + REQUEST_DEADLINE,
+    };
+    // `take` bounds every `read_line`: a line that never ends can't grow
+    // without limit, it just runs out of budget.
+    let mut reader = BufReader::new(reader).take(MAX_HEAD);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     let mut parts = line.split_whitespace();
@@ -158,7 +218,7 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     loop {
         line.clear();
         if reader.read_line(&mut line).ok()? == 0 {
-            return None;
+            return None; // EOF, or the head budget ran out
         }
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
@@ -170,22 +230,37 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
         let (k, v) = trimmed.split_once(':')?;
         headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
     }
-    let len = headers
-        .iter()
-        .find(|(k, _)| k == "content-length")
-        .and_then(|(_, v)| v.parse::<usize>().ok())
-        .unwrap_or(0);
-    if len > MAX_BODY {
-        return None;
+    Some((
+        Request {
+            method,
+            path,
+            headers,
+        },
+        reader,
+    ))
+}
+
+/// The body, per `Content-Length`; an `Err` is the HTTP status to answer.
+fn read_body(req: &Request, mut reader: Body) -> Result<Vec<u8>, &'static str> {
+    if req.header("transfer-encoding").is_some() {
+        return Err("501 Not Implemented"); // no chunked bodies
     }
-    let mut body = vec![0; len];
-    reader.read_exact(&mut body).ok()?;
-    Some(Request {
-        method,
-        path,
-        headers,
-        body,
-    })
+    let Some(len) = req.header("content-length") else {
+        return Err("411 Length Required");
+    };
+    let len = len.parse::<usize>().map_err(|_| "400 Bad Request")?;
+    if len > MAX_BODY {
+        return Err("413 Content Too Large");
+    }
+    reader.set_limit(len as u64);
+    let mut body = Vec::with_capacity(len);
+    reader
+        .read_to_end(&mut body)
+        .map_err(|_| "400 Bad Request")?;
+    if body.len() != len {
+        return Err("400 Bad Request"); // the client hung up early
+    }
+    Ok(body)
 }
 
 fn respond(mut stream: &TcpStream, status: &str, extra_headers: &[&str], body: &str) {
@@ -247,9 +322,12 @@ fn reject(req: &Request, token: &str) -> Option<(&'static str, &'static str)> {
             return Some(("403 Forbidden", ""));
         }
     }
+    // The auth scheme name is case-insensitive (RFC 9110 §11.1).
     let bearer = req
         .header("authorization")
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, t)| t);
     if !bearer.is_some_and(|t| token_matches(t.trim(), token)) {
         return Some(("401 Unauthorized", "WWW-Authenticate: Bearer"));
     }
@@ -257,11 +335,13 @@ fn reject(req: &Request, token: &str) -> Option<(&'static str, &'static str)> {
 }
 
 fn serve_connection(stream: TcpStream, token: &str, backend: &dyn Backend) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let Some(req) = read_request(&stream) else {
-        respond(&stream, "400 Bad Request", &[], "");
+    let stream = &stream;
+    let Some((req, body_reader)) = read_head(stream) else {
+        respond(stream, "400 Bad Request", &[], "");
         return;
     };
+    // Authenticate on the head alone: nothing unauthenticated gets to make
+    // us allocate or wait for a body.
     if let Some((status, header)) = reject(&req, token) {
         if status.starts_with("401") || status.starts_with("403") {
             backend.log(format!("refused request: {status}"));
@@ -271,14 +351,21 @@ fn serve_connection(stream: TcpStream, token: &str, backend: &dyn Backend) {
         } else {
             vec![header]
         };
-        respond(&stream, status, &headers, "");
+        respond(stream, status, &headers, "");
         return;
     }
-    let message: Value = match serde_json::from_slice(&req.body) {
+    let body = match read_body(&req, body_reader) {
+        Ok(body) => body,
+        Err(status) => {
+            respond(stream, status, &[], "");
+            return;
+        }
+    };
+    let message: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
             let body = rpc_error(Value::Null, -32700, &format!("parse error: {e}"));
-            respond(&stream, "400 Bad Request", &[], &body.to_string());
+            respond(stream, "400 Bad Request", &[], &body.to_string());
             return;
         }
     };
@@ -294,9 +381,9 @@ fn serve_connection(stream: TcpStream, token: &str, backend: &dyn Backend) {
         _ => handle_message(&message, backend),
     };
     match reply {
-        Some(body) => respond(&stream, "200 OK", &[], &body.to_string()),
+        Some(body) => respond(stream, "200 OK", &[], &body.to_string()),
         // Notifications and responses get no body.
-        None => respond(&stream, "202 Accepted", &[], ""),
+        None => respond(stream, "202 Accepted", &[], ""),
     }
 }
 
@@ -764,7 +851,7 @@ mod tests {
     #[test]
     fn http_transport_enforces_auth_and_origin() {
         let fake: Arc<dyn Backend> = Arc::new(Fake::default());
-        let server = McpServer::start(0, "secret".into(), fake).unwrap();
+        let server = McpServer::start(0, "secret".into(), fake, false).unwrap();
         let port = server.port;
         let post = |headers: &str, body: &str| -> String {
             let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -807,6 +894,60 @@ mod tests {
         // Notifications are accepted with no body.
         let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
         assert!(post(&format!("{host}{auth}"), note).starts_with("HTTP/1.1 202"));
+        // The auth scheme name is case-insensitive.
+        assert!(
+            post(&format!("{host}authorization: bearer secret\r\n"), ping)
+                .starts_with("HTTP/1.1 200")
+        );
+        server.stop();
+    }
+
+    /// Send raw bytes, return the status line (empty if the server just hung up).
+    fn raw(port: u16, request: &[u8]) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = s.write_all(request);
+        let mut out = Vec::new();
+        let _ = s.read_to_end(&mut out);
+        String::from_utf8_lossy(&out)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Nothing unauthenticated can make the server buffer much: an endless
+    /// header line hits the head cap, and a big body is refused on its
+    /// headers alone (401 without waiting for the 8 MiB that never comes).
+    #[test]
+    fn http_limits_apply_before_auth() {
+        let fake: Arc<dyn Backend> = Arc::new(Fake::default());
+        let server = McpServer::start(0, "secret".into(), fake, false).unwrap();
+        let port = server.port;
+        let host = format!("Host: 127.0.0.1:{port}\r\n");
+
+        let mut endless = b"POST /mcp HTTP/1.1\r\nX-Pad: ".to_vec();
+        endless.extend(std::iter::repeat_n(b'a', (MAX_HEAD as usize) + 1024));
+        assert_eq!(raw(port, &endless), "HTTP/1.1 400 Bad Request");
+
+        let started = Instant::now();
+        let big = format!("POST /mcp HTTP/1.1\r\n{host}Content-Length: 8000000\r\n\r\n");
+        assert!(raw(port, big.as_bytes()).starts_with("HTTP/1.1 401"));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "waited for the body"
+        );
+
+        let auth = "Authorization: Bearer secret\r\n";
+        let no_len = format!("POST /mcp HTTP/1.1\r\n{host}{auth}\r\n");
+        assert!(raw(port, no_len.as_bytes()).starts_with("HTTP/1.1 411"));
+        let bad_len = format!("POST /mcp HTTP/1.1\r\n{host}{auth}Content-Length: -4\r\n\r\n");
+        assert!(raw(port, bad_len.as_bytes()).starts_with("HTTP/1.1 400"));
+        let too_big = format!("POST /mcp HTTP/1.1\r\n{host}{auth}Content-Length: 99999999\r\n\r\n");
+        assert!(raw(port, too_big.as_bytes()).starts_with("HTTP/1.1 413"));
+        let chunked =
+            format!("POST /mcp HTTP/1.1\r\n{host}{auth}Transfer-Encoding: chunked\r\n\r\n");
+        assert!(raw(port, chunked.as_bytes()).starts_with("HTTP/1.1 501"));
         server.stop();
     }
 }

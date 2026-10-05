@@ -117,6 +117,9 @@ impl Canvas {
         if let Some(i) = self.faces.iter().position(|f| f == face) {
             return Some(i as u16);
         }
+        if self.faces.len() > u16::MAX as usize {
+            return None; // absurdly many faces: draw the rest uncolored
+        }
         self.faces.push(face.to_string());
         Some((self.faces.len() - 1) as u16)
     }
@@ -150,8 +153,20 @@ impl Canvas {
         cell.face = face;
     }
 
-    /// A straight line between two dots (Bresenham), inclusive.
+    /// A straight line between two dots (Bresenham), inclusive. The segment
+    /// is clipped to (just outside) the canvas first, so far-off or huge
+    /// endpoints neither overflow nor exhaust the walk before reaching the
+    /// visible part.
     pub fn line(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, face: Option<&str>) {
+        let (w, h) = self.dot_size();
+        let Some((x0, y0, x1, y1)) = clip_segment(
+            (x0 as f64, y0 as f64),
+            (x1 as f64, y1 as f64),
+            (-1.0, -1.0),
+            (w as f64, h as f64),
+        ) else {
+            return;
+        };
         let (mut x, mut y) = (x0, y0);
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -205,7 +220,7 @@ impl Canvas {
         }
         let face = self.intern(face);
         for (i, ch) in text.chars().enumerate() {
-            let c = col + i as i64;
+            let c = col.saturating_add(i as i64);
             if c < 0 {
                 continue;
             }
@@ -241,6 +256,10 @@ impl Canvas {
             }
             Mode::HalfBlock => match (cell.bits & 1 != 0, cell.bits & 2 != 0) {
                 (true, true) if cell.face == cell.bottom => ('█', cell.face, None),
+                // An uncolored bottom under a colored top: draw the bottom as
+                // the (default-colored) glyph and the top as the background,
+                // or the bottom half would vanish.
+                (true, true) if cell.bottom.is_none() => ('▄', None, cell.face),
                 (true, true) => ('▀', cell.face, cell.bottom),
                 (true, false) => ('▀', cell.face, None),
                 _ => ('▄', cell.bottom, None),
@@ -335,9 +354,15 @@ pub fn ticks(lo: f64, hi: f64, n: usize) -> Vec<(f64, String)> {
         (lo - 0.5, lo + 0.5)
     };
     let step = nice_step((hi - lo) / n.max(1) as f64);
-    let decimals = (-step.log10().floor()).max(0.0) as usize;
-    let first = (lo / step).ceil() as i64;
-    let last = (hi / step).floor() as i64;
+    // A span too small to step through at this magnitude (lo ± 0.5 rounds
+    // back to lo near 1e17), or one that overflowed: one tick at lo.
+    if !step.is_finite() || step <= 0.0 || lo + step == lo {
+        return vec![(lo, format_compact(lo))];
+    }
+    let decimals = (-step.log10().floor()).clamp(0.0, 20.0) as usize;
+    // A hair of slack: 0.3 / 0.1 is 2.9999999999999996, not 3.
+    let first = (lo / step - TICK_EPS).ceil() as i64;
+    let last = (hi / step + TICK_EPS).floor() as i64;
     (first..=last)
         .take(1000)
         .map(|k| {
@@ -353,9 +378,31 @@ pub fn nice_range(lo: f64, hi: f64, n: usize) -> (f64, f64) {
     if !lo.is_finite() || !hi.is_finite() || hi <= lo {
         return (lo, hi);
     }
-    let step = nice_step((hi - lo) / n.max(1) as f64);
-    ((lo / step).floor() * step, (hi / step).ceil() * step)
+    // [`ticks`] picks its step from the WIDENED span, which can round up to
+    // the next 1/2/5 step; the ends must be multiples of that step or one of
+    // them goes unlabeled. Widen until the step stops changing (it only ever
+    // grows, so this settles in a couple of rounds).
+    let n = n.max(1) as f64;
+    let (mut a, mut b) = (lo, hi);
+    let mut step = nice_step((hi - lo) / n);
+    for _ in 0..8 {
+        if !step.is_finite() || step <= 0.0 {
+            return (lo, hi);
+        }
+        a = (lo / step + TICK_EPS).floor() * step;
+        b = (hi / step - TICK_EPS).ceil() * step;
+        let next = nice_step((b - a) / n);
+        if next == step {
+            break;
+        }
+        step = next;
+    }
+    (a, b)
 }
+
+/// Relative slack when snapping to tick multiples, so float noise
+/// (0.30000000000000004) doesn't add or drop a tick.
+const TICK_EPS: f64 = 1e-9;
 
 fn nice_step(raw: f64) -> f64 {
     let mag = 10f64.powf(raw.log10().floor());
@@ -385,44 +432,98 @@ pub fn format_number(v: f64, decimals: usize) -> String {
     }
 }
 
-/// Compact human formatting for labels: `950`, `1.2k`, `3.4M`, `0.25`.
+/// Compact human formatting for labels: `950`, `1200`, `12.3k`, `3.4M`,
+/// `0.25`, `0.004`. Values under 10,000 print in full; larger ones take a
+/// k/M/G/T suffix, bumped up a tier when rounding reaches 1000 (999,950 is
+/// `1M`, not `1000k`).
 pub fn format_compact(v: f64) -> String {
     if !v.is_finite() {
         return String::new();
     }
+    const TIERS: [(f64, &str); 4] = [(1e3, "k"), (1e6, "M"), (1e9, "G"), (1e12, "T")];
     let a = v.abs();
-    let (n, suffix) = if a >= 1e12 {
-        (v / 1e12, "T")
-    } else if a >= 1e9 {
-        (v / 1e9, "G")
-    } else if a >= 1e6 {
-        (v / 1e6, "M")
-    } else if a >= 1e4 {
-        (v / 1e3, "k")
-    } else {
-        (v, "")
+    let trim = |s: String| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
     };
-    let decimals = if suffix.is_empty() {
-        if n.fract() == 0.0 {
+    if a < 1e4 {
+        let decimals = if v.fract() == 0.0 {
             0
         } else if a >= 100.0 {
             1
-        } else {
+        } else if a >= 0.01 {
             2
-        }
-    } else if n.abs() >= 100.0 {
-        0
-    } else {
+        } else {
+            // Keep two significant digits rather than rounding to "0".
+            ((-a.log10()).ceil() as usize + 1).min(12)
+        };
+        return trim(format_number(v, decimals));
+    }
+    // First tier whose rounded mantissa stays under 1000 (the last tier
+    // takes whatever is left).
+    let start = if a >= 1e12 {
+        3
+    } else if a >= 1e9 {
+        2
+    } else if a >= 1e6 {
         1
-    };
-    let s = format_number(n, decimals);
-    // Trim trailing zeros after a decimal point ("2.50" → "2.5", "3.0" → "3").
-    let s = if s.contains('.') {
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
     } else {
-        s
+        0
     };
-    format!("{s}{suffix}")
+    for (i, &(scale, suffix)) in TIERS.iter().enumerate().skip(start) {
+        let n = v / scale;
+        let decimals = if n.abs() >= 100.0 { 0 } else { 1 };
+        let s = format_number(n, decimals);
+        let rounded: f64 = s.parse().unwrap_or(n);
+        if rounded.abs() < 1000.0 || i == TIERS.len() - 1 {
+            return format!("{}{suffix}", trim(s));
+        }
+    }
+    unreachable!("the last tier always returns")
+}
+
+/// Clip the segment p–q to the box [lo, hi] (Liang–Barsky) and round the
+/// result to dots. `None` when no part of it is inside.
+fn clip_segment(
+    p: (f64, f64),
+    q: (f64, f64),
+    lo: (f64, f64),
+    hi: (f64, f64),
+) -> Option<(i64, i64, i64, i64)> {
+    if ![p.0, p.1, q.0, q.1].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    // Each edge as (direction component, distance from p to the edge).
+    for (d, dist) in [
+        (-dx, p.0 - lo.0),
+        (dx, hi.0 - p.0),
+        (-dy, p.1 - lo.1),
+        (dy, hi.1 - p.1),
+    ] {
+        if d == 0.0 {
+            if dist < 0.0 {
+                return None; // parallel to this edge and outside it
+            }
+            continue;
+        }
+        let t = dist / d;
+        if d < 0.0 {
+            t0 = t0.max(t);
+        } else {
+            t1 = t1.min(t);
+        }
+        if t0 > t1 {
+            return None;
+        }
+    }
+    let at = |t: f64| ((p.0 + t * dx).round() as i64, (p.1 + t * dy).round() as i64);
+    let (a, b) = (at(t0), at(t1));
+    Some((a.0, a.1, b.0, b.1))
 }
 
 #[cfg(test)]
@@ -550,5 +651,81 @@ mod tests {
         assert_eq!(format_compact(0.25), "0.25");
         assert_eq!(format_compact(2.5), "2.5");
         assert_eq!(format_compact(-0.0), "0");
+    }
+
+    #[test]
+    fn ticks_survive_degenerate_and_huge_ranges() {
+        // lo ± 0.5 rounds back to lo at this magnitude: one tick, no panic.
+        assert_eq!(ticks(1e17, 1e17, 5).len(), 1);
+        // hi - lo overflows to inf: no NaN tick.
+        assert!(ticks(-1e308, 1e308, 5).iter().all(|(v, _)| v.is_finite()));
+        // Float noise doesn't drop the end tick (0.3 / 0.1 = 2.9999999999999996).
+        let labels: Vec<String> = ticks(0.0, 0.3, 3).into_iter().map(|t| t.1).collect();
+        assert_eq!(labels, ["0.0", "0.1", "0.2", "0.3"]);
+    }
+
+    #[test]
+    fn nice_range_ends_are_always_labeled_ticks() {
+        // Each widened range must start and end on a tick `ticks` will emit.
+        for &(lo, hi, n) in &[
+            (-0.03, 3.4, 4),
+            (-0.3, 0.01, 2),
+            (-0.99, 1.0, 4),
+            (0.0, 0.3, 3),
+        ] {
+            let (a, b) = nice_range(lo, hi, n);
+            let t = ticks(a, b, n);
+            let (first, last) = (t.first().unwrap().0, t.last().unwrap().0);
+            assert!(
+                (first - a).abs() < 1e-9 && (last - b).abs() < 1e-9,
+                "{lo}..{hi} n={n}: {a}..{b} → {t:?}"
+            );
+        }
+        // A sweep of small-negative-low ranges (the reported failure mode).
+        for i in 1..400 {
+            let (lo, hi) = (-(i as f64) * 0.013, 1.0 + i as f64 * 0.11);
+            let (a, b) = nice_range(lo, hi, 4);
+            let t = ticks(a, b, 4);
+            assert!(
+                (t[0].0 - a).abs() < 1e-9 && (t[t.len() - 1].0 - b).abs() < 1e-9,
+                "{lo}..{hi}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_format_boundaries() {
+        assert_eq!(format_compact(999_950.0), "1M");
+        assert_eq!(format_compact(-999_999.0), "-1M");
+        assert_eq!(format_compact(999_999_999.0), "1G");
+        assert_eq!(format_compact(12_345.0), "12.3k");
+        assert_eq!(format_compact(1200.0), "1200");
+        assert_eq!(format_compact(0.001), "0.001");
+        assert_eq!(format_compact(-0.004), "-0.004");
+        assert_eq!(format_compact(0.25), "0.25");
+        assert_eq!(format_compact(0.0), "0");
+    }
+
+    #[test]
+    fn far_off_canvas_lines_still_draw_their_visible_part() {
+        let mut c = Canvas::new(10, 1, Mode::Braille);
+        c.line(-3_000_000, 1, 19, 1, None);
+        assert_eq!(texts(&c), ["⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒"]);
+        // Extreme endpoints neither overflow nor hang.
+        let mut c = Canvas::new(4, 1, Mode::Braille);
+        c.line(i64::MIN, 0, i64::MAX, 0, Some("a"));
+        c.text(i64::MAX, 0, "ab", None);
+        assert_eq!(texts(&c)[0].chars().count(), 4);
+    }
+
+    #[test]
+    fn half_block_uncolored_bottom_is_drawn() {
+        let mut c = Canvas::new(1, 1, Mode::HalfBlock);
+        c.set(0, 0, Some("hot"));
+        c.set(0, 1, None);
+        let row = &c.render()[0];
+        // Bottom as the default-colored glyph, top as the face's background.
+        assert_eq!(row.text, "▄");
+        assert_eq!(row.spans, vec![(0, 3, "hot-bg".to_string())]);
     }
 }

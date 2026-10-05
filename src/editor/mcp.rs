@@ -61,14 +61,25 @@ const EDITOR_GONE: &str = "the editor did not respond";
 impl Backend for EditorBackend {
     fn eval(&self, code: &str) -> EvalReport {
         self.ask(McpRequest::PublishPoint);
-        let (commands, value, error) = self.engine.eval_sync(code);
-        let count = commands.len();
-        let messages = if count > 0 {
-            self.ask(|tx| McpRequest::Apply(commands, tx))
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let (commands, value, mut error) = self.engine.eval_sync(code);
+        let mut count = commands.len();
+        let mut messages = Vec::new();
+        if count > 0 {
+            match self.ask(|tx| McpRequest::Apply(commands, tx)) {
+                Some(applied) => messages = applied,
+                None => {
+                    // Timed out or the server was stopped mid-request: don't
+                    // claim the commands took effect.
+                    count = 0;
+                    let note =
+                        format!("{EDITOR_GONE}; its editor commands were not confirmed applied");
+                    error = Some(match error {
+                        Some(e) => format!("{e}\n{note}"),
+                        None => note,
+                    });
+                }
+            }
+        }
         EvalReport {
             value,
             error,
@@ -119,6 +130,8 @@ fn load_or_create_token() -> Result<String, String> {
     if let Ok(token) = std::fs::read_to_string(&path) {
         let token = token.trim().to_string();
         if !token.is_empty() {
+            // A copied or synced file may have lost its owner-only mode.
+            restrict_to_owner(&path);
             return Ok(token);
         }
     }
@@ -140,7 +153,21 @@ fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> 
         .truncate(true)
         .mode(0o600)
         .open(path)?;
+    // `mode` only applies when the file is created; tighten an existing one.
+    restrict_to_owner(path);
     f.write_all(contents.as_bytes())
+}
+
+/// Make `path` readable and writable by its owner only (Unix; a no-op elsewhere,
+/// where the config directory's ACLs apply).
+fn restrict_to_owner(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 #[cfg(not(unix))]
@@ -176,14 +203,15 @@ impl Editor {
         {
             return;
         }
-        // Restarting: stop the old server first so its port is free.
-        self.mcp = None;
+        // Restarting: stop the old server first so its port is free. Only
+        // then is a brief AddrInUse expected (our listener closing).
+        let restarting = self.mcp.take().is_some_and(|m| m.server.port == port);
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         let backend = Arc::new(EditorBackend {
             engine: self.script.action_handle(),
             tx,
         });
-        match McpServer::start(port, token.clone(), backend) {
+        match McpServer::start(port, token.clone(), backend, restarting) {
             Ok(server) => {
                 let drain = cx.spawn(async move |this, cx| {
                     while let Some(request) = rx.next().await {
