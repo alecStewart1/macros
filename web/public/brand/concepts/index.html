@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Icon concepts — Macros</title>
+<style>
+  :root { --ink:#0b0a10; --fg:#f2eff7; --fg2:#b9b2c8; --line:rgba(242,239,247,.1); }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--ink); color:var(--fg); font:15px/1.5 "IBM Plex Sans", system-ui, sans-serif; padding:40px 16px; }
+  h1 { font-size:28px; margin:0 0 6px; letter-spacing:-.5px; }
+  p.lede { color:var(--fg2); margin:0 0 32px; max-width:640px; }
+  .grid { display:grid; gap:20px; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); max-width:1300px; }
+  .card { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#13111b; }
+  .card h2 { font-size:16px; margin:0; padding:16px 18px 2px; }
+  .card .note { color:var(--fg2); font-size:13px; padding:0 18px 14px; margin:0; }
+  .hero { display:flex; justify-content:center; padding:22px 0; }
+  .hero img { width:220px; height:220px; filter:drop-shadow(0 12px 28px rgba(0,0,0,.5)); }
+  .sizes { display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-around; padding:16px 12px; gap:12px; }
+  .sizes.dark { background:#000; } .sizes.light { background:#f3efe6; }
+  .sizes img { display:block; image-rendering:auto; }
+  .tab { display:flex; align-items:center; gap:7px; font-size:12px; padding:5px 10px; border-radius:7px 7px 0 0; background:#2a2833; color:#ddd; }
+  .sizes.light .tab { background:#fff; color:#222; }
+</style>
+</head>
+<body>
+<h1>Icon concepts</h1>
+<p class="lede">Three directions for the Macros mark that match the Spectrum site, each shown large, at dock sizes and as a browser-tab favicon, on dark and light backgrounds. The current icon is first for comparison.</p>
+<div class="grid" id="grid"></div>
+<script>
+const icons = [
+  ["current.svg", "Current", "Tan squircle, near-black parentheses."],
+  ["macros-heat-parens.svg", "1 · Heat parens", "The same parentheses on dark ink, stroked with the viridis heat ramp. Closest to the current mark."],
+  ["macros-mosaic.svg", "2 · Mosaic", "A heatmap of cells where the hot cells spell \"()\". Echoes the homepage hero."],
+  ["macros-braille.svg", "3 · Braille", "(⣿): the parentheses around one braille cell, each dot a step of the ramp. Every chart is text."],
+];
+const grid = document.getElementById("grid");
+for (const [src, name, note] of icons) {
+  const sizes = [128, 64, 32, 16].map(s => `<img src="${src}" width="${s}" height="${s}" alt="">`).join("");
+  const tab = `<span class="tab"><img src="${src}" width="16" height="16" alt="">Macros</span>`;
+  grid.insertAdjacentHTML("beforeend", `
+    <section class="card">
+      <h2>${name}</h2><p class="note">${note}</p>
+      <div class="hero"><img src="${src}" alt="${name} icon"></div>
+      <div class="sizes dark">${sizes}${tab}</div>
+      <div class="sizes light">${sizes}${tab}</div>
+    </section>`);
+}
+</script>
+</body>
+</html>

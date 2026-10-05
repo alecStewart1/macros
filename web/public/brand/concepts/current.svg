@@ -1,0 +1,19 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Macros — parentheses</title>
+  <desc>Near-black "()" on a light tan squircle.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f1ece2"/>
+      <stop offset="1" stop-color="#e2d9c8"/>
+    </linearGradient>
+    <linearGradient id="em" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1916"/>
+      <stop offset="1" stop-color="#100f0d"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
+  <g fill="none" stroke="url(#em)" stroke-width="64" stroke-linecap="round">
+    <path d="M430,288 Q260,512 430,736"/>
+    <path d="M594,288 Q764,512 594,736"/>
+  </g>
+</svg>
