@@ -3024,7 +3024,7 @@ mod magit_tests {
         // FIRST compile after the switch — regression: it ran in alpha.
         let cd = compile_cd(&engine);
         assert!(
-            cd.contains(&format!("cd {b} && make")),
+            cd.contains(&format!("cd '{b}' && make")),
             "first compile after switch must run in beta, ran: {cd}"
         );
         engine.call_action("compile-done", Some("0"));
@@ -3042,7 +3042,7 @@ mod magit_tests {
         );
         let cd = compile_cd(&engine);
         assert!(
-            cd.contains(&format!("cd {b} && make")),
+            cd.contains(&format!("cd '{b}' && make")),
             "second compile must still run in beta, ran: {cd}"
         );
     }
@@ -7691,7 +7691,7 @@ mod compile_lib {
         let result = engine.eval(r#"(compile-run "make")"#).unwrap();
         let cd_in_proj = result.commands.iter().any(|c| match c {
             EditorCommand::MakeProcess { args, .. } => {
-                args.iter().any(|a| a.contains("cd /w/proj && make"))
+                args.iter().any(|a| a.contains("cd '/w/proj' && make"))
             }
             _ => false,
         });
@@ -7876,27 +7876,33 @@ mod compile_lib {
         engine
             .eval(&format!(r#"(compile-output "{here}:9:1: error: b")"#))
             .unwrap();
-        // First next-error opens the file in another window and jumps to line 5 (4 0-based).
+        // First next-error opens the file in another window and (once it is
+        // current — open-file is async) jumps to line 5 (4 0-based).
+        let pending_line = |engine: &ScriptEngine| {
+            engine
+                .eval("(list-ref *visit-pending* 2)")
+                .unwrap()
+                .value
+                .unwrap()
+        };
         let cmds = engine.eval("(next-error)").unwrap();
         assert!(
-            cmds.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::GotoLine(4))),
-            "expected GotoLine(4), got {:?}",
+            cmds.commands.iter().any(|c| matches!(
+                c,
+                EditorCommand::RunWithTimer { callback, .. } if callback == "visit-location-step"
+            )),
+            "expected a deferred visit, got {:?}",
             cmds.commands
         );
+        assert_eq!(pending_line(&engine), "4");
         assert!(
             cmds.commands
                 .iter()
                 .any(|c| matches!(c, EditorCommand::OpenFileOtherWindow(_)))
         );
         // Second advances to the next error (line 9 → 8 0-based).
-        let cmds = engine.eval("(next-error)").unwrap();
-        assert!(
-            cmds.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::GotoLine(8)))
-        );
+        engine.eval("(next-error)").unwrap();
+        assert_eq!(pending_line(&engine), "8");
     }
 
     #[test]
@@ -10006,7 +10012,7 @@ mod tests {
             out.commands.iter().any(|c| match c {
                 EditorCommand::MakeProcess { args, .. } => args.iter().any(|a| {
                     a.contains(&format!(
-                        "cd {root} && cargo test calc::tests::adds_numbers"
+                        "cd '{root}' && cargo test calc::tests::adds_numbers"
                     ))
                 }),
                 _ => false,
@@ -10752,5 +10758,451 @@ mod plot_tests {
         assert!(
             matches!(&cmds[..], [EditorCommand::SetFaceBackground(f, c)] if f == "x-bg" && c == "#123456")
         );
+    }
+}
+
+/// Audit fixes in shell/magit/lsp/helm/helix/evil scheme files: shell quoting,
+/// `~` expansion, inlay-hint grouping, range merging, screen-line bounds,
+/// path-vs-buffer-name lookups.
+#[cfg(test)]
+mod audit_scheme_fix_tests {
+    use super::*;
+
+    fn engine_with(text: &str, point: usize, path: &str, visible: (usize, usize)) -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine.set_snapshot(EditorSnapshot {
+            name: "mod.rs<parser>".into(),
+            path: path.into(),
+            text: Rope::from_str(text),
+            point,
+            selections: vec![(point, point)],
+            visible_lines: visible,
+            ..Default::default()
+        });
+        engine
+    }
+
+    fn value(engine: &ScriptEngine, q: &str) -> String {
+        match engine.eval(q) {
+            Ok(r) => r.value.unwrap_or_default(),
+            Err(e) => panic!("{q}: {e}"),
+        }
+    }
+
+    #[test]
+    fn shell_quote_survives_spaces_and_single_quotes() {
+        let e = engine_with("", 0, "", (0, 1));
+        assert_eq!(value(&e, r#"(shell-quote "a b")"#), r#""'a b'""#);
+        // Round-trip through a real shell.
+        let out = value(
+            &e,
+            r#"(call-process "/bin/sh" (list "-c" (string-append "printf %s " (shell-quote "it's a $x; b"))))"#,
+        );
+        assert_eq!(out, r#""it's a $x; b""#);
+    }
+
+    #[test]
+    fn expand_file_name_only_treats_leading_tilde_segment_as_home() {
+        let e = engine_with("", 0, "", (0, 1));
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            value(&e, r#"(expand-file-name "/a/b/foo~bar")"#),
+            r#""/a/b/foo~bar""#
+        );
+        assert_eq!(
+            value(&e, r#"(expand-file-name "/a/backup.txt~")"#),
+            r#""/a/backup.txt~""#
+        );
+        assert_eq!(
+            value(&e, r#"(expand-file-name "/a/b/~/x")"#),
+            format!("\"{home}/x\"")
+        );
+        assert_eq!(
+            value(&e, r#"(expand-file-name "~")"#),
+            format!("\"{home}/\"")
+        );
+        assert_eq!(
+            value(&e, r#"(expand-file-name "~/")"#),
+            format!("\"{home}/\"")
+        );
+        assert_eq!(value(&e, r#"(expand-file-name "/a/b//etc")"#), r#""/etc""#);
+    }
+
+    #[test]
+    fn inlay_hints_on_one_line_are_joined_in_character_order() {
+        let e = engine_with("", 0, "", (0, 1));
+        assert_eq!(
+            value(
+                &e,
+                r#"(lsp--inlay-group (list (list 2 9 ": b") (list 0 1 "x") (list 2 3 ": a")))"#
+            ),
+            r#"((0 . "  x") (2 . "  : a  : b"))"#
+        );
+    }
+
+    #[test]
+    fn helix_merge_ranges_merges_overlapping_and_touching() {
+        let e = engine_with("", 0, "", (0, 1));
+        assert_eq!(
+            value(
+                &e,
+                "(helix-merge-ranges (list (cons 0 5) (cons 3 8) (cons 8 9) (cons 12 14)))"
+            ),
+            "((0 . 9) (12 . 14))"
+        );
+    }
+
+    #[test]
+    fn screen_bottom_excludes_overscan_rows() {
+        let text: String = (0..200).map(|i| format!("l{i}\n")).collect();
+        // Viewport of ~30.5 rows at the top: Rust reports (0, 32).
+        let e = engine_with(&text, 0, "", (0, 32));
+        assert_eq!(value(&e, "(evil-visible-bottom (visible-lines))"), "29");
+        assert_eq!(value(&e, r#"(evil-screen-line "L" 1)"#), "29");
+        assert_eq!(value(&e, r#"(evil-screen-line "H" 1)"#), "0");
+        // Clamped at the buffer end: the last real line is the bottom.
+        let e = engine_with("a\nb\nc\n", 0, "", (0, 4));
+        assert_eq!(value(&e, "(evil-visible-bottom (visible-lines))"), "2");
+    }
+
+    #[test]
+    fn file_lookups_use_path_not_uniquified_buffer_name() {
+        let e = engine_with("", 0, "/src/parser/mod.rs", (0, 1));
+        assert_eq!(value(&e, "(lsp--file-ext (lsp--buffer-path))"), r#""rs""#);
+        assert_eq!(value(&e, "(magit-blame-file)"), r#""/src/parser/mod.rs""#);
+        let e = engine_with("", 0, "/notes/a.md", (0, 1));
+        assert_eq!(value(&e, "(rainbow--skip?)"), "#true");
+        // Fileless buffers fall back to the name.
+        let e = engine_with("", 0, "", (0, 1));
+        assert_eq!(value(&e, "(lsp--buffer-path)"), r#""mod.rs<parser>""#);
+    }
+}
+
+/// Regression tests for the Scheme audit fixes (markdown / editing / org /
+/// org-roam / folding / persistence / themes).
+#[cfg(test)]
+mod scheme_audit_fixes {
+    use super::*;
+
+    fn engine_at(name: &str, path: &str, text: &str, point: usize, line: usize) -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        set_text(&engine, name, path, text, point, line);
+        engine
+    }
+
+    fn set_text(
+        engine: &ScriptEngine,
+        name: &str,
+        path: &str,
+        text: &str,
+        point: usize,
+        line: usize,
+    ) {
+        engine.set_snapshot(EditorSnapshot {
+            name: name.into(),
+            path: path.into(),
+            text: Rope::from_str(text),
+            point,
+            line,
+            selections: vec![(point, point)],
+            ..Default::default()
+        });
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine.eval(q).unwrap().value.unwrap()
+    }
+
+    #[test]
+    fn md_wrap_region_lands_between_delimiters() {
+        let e = engine_at("a.md", "/tmp/a.md", "abc", 1, 0);
+        let cmds = e.eval(r#"(md-wrap-region "**" "**")"#).unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(3))),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn sort_lines_keeps_trailing_newline() {
+        let e = engine_at("a.txt", "", "", 0, 0);
+        assert_eq!(v(&e, r#"(sort-lines-text "b\na\n")"#), r#""a\nb\n""#);
+        assert_eq!(v(&e, r#"(sort-lines-text "b\na")"#), r#""a\nb""#);
+    }
+
+    #[test]
+    fn org_export_inline_protects_links_and_dollar_groups() {
+        let e = engine_at("a.org", "/tmp/a.org", "", 0, 0);
+        assert_eq!(
+            v(&e, r#"(org--inline->md "/it/ [[https://a.com/b/c][d]]")"#),
+            r#""_it_ [d](https://a.com/b/c)""#
+        );
+        let html = v(&e, r#"(org--inline->html "[[https://a.com/b/c]] *b* /i/")"#);
+        assert!(html.contains(r#"href=\"https://a.com/b/c\""#), "{html}");
+        assert!(html.contains("<strong>b</strong>"), "{html}");
+        assert!(html.contains("<em>i</em>"), "{html}");
+        let ascii = v(&e, r#"(org--inline->ascii "[[https://a.com/x/y][d]] /i/")"#);
+        assert_eq!(ascii, r#""d (https://a.com/x/y) i""#);
+    }
+
+    #[test]
+    fn user_text_replacements_keep_dollars() {
+        let e = engine_at("a.org", "/tmp/a.org", "", 0, 0);
+        assert_eq!(
+            v(&e, r#"(org--expand-template-final "* %?" "cost $5 ${x}")"#),
+            r#""* cost $5 ${x}""#
+        );
+        assert_eq!(
+            v(
+                &e,
+                r##"(org-roam--expand-tmpl "#+title: ${title}" "A $1 b" "s" "i")"##
+            ),
+            r##""#+title: A $1 b""##
+        );
+        assert_eq!(
+            v(
+                &e,
+                r#"(org-roam--rewrite-links "[[id:abc][old]]" "abc" "New $2")"#
+            ),
+            r#""[[id:abc][New $2]]""#
+        );
+    }
+
+    #[test]
+    fn org_heading_title_strips_bare_keyword() {
+        let e = engine_at("a.org", "/tmp/a.org", "", 0, 0);
+        assert_eq!(v(&e, r#"(nth (org--parse-headline "* TODO") 3)"#), r#""""#);
+        assert_eq!(
+            v(&e, r#"(nth (org--parse-headline "* TODO [#A]") 3)"#),
+            r#""""#
+        );
+        assert_eq!(
+            v(&e, r#"(nth (org--parse-headline "* TODO x") 3)"#),
+            r#""x""#
+        );
+    }
+
+    #[test]
+    fn org_move_subtree_down_needs_a_true_sibling() {
+        // "** B" is followed only by its parent's sibling "* C": no move.
+        let e = engine_at("a.org", "/tmp/a.org", "* A\n** B\n* C\n", 4, 1);
+        let cmds = e.eval("(org-move-subtree-down)").unwrap().commands;
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, EditorCommand::ReplaceRegion { .. })),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn uniquified_buffers_detected_by_file_path() {
+        let e = engine_at("notes.org<x>", "/tmp/x/notes.org", "* A\n", 0, 0);
+        assert_eq!(v(&e, "(if (org--active?) 1 0)"), "1");
+        assert_eq!(v(&e, "(org--current-file-path)"), r#""/tmp/x/notes.org""#);
+        assert_eq!(v(&e, r#"(org--output-path ".md")"#), r#""/tmp/x/notes.md""#);
+        set_text(&e, "README.md<y>", "/tmp/y/README.md", "# A\n", 0, 0);
+        assert_eq!(v(&e, "(if (md--active?) 1 0)"), "1");
+    }
+
+    #[test]
+    fn saveplace_keys_on_file_path() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let e = engine_at("Cargo.toml<m>", path, "0123456789", 5, 0);
+        e.eval("(saveplace-remember)").unwrap();
+        assert_eq!(v(&e, &format!("(alist-ref *saveplace* {path:?})")), "5");
+    }
+
+    #[test]
+    fn org_column_formula_skips_header_rows() {
+        let e = engine_at("a.org", "/tmp/a.org", "", 0, 0);
+        assert_eq!(
+            v(
+                &e,
+                r#"(org--table-first-data-row (list "| a | b |" "|---+---|" "| 1 | 2 |"))"#
+            ),
+            "2"
+        );
+        assert_eq!(
+            v(&e, r#"(org--table-first-data-row (list "| 1 | 2 |"))"#),
+            "1"
+        );
+        let g =
+            r#"(org--apply-formula-from (list (list "a" "b" "c") (list "1" "2" "")) "$3=$1+$2" 2)"#;
+        assert_eq!(v(&e, &format!("(nth (car {g}) 2)")), r#""c""#);
+        assert_eq!(v(&e, &format!("(nth (cadr {g}) 2)")), r#""3""#);
+    }
+
+    #[test]
+    fn fold_state_follows_edits() {
+        let e = engine_at("a.org", "/tmp/a.org", "* A\nbody\n* B\nbody\n", 0, 0);
+        assert_eq!(
+            v(
+                &e,
+                r#"(fold-anchor-locate (list "x" "* A" "y") (cons 0 "* A"))"#
+            ),
+            "1"
+        );
+        assert_eq!(
+            v(
+                &e,
+                r#"(if (fold-anchor-locate (list "x") (cons 0 "* A")) 1 0)"#
+            ),
+            "0"
+        );
+        // Fold "* B" (line 2), then insert a line above it: the state follows.
+        e.eval("(org--set-heading-state 2 'folded)").unwrap();
+        set_text(
+            &e,
+            "a.org",
+            "/tmp/a.org",
+            "new\n* A\nbody\n* B\nbody\n",
+            0,
+            0,
+        );
+        e.eval("(org--fold-state-resync)").unwrap();
+        assert_eq!(v(&e, "(car (car (org--fold-state-get)))"), "3");
+        // Markdown: same relocation.
+        set_text(&e, "a.md", "/tmp/a.md", "# A\nb\n# B\nb\n", 0, 0);
+        e.eval("(md--folded-set (list 2))").unwrap();
+        set_text(&e, "a.md", "/tmp/a.md", "x\n# A\nb\n# B\nb\n", 0, 0);
+        e.eval("(md--folded-resync (md-lines))").unwrap();
+        assert_eq!(v(&e, "(car (md--folded-get))"), "3");
+        // Generic indentation folding: same relocation.
+        set_text(&e, "a.py", "/tmp/a.py", "def f():\n  x\n", 0, 0);
+        e.eval("(fold--folded-set (list 0))").unwrap();
+        set_text(&e, "a.py", "/tmp/a.py", "import y\ndef f():\n  x\n", 0, 0);
+        e.eval("(fold--resync)").unwrap();
+        assert_eq!(v(&e, "(car (fold--folded-get))"), "1");
+    }
+
+    #[test]
+    fn org_roam_commands_callable_without_args() {
+        let e = engine_at("*scratch*", "", "", 0, 0);
+        e.eval("(org-roam-set-directory)").unwrap();
+        assert_eq!(
+            v(&e, r#"(key-binding "org-roam-backlinks-mode" "g")"#),
+            r#""org-roam-backlinks-refresh""#
+        );
+    }
+
+    #[test]
+    fn themes_define_module_faces() {
+        for theme in ["macros-dark", "macros-light"] {
+            let e = engine_at("a", "", "", 0, 0);
+            let cmds = e
+                .eval(crate::runtime::theme_script(theme).unwrap())
+                .unwrap()
+                .commands;
+            for face in [
+                "org-level-1",
+                "org-todo",
+                "org-link",
+                "tabulated-header",
+                "projectile-modeline",
+            ] {
+                assert!(
+                    cmds.iter()
+                        .any(|c| matches!(c, EditorCommand::SetFace(f, _) if f == face)),
+                    "{theme} missing {face}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod audit_fixes {
+    use super::*;
+
+    #[test]
+    fn directory_of_bare_name_is_current_dir() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        assert_eq!(val(r#"(directory-of "foo.txt")"#), "\"./\"");
+        assert_eq!(val(r#"(directory-of "/a/b.txt")"#), "\"/a/\"");
+        assert_eq!(val(r#"(directory-of "/a/")"#), "\"/a/\"");
+    }
+
+    /// Large stdin + large stdout must not deadlock (stdin is written on its
+    /// own thread while output is drained).
+    #[cfg(unix)]
+    #[test]
+    fn call_process_full_streams_large_input_and_output() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        engine
+            .eval(r#"(define r (call-process-full "cat" '() (make-string 300000 #\a)))"#)
+            .unwrap();
+        assert_eq!(val("(car r)"), "\"0\"");
+        assert_eq!(val("(string-length (cadr r))"), "300000");
+    }
+
+    #[test]
+    fn re_search_forward_keeps_context_before_point() {
+        let text = "foo bar\nbaz";
+        // `^` at point (mid-line) must not match: the line starts earlier.
+        assert_eq!(re_search_forward_in(text, 4, "^b"), Some((8, 9)));
+        // `\b` sees the character before point.
+        assert_eq!(re_search_forward_in(text, 5, r"\bar"), None);
+        assert_eq!(re_search_forward_in(text, 0, r"ba."), Some((4, 7)));
+        assert_eq!(re_search_forward_in(text, 0, "("), None);
+        assert_eq!(re_search_forward_in(text, 99, "a"), None);
+    }
+
+    #[test]
+    fn resolv_conf_lists_every_parseable_nameserver() {
+        let conf = "# c\nnameserver 2001:4860:4860::8888\nnameserver fe80::1%en0\n\
+                    nameserver 1.1.1.1 # trailing\nsearch lan\n";
+        let ns = parse_resolv_conf_nameservers(conf);
+        assert_eq!(
+            ns,
+            vec![
+                "2001:4860:4860::8888".parse::<std::net::IpAddr>().unwrap(),
+                "1.1.1.1".parse().unwrap(),
+            ]
+        );
+    }
+
+    /// A read timeout mid-line/mid-length keeps the bytes already received;
+    /// the next receive returns them with the rest.
+    #[test]
+    fn socket_recv_timeout_keeps_partial_data() {
+        let (engine, _rx) = ScriptEngine::new();
+        let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
+        engine
+            .eval(r#"(define srv (tcp-listen "127.0.0.1" 0))"#)
+            .unwrap();
+        let port: u16 = val("(tcp-listener-port srv)").parse().unwrap();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.write_all(b"hel").unwrap();
+            go_rx.recv().unwrap();
+            c.write_all(b"lo\nAB").unwrap();
+            go_rx.recv().unwrap();
+            c.write_all(b"CD").unwrap();
+            go_rx.recv().unwrap();
+        });
+        engine.eval("(define conn (tcp-accept srv))").unwrap();
+        assert!(val("(socket-set-timeout conn 200)").contains("#t"));
+        assert_eq!(val("(socket-recv-line conn)"), "\"\"");
+        go_tx.send(()).unwrap();
+        assert_eq!(val("(socket-recv-line conn)"), "\"hello\\n\"");
+        // "AB" arrived; asking for 4 times out, then completes with "CD".
+        assert_eq!(val("(socket-recv-bytes conn 4)"), "\"\"");
+        go_tx.send(()).unwrap();
+        assert_eq!(val("(socket-recv-bytes conn 4)"), "\"ABCD\"");
+        go_tx.send(()).unwrap();
+        client.join().unwrap();
+        assert!(val("(socket-close conn)").contains("#t"));
+        assert!(val("(tcp-listener-close srv)").contains("#t"));
     }
 }

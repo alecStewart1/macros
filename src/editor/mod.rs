@@ -117,10 +117,13 @@ fn new_undo_tree() -> Vec<UndoNode> {
 }
 
 /// An action deferred until the user confirms it in a yes/no minibuffer.
-#[derive(Clone, Copy)]
+/// The kill variants carry the buffer's name: the prompt is asynchronous, so
+/// the active buffer may change (e.g. process output activating another
+/// buffer) before the user answers.
+#[derive(Clone)]
 enum PendingAction {
-    KillActiveBuffer,
-    KillBufferAndWindow,
+    KillBuffer(String),
+    KillBufferAndWindow(String),
 }
 
 /// What a minibuffer read is for, deciding completion candidates and what
@@ -466,11 +469,17 @@ pub struct Editor {
     kill_index: usize,
     last_yank: Option<Range<usize>>,
     last_was_yank: bool,
-    /// While true, edits append to the current undo group (so a multi-edit Scheme
-    /// command undoes as one unit); otherwise each edit is its own group.
-    undo_grouping: bool,
+    /// Nesting depth of open undo groups. While > 0, edits append to the current
+    /// undo group (so a multi-edit Scheme command undoes as one unit); otherwise
+    /// each edit is its own group. Counted, so a nested begin/end (a `C-u N`
+    /// repeat or `:s` inside a Scheme batch) merges into the outer group.
+    undo_group_depth: usize,
     /// Whether the current group has received an edit yet (lazily created).
     undo_group_started: bool,
+    /// The buffer the open group's node lives in. An edit in another buffer
+    /// (the batch switched buffers) starts its own node there instead of
+    /// appending to whatever that buffer's current node happens to be.
+    undo_group_buffer: String,
 
     /// Keys accumulated in an in-progress prefix sequence (e.g. after `C-x`).
     pending_keys: Vec<String>,
@@ -560,6 +569,9 @@ pub struct Editor {
     xref_marker_stack: Vec<(Option<PathBuf>, usize)>,
     /// Code actions backing the rows of the current `*lsp-actions*` buffer.
     code_actions: Vec<lsp::CodeAction>,
+    /// The buffer `code_actions` were requested in — where applying one must
+    /// return to before editing.
+    code_actions_source: Option<String>,
     /// Languages whose buffers are LSP-formatted on save (set via the Scheme
     /// `lsp-language` config / `(set-lsp-format-on-save …)`).
     lsp_format_on_save: HashSet<String>,
@@ -582,6 +594,9 @@ pub struct Editor {
     /// An auto-triggered completion request is in flight (suppresses duplicate
     /// requests and the "no completions" echo while typing).
     completion_auto_pending: bool,
+    /// Buffer state the in-flight async completion request was made against
+    /// (see [`completion::CompletionStamp`]); a stale reply is dropped.
+    completion_stamp: Option<completion::CompletionStamp>,
     /// The active Helm selection session, if any.
     helm: Option<HelmSession>,
     /// Monotonic id for dynamic-candidate queries (stale results are dropped).
@@ -1338,8 +1353,9 @@ impl Editor {
             kill_index: 0,
             last_yank: None,
             last_was_yank: false,
-            undo_grouping: false,
+            undo_group_depth: 0,
             undo_group_started: false,
+            undo_group_buffer: String::new(),
             pending_keys: Vec::new(),
             minibuffer: None,
             completing_candidates: Vec::new(),
@@ -1377,6 +1393,7 @@ impl Editor {
             xref_targets: Vec::new(),
             xref_marker_stack: Vec::new(),
             code_actions: Vec::new(),
+            code_actions_source: None,
             lsp_format_on_save: HashSet::new(),
             formatting_for_save: HashMap::new(),
             format_save_seq: 0,
@@ -1385,6 +1402,7 @@ impl Editor {
             completion_range: None,
             completion_popup: None,
             completion_auto_pending: false,
+            completion_stamp: None,
             helm: None,
             helm_query_counter: 0,
             helm_action_context: None,
@@ -1565,10 +1583,11 @@ impl Editor {
                 self.script_batch_stale = false;
                 // Repetition 2..N of a counted command: its kills extend the
                 // first run's kill-ring entry (see `dispatch_counted`).
-                self.kill_append = self.count_repeat.as_ref().is_some_and(|r| r.done > 0)
-                    && commands
-                        .iter()
-                        .any(|c| matches!(c, EditorCommand::CountRepeatStep));
+                let has_step = commands
+                    .iter()
+                    .any(|c| matches!(c, EditorCommand::CountRepeatStep));
+                self.kill_append =
+                    self.count_repeat.as_ref().is_some_and(|r| r.done > 0) && has_step;
                 for command in commands {
                     if self.script_batch_stale {
                         break;
@@ -1583,6 +1602,16 @@ impl Editor {
                 // sidebar buffer for this batch; that scope ends here.
                 self.render_redirect = None;
                 self.end_undo_group();
+                // A chained counted run (`3x` on a Scheme command) that errored
+                // never reached its `(count-repeat-step)`: end the chain here,
+                // squashing the runs that did apply, or `count_repeat` stays set
+                // (corrupting later kills) and the undo steps stay split.
+                if !has_step
+                    && message.as_deref().is_some_and(|m| m.starts_with("error: "))
+                    && let Some(r) = self.count_repeat.take()
+                {
+                    self.squash_undo_since(&r.undo_base);
+                }
                 if let Some(message) = message {
                     self.echo(message, cx);
                 }
@@ -1643,8 +1672,9 @@ impl Editor {
             // Empty means no live binding matches; show "No completions" rather
             // than falling through to LSP (the REPL has no language server).
             AnvilOutcome::Completions { start, end, items } => {
-                let len = self.active.buffer.len();
-                let range = start.min(len)..end.min(len);
+                let Some(range) = self.completion_reply_range(start, end) else {
+                    return; // the buffer changed under the request
+                };
                 let items = items
                     .into_iter()
                     .map(|label| CompletionItem {
@@ -2116,7 +2146,8 @@ impl Editor {
         // Append to the open group when grouping (one Scheme command = one undo);
         // otherwise start a NEW node branching off the current one — undoing then
         // editing keeps the old branch as a sibling (undo tree, not a stack).
-        if self.undo_grouping && self.undo_group_started {
+        let grouping = self.undo_group_depth > 0;
+        if grouping && self.undo_group_started && self.undo_group_buffer == self.active.name {
             self.active.undo_tree[self.active.undo_current]
                 .edit
                 .push(record);
@@ -2130,7 +2161,10 @@ impl Editor {
             });
             self.active.undo_tree[parent].children.push(new_idx);
             self.active.undo_current = new_idx;
-            self.undo_group_started = self.undo_grouping;
+            self.undo_group_started = grouping;
+            if grouping && self.undo_group_buffer != self.active.name {
+                self.undo_group_buffer.clone_from(&self.active.name);
+            }
         }
 
         // Capture pre-edit byte/point positions while the old text still exists.
@@ -2172,7 +2206,10 @@ impl Editor {
         // …and the Vim marks / jump list, then the change marks `[ ] .`.
         self.shift_vim_positions(range_start, range_end, new_text.len());
         self.set_auto_mark('[', range_start);
-        self.set_auto_mark(']', range_start + new_text.len().saturating_sub(1));
+        // `]` sits ON the last inserted char — its start byte, never mid-codepoint
+        // (`len - 1` would land inside a multibyte char like `é`).
+        let last_char = new_text.char_indices().next_back().map_or(0, |(i, _)| i);
+        self.set_auto_mark(']', range_start + last_char);
         self.set_auto_mark('.', range_start);
         // Shift byte-range overlays the same way so they stay aligned until the
         // debounced re-fontify runs — otherwise hidden ranges / faces below the
@@ -2270,8 +2307,13 @@ impl Editor {
                 .next()
                 .is_some_and(|n| n.is_alphanumeric() || n == '_');
             if !next_is_word {
+                let before = self.active.buffer.len();
                 let cursor = self.edit(at..at, &format!("{ch}{close}"));
-                self.collapse_to(cursor - close.len());
+                // A refused edit (read-only text) returns point unchanged — only
+                // step back between the pair when it was actually inserted.
+                if self.active.buffer.len() != before {
+                    self.collapse_to(cursor - close.len());
+                }
                 self.ensure_cursor_visible();
                 cx.notify();
                 return true;
@@ -3086,7 +3128,9 @@ impl Editor {
         }
         self.recenter_point = point;
 
-        let line = self.active.buffer.line_index_at_byte(point) as f32;
+        // Scroll space is display rows (folds collapsed, image/scaled rows
+        // counted), as in `ensure_cursor_visible` — not buffer line indices.
+        let line = self.display_row_of_line(self.active.buffer.line_index_at_byte(point)) as f32;
         let top = line * lh; // point's line flush with the window top
         let desired = match self.recenter_cycle {
             0 => top - vh / 2.0 + lh / 2.0, // middle
@@ -3194,10 +3238,20 @@ impl Editor {
             // Bound growth (only while not being viewed): keep the last N lines.
             let lines = doc.buffer.line_count();
             if lines > LOG_BUFFER_LINES_CAP {
-                let cut = doc.buffer.line_range(lines - LOG_BUFFER_LINES_CAP).start;
+                let dropped = lines - LOG_BUFFER_LINES_CAP;
+                let cut = doc.buffer.line_range(dropped).start;
                 doc.buffer.replace(0..cut, "");
                 doc.reset_undo(); // unrecorded edit: old records are stale
-                doc.selected_range = doc.buffer.clamp_range(doc.selected_range.clone());
+                // Shift point/mark back with the text they sat on (a position
+                // inside the dropped head pins to the new start), and the view
+                // up by the dropped rows so it keeps showing the same lines.
+                let r = doc.selected_range.clone();
+                doc.selected_range = doc
+                    .buffer
+                    .clamp_range(r.start.saturating_sub(cut)..r.end.saturating_sub(cut));
+                let lh = f32::from(self.line_height);
+                let scroll = f32::from(doc.scroll_offset) - dropped as f32 * lh;
+                doc.scroll_offset = px(scroll.max(0.0));
             }
         } else {
             self.inactive
@@ -3521,7 +3575,9 @@ impl Editor {
     /// command arm must resolve its stores through this, so a redirected batch
     /// can never write into the wrong buffer.
     fn redirect_target(&mut self) -> DecorationTarget<'_> {
-        match self.render_redirect {
+        // Out-of-range (a stale redirect) falls back to the active buffer
+        // rather than panicking.
+        match self.render_redirect.filter(|&i| i < self.inactive.len()) {
             Some(i) => {
                 let doc = &mut self.inactive[i];
                 DecorationTarget {
@@ -4063,6 +4119,7 @@ impl Editor {
             let point = self.point();
             let start = self.active.buffer.backward_symbol(point);
             let prefix = self.active.buffer.slice_to_string(start..point);
+            self.stamp_completion_request();
             self.anvil.complete(&prefix, start, point);
             return;
         }
@@ -4072,6 +4129,7 @@ impl Editor {
             let start = self.active.buffer.word_start(point);
             let prefix = self.active.buffer.slice_to_string(start..point);
             self.publish_point();
+            self.stamp_completion_request();
             self.script
                 .dispatch_capf(self.capf_functions.clone(), &prefix, start, point);
             return;
@@ -4112,7 +4170,9 @@ impl Editor {
         } else {
             false
         };
-        if !sent {
+        if sent {
+            self.stamp_completion_request();
+        } else {
             // Nothing will answer this round, so the auto flag must drop here or
             // auto-completion is dead for the whole session (one keystroke in a
             // serverless buffer whose CAPFs decline would jam it). Auto requests
@@ -4134,12 +4194,15 @@ impl Editor {
         items: Vec<(String, Option<String>)>,
         cx: &mut Context<Self>,
     ) {
+        // A reply computed against since-changed text (or another buffer) is
+        // dropped outright — its range addresses bytes that no longer exist.
+        let Some(range) = self.completion_reply_range(start, end) else {
+            return;
+        };
         if items.is_empty() {
             self.completion_at_point_lsp(cx);
             return;
         }
-        let len = self.active.buffer.len();
-        let range = start.min(len)..end.min(len);
         let items = items
             .into_iter()
             .map(|(label, annotation)| CompletionItem {

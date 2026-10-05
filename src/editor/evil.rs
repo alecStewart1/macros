@@ -252,6 +252,24 @@ impl Editor {
         self.evil_insert_state(cx);
     }
 
+    /// File a block's text like any yank/delete: the pending register (`"a`),
+    /// the kill ring and the system clipboard — or nowhere for `"_`.
+    fn save_block_kill(
+        &mut self,
+        kind: super::registers::KillKind,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let reg = self.take_kill_register();
+        if reg == Some('_') {
+            return;
+        }
+        self.set_clipboard(&text, cx);
+        self.note_register_kill(kind, reg, &text);
+        self.push_kill(text);
+        self.evil_yank_linewise = false;
+    }
+
     /// Block `d`/`x`: delete the rectangle (columns `[left, right]` on every row),
     /// copy it to the kill ring + system clipboard, and return to Normal with the
     /// cursor at the block's top-left.
@@ -260,10 +278,7 @@ impl Editor {
             return;
         };
         let killed = self.block_text(top, bottom, left, right);
-        self.set_clipboard(&killed, cx);
-        let reg = self.take_kill_register();
-        self.note_register_kill(super::registers::KillKind::Delete, reg, &killed);
-        self.push_kill(killed);
+        self.save_block_kill(super::registers::KillKind::Delete, killed, cx);
         // Delete bottom-up so earlier edits don't shift later rows' offsets.
         self.begin_undo_group();
         for row in (top..=bottom).rev() {
@@ -279,7 +294,6 @@ impl Editor {
         let top_line = self.active.buffer.line_range(top);
         let line = self.active.buffer.slice_to_string(top_line.clone());
         let cursor = top_line.start + char_col_byte(&line, left);
-        self.evil_yank_linewise = false;
         self.collapse_to(cursor);
         self.evil_normal_state(cx);
     }
@@ -293,8 +307,7 @@ impl Editor {
             return;
         };
         let killed = self.block_text(top, bottom, left, right);
-        self.set_clipboard(&killed, cx);
-        self.push_kill(killed);
+        self.save_block_kill(super::registers::KillKind::Delete, killed, cx);
         self.begin_undo_group();
         for row in (top..=bottom).rev() {
             let lr = self.active.buffer.line_range(row);
@@ -306,7 +319,6 @@ impl Editor {
             }
         }
         self.end_undo_group();
-        self.evil_yank_linewise = false;
         // Cursors are computed AFTER the deletes, so each row's left column is
         // its post-delete position.
         let mut positions = Vec::new();
@@ -331,11 +343,7 @@ impl Editor {
             return;
         };
         let text = self.block_text(top, bottom, left, right);
-        self.set_clipboard(&text, cx);
-        let reg = self.take_kill_register();
-        self.note_register_kill(super::registers::KillKind::Yank, reg, &text);
-        self.push_kill(text);
-        self.evil_yank_linewise = false;
+        self.save_block_kill(super::registers::KillKind::Yank, text, cx);
         let top_line = self.active.buffer.line_range(top);
         let line = self.active.buffer.slice_to_string(top_line.clone());
         let cursor = top_line.start + char_col_byte(&line, left);
@@ -621,7 +629,8 @@ impl Editor {
         let Some(query) = self.search_query.clone() else {
             return;
         };
-        let regex = match Regex::new(&query) {
+        // Vim atoms (`\c`, `\<`) a `/` query may carry; plain regex passes through.
+        let regex = match Regex::new(&super::ex::vim_pattern(&query, false)) {
             Ok(r) => r,
             Err(err) => {
                 self.echo(format!("Invalid regex: {err}"), cx);

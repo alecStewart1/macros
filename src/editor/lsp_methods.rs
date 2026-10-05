@@ -336,6 +336,11 @@ impl Editor {
                     _ => None,
                 });
         if let Some((_, range)) = completion {
+            // Typing (or a buffer switch) since the request makes the reply's
+            // range stale; drop it rather than slice text that moved.
+            let Some(range) = self.completion_reply_range(range.start, range.end) else {
+                return;
+            };
             let items = lsp::parse_completion(&message["result"]);
             self.show_completion(items, range, cx);
             return;
@@ -1747,7 +1752,16 @@ impl Editor {
         for (uri, edits) in &edit.changes {
             let path = PathBuf::from(lsp::uri_to_path(uri));
             total += edits.len();
-            if self.active.path.as_deref() == Some(path.as_path()) {
+            // Match open buffers by canonical identity (as `find_file` does): a
+            // buffer opened via a symlink / relative path / `/tmp` alias must be
+            // edited in place, not bypassed by a disk write it would then clobber.
+            let identity = super::buffers::file_identity(&path);
+            let visits = |d: &Document| {
+                d.path
+                    .as_deref()
+                    .is_some_and(|p| super::buffers::file_identity(p) == identity)
+            };
+            if visits(&self.active) {
                 // Active buffer: edit in place so it's undoable + reparsed.
                 let current = self.active.buffer.full_text();
                 let updated = lsp::apply_edits_to_text(&current, edits);
@@ -1755,11 +1769,7 @@ impl Editor {
                     let point = self.point();
                     self.replace_whole_buffer(&updated, point, cx);
                 }
-            } else if let Some(idx) = self
-                .inactive
-                .iter()
-                .position(|d| d.path.as_deref() == Some(path.as_path()))
-            {
+            } else if let Some(idx) = self.inactive.iter().position(visits) {
                 // Open but not active: rewrite its buffer (undoably, and synced
                 // to its servers — they'd otherwise keep the pre-edit text) and
                 // persist to disk.
@@ -1768,6 +1778,9 @@ impl Editor {
                 if updated != current {
                     self.replace_inactive_text(idx, &updated);
                 }
+                // Write/re-watch via the buffer's own spelling of the path — the
+                // file watch is keyed by it.
+                let path = self.inactive[idx].path.clone().unwrap_or(path);
                 match crate::save::write_now(&path, updated.as_bytes()) {
                     // Only a successful write makes the buffer clean; on failure
                     // it keeps its (edited) unsaved state so nothing is lost.
@@ -1832,6 +1845,7 @@ impl Editor {
         // Kept in sync for the buffer-based RET path (`lsp-apply-code-action`),
         // which some keymaps may still reach.
         self.code_actions = actions.clone();
+        self.code_actions_source = Some(self.active.name.clone());
         let source = HelmSource {
             name: format!("Code actions ({})", actions.len()),
             candidates,
@@ -1886,9 +1900,16 @@ impl Editor {
             return;
         };
         // Return to the source buffer before applying, so edits land there (the
-        // `*lsp-actions*` buffer is active when this runs).
-        if let Some(idx) = self.inactive.iter().position(|d| d.special.is_none()) {
-            self.activate(idx, true, cx);
+        // `*lsp-actions*` buffer is active when this runs): the one the actions
+        // were requested in, else the most recently used file buffer.
+        let source = self.code_actions_source.clone();
+        if source.as_deref() != Some(self.active.name.as_str()) {
+            let idx = source
+                .and_then(|name| self.inactive.iter().position(|d| d.name == name))
+                .or_else(|| self.inactive.iter().rposition(|d| d.special.is_none()));
+            if let Some(idx) = idx {
+                self.activate(idx, true, cx);
+            }
         }
         self.apply_code_action(action, cx);
     }

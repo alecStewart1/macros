@@ -46,12 +46,20 @@
 ;; e.g. with the input sitting at /a/b/c/, typing "~/" jumps home and "//" jumps
 ;; to root.
 (define (path-contains? s sub) (> (length (split-many s sub)) 1))
+;; The path segments after the LAST segment that is exactly "~" (a "~" at the
+;; start or right after a "/"), or #f when there is none — so "foo~bar" and
+;; "backup.txt~" are left alone.
+(define (tilde-tail segs)
+  (let loop ((ss segs) (found #f))
+    (cond ((null? ss) found)
+          ((equal? (car ss) "~") (loop (cdr ss) (cdr ss)))
+          (else (loop (cdr ss) found)))))
 (define (expand-file-name path)
-  (let ((home (getenv "HOME")))
+  (let ((home (getenv "HOME"))
+        (tail (tilde-tail (split-many path "/"))))
     (cond
-      ((path-contains? path "~")
-       (let ((tail (last (split-many path "~"))))
-         (string-append home (if (equal? tail "") "/" tail))))
+      (tail
+       (string-append home "/" (string-join tail "/")))
       ((path-contains? path "//")
        (string-append "/" (last (split-many path "//"))))
       (else path))))
@@ -103,14 +111,15 @@
 ;;   (helm (list (list "People" (list "ada" "alan" "grace") "open-greeting"))))
 
 ;; --- helm-recentf: recently visited files -----------------------------------
-;; find-file-hook fires after the new buffer is active, so (current-buffer) is
-;; the path it was opened with. Keep real files (skip *scratch*, *magit*, …).
+;; find-file-hook fires after the new buffer is active, so (buffer-file-name) is
+;; the path it visits ((current-buffer) is only the uniquified basename). Keep
+;; real files (skip *scratch*, *magit*, …).
 (define *recentf* '())
 (define *recentf-max* 50)
 (define (helm-take lst n)
   (if (or (= n 0) (null? lst)) '() (cons (car lst) (helm-take (cdr lst) (- n 1)))))
 (define (recentf-track)
-  (let ((f (current-buffer)))
+  (let ((f (buffer-file-name)))
     (when (and (not (equal? f "")) (file-exists? f))
       (set! *recentf*
             (helm-take (cons f (filter (lambda (x) (not (equal? x f))) *recentf*))

@@ -39,15 +39,18 @@
 
 ;; find-file-hook: jump to the remembered position for this file (clamped to the
 ;; current buffer length, in case the file shrank since last visit).
+;; Keyed on the visited file's real path — the buffer name is only a basename
+;; (possibly uniquified `name<dir>`), which collides across directories and
+;; makes file-exists? resolve against the process cwd.
 (define (saveplace-restore)
-  (let* ((f (current-buffer))
+  (let* ((f (buffer-file-name))
          (pos (alist-ref *saveplace* f)))
     (when (and pos (file-exists? f))
       (goto-char (min pos (point-max))))))
 
 ;; Record point for the current file (run before each save).
 (define (saveplace-remember)
-  (let ((f (current-buffer)))
+  (let ((f (buffer-file-name)))
     (when (and (not (equal? f "")) (file-exists? f))
       (saveplace-set! f (point)))))
 

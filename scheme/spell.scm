@@ -70,7 +70,7 @@
 ;; --- backend probe --------------------------------------------------------------
 (define (spell--pipe-program-exists?)
   (> (string-length
-      (call-process "sh" (list "-c" (string-append "command -v " *spell-program*))))
+      (call-process "sh" (list "-c" (string-append "command -v " (shell-quote *spell-program*)))))
      0))
 
 (define (spell--resolve-backend)
@@ -310,7 +310,7 @@
 
 (define (spell--maybe-auto-enable)
   (when (and (not (null? *spell-auto-exts*)) (not (spell--on?)))
-    (let ((b (current-buffer)))
+    (let ((b (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f))))
       (when (let loop ((es *spell-auto-exts*))
               (cond ((null? es) #f)
                     ((ends-with? b (car es)) #t)

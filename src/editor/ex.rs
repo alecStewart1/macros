@@ -529,6 +529,33 @@ impl Editor {
         a..b
     }
 
+    /// The buffer's line break: `\r\n` when its first line ends in one.
+    fn ex_eol(&self) -> &'static str {
+        let end = self.active.buffer.line_range(0).end;
+        let len = self.active.buffer.len();
+        if end < len && self.active.buffer.slice_to_string(end..end + 1) == "\r" {
+            "\r\n"
+        } else {
+            "\n"
+        }
+    }
+
+    /// Byte span removing lines `s..=e` whole, line break included (CRLF
+    /// aware): the break after them, or — on the buffer's last line — the
+    /// break before them.
+    fn ex_line_block_span(&self, s: i64, e: i64) -> Range<usize> {
+        let buf = &self.active.buffer;
+        let a = buf.line_range((s - 1) as usize).start;
+        let le = buf.line_range((e - 1) as usize).end;
+        if (e as usize) < buf.line_count() {
+            a..buf.line_range(e as usize).start
+        } else if s > 1 {
+            buf.line_range((s - 2) as usize).end..le
+        } else {
+            a..le
+        }
+    }
+
     /// Resolve one address to a 1-based line (not range-checked).
     fn ex_resolve_addr(&self, a: &Addr, cur: i64) -> Result<i64, String> {
         let base = match &a.base {
@@ -586,6 +613,17 @@ impl Editor {
         range: &Option<ExRange>,
         default: (i64, i64),
     ) -> Result<(i64, i64), String> {
+        let (s, e) = self.ex_resolve_range0(range, default)?;
+        Ok((s.max(1), e.max(1)))
+    }
+
+    /// [`Self::ex_resolve_range`] keeping a line 0 (`:0put`: above the first
+    /// line).
+    fn ex_resolve_range0(
+        &self,
+        range: &Option<ExRange>,
+        default: (i64, i64),
+    ) -> Result<(i64, i64), String> {
         let cur = self.ex_cur_line();
         let last = self.ex_last_line();
         let (s, e) = match range {
@@ -605,7 +643,7 @@ impl Editor {
         if s < 0 || e > last {
             return Err("E16: Invalid range".into());
         }
-        Ok((s.max(1), e.max(1)))
+        Ok((s, e))
     }
 
     /// Run an ex line that has a range or names one of the line commands.
@@ -698,16 +736,7 @@ impl Editor {
     /// kill ring / registers as a linewise delete; on the buffer's last line the
     /// newline before goes instead.
     fn ex_delete_lines(&mut self, s: i64, e: i64, reg: Option<char>, cx: &mut Context<Self>) {
-        let len = self.active.buffer.len();
-        let a = self.active.buffer.line_range((s - 1) as usize).start;
-        let le = self.active.buffer.line_range((e - 1) as usize).end;
-        let (start, end) = if le < len {
-            (a, le + 1)
-        } else if a > 0 {
-            (a - 1, le)
-        } else {
-            (a, le)
-        };
+        let span = self.ex_line_block_span(s, e);
         let mut text = self.ex_lines(s, e).join("\n");
         text.push('\n');
         if reg != Some('_') {
@@ -717,7 +746,7 @@ impl Editor {
             self.evil_yank_linewise = true;
             self.vim.registers.set_linewise_last(true);
         }
-        self.edit(start..end, "");
+        self.edit(span, "");
         let line = (s - 1).min(self.ex_last_line() - 1).max(0) as usize;
         let pos = self.active.buffer.line_range(line).start;
         self.collapse_to(self.first_non_blank(pos));
@@ -759,15 +788,19 @@ impl Editor {
         }
         let block = self.ex_lines(s, e);
         let n = e - s + 1;
-        if !mv {
-            // Copy: insert after line t.
-            let text = block.join("\n");
+        let eol = self.ex_eol();
+        let text = block.join(eol);
+        // Insert the block after line `t` (0 = above the first line).
+        let insert_after = |ed: &mut Self, t: i64| {
             if t == 0 {
-                self.edit(0..0, &format!("{text}\n"));
+                ed.edit(0..0, &format!("{text}{eol}"));
             } else {
-                let at = self.active.buffer.line_range((t - 1) as usize).end;
-                self.edit(at..at, &format!("\n{text}"));
+                let at = ed.active.buffer.line_range((t - 1) as usize).end;
+                ed.edit(at..at, &format!("{eol}{text}"));
             }
+        };
+        if !mv {
+            insert_after(self, t);
             let last = t + n;
             let pos = self.active.buffer.line_range((last - 1) as usize).start;
             self.collapse_to(self.first_non_blank(pos));
@@ -779,18 +812,27 @@ impl Editor {
         if t == e || t == s - 1 {
             return Ok(()); // already there
         }
-        // Rewrite the span covering the block and the target as one edit.
-        let (lo, hi, new_lines, last) = if t > e {
-            let mut v = self.ex_lines(e + 1, t);
-            v.extend(block);
-            (s, t, v, t)
+        // A delete plus an insert, not one rewrite of the whole span: lines
+        // in between keep their marks and `:g` anchors, and the moved lines
+        // take their marks along.
+        let block_start = self.active.buffer.line_range((s - 1) as usize).start;
+        let block_end = self.active.buffer.line_range((e - 1) as usize).end;
+        let moved = self.take_vim_positions(block_start..block_end + 1);
+        self.begin_undo_group();
+        let last = if t > e {
+            insert_after(self, t);
+            let span = self.ex_line_block_span(s, e);
+            self.edit(span, "");
+            t
         } else {
-            let mut v = block;
-            v.extend(self.ex_lines(t + 1, s - 1));
-            (t + 1, e, v, t + n)
+            let span = self.ex_line_block_span(s, e);
+            self.edit(span, "");
+            insert_after(self, t);
+            t + n
         };
-        let span = self.ex_text_span(lo, hi);
-        self.edit(span, &new_lines.join("\n"));
+        self.end_undo_group();
+        let first = self.active.buffer.line_range((last - n) as usize).start;
+        self.restore_vim_positions(moved, first);
         let pos = self.active.buffer.line_range((last - 1) as usize).start;
         self.collapse_to(self.first_non_blank(pos));
         Ok(())
@@ -849,18 +891,25 @@ impl Editor {
     /// (`!`: above) the line.
     fn ex_put(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), String> {
         let cur = self.ex_cur_line();
-        let (_, l) = self.ex_resolve_range(&line.range, (cur, cur))?;
+        let (_, l) = self.ex_resolve_range0(&line.range, (cur, cur))?;
         let reg = line.arg.trim().chars().next().unwrap_or('"');
         let v = self
             .evil_register_value(reg, cx)
             .ok_or_else(|| format!("E353: Nothing in register {reg}"))?;
-        let text = v.text.strip_suffix('\n').unwrap_or(&v.text).to_string();
+        let text = v.text.strip_suffix('\n').unwrap_or(&v.text);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let eol = self.ex_eol();
+        let text = if eol == "\n" {
+            text.to_string()
+        } else {
+            text.replace("\r\n", "\n").replace('\n', eol)
+        };
         let (at, ins, first) = if line.bang || l == 0 {
             let at = self.active.buffer.line_range((l.max(1) - 1) as usize).start;
-            (at, format!("{text}\n"), l.max(1))
+            (at, format!("{text}{eol}"), l.max(1))
         } else {
             let at = self.active.buffer.line_range((l - 1) as usize).end;
-            (at, format!("\n{text}"), l + 1)
+            (at, format!("{eol}{text}"), l + 1)
         };
         self.edit(at..at, &ins);
         let pos = self.active.buffer.line_range((first - 1) as usize).start;
@@ -902,7 +951,9 @@ impl Editor {
             replacement: spec.replacement.clone(),
             flags: spec.flags.replace('&', ""),
         });
-        self.search_query = Some(spec.pattern.clone());
+        // `n` and the search highlight compile it as a plain regex: store the
+        // converted pattern (`\c` / `\<` resolved).
+        self.search_query = Some(vim_pattern(&spec.pattern, false));
         self.ex_substitute_range(s, e, &spec, cx)
     }
 
@@ -1124,7 +1175,7 @@ impl Editor {
         };
         let re =
             Regex::new(&vim_pattern(&pat, false)).map_err(|err| format!("Invalid regex: {err}"))?;
-        self.search_query = Some(pat);
+        self.search_query = Some(vim_pattern(&pat, false));
         let cmd = if cmd.trim().is_empty() {
             "p".to_string()
         } else {

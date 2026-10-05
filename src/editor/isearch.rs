@@ -103,10 +103,13 @@ impl Editor {
             }
         } else if let Some(m) = st.matched.clone() {
             // Step off the current match so the next hit is a different one.
+            // Backward from a match at byte 0 there's nothing before it: wrap
+            // to the end so the search lands on the LAST match (saturating to
+            // 0 would just find the same match again).
             st.from = if forward {
                 m.start + 1
             } else {
-                m.start.saturating_sub(1)
+                m.start.checked_sub(1).unwrap_or(usize::MAX)
             };
         }
         let from = self.isearch.as_ref().map_or(0, |st| st.from);

@@ -105,6 +105,39 @@
 (set-face "magit-gutter-modified" "#c7a23a") ; git-gutter modified bar
 (set-face "magit-gutter-removed" "#c1574b")  ; git-gutter deletion mark
 
+;; Org / tabulated / projectile. Each module sets these same defaults at load
+;; time, but `load-theme` wipes every face first, so they must live here too or
+;; they vanish on a runtime theme switch.
+(set-face "org-level-1" "#8ec07c")
+(set-face "org-level-2" "#83a598")
+(set-face "org-level-3" "#d3869b")
+(set-face "org-level-4" "#fabd2f")
+(set-face "org-level-5" "#fe8019")
+(set-face "org-level-6" "#b8bb26")
+(set-face "org-level-7" "#fb4934")
+(set-face "org-level-8" "#458588")
+(set-face "org-todo" "#fb4934")
+(set-face "org-done" "#8ec07c")
+(set-face "org-tag" "#83a598")
+(set-face "org-priority" "#d3869b")
+(set-face "org-meta" "#928374")
+(set-face "org-drawer" "#665c54")
+(set-face "org-block" "#bdae93")
+(set-face "org-table" "#83a598")
+(set-face "org-link" "#458588")
+(set-face "org-date" "#b16286")
+(set-face "org-bold" "#ebdbb2")
+(set-face "org-italic" "#d5c4a1")
+(set-face "org-verbatim" "#b8bb26")
+(set-face "org-code" "#b8bb26")
+(set-face "org-checkbox" "#fabd2f")
+(set-face "org-checkbox-done" "#8ec07c")
+(set-face "org-strike" "#928374")
+(set-face "org-underline" "#83a598")
+(set-face "org-footnote" "#d3869b")
+(set-face "tabulated-header" "#66d9ef")
+(set-face "projectile-modeline" "#66d9ef")
+
 ;; spell.scm — misspelled-word squiggle (wavy is an attribute, so it is
 ;; re-declared here: load-theme wipes attributes along with colors).
 (set-face "spell-error" "#f14c4c")

@@ -248,8 +248,8 @@
 (define-key "dap-ui-mode" "x" 'dap-ui-remove)
 (define-key "dap-ui-mode" "e" 'dap-eval)
 (define-key "dap-ui-mode" "w" 'dap-watch-add)
-(define-key "dap-ui-mode" "W" 'dap-watch-clear)
-(define-key "dap-ui-mode" "Q" 'dap-quit)
+(define-key "dap-ui-mode" "shift-w" 'dap-watch-clear)
+(define-key "dap-ui-mode" "shift-q" 'dap-quit)
 (define-key "dap-ui-mode" "q" 'kill-buffer)
 (define-key "dap-ui-mode" "?" 'dap-hydra)
 ;; Modal states resolve movement against their own maps first — mirror the

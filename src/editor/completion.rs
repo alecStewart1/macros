@@ -2,7 +2,49 @@
 
 use super::*;
 
+/// Which text an async completion request was computed against: the active
+/// buffer's name plus its edit tick and length at request time. A reply whose
+/// stamp no longer matches addresses text that has since changed (or another
+/// buffer), so its byte range can't be trusted.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct CompletionStamp {
+    buffer: String,
+    tick: u64,
+    len: usize,
+}
+
 impl Editor {
+    fn completion_stamp_now(&self) -> CompletionStamp {
+        CompletionStamp {
+            buffer: self.active.name.clone(),
+            tick: self.active.buffer.tick(),
+            len: self.active.buffer.len(),
+        }
+    }
+
+    /// Record the active buffer's state as an async completion request (CAPF,
+    /// LSP, ANVIL) goes out; checked by [`Self::completion_reply_range`].
+    pub(super) fn stamp_completion_request(&mut self) {
+        self.completion_stamp = Some(self.completion_stamp_now());
+    }
+
+    /// Validate an async completion reply's `start..end`: `None` (and the
+    /// auto-trigger flag released, so auto-completion re-arms) when the buffer
+    /// switched or changed since the request; otherwise the range clamped and
+    /// snapped to char boundaries, so slicing it can never panic.
+    pub(super) fn completion_reply_range(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Option<Range<usize>> {
+        let fresh = self.completion_stamp.take() == Some(self.completion_stamp_now());
+        if !fresh {
+            self.completion_auto_pending = false;
+            return None;
+        }
+        Some(self.active.buffer.clamp_range(start..end))
+    }
+
     /// The candidate set filtered by the live prefix `buffer[anchor..point]`.
     /// Point BEFORE the anchor means the completed word is gone (deleted via a
     /// path that never refiltered — evil `C-w`, a Scheme edit): nothing matches,

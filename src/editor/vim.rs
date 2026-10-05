@@ -111,6 +111,44 @@ pub(super) struct GlobalMark {
     pub pos: usize,
 }
 
+/// Outcome of showing the buffer a mark / jump points into.
+enum Target {
+    /// It is the active buffer now.
+    Here,
+    /// Its file is still opening; the position is applied when it opens.
+    Deferred,
+    /// No such buffer, and no file to revisit.
+    Gone,
+}
+
+/// 0-based line and byte column of byte `pos` in `text` (clamped), or of
+/// that line's first non-blank when `exact` is false.
+fn line_col_at(text: &str, pos: usize, exact: bool) -> (usize, usize) {
+    let mut pos = pos.min(text.len());
+    while !text.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    let line_start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
+    let line0 = text[..line_start].matches('\n').count();
+    let col = if exact {
+        pos - line_start
+    } else {
+        text[line_start..]
+            .find(|c: char| !matches!(c, ' ' | '\t'))
+            .unwrap_or(0)
+    };
+    (line0, col)
+}
+
+/// Marks / jumps lifted out of a block of text that is being moved (offsets
+/// from the block's start; jumps by index into the jump list).
+#[derive(Default)]
+pub(super) struct MovedPositions {
+    local: Vec<(char, usize)>,
+    global: Vec<(char, usize)>,
+    jumps: Vec<(usize, usize)>,
+}
+
 /// One jump-list entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Jump {
@@ -220,6 +258,8 @@ fn is_repeat_neutral(expr: &str) -> bool {
 pub(super) fn override_count(events: &mut [MacroEvent], n: usize) {
     for ev in events.iter_mut() {
         match ev {
+            // `"a` before the change: the register prefix, not the change.
+            MacroEvent::Command(expr) if expr.trim_start().starts_with("(evil-use-register ") => {}
             MacroEvent::Command(expr) | MacroEvent::Counted(expr, _)
                 if expr.starts_with("(evil-operate ") =>
             {
@@ -565,6 +605,57 @@ impl Editor {
         }
     }
 
+    /// Marks and jump positions in the active buffer inside `range`, as
+    /// offsets from its start — so a block that is cut and re-inserted
+    /// elsewhere (`:m`) can bring them along via [`Self::restore_vim_positions`].
+    pub(super) fn take_vim_positions(&self, range: Range<usize>) -> MovedPositions {
+        let name = &self.active.name;
+        let inside = |p: usize| range.contains(&p).then(|| p - range.start);
+        let mut moved = MovedPositions::default();
+        if let Some(m) = self.vim.marks.get(name) {
+            for (&c, &p) in m {
+                if let Some(off) = inside(p) {
+                    moved.local.push((c, off));
+                }
+            }
+        }
+        for (&c, g) in &self.vim.global_marks {
+            if &g.buffer == name
+                && let Some(off) = inside(g.pos)
+            {
+                moved.global.push((c, off));
+            }
+        }
+        for (i, j) in self.vim.jumps.iter().enumerate() {
+            if &j.buffer == name
+                && let Some(off) = inside(j.pos)
+            {
+                moved.jumps.push((i, off));
+            }
+        }
+        moved
+    }
+
+    /// Put positions taken by [`Self::take_vim_positions`] back, relative to
+    /// the block's new start.
+    pub(super) fn restore_vim_positions(&mut self, moved: MovedPositions, start: usize) {
+        if let Some(m) = self.vim.marks.get_mut(&self.active.name) {
+            for (c, off) in moved.local {
+                m.insert(c, start + off);
+            }
+        }
+        for (c, off) in moved.global {
+            if let Some(g) = self.vim.global_marks.get_mut(&c) {
+                g.pos = start + off;
+            }
+        }
+        for (i, off) in moved.jumps {
+            if let Some(j) = self.vim.jumps.get_mut(i) {
+                j.pos = start + off;
+            }
+        }
+    }
+
     /// Set an automatic mark in the active buffer (no-op unless evil is on).
     pub(super) fn set_auto_mark(&mut self, c: char, pos: usize) {
         if self.evil == EvilState::Disabled || self.modal_helix {
@@ -625,31 +716,99 @@ impl Editor {
         }
     }
 
+    /// Show the buffer a jump / file mark points into: switch to it by name,
+    /// or revisit its file. A file whose read is still in flight gets
+    /// [`Target::Deferred`] — `pos` is applied once it opens; a buffer that
+    /// no longer exists (and has no file to revisit) gets [`Target::Gone`].
+    fn visit_position_buffer(
+        &mut self,
+        buffer: &str,
+        path: Option<&std::path::PathBuf>,
+        pos: usize,
+        exact: bool,
+        cx: &mut Context<Self>,
+    ) -> Target {
+        if buffer == self.active.name {
+            return Target::Here;
+        }
+        if self.inactive.iter().any(|d| d.name == buffer) {
+            self.switch_to_buffer(buffer, cx);
+            return Target::Here;
+        }
+        // A fileless buffer is identified by its name alone: it is gone.
+        let Some(path) = path else {
+            return Target::Gone;
+        };
+        // Already open under another name: find_file switches synchronously.
+        self.find_file(&path.to_string_lossy(), cx);
+        if self.active.path.as_ref() == Some(path) {
+            return Target::Here;
+        }
+        self.goto_when_visiting(path.clone(), pos, exact, cx);
+        Target::Deferred
+    }
+
+    /// Land on byte `pos` (`exact` false: that line's first non-blank) of the
+    /// file `path` once its buffer — opening asynchronously — is current,
+    /// through Scheme's `goto-when-visiting`. That takes a line and column, so
+    /// they are read off the file (off the UI thread).
+    fn goto_when_visiting(
+        &mut self,
+        path: std::path::PathBuf,
+        pos: usize,
+        exact: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let read_path = path.clone();
+        let read = cx
+            .background_executor()
+            .spawn(async move { std::fs::read_to_string(&read_path) });
+        cx.spawn(async move |this, cx| {
+            let text = read.await.unwrap_or_default();
+            let (line0, col) = line_col_at(&text, pos, exact);
+            this.update(cx, |editor, _| {
+                let expr = format!(
+                    "(goto-when-visiting \"\" {} {line0} {col})",
+                    steel_quote(&path.to_string_lossy())
+                );
+                editor.script.dispatch(&expr, false);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Where mark `c` is, switching to its buffer first for a file mark in
-    /// another buffer. `None` (with an echo) when unset.
-    fn resolve_mark(&mut self, c: char, cx: &mut Context<Self>) -> Option<usize> {
+    /// another buffer. `Err(false)` (with an echo) when unset or gone;
+    /// `Err(true)` when the mark's file is still opening (the jump then lands
+    /// once it is open).
+    fn resolve_mark(
+        &mut self,
+        c: char,
+        exact: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<usize, bool> {
         let c = if c == '`' { '\'' } else { c };
         if c.is_ascii_uppercase() {
             let Some(g) = self.vim.global_marks.get(&c).cloned() else {
                 self.echo(format!("Mark not set: {c}"), cx);
-                return None;
+                return Err(false);
             };
             if g.buffer != self.active.name {
-                if self.inactive.iter().any(|d| d.name == g.buffer) {
-                    self.switch_to_buffer(&g.buffer, cx);
-                } else if let Some(path) = &g.path {
-                    self.find_file(&path.to_string_lossy(), cx);
-                }
-                if self.active.name != g.buffer && self.active.path.as_ref() != g.path.as_ref() {
-                    self.echo(format!("Mark {c}: buffer is gone"), cx);
-                    return None;
+                match self.visit_position_buffer(&g.buffer, g.path.as_ref(), g.pos, exact, cx) {
+                    Target::Here => {}
+                    Target::Deferred => return Err(true),
+                    Target::Gone => {
+                        self.echo(format!("Mark {c}: buffer is gone"), cx);
+                        return Err(false);
+                    }
                 }
                 // The buffer may have been reopened under a new name.
                 if let Some(m) = self.vim.global_marks.get_mut(&c) {
                     m.buffer = self.active.name.clone();
                 }
             }
-            return Some(g.pos.min(self.active.buffer.len()));
+            return Ok(g.pos.min(self.active.buffer.len()));
         }
         match self
             .vim
@@ -657,10 +816,10 @@ impl Editor {
             .get(&self.active.name)
             .and_then(|m| m.get(&c))
         {
-            Some(&p) => Some(p.min(self.active.buffer.len())),
+            Some(&p) => Ok(p.min(self.active.buffer.len())),
             None => {
                 self.echo(format!("Mark not set: {c}"), cx);
-                None
+                Err(false)
             }
         }
     }
@@ -673,8 +832,19 @@ impl Editor {
         };
         let from_buffer = self.active.name.clone();
         let from = self.point();
-        let Some(pos) = self.resolve_mark(c, cx) else {
-            return;
+        let pos = match self.resolve_mark(c, exact, cx) {
+            Ok(pos) => pos,
+            Err(deferred) => {
+                if deferred {
+                    // Landing once its file opens: record where we were.
+                    self.push_jump(Jump {
+                        buffer: from_buffer,
+                        path: None,
+                        pos: from,
+                    });
+                }
+                return;
+            }
         };
         let target = if exact {
             pos
@@ -781,13 +951,14 @@ impl Editor {
             self.vim.jump_idx - 1
         };
         let jump = self.vim.jumps[target].clone();
-        if jump.buffer != self.active.name {
-            if self.inactive.iter().any(|d| d.name == jump.buffer) {
-                self.switch_to_buffer(&jump.buffer, cx);
-            } else if let Some(path) = &jump.path {
-                self.find_file(&path.to_string_lossy(), cx);
+        match self.visit_position_buffer(&jump.buffer, jump.path.as_ref(), jump.pos, true, cx) {
+            Target::Here => {}
+            Target::Deferred => {
+                // Its file is opening; the position applies once it is open.
+                self.vim.jump_idx = target;
+                return;
             }
-            if self.active.name != jump.buffer && self.active.path != jump.path {
+            Target::Gone => {
                 // The buffer is gone: drop the entry and keep walking.
                 self.vim.jumps.remove(target);
                 if !forward {
@@ -1170,7 +1341,9 @@ impl Editor {
                         .trim()
                         .trim_start_matches('(')
                         .trim_end_matches(')')
-                        .trim();
+                        .split(char::is_whitespace)
+                        .next()
+                        .unwrap_or("");
                     if self.count_aware.contains(name) || self.script.builtins_for(&expr).is_some()
                     {
                         self.run_counted(&expr, n, cx);

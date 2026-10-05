@@ -731,8 +731,19 @@
   (select-to (evil-repeat-pos evil-sentence-backward-pos (point) (evil-count))))
 
 ;; H / M / L — screen lines (top / middle / bottom of the window).
+;; `(visible-lines)` is (first end) with `end` EXCLUSIVE and overscanned: Rust
+;; computes end = first + ceil(viewport/line-height) + 1, clamped to the line
+;; count. So unclamped, the last FULLY visible line is end - 3 (the partial
+;; bottom row and the overscan row excluded; off by one only when the viewport
+;; is an exact multiple of the line height). When clamped at the buffer end the
+;; buffer's last line is (at most a row or two past) the bottom — use it.
+(define (evil-visible-bottom vl)
+  (let ((top (car vl)) (end (cadr vl)))
+    (if (>= end (line-count))
+        (evil-last-line)
+        (min (evil-last-line) (max top (- end 3))))))
 (define (evil-screen-line which n)
-  (let* ((vl (visible-lines)) (top (car vl)) (bot (min (cadr vl) (evil-last-line))))
+  (let* ((vl (visible-lines)) (top (car vl)) (bot (evil-visible-bottom vl)))
     (cond ((equal? which "H") (min bot (+ top (- n 1))))
           ((equal? which "L") (max top (- bot (- n 1))))
           (else (quotient (+ top bot) 2)))))

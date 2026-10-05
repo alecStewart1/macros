@@ -591,7 +591,10 @@ impl Editor {
             self.switch_to_buffer_ex(&target_buffer, false, cx);
         }
         if let Some((point, scroll)) = restore {
-            self.move_to(point.min(self.active.buffer.len()), cx);
+            // The saved point may sit inside a multibyte char of the current
+            // text (another window edited the buffer meanwhile): snap it.
+            let point = crate::script::snap_byte(self.active.buffer.rope(), point);
+            self.move_to(point, cx);
             self.active.scroll_offset = scroll;
         }
         cx.notify();

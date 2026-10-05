@@ -11,9 +11,15 @@
     (if (or (= i 0) (equal? (buffer-substring (- i 1) i) "\n")) i (loop (- i 1)))))
 
 ;; --- sort-lines (region, or whole buffer) -----------------------------------
+;; A text ending in a newline splits to a trailing "" — sorting that would move
+;; the final newline to the top, so sort only the real lines and keep it last.
+(define (sort-lines-text text)
+  (if (ends-with? text "\n")
+      (string-append (sort-lines-text (substring text 0 (- (string-length text) 1))) "\n")
+      (join-lines (sort-strings (split-many text "\n")))))
 (define (sort-lines)
   (let* ((r (region-or 0 (point-max))) (s (car r)) (e (cadr r)))
-    (replace-region s e (join-lines (sort-strings (split-many (buffer-substring s e) "\n"))))
+    (replace-region s e (sort-lines-text (buffer-substring s e)))
     (message "Sorted lines")))
 
 ;; --- case commands (region) -------------------------------------------------

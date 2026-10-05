@@ -243,8 +243,9 @@
   ;; C-g-cancellable. `exec` so git replaces the wrapper shell — the cancel
   ;; then signals git itself rather than an sh that would orphan it.
   (when (async-lane-run "magit" "/bin/sh"
-                        (list "-c" (string-append "cd " *magit-dir* " && exec git "
-                                                  (string-join args " ") " 2>&1"))
+                        (list "-c" (string-append "cd " (shell-quote *magit-dir*) " && exec git "
+                                                  (string-join (map shell-quote args) " ")
+                                                  " 2>&1"))
                         'magit-async-output 'magit-async-exit)
     (set! *magit-async-out* "")
     (set! *magit-async-done* done-msg)
@@ -1355,7 +1356,12 @@
         (amend (equal? (buffer-local-get "magit-amend") "yes")))
     (if (equal? msg "")
         (message "Aborting: empty commit message")
-        (let ((file (path-join *magit-dir* ".git/MACROS_EDITMSG")))
+        ;; Resolve the real git dir: in a linked worktree or submodule `.git` is
+        ;; a FILE (`gitdir: …`), so `<repo>/.git/…` can't be written.
+        (let* ((gd (trim-end (call-process "git" (list "-C" *magit-dir* "rev-parse"
+                                                       "--absolute-git-dir"))))
+               (file (path-join (if (equal? gd "") (path-join *magit-dir* ".git") gd)
+                                "MACROS_EDITMSG")))
           (write-file file msg)
           (let ((r (call-process-full "git"
                      (append (list "-C" *magit-dir* "commit")
@@ -1399,7 +1405,9 @@
 (define-command (magit-checkout-remote)
   (helm (list (list "Checkout remote" (magit-remote-branches) 'magit-do-checkout-remote))))
 (define (magit-do-checkout-remote rb)
-  (let ((local (car (reverse (split-many rb "/")))))
+  ;; Strip only the remote prefix: "origin/feature/login" → "feature/login".
+  (let* ((parts (split-many rb "/"))
+         (local (if (null? (cdr parts)) rb (string-join (cdr parts) "/"))))
     (magit-do (list "checkout" "-b" local "--track" rb) (string-append "Checked out " local))))
 (define-command (magit-branch-set-upstream)
   (helm (list (list "Set upstream to" (magit-remote-branches) 'magit-do-set-upstream))))
@@ -1790,8 +1798,11 @@
                    (target (if h (magit-hunk-target-line h (buffer-line)) 0)))
               (split-window-right)
               (other-window)
-              (open-file (path-join *magit-dir* (magit-newpath (sec-path s))))
-              (when (> target 0) (goto-line (- target 1)))))))))
+              ;; open-file is async: goto-line here would land in the old
+              ;; buffer, so defer the jump until the file is current.
+              (let ((path (path-join *magit-dir* (magit-newpath (sec-path s)))))
+                (open-file path)
+                (when (> target 0) (goto-when-visiting "" path (- target 1) 0)))))))))
 
 ;; --- inline blame (git-blame as virtual line suffixes) ----------------------
 ;; GitLens-style annotations on the END of each line, built on `set-line-suffix`.
@@ -1919,9 +1930,13 @@
               (set! *magit-blame-cache*
                     (hash-insert *magit-blame-cache* (magit-blame-rec-line rec) rec)))
             recs))
+;; The file to blame: the buffer's real path — its name may be uniquified
+;; (`mod.rs<parser>`), which git can't resolve. Falls back to the name.
+(define (magit-blame-file)
+  (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f)))
 (define (magit-blame-ensure)
-  (when (not (equal? (current-buffer) *magit-blame-buf*))
-    (magit-blame-store (current-buffer) (magit-blame-fetch (buffer-directory) (current-buffer))))
+  (when (not (equal? (magit-blame-file) *magit-blame-buf*))
+    (magit-blame-store (magit-blame-file) (magit-blame-fetch (buffer-directory) (magit-blame-file))))
   *magit-blame-cache*)
 (define (magit-blame-rec-at line)     ; line is 1-based (git's final line)
   (hash-try-get (magit-blame-ensure) line))
@@ -1932,7 +1947,7 @@
 ;; the same hash/date on every line.
 (define *magit-blame-on* #f)
 (define (magit-blame-annotate)
-  (let* ((dir (buffer-directory)) (file (current-buffer))
+  (let* ((dir (buffer-directory)) (file (magit-blame-file))
          (recs (magit-blame-fetch dir file)))
     (if (null? recs)
         (message "git blame: nothing to annotate")
@@ -2227,7 +2242,7 @@
 ;; *scratch*, or to jump to another project).
 (define-command (helm-magit)
   (helm (list (list "Open git repo in" "find-file-candidates" 'magit-status-in))))
-(define-key "fundamental" "ctrl-x M" 'helm-magit)
+(define-key "fundamental" "ctrl-x shift-m" 'helm-magit)
 
 ;; C-x v …: inline git-blame controls on the current file buffer (Emacs vc-prefix).
 (define-key "fundamental" "ctrl-x v b" 'magit-blame-toggle)        ; full-file blame

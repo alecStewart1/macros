@@ -38,9 +38,19 @@
 ;; The directory scanned for nodes. Empty = ~/org-roam. Set from init.scm with
 ;; (org-roam-set-directory "~/notes").
 (define *org-roam-directory* "")
-(define-command (org-roam-set-directory d)
-  (set! *org-roam-directory* d)
-  (set! *org-roam-synced* #f))
+;; With no argument (M-x org-roam-set-directory) it prompts for the directory.
+(define-command (org-roam-set-directory . rest)
+  (if (null? rest)
+      (read-string "org-roam directory: "
+                   (lambda (d)
+                     (let ((d (string-trim d)))
+                       (when (not (equal? d ""))
+                         (org-roam-set-directory d)
+                         (message (string-append "org-roam directory: " d)))))
+                   (if (equal? *org-roam-directory* "") "~/org-roam" *org-roam-directory*))
+      (begin
+        (set! *org-roam-directory* (car rest))
+        (set! *org-roam-synced* #f))))
 
 ;; Command used to open external (http / file) links. macOS "open"; set to
 ;; "xdg-open" on Linux from init.scm via (set! *org-open-command* "xdg-open").
@@ -68,6 +78,10 @@
 ;; Resolve a (possibly relative) link target against the active buffer's dir.
 (define (org-roam--resolve p)
   (if (>= (string-match "^[/~]" p) 0) p (path-join (buffer-directory) p)))
+
+;; `$` in a replace-regexp-in-string replacement is a group reference; double
+;; it so user text (a title like "Cost in $USD") is inserted literally.
+(define (org-roam--replacement-literal s) (replace-regexp-in-string "\\$" "$$$$" s))
 
 ;; A filesystem-safe slug from a title: lowercased, non-alphanumerics collapsed
 ;; to single dashes, trimmed.
@@ -294,8 +308,11 @@
   (let ((n (org-roam--node-by-id id)))
     (if (not n)
         (message (string-append "org-roam: no node " id))
+        ;; open-file is async: a goto-line in the same command would land in
+        ;; the OLD buffer, so jump once the file's buffer is current.
         (begin (open-file (nth n 2))
-               (when (> (org-roam--node-line n) 0) (goto-line (org-roam--node-line n)))))))
+               (when (> (org-roam--node-line n) 0)
+                 (goto-when-visiting "" (nth n 2) (org-roam--node-line n) 0))))))
 
 ;; C-c C-o — open the link at point.
 (define-command (org-open-at-point)
@@ -328,8 +345,12 @@
 
 ;; agenda-buffer line -> (source-file . 0-based-line), for RET.
 (define *org-roam-backlink-targets* '())
+;; (id . title) of the node the backlinks buffer currently shows, so `g` can
+;; refresh it from inside *org-roam-backlinks* (which has no :ID: of its own).
+(define *org-roam-backlinks-node* #f)
 
 (define (org-roam--render-backlinks id title)
+  (set! *org-roam-backlinks-node* (cons id title))
   (set! *org-roam-backlink-targets* '())
   (let ((hits (grep-files (org-roam-directory) (string-append "\\[\\[id:" id))))
     (let loop ((hs hits) (i 2) (out '()))
@@ -361,9 +382,16 @@
         (let ((n (org-roam--node-by-id id)))
           (org-roam--render-backlinks id (if n (nth n 1) (basename (current-buffer))))))))
 
+;; `g` in *org-roam-backlinks* — re-render for the node it was opened on.
+(define-command (org-roam-backlinks-refresh)
+  (let ((node *org-roam-backlinks-node*))
+    (if (not node)
+        (message "No org-roam node to refresh")
+        (org-roam--render-backlinks (car node) (cdr node)))))
+
 (define (org-roam-backlinks-visit)
   (let ((t (alist-ref *org-roam-backlink-targets* (buffer-line))))
-    (when t (open-file (car t)) (goto-line (cdr t)))))
+    (when t (open-file (car t)) (goto-when-visiting "" (car t) (cdr t) 0))))
 
 ;; ===========================================================================
 ;; Graph view (graphviz → inline image)
@@ -531,7 +559,7 @@
 (define (org-roam--rewrite-links text id newtitle)
   (replace-regexp-in-string
    (string-append "\\[\\[id:" (regexp-quote id) "\\]\\[[^]]*\\]\\]")
-   (string-append "[[id:" id "][" newtitle "]]") text))
+   (org-roam--replacement-literal (string-append "[[id:" id "][" newtitle "]]")) text))
 ;; C-c n r — rename the current node (the node id rides in the closure).
 (define-command (org-roam-rename-node)
   (let ((id (org-roam--current-id)))
@@ -544,10 +572,13 @@
     (when (not (equal? nt ""))
       ;; current buffer: rewrite #+title and any self-links
       (let* ((text (buffer-string))
-             (t2 (replace-regexp-in-string "(?im)^#\\+title:[ \t]*.*$" (string-append "#+title: " nt) text)))
+             (t2 (replace-regexp-in-string "(?im)^#\\+title:[ \t]*.*$"
+                                           (org-roam--replacement-literal (string-append "#+title: " nt))
+                                           text)))
         (replace-region 0 (point-max) (org-roam--rewrite-links t2 id nt)))
       ;; every other file: rewrite inbound link descriptions
-      (let ((cur (path-join (buffer-directory) (current-buffer))))
+      (let ((cur (let ((f (buffer-file-name)))
+                   (if (equal? f "") (path-join (buffer-directory) (current-buffer)) f))))
         (for-each (lambda (f)
                     (when (and (ends-with? f ".org") (not (equal? f cur)))
                       (let* ((t (read-file f)) (t2 (org-roam--rewrite-links t id nt)))
@@ -618,9 +649,9 @@
 ;; Templated node creation
 ;; ===========================================================================
 (define (org-roam--expand-tmpl s title slug id)
-  (let* ((s (replace-regexp-in-string "\\$\\{title\\}" title s))
-         (s (replace-regexp-in-string "\\$\\{slug\\}" slug s))
-         (s (replace-regexp-in-string "\\$\\{id\\}" id s))
+  (let* ((s (replace-regexp-in-string "\\$\\{title\\}" (org-roam--replacement-literal title) s))
+         (s (replace-regexp-in-string "\\$\\{slug\\}" (org-roam--replacement-literal slug) s))
+         (s (replace-regexp-in-string "\\$\\{id\\}" (org-roam--replacement-literal id) s))
          (s (replace-regexp-in-string "\\$\\{date\\}" (current-time "%Y-%m-%d") s))
          (s (replace-regexp-in-string "\\$\\{time\\}" (current-time "%Y%m%d%H%M%S") s)))
     s))
@@ -666,7 +697,7 @@
 
 ;; *org-roam-backlinks* buffer.
 (define-list-mode-keys "org-roam-backlinks-mode" 'org-roam-backlinks-visit)
-(define-key "org-roam-backlinks-mode" "g" 'org-roam-buffer-toggle)
+(define-key "org-roam-backlinks-mode" "g" 'org-roam-backlinks-refresh)
 
 ;; *org-roam-graph* buffer.
 (define-key "org-roam-graph-mode" "g" 'org-roam-graph)
@@ -680,4 +711,4 @@
 ;; *org-roam-unlinked* reuses the backlinks keymap; map RET to its visitor.
 (define-command (org-roam-unlinked-visit)
   (let ((t (alist-ref *org-roam-unlinked-targets* (buffer-line))))
-    (when t (open-file (car t)) (goto-line (cdr t)))))
+    (when t (open-file (car t)) (goto-when-visiting "" (car t) (cdr t) 0))))

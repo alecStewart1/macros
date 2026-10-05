@@ -145,6 +145,15 @@ fn ghost_to_display(disp: usize, ghost: Option<(usize, usize)>) -> usize {
     }
 }
 
+/// The display index past the end of a line whose real text ends at display
+/// index `end`, with ghost text `(at, len)` spliced in at or before it.
+fn display_end(end: usize, ghost: Option<(usize, usize)>) -> usize {
+    match ghost {
+        Some((at, len)) if at <= end => end + len,
+        _ => end,
+    }
+}
+
 /// Inverse of [`ghost_to_display`]: an index inside the ghost text collapses to
 /// its insertion point (a click on the suggestion lands at point).
 fn ghost_from_display(disp: usize, ghost: Option<(usize, usize)>) -> usize {
@@ -365,6 +374,17 @@ impl LineCtx<'_> {
     fn disp(&self, offset: usize) -> usize {
         ghost_to_display(
             to_display(offset.saturating_sub(self.range.start), self.holes),
+            self.ghost,
+        )
+    }
+
+    /// Display index just past *everything* on the line, including ghost text
+    /// anchored at end of line — `disp(range.end)` stops before such a ghost
+    /// (an index at the anchor is point, which renders before it), so virtual
+    /// suffixes placed there would overlap the suggestion.
+    fn disp_end(&self) -> usize {
+        display_end(
+            to_display(self.range.end - self.range.start, self.holes),
             self.ghost,
         )
     }
@@ -739,7 +759,7 @@ fn layout_decorations(
         );
         let epos = line
             .wrapped
-            .position_for_index(line.disp(range.end), line.line_height)
+            .position_for_index(line.disp_end(), line.line_height)
             .unwrap_or_default();
         acc.virtual_text.push((
             shaped_suffix,
@@ -1221,6 +1241,7 @@ impl Element for EditorElement {
                     color,
                     theme.is_bold(face),
                     theme,
+                    Some(text.as_str()),
                 )
             } else {
                 line_runs(
@@ -1231,6 +1252,7 @@ impl Element for EditorElement {
                     text_color,
                     false,
                     theme,
+                    Some(text.as_str()),
                 )
             };
             // Ghost anchored on this line (point's line): splice the
@@ -2035,6 +2057,7 @@ impl Seg {
 /// Build the `TextRun`s for one line: tile it with the buffer's tree-sitter
 /// highlight spans, then let sub-line overlay faces override on top (the Emacs
 /// overlay model). With no overlays this is exactly the old syntax-only path.
+#[allow(clippy::too_many_arguments)]
 fn line_runs(
     spans: &[HlSpan],
     overlays: &[(std::ops::Range<usize>, SharedString)],
@@ -2043,6 +2066,7 @@ fn line_runs(
     default: Hsla,
     default_bold: bool,
     theme: &Theme,
+    text: Option<&str>,
 ) -> Vec<TextRun> {
     // 1. Base segments from syntax spans. `default_bold` styles the face-less
     //    base — a whole-line face is resolved to `default` by the caller, so
@@ -2087,9 +2111,23 @@ fn line_runs(
     //    everything else it lands on, so it layers under a foreground face
     //    (text-plot half-blocks: `plot-heat-3` + `plot-heat-5-bg`). A face
     //    font (`set-face-font`) switches the run's family.
+    //    Face ranges are byte offsets set from Scheme and need not fall on
+    //    char boundaries; a run edge inside a multibyte char makes gpui's
+    //    shaper panic once the face switches font. Widen each edge to the
+    //    enclosing char boundaries of the line's `text` (when given).
+    let snap = |b: usize, up: bool| -> usize {
+        let Some(t) = text.filter(|t| t.len() == line.len()) else {
+            return b;
+        };
+        let mut rel = b - line.start;
+        while !t.is_char_boundary(rel) {
+            if up { rel += 1 } else { rel -= 1 }
+        }
+        line.start + rel
+    };
     for (range, face) in overlays {
-        let os = range.start.max(line.start);
-        let oe = range.end.min(line.end);
+        let os = snap(range.start.max(line.start), false);
+        let oe = snap(range.end.min(line.end), true);
         if os >= oe {
             continue;
         }
@@ -2155,6 +2193,50 @@ fn line_runs(
             run
         })
         .collect()
+}
+
+/// The `(row, first_col, last_col)` cell spans (inclusive) a terminal
+/// selection covers within the visible `rows` x `cols` viewport. Rows are
+/// viewport-relative and may be negative (scrolled above) or past the bottom:
+/// those are clipped, and a selection lying entirely outside the viewport yields
+/// nothing (rather than a phantom band clamped onto row 0). Block selections
+/// use the same columns on every row; a simple selection runs start..eol on its
+/// first row, full width in between, and 0..end on its last — with a clipped
+/// end row taking the full width it would have had.
+fn terminal_selection_spans(
+    sel: &crate::terminal::TermSelection,
+    rows: usize,
+    cols: usize,
+) -> Vec<(usize, usize, usize)> {
+    let mut spans = Vec::new();
+    if rows == 0 || cols == 0 || sel.end_row < 0 || sel.start_row >= rows as i32 {
+        return spans;
+    }
+    let first = sel.start_row.max(0) as usize;
+    let last = (sel.end_row as usize).min(rows - 1);
+    for r in first..=last {
+        let (c0, c1) = if sel.is_block {
+            (sel.start_col, sel.end_col)
+        } else {
+            let c0 = if sel.start_row == r as i32 {
+                sel.start_col
+            } else {
+                0
+            };
+            let c1 = if sel.end_row == r as i32 {
+                sel.end_col
+            } else {
+                cols - 1
+            };
+            (c0, c1)
+        };
+        let c1 = c1.min(cols - 1);
+        if c1 < c0 {
+            continue;
+        }
+        spans.push((r, c0, c1));
+    }
+    spans
 }
 
 /// The custom GPUI element that draws an embedded terminal grid. Like
@@ -2303,16 +2385,30 @@ impl Element for TerminalElement {
                         && let Some(bg) = cell.bg
                     {
                         let x = bounds.left() + em * c as f32;
+                        let w = if cell.wide { em * 2. } else { em };
                         cell_backgrounds.push(fill(
-                            Bounds::new(point(x, y), size(em, line_height)),
+                            Bounds::new(point(x, y), size(w, line_height)),
                             Hsla::from(rgb(bg)),
                         ));
                     }
                 }
-                // Build the row string + per-cell styled runs.
+                // Build the row as grid-anchored segments of styled runs. A
+                // wide (CJK/emoji) glyph covers two columns but its shaped
+                // advance is whatever the (often fallback) font says, so the
+                // segment ends after it and the next one restarts exactly at
+                // column `c + 2` — later text stays on the `em * col` grid. The
+                // wide glyph's spacer column is skipped (it must not become an
+                // extra space).
                 let mut text = String::with_capacity(cols);
                 let mut runs: Vec<TextRun> = Vec::with_capacity(cols);
-                for cell in row_cells {
+                let mut seg_col = 0usize;
+                let mut skip_spacer = false;
+                for (c, cell) in row_cells.iter().enumerate() {
+                    if skip_spacer {
+                        skip_spacer = false;
+                        seg_col = c + 1;
+                        continue;
+                    }
                     let (ch, color, bold, italic, underline) = match cell {
                         Some(c) => {
                             let ch = if c.ch == '\0' { ' ' } else { c.ch };
@@ -2320,6 +2416,7 @@ impl Element for TerminalElement {
                         }
                         None => (' ', default_fg, false, false, false),
                     };
+                    let wide = cell.is_some_and(|c| c.wide);
                     text.push(ch);
                     let mut f = term_font.clone();
                     if bold {
@@ -2340,44 +2437,31 @@ impl Element for TerminalElement {
                         }),
                         strikethrough: None,
                     });
+                    if wide {
+                        let shaped = window.text_system().shape_line(
+                            SharedString::from(std::mem::take(&mut text)),
+                            font_size,
+                            &std::mem::take(&mut runs),
+                            None,
+                        );
+                        shaped_rows.push((shaped, point(bounds.left() + em * seg_col as f32, y)));
+                        skip_spacer = true;
+                    }
                 }
-                let shaped = window.text_system().shape_line(
-                    SharedString::from(text),
-                    font_size,
-                    &runs,
-                    None,
-                );
-                shaped_rows.push((shaped, point(bounds.left(), y)));
+                if !text.is_empty() {
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(text),
+                        font_size,
+                        &runs,
+                        None,
+                    );
+                    shaped_rows.push((shaped, point(bounds.left() + em * seg_col as f32, y)));
+                }
             }
 
             // Selection highlight: one quad per visible row the range covers.
             if let Some(sel) = &snapshot.selection {
-                let first = sel.start_row.max(0) as usize;
-                let last = (sel.end_row.max(0) as usize).min(rows.saturating_sub(1));
-                for r in first..=last.min(rows.saturating_sub(1)) {
-                    if r >= rows {
-                        break;
-                    }
-                    // Column span for this row (block = same cols every row; simple =
-                    // start..eol on the first row, full middle rows, 0..end on the last).
-                    let (c0, c1) = if sel.is_block {
-                        (sel.start_col, sel.end_col)
-                    } else {
-                        let c0 = if sel.start_row == r as i32 {
-                            sel.start_col
-                        } else {
-                            0
-                        };
-                        let c1 = if sel.end_row == r as i32 {
-                            sel.end_col
-                        } else {
-                            cols.saturating_sub(1)
-                        };
-                        (c0, c1)
-                    };
-                    if c1 < c0 {
-                        continue;
-                    }
+                for (r, c0, c1) in terminal_selection_spans(sel, rows, cols) {
                     let x0 = bounds.left() + em * c0 as f32;
                     let x1 = bounds.left() + em * (c1 + 1) as f32;
                     let y = bounds.top() + line_height * r as f32;
@@ -2499,7 +2583,7 @@ mod tests {
         let default: Hsla = rgb(0x000000).into();
         // Line [0,10), no syntax spans, one overlay [2,5) with face "hl".
         let overlays = vec![(2usize..5usize, SharedString::from("hl"))];
-        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
         assert_eq!(
             runs.iter().map(|r| r.len).collect::<Vec<_>>(),
             vec![2, 3, 5]
@@ -2524,7 +2608,7 @@ mod tests {
             (0usize..6usize, SharedString::from("heat-7")),
             (3usize..6usize, SharedString::from("heat-2-bg")),
         ];
-        let runs = line_runs(&[], &overlays, 0..9, &font, default, false, &theme);
+        let runs = line_runs(&[], &overlays, 0..9, &font, default, false, &theme, None);
         assert_eq!(
             runs.iter().map(|r| r.len).collect::<Vec<_>>(),
             vec![3, 3, 3]
@@ -2535,7 +2619,7 @@ mod tests {
 
         // A bg-only face alone leaves the text color untouched.
         let overlays = vec![(0usize..3usize, SharedString::from("heat-2-bg"))];
-        let runs = line_runs(&[], &overlays, 0..3, &font, default, false, &theme);
+        let runs = line_runs(&[], &overlays, 0..3, &font, default, false, &theme, None);
         assert_eq!(
             (runs[0].color, runs[0].background_color),
             (default, Some(blue))
@@ -2550,7 +2634,7 @@ mod tests {
         let font = font("Lilex");
         let default: Hsla = rgb(0x000000).into();
         let overlays = vec![(3usize..9usize, SharedString::from("plot-series-0"))];
-        let runs = line_runs(&[], &overlays, 0..12, &font, default, false, &theme);
+        let runs = line_runs(&[], &overlays, 0..12, &font, default, false, &theme, None);
         let families: Vec<&str> = runs.iter().map(|r| r.font.family.as_ref()).collect();
         assert_eq!(families, vec!["Lilex", "Macros Plot", "Lilex"]);
     }
@@ -2564,7 +2648,7 @@ mod tests {
         let default: Hsla = rgb(0x000000).into();
         // One overlay [2,5) with an underlined face; the rest of the line is not.
         let overlays = vec![(2usize..5usize, SharedString::from("link"))];
-        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
         assert!(
             runs[1].underline.is_some(),
             "underlined face underlines its run"
@@ -2582,7 +2666,7 @@ mod tests {
         let font = font("Lilex");
         let default: Hsla = rgb(0x000000).into();
         let overlays = vec![(2usize..5usize, SharedString::from("spell-error"))];
-        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
         let ul = runs[1].underline.as_ref().expect("wavy implies underline");
         assert!(ul.wavy, "wavy face squiggles its run");
         assert_eq!(ul.color, Some(red), "the squiggle takes the face color");
@@ -2599,7 +2683,7 @@ mod tests {
         let theme = Theme::default();
         let font = font("Lilex");
         let default: Hsla = rgb(0x111111).into();
-        let runs = line_runs(&[], &[], 0..7, &font, default, false, &theme);
+        let runs = line_runs(&[], &[], 0..7, &font, default, false, &theme, None);
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 7);
     }
 
@@ -2672,15 +2756,93 @@ mod tests {
             theme.color("feeds-unread", default),
             theme.is_bold("feeds-unread"),
             &theme,
+            None,
         );
         assert_eq!(runs[0].font.weight, FontWeight::BOLD);
         assert_eq!(runs[0].color, default, "colorless bold face keeps default");
         // Overlay path: a bold overlay bolds only its sub-range.
         let overlays = vec![(2usize..5usize, SharedString::from("feeds-unread"))];
-        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme);
+        let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
         assert_eq!(runs[0].font.weight, FontWeight::NORMAL);
         assert_eq!(runs[1].font.weight, FontWeight::BOLD);
         assert_eq!(runs[2].font.weight, FontWeight::NORMAL);
+    }
+
+    #[test]
+    fn overlay_face_edges_snap_to_char_boundaries() {
+        let mut theme = Theme::default();
+        let red: Hsla = rgb(0xff0000).into();
+        theme.set("hl", red);
+        let font = font("Lilex");
+        let default: Hsla = rgb(0x000000).into();
+        // "aé b": "é" is bytes 1..3; the face [2,4) starts inside it.
+        let text = "aé b";
+        let overlays = vec![(2usize..4usize, SharedString::from("hl"))];
+        let runs = line_runs(
+            &[],
+            &overlays,
+            0..5,
+            &font,
+            default,
+            false,
+            &theme,
+            Some(text),
+        );
+        let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
+        assert_eq!(lens, vec![1, 3, 1], "face widened to cover all of é");
+        let mut at = 0;
+        for len in lens {
+            at += len;
+            assert!(text.is_char_boundary(at));
+        }
+        // An end inside a multibyte char widens up to the char's end.
+        let overlays = vec![(0usize..2usize, SharedString::from("hl"))];
+        let runs = line_runs(
+            &[],
+            &overlays,
+            0..5,
+            &font,
+            default,
+            false,
+            &theme,
+            Some(text),
+        );
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![3, 2]);
+    }
+
+    #[test]
+    fn suffix_goes_after_ghost_text_anchored_at_eol() {
+        // Line text ends at display index 5; ghost of 7 bytes at EOL.
+        assert_eq!(display_end(5, Some((5, 7))), 12);
+        // A ghost mid-line also pushes the end right.
+        assert_eq!(display_end(5, Some((2, 7))), 12);
+        assert_eq!(display_end(5, None), 5);
+    }
+
+    #[test]
+    fn terminal_selection_outside_viewport_paints_nothing() {
+        use crate::terminal::TermSelection;
+        let sel = |start_row, start_col, end_row, end_col| TermSelection {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            is_block: false,
+        };
+        // Entirely above the viewport: no phantom band on row 0.
+        assert!(terminal_selection_spans(&sel(-5, 3, -2, 4), 10, 80).is_empty());
+        // Entirely below.
+        assert!(terminal_selection_spans(&sel(12, 0, 14, 4), 10, 80).is_empty());
+        // Starting above: row 0 is a full-width continuation up to the end.
+        assert_eq!(
+            terminal_selection_spans(&sel(-3, 5, 1, 4), 10, 80),
+            vec![(0, 0, 79), (1, 0, 4)]
+        );
+        // Running past the bottom: the last visible row is full width.
+        assert_eq!(
+            terminal_selection_spans(&sel(8, 2, 20, 4), 10, 80),
+            vec![(8, 2, 79), (9, 0, 79)]
+        );
     }
 
     #[test]

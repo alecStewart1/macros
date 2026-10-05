@@ -34,7 +34,10 @@
 (define *markdown-scale-headings* #t)
 
 (define (md--active?)
-  (let ((b (current-buffer)))
+  ;; The visited file's path (the buffer name of a uniquified buffer is
+  ;; `README.md<dir>`), or the buffer name for a fileless buffer.
+  (let ((b (let ((f (buffer-file-name)))
+             (if (or (not (string? f)) (equal? f "")) (current-buffer) f))))
     (or (ends-with? b ".md") (ends-with? b ".markdown")
         (ends-with? b ".mdown") (ends-with? b ".mkd") (ends-with? b ".mkdn"))))
 
@@ -208,11 +211,22 @@
            (loop (cdr ls) (+ i 1) (cons i acc)))
           (else (loop (cdr ls) (+ i 1) acc)))))
 
-;; Per-buffer set of folded heading line numbers (mirrors org's fold state).
+;; Per-buffer set of folded heading line numbers (mirrors org's fold state),
+;; plus each one's text anchor so the numbers can be relocated after edits shift
+;; the lines (see fold-anchors-capture in folding.scm).
 (define *md-folded* '())
+(define *md-folded-anchors* '())
 (define (md--folded-get) (buffer-state-get *md-folded* '()))
 (define (md--folded-set v)
-  (set! *md-folded* (buffer-state-set *md-folded* v)))
+  (set! *md-folded* (buffer-state-set *md-folded* v))
+  (set! *md-folded-anchors*
+        (buffer-state-set *md-folded-anchors* (fold-anchors-capture (md-lines) v))))
+;; Relocate the recorded folded lines to where their headings are now.
+(define (md--folded-resync lines)
+  (let ((v (md--folded-get)))
+    (when (not (null? v))
+      (md--folded-set
+       (fold-anchors-relocate-lines (buffer-state-get *md-folded-anchors* '()) lines v)))))
 (define (md--folded? line) (if (member line (md--folded-get)) #t #f))
 
 ;; Re-hide every folded section from scratch (the only unfold primitive is
@@ -234,6 +248,7 @@
   (when (md--active?)
     (buffer-local-set "fold-style" "md")
     (let ((lines (md-lines)) (still '()))
+      (md--folded-resync lines)
       (clear-fold-markers)
       (for-each (lambda (h)
                   (let ((folded (md--folded? h)))
@@ -245,6 +260,7 @@
 ;; Toggle the fold of the heading on `line` — the chevron click entry point.
 (define (md--fold-toggle-at-line line)
   (let ((lines (md-lines)))
+    (md--folded-resync lines)
     (when (and (md-heading-line? (nth lines line))
                (> (md--section-body-end lines line) (+ line 1)))
       (md--folded-set
@@ -276,8 +292,11 @@
   (if (region-active?)
       (let ((s (region-beginning)) (e (region-end)))
         (replace-region s e (string-append left (buffer-substring s e) right)))
-      (begin (insert (string-append left right))
-             (goto-char (- (point) (string-length right))))))
+      ;; `point` is the pre-command snapshot (the insert is queued), so land
+      ;; between the delimiters relative to where they were inserted.
+      (let ((p (point)))
+        (insert (string-append left right))
+        (goto-char (+ p (string-length left))))))
 
 (define-command (md-bold)   (md-wrap-region "**" "**"))
 (define-command (md-italic) (md-wrap-region "*" "*"))

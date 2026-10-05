@@ -119,6 +119,32 @@ pub(super) fn helm_file_accept_target(
     Some((source.action.clone(), pattern.to_string()))
 }
 
+/// The index within its source's (unfiltered) `candidates` of match
+/// `selected` in `matches` (as from [`helm_filter`]). Identical candidate
+/// strings (two LSP locations rendering the same `file:line:col: text` row)
+/// are told apart by occurrence: the k-th matching copy maps to the k-th copy
+/// in the source — filtering keeps equal strings in source order (substring
+/// filtering preserves it; equal strings score equally under a stable sort).
+pub(super) fn helm_candidate_index(
+    sources: &[HelmSource],
+    matches: &[(usize, String)],
+    selected: usize,
+) -> Option<usize> {
+    let (src, candidate) = matches.get(selected)?;
+    let nth = matches[..selected]
+        .iter()
+        .filter(|(s, c)| s == src && c == candidate)
+        .count();
+    sources
+        .get(*src)?
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| *c == candidate)
+        .nth(nth)
+        .map(|(i, _)| i)
+}
+
 /// Cycle a selection index by one step with wraparound over `count` items.
 /// `forward` advances, otherwise it steps back. Returns 0 if `count` is 0.
 pub(super) fn wrap_index(selected: usize, count: usize, forward: bool) -> usize {
@@ -261,9 +287,9 @@ impl Editor {
             return;
         };
         let native = match matches.get(helm.selected) {
-            Some((src, candidate)) => {
+            Some((src, _)) => {
                 let source = &helm.sources[*src];
-                let idx = source.candidates.iter().position(|c| c == candidate);
+                let idx = helm_candidate_index(&helm.sources, &matches, helm.selected);
                 match (&source.action, idx) {
                     (HelmAction::GotoLocation(locs), Some(i)) => {
                         locs.get(i).cloned().map(NativePreview::Location)
@@ -573,10 +599,8 @@ impl Editor {
         // The accepted candidate's index within the (unfiltered) source — native
         // actions use it to pick from their parallel target vec, since Helm
         // filters and reorders the visible matches.
-        let candidate_index = helm.sources[source_index]
-            .candidates
-            .iter()
-            .position(|c| c == &candidate);
+        let candidate_index =
+            helm_candidate_index(&helm.sources, &self.helm_matches(), helm.selected);
         // Multi-select: act on every marked candidate (in mark order). With none
         // marked, fall back to the single candidate under the cursor.
         let targets = if helm.marked.is_empty() {
@@ -707,6 +731,39 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn duplicate_candidates_map_to_their_own_index() {
+        use super::{HelmAction, HelmSource, helm_candidate_index, helm_filter};
+        // Two LSP locations rendering the same row (same basename/line/col in
+        // different directories) must still select distinct targets.
+        let sources = vec![HelmSource {
+            name: "References".into(),
+            candidates: vec![
+                "mod.rs:3:1: x".into(),
+                "lib.rs:9:2: y".into(),
+                "mod.rs:3:1: x".into(),
+            ],
+            annotations: std::collections::HashMap::new(),
+            dynamic: None,
+            raw: false,
+            action: HelmAction::ExecuteCommand,
+            preview: None,
+        }];
+        let all = helm_filter(&sources, "", true);
+        let idx: Vec<_> = (0..3)
+            .map(|i| helm_candidate_index(&sources, &all, i))
+            .collect();
+        assert_eq!(idx, vec![Some(0), Some(1), Some(2)]);
+        // Filtered (fuzzy + substring): copies keep their source order.
+        for fuzzy in [true, false] {
+            let m = helm_filter(&sources, "mod", fuzzy);
+            assert_eq!(m.len(), 2);
+            assert_eq!(helm_candidate_index(&sources, &m, 0), Some(0));
+            assert_eq!(helm_candidate_index(&sources, &m, 1), Some(2));
+            assert_eq!(helm_candidate_index(&sources, &m, 2), None);
+        }
+    }
+
     #[test]
     fn helm_fuzzy_ranks_and_filters() {
         use super::{HelmAction, HelmSource, helm_filter};

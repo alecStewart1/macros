@@ -271,8 +271,7 @@ impl Editor {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<ChildMsg>();
         std::thread::spawn(move || {
             if let Some(out) = stdout {
-                for line in BufReader::new(out).lines() {
-                    let Ok(l) = line else { break };
+                for l in lossy_lines(BufReader::new(out)) {
                     if tx.unbounded_send(ChildMsg::Line(l)).is_err() {
                         break;
                     }
@@ -514,11 +513,10 @@ impl Editor {
             }
             match req.send_string(&body) {
                 Ok(resp) => {
-                    for line in BufReader::new(resp.into_reader()).lines() {
+                    for l in lossy_lines(BufReader::new(resp.into_reader())) {
                         if cancel.load(Ordering::Relaxed) {
                             break;
                         }
-                        let Ok(l) = line else { break };
                         if tx.unbounded_send(ProcMsg::Line(l)).is_err() {
                             break;
                         }
@@ -1372,6 +1370,42 @@ fn ws_run(
         }
     }
     Ok(())
+}
+
+/// The lines of `reader`, like [`BufRead::lines`] (a trailing `\n` or `\r\n`
+/// stripped) but decoding each line lossily: a process or HTTP stream that
+/// emits one non-UTF-8 line (a Latin-1 filename, a binary blob) keeps flowing
+/// instead of `lines()` erroring and the reader dropping the pipe. Ends at EOF
+/// or on a real I/O error.
+fn lossy_lines<R: BufRead>(mut reader: R) -> impl Iterator<Item = String> {
+    let mut buf = Vec::new();
+    std::iter::from_fn(move || {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
+                }
+                Some(String::from_utf8_lossy(&buf).into_owned())
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod lossy_lines_tests {
+    use super::lossy_lines;
+
+    #[test]
+    fn non_utf8_line_does_not_end_the_stream() {
+        let input: &[u8] = b"one\r\nbad \xff\xfe byte\nthree";
+        let lines: Vec<String> = lossy_lines(input).collect();
+        assert_eq!(lines, vec!["one", "bad \u{fffd}\u{fffd} byte", "three"]);
+    }
 }
 
 #[cfg(all(test, unix))]

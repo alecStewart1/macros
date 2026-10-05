@@ -87,6 +87,26 @@ impl Editor {
         )
     }
 
+    /// The name of the inactive buffer [`render_redirect`](Self::render_redirect)
+    /// points at, captured before `inactive` is reshuffled (a remove/retain/
+    /// insert shifts every later index) so [`reindex_redirect`](Self::reindex_redirect)
+    /// can re-resolve it afterwards.
+    pub(super) fn redirect_name(&self) -> Option<String> {
+        self.render_redirect
+            .and_then(|i| self.inactive.get(i))
+            .map(|d| d.name.clone())
+    }
+
+    /// Re-point [`render_redirect`](Self::render_redirect) at the inactive
+    /// buffer `name` after `inactive` was mutated. If it's no longer inactive
+    /// (now the active buffer, or killed) the redirect ends — decorations then
+    /// target the active buffer, which is right when it was just activated —
+    /// and a stale index can never address the wrong document or run off the
+    /// end of the vector.
+    pub(super) fn reindex_redirect(&mut self, name: Option<String>) {
+        self.render_redirect = name.and_then(|n| self.inactive.iter().position(|d| d.name == n));
+    }
+
     pub(super) fn install_active(&mut self, doc: Document) {
         self.active = doc;
         // Markers are positions in the previous buffer; drop them on a switch.
@@ -146,10 +166,12 @@ impl Editor {
     /// process-output surfacing). Both fire `buffer-switch-hook`; only a
     /// deliberate switch also fires `buffer-select-hook` — see [`switch_hooks`].
     pub(super) fn activate(&mut self, index: usize, deliberate: bool, cx: &mut Context<Self>) {
+        let redirect = self.redirect_name();
         let target = self.inactive.remove(index);
         let current = self.snapshot_active();
         self.inactive.push(current);
         self.install_active(target);
+        self.reindex_redirect(redirect);
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
@@ -180,24 +202,27 @@ impl Editor {
             self.echo("No other buffer", cx);
             return;
         }
+        let redirect = self.redirect_name();
         let target = self.inactive.remove(0);
-        self.cycle_to(target, true, cx);
+        self.cycle_to(target, true, redirect, cx);
     }
 
     /// `C-x <left>`: cycle backward (the active buffer goes to the front, the
     /// back buffer becomes active) — the exact inverse of `next-buffer`.
     pub(super) fn previous_buffer(&mut self, cx: &mut Context<Self>) {
+        let redirect = self.redirect_name();
         let Some(target) = self.inactive.pop() else {
             self.echo("No other buffer", cx);
             return;
         };
-        self.cycle_to(target, false, cx);
+        self.cycle_to(target, false, redirect, cx);
     }
 
     pub(super) fn cycle_to(
         &mut self,
         target: Document,
         current_to_back: bool,
+        redirect: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let current = self.snapshot_active();
@@ -207,6 +232,7 @@ impl Editor {
             self.inactive.insert(0, current);
         }
         self.install_active(target);
+        self.reindex_redirect(redirect);
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
@@ -902,6 +928,18 @@ impl Editor {
     }
 
     fn confirm_quit_ex(&mut self, relaunch: bool, cx: &mut Context<Self>) -> bool {
+        // A fresh, user-initiated app quit: forget any earlier (cancelled)
+        // quit's per-window answers so every dirty window is asked again.
+        crate::workspace::begin_app_quit(relaunch, cx);
+        self.prompt_quit_save(relaunch, cx);
+        false
+    }
+
+    /// Ask (only if needed) whether to save this window's modified buffers as
+    /// part of an app quit already in progress — the app-wide quit flow
+    /// (`workspace::continue_app_quit`) calls this for each further dirty
+    /// window without resetting the answers already given.
+    pub fn prompt_quit_save(&mut self, relaunch: bool, cx: &mut Context<Self>) {
         if self.any_modified() {
             let listing = self.modified_buffer_names().join(", ");
             self.echo(format!("Modified buffers: {listing}"), cx);
@@ -914,7 +952,31 @@ impl Editor {
         } else {
             self.finish_quit(relaunch, cx);
         }
+    }
+
+    /// The OS close button on a window with unsaved buffers while other windows
+    /// stay open: the same save/discard/cancel prompt as a quit, but answering
+    /// it closes just this window (see `workspace::quit_confirmed`). Returns
+    /// `false` so the bare close is cancelled until the prompt resolves.
+    pub fn confirm_close_window(&mut self, cx: &mut Context<Self>) -> bool {
+        crate::workspace::begin_window_close(cx.entity_id(), cx);
+        let listing = self.modified_buffer_names().join(", ");
+        self.echo(format!("Modified buffers: {listing}"), cx);
+        self.open_minibuffer(
+            "Save modified buffers before closing this window? (yes/no, C-g to cancel) ",
+            MinibufferPurpose::QuitSave { relaunch: false },
+            "",
+            cx,
+        );
         false
+    }
+
+    /// The per-window part of quitting: publish session state and run
+    /// `kill-emacs-hook` synchronously (savehist / desktop), without quitting.
+    /// The app-wide quit flow runs this for every window before `cx.quit()`.
+    pub fn prepare_quit(&mut self, cx: &mut Context<Self>) {
+        self.publish_session();
+        self.run_hook_blocking("kill-emacs-hook", cx);
     }
 
     /// Names of the buffers [`any_modified`](Self::any_modified) counts as
@@ -927,16 +989,18 @@ impl Editor {
             .collect()
     }
 
-    /// Actually quit (the user has confirmed, or nothing was unsaved). With
-    /// `relaunch`, first spawn the helper that reopens the staged update once
-    /// this process exits; if that fails, stay running and say so rather than
-    /// quitting into nothing.
+    /// This window is cleared to quit (the user has confirmed, or nothing was
+    /// unsaved). This window's answer is handed to the app-wide quit flow
+    /// (`workspace::quit_confirmed`, deferred so no entity is mid-update): it
+    /// either closes just this window (a close-button prompt), or moves on to
+    /// the next window with unsaved buffers, and only once every window is
+    /// resolved runs each window's `kill-emacs-hook` and quits — so another
+    /// window's edits are never discarded unasked. With `relaunch`, the helper
+    /// that reopens the staged update is spawned there, at the very end; if
+    /// that fails the app stays running and says so.
     pub(super) fn finish_quit(&mut self, relaunch: bool, cx: &mut Context<Self>) {
-        if relaunch && let Err(err) = crate::update::relaunch() {
-            self.echo(format!("Relaunch failed: {err}"), cx);
-            return;
-        }
-        self.quit_now(cx);
+        let id = cx.entity_id();
+        cx.defer(move |cx| crate::workspace::quit_confirmed(id, relaunch, cx));
     }
 
     /// Write every modified, file-visiting buffer (active + inactive) to disk
@@ -1017,7 +1081,7 @@ impl Editor {
         if self.kill_needs_confirm() {
             self.open_confirm(
                 "Buffer modified; kill anyway?",
-                PendingAction::KillActiveBuffer,
+                PendingAction::KillBuffer(self.active.name.clone()),
                 cx,
             );
         } else {
@@ -1032,7 +1096,7 @@ impl Editor {
         if self.kill_needs_confirm() {
             self.open_confirm(
                 "Buffer modified; kill anyway?",
-                PendingAction::KillBufferAndWindow,
+                PendingAction::KillBufferAndWindow(self.active.name.clone()),
                 cx,
             );
         } else {
@@ -1048,16 +1112,35 @@ impl Editor {
         // path swaps buffers without `snapshot_active`'s flush).
         let killed_uri = document_uri(&self.active);
         self.lsp_close_document(&killed_uri);
+        let redirect = self.redirect_name();
         let replacement = self
             .inactive
             .pop()
             .unwrap_or_else(|| make_document("*scratch*".to_string(), None, ""));
         self.install_active(replacement);
+        self.reindex_redirect(redirect);
+        // `install_active` re-pointed only the selected window; every other
+        // window that showed the killed buffer follows it to the replacement
+        // instead of keeping a dangling name (which selecting it would later
+        // resurrect as an empty buffer).
+        let shown = self.active.name.clone();
+        let point = self.point();
+        self.repoint_panes_showing(&killed, &shown, point);
         self.drop_terminal_for_buffer(&killed);
         self.parse_full();
         self.ensure_cursor_visible();
         self.echo(format!("Killed {killed}"), cx);
         self.reconcile_watches(cx); // stop watching the killed buffer's file
+    }
+
+    /// Point every window showing the (killed) buffer `from` at buffer `to`,
+    /// with its saved point at `point` and scrolled to the top.
+    fn repoint_panes_showing(&mut self, from: &str, to: &str, point: usize) {
+        for pane in self.panes.iter_mut().filter(|p| p.buffer == from) {
+            pane.buffer = to.to_string();
+            pane.point = point;
+            pane.scroll = px(0.0);
+        }
     }
 
     /// Shut down and forget any embedded terminal backing buffer `name` (its
@@ -1085,8 +1168,17 @@ impl Editor {
         if name == self.active.name {
             self.kill_active_buffer(cx);
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
+            let redirect = self.redirect_name();
             let doc = self.inactive.remove(idx);
+            self.reindex_redirect(redirect);
             self.lsp_close_document(&document_uri(&doc));
+            // Non-selected windows that showed it switch to the most recent
+            // other buffer (or the active one) rather than keep a dangling name.
+            let (shown, point) = match self.inactive.last() {
+                Some(d) => (d.name.clone(), d.selected_range.end),
+                None => (self.active.name.clone(), self.point()),
+            };
+            self.repoint_panes_showing(name, &shown, point);
             self.drop_terminal_for_buffer(name);
             self.sync_buffers();
             self.echo(format!("Killed {name}"), cx);
@@ -1127,11 +1219,13 @@ impl Editor {
             .map(|(line, face)| (line, SharedString::from(face)))
             .collect();
         // Not shown anywhere: switch the selected window to a fresh buffer.
+        let redirect = self.redirect_name();
         let current = self.snapshot_active();
         // Replace any stale buffer of the same name, then install fresh.
         self.inactive.retain(|d| d.name != name);
         self.inactive.push(current);
         self.install_active(make_special_document(name, &mode, &text));
+        self.reindex_redirect(redirect);
         self.active.line_faces = faces;
         self.move_to(0, cx);
         self.active.modified = false;
@@ -1385,7 +1479,7 @@ impl Editor {
             let (s, e) = line_span(&self.active.buffer, ds, de);
             self.replace_region(s, e, &text, cx);
         } else if let Some(idx) = self.inactive.iter().position(|d| d.name == dst) {
-            let len = {
+            let (len, uri, full) = {
                 let doc = &mut self.inactive[idx];
                 let (s, e) = line_span(&doc.buffer, ds, de);
                 doc.buffer.replace(s..e, &text);
@@ -1401,8 +1495,12 @@ impl Editor {
                 if doc.selected_range.end > len {
                     doc.selected_range.end = len;
                 }
-                len
+                (len, document_uri(doc), doc.buffer.full_text())
             };
+            // Like `replace_inactive_text`: an open LSP document must see the
+            // new text, or later positions/diagnostics are computed against
+            // the stale copy.
+            self.lsp_sync_document(&uri, &full);
             // Keep any pane viewing this buffer in bounds after the edit.
             for p in &mut self.panes {
                 if p.buffer == dst && p.point > len {
@@ -1511,5 +1609,141 @@ mod tests {
             file_identity(&dir.join("new.txt"))
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Editor-level regressions for buffer kill / redirect / pane bookkeeping, on
+/// gpui's headless test platform (no Scheme runtime needed).
+#[cfg(test)]
+mod editor_state_tests {
+    use gpui::{Entity, TestAppContext};
+
+    use super::*;
+
+    fn editor_with(cx: &mut TestAppContext, names: &[&str]) -> Entity<Editor> {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let editor = cx.new(Editor::new);
+        editor.update(cx, |e, _| {
+            for name in names {
+                let current = e.snapshot_active();
+                e.inactive.push(current);
+                e.install_active(make_document(name.to_string(), None, "aéb\n"));
+            }
+        });
+        editor
+    }
+
+    fn inactive_names(e: &Editor) -> Vec<String> {
+        e.inactive.iter().map(|d| d.name.clone()).collect()
+    }
+
+    #[gpui::test]
+    fn render_redirect_follows_its_buffer_across_inactive_mutations(cx: &mut TestAppContext) {
+        let ed = editor_with(cx, &["a", "b", "c", "d"]);
+        ed.update(cx, |e, cx| {
+            // Active "d"; redirect at "c".
+            let c = e.inactive.iter().position(|d| d.name == "c").unwrap();
+            e.render_redirect = Some(c);
+            // Removing an earlier inactive buffer shifts "c" down one slot.
+            let first = e.inactive[0].name.clone();
+            e.kill_buffer_named(&first, cx);
+            let c = e.inactive.iter().position(|d| d.name == "c");
+            assert_eq!(e.render_redirect, c, "{:?}", inactive_names(e));
+            // Activating the redirected buffer ends the redirect (it's active).
+            e.activate(c.unwrap(), false, cx);
+            assert_eq!(e.active.name, "c");
+            assert_eq!(e.render_redirect, None);
+            // Killing the redirected buffer can't leave a dangling index.
+            let b = e.inactive.iter().position(|d| d.name == "b").unwrap();
+            e.render_redirect = Some(b);
+            e.kill_buffer_named("b", cx);
+            assert_eq!(e.render_redirect, None);
+            // Popping the last inactive buffer on an active kill.
+            let last = e.inactive.len() - 1;
+            e.render_redirect = Some(last);
+            e.kill_active_buffer(cx);
+            assert!(e.render_redirect.is_none_or(|i| i < e.inactive.len()));
+        });
+    }
+
+    #[gpui::test]
+    fn killing_a_buffer_repoints_every_window_showing_it(cx: &mut TestAppContext) {
+        let ed = editor_with(cx, &["a", "b"]);
+        ed.update(cx, |e, cx| {
+            // Two windows on "b".
+            e.split_window(true, cx);
+            assert_eq!(e.panes.len(), 2);
+            assert!(e.panes.iter().all(|p| p.buffer == "b"));
+            e.kill_active_buffer(cx);
+            let shown = e.active.name.clone();
+            assert_ne!(shown, "b");
+            assert!(
+                e.panes.iter().all(|p| p.buffer == shown),
+                "every window left the killed buffer"
+            );
+            // An inactive buffer shown in the other window.
+            let other = e.panes.iter().find(|p| p.id != e.selected_pane).unwrap().id;
+            let current = e.snapshot_active();
+            e.inactive.push(current);
+            e.install_active(make_document("c".into(), None, "x"));
+            let c_pane = e.panes.iter_mut().find(|p| p.id == other).unwrap();
+            c_pane.buffer = "zzz".into();
+            e.inactive.push(make_document("zzz".into(), None, "y"));
+            e.kill_buffer_named("zzz", cx);
+            let pane = e.panes.iter().find(|p| p.id == other).unwrap();
+            assert_ne!(pane.buffer, "zzz");
+            assert!(e.doc(&pane.buffer).is_some(), "repointed at a live buffer");
+        });
+    }
+
+    #[gpui::test]
+    fn selecting_a_pane_snaps_its_saved_point_to_a_char_boundary(cx: &mut TestAppContext) {
+        let ed = editor_with(cx, &["a"]);
+        ed.update(cx, |e, cx| {
+            e.split_window(true, cx);
+            let other = e.panes.iter().find(|p| p.id != e.selected_pane).unwrap().id;
+            // Byte 2 is inside "é" (bytes 1..3 of "aéb").
+            e.panes.iter_mut().find(|p| p.id == other).unwrap().point = 2;
+            e.select_pane(other, cx);
+            assert!(e.active.buffer.full_text().is_char_boundary(e.point()));
+        });
+    }
+
+    #[gpui::test]
+    fn displaced_grammar_prompt_is_asked_again(cx: &mut TestAppContext) {
+        let ed = editor_with(cx, &["a"]);
+        ed.update(cx, |e, cx| {
+            e.pending_grammar_installs
+                .push_back(crate::grammar::InstallSpec {
+                    id: "nim".into(),
+                    repo: "https://example.invalid/tree-sitter-nim".into(),
+                    rev: "main".into(),
+                    extensions: vec!["nim".into()],
+                    subdir: None,
+                    symbol: None,
+                    highlights_path: None,
+                });
+            e.resume_grammar_prompt(cx);
+            let purpose = |e: &Editor| e.minibuffer.as_ref().map(|m| m.purpose.clone());
+            assert!(matches!(
+                purpose(e),
+                Some(MinibufferPurpose::ConfirmGrammarInstall)
+            ));
+            // Another read replaces the prompt; closing it re-asks.
+            e.open_minibuffer("Find file: ", MinibufferPurpose::FindFile, "", cx);
+            e.mb_abort(cx);
+            assert!(matches!(
+                purpose(e),
+                Some(MinibufferPurpose::ConfirmGrammarInstall)
+            ));
+            assert_eq!(e.pending_grammar_installs.len(), 1);
+            // Declining advances the queue and leaves the minibuffer free.
+            e.mb_abort(cx);
+            assert!(e.pending_grammar_installs.is_empty());
+            assert!(e.minibuffer.is_none());
+        });
     }
 }

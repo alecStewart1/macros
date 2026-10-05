@@ -99,8 +99,8 @@
 
 ;; M-x ediff-current-with: diff the file in the current buffer against another.
 (define-command (ediff-current-with)
-  (let ((cur (current-buffer)))
-    (if (file-exists? cur)
+  (let ((cur (buffer-file-name)))
+    (if (and (not (equal? cur "")) (file-exists? cur))
         (begin (set! *ediff-tmp-a* cur)
                (read-file-name "diff against: " 'ediff--got-b))
         (message "ediff: current buffer is not a file"))))

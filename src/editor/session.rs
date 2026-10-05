@@ -223,20 +223,28 @@ impl Editor {
     /// files just get their point moved; missing or unreadable ones are
     /// skipped silently. Reads synchronously — this is a startup/restore path
     /// and the files are ones the user had open.
-    fn restore_file_buffers(&mut self, entries: Vec<(String, usize)>, cx: &mut Context<Self>) {
+    pub(super) fn restore_file_buffers(
+        &mut self,
+        entries: Vec<(String, usize)>,
+        cx: &mut Context<Self>,
+    ) {
         let mut opened = 0;
         for (path, point) in entries {
             let path = PathBuf::from(expand_path(&path));
-            if self.active.path.as_deref() == Some(path.as_path()) {
+            // "Already open" by canonical identity, as `find_file` decides it —
+            // a symlinked / relative spelling must not open a second buffer.
+            let identity = super::buffers::file_identity(&path);
+            let visits = |d: &Document| {
+                d.path
+                    .as_deref()
+                    .is_some_and(|p| super::buffers::file_identity(p) == identity)
+            };
+            if visits(&self.active) {
                 let p = crate::script::snap_byte(self.active.buffer.rope(), point);
                 self.move_to(p, cx);
                 continue;
             }
-            if let Some(doc) = self
-                .inactive
-                .iter_mut()
-                .find(|d| d.path.as_deref() == Some(path.as_path()))
-            {
+            if let Some(doc) = self.inactive.iter_mut().find(|d| visits(d)) {
                 let p = crate::script::snap_byte(doc.buffer.rope(), point);
                 doc.selected_range = p..p;
                 doc.selection_reversed = false;
@@ -249,6 +257,9 @@ impl Editor {
                 continue;
             };
             let p = char_floor(&contents, point);
+            // Two restored `mod.rs` files get distinct names (`mod.rs<a>`), as
+            // a visit would give them — buffer names are identity everywhere.
+            let name = self.unique_buffer_name(&name, &path);
             let mut doc = make_document(name, Some(path), &contents);
             doc.selected_range = p..p;
             doc.selection_reversed = false;
@@ -371,13 +382,15 @@ impl Editor {
         cx.notify();
     }
 
-    /// Run `kill-emacs-hook` synchronously (fresh session state published
-    /// first), then quit the app. Every quit path funnels through here so
-    /// savehist / desktop get to write their files before the process exits.
+    /// Quit the app once this window's unsaved buffers are dealt with (evil
+    /// `:q` / `:wq` family). Other windows with unsaved buffers are still
+    /// prompted; `prepare_quit` runs savehist / desktop hooks in each window.
     pub(super) fn quit_now(&mut self, cx: &mut Context<Self>) {
-        self.publish_session();
-        self.run_hook_blocking("kill-emacs-hook", cx);
-        cx.quit();
+        // This window's unsaved buffers were already resolved by the caller;
+        // route through the app-wide quit so other windows still get their
+        // save prompt and every window runs `kill-emacs-hook`.
+        crate::workspace::begin_app_quit(false, cx);
+        self.finish_quit(false, cx);
     }
 
     /// Run `after-init-hook` synchronously, once startup + user config have

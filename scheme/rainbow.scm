@@ -101,7 +101,9 @@
 (define *rainbow-skip-extensions*
   (list ".org" ".md" ".markdown" ".mdown" ".mkd" ".mkdn" ".txt"))
 (define (rainbow--skip?)
-  (let ((b (current-buffer)))
+  ;; The visited path, not the (possibly uniquified `x.md<dir>`) buffer name;
+  ;; fall back to the name for fileless buffers.
+  (let ((b (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f))))
     (let loop ((es *rainbow-skip-extensions*))
       (cond ((null? es) #f)
             ((ends-with? b (car es)) #t)

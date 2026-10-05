@@ -47,8 +47,9 @@ pub struct Diagnostic {
 /// thread reads framed messages and forwards them as JSON `Value`s over a
 /// channel; the editor drives requests/notifications from the main thread.
 pub struct LspClient {
-    #[allow(dead_code)] // kept alive so the child isn't reaped; killed on Drop.
-    child: Child,
+    /// The server process; killed and reaped on Drop (an `Option` only so
+    /// Drop can move it to a reaper thread).
+    child: Option<Child>,
     /// Outgoing framed messages, drained by a writer thread so the UI never
     /// blocks on a full stdin pipe (e.g. a large `didOpen` to a busy server).
     outgoing: Sender<String>,
@@ -71,6 +72,9 @@ impl LspClient {
         // program path ourselves — otherwise `~/.opam/…/ocaml_lsp` is looked up
         // as a literal path and fails with NotFound.
         let program = crate::util::expand_tilde(program);
+        // A missing working directory makes `spawn` fail with `NotFound` too,
+        // which would otherwise be misreported as the program missing from PATH.
+        check_spawn_cwd(root)?;
         let mut child = match Command::new(&program)
             .args(parts)
             .current_dir(root)
@@ -107,12 +111,10 @@ impl LspClient {
         if let Some(stderr) = child.stderr.take() {
             let tx_err = tx.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                for_each_stderr_line(stderr, |line| {
                     let msg = json!({ "method": "$/stderr", "params": { "line": line } });
-                    if tx_err.unbounded_send(msg).is_err() {
-                        break;
-                    }
-                }
+                    tx_err.unbounded_send(msg).is_ok()
+                });
             });
         }
         std::thread::spawn(move || read_loop(stdout, tx));
@@ -129,7 +131,7 @@ impl LspClient {
         });
 
         let mut client = Self {
-            child,
+            child: Some(child),
             outgoing,
             next_id: 1,
             root_uri: path_to_uri(root),
@@ -502,7 +504,7 @@ struct WireDiagnostic {
 
 /// Parse a `textDocument/publishDiagnostics` params object into `(uri, diags)`.
 pub fn parse_diagnostics(params: &Value) -> (String, Vec<RawDiagnostic>) {
-    let uri = params["uri"].as_str().unwrap_or_default().to_string();
+    let uri = normalize_uri(params["uri"].as_str().unwrap_or_default());
     let diagnostics = params["diagnostics"]
         .as_array()
         .map(|arr| {
@@ -618,9 +620,11 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
     let raw_label = wire.label?;
     // `insert_text` goes into the buffer, so fall back to the *raw* label; the
     // display `label` is collapsed to a single line for the popup.
+    // Per the spec, `textEdit` wins over `insertText` when both are present.
     let insert_text = wire
-        .insert_text
-        .or(wire.text_edit.and_then(|e| e.new_text))
+        .text_edit
+        .and_then(|e| e.new_text)
+        .or(wire.insert_text)
         .unwrap_or_else(|| raw_label.clone());
     let label = single_line(&raw_label);
     let kind = wire.kind.and_then(completion_kind).map(str::to_string);
@@ -648,7 +652,9 @@ pub fn merge_resolved_completion(item: &mut CompletionItem, resolved: &Value) {
         item.additional_edits = edits;
     }
     if let Some(detail) = wire.signature() {
-        item.detail = Some(detail);
+        // Same single-line rule as `parse_completion_item`: the popup can't
+        // render an embedded newline.
+        item.detail = Some(crate::util::single_line(&detail));
     }
     item.resolved = true;
 }
@@ -1229,18 +1235,22 @@ pub fn parse_signature_help(result: &Value) -> Option<String> {
 /// last-position-first so earlier byte offsets stay valid as we splice.
 pub fn apply_edits_to_text(text: &str, edits: &[TextEdit]) -> String {
     let buf = crate::buffer::Buffer::new(text);
-    let mut spans: Vec<(usize, usize, &str)> = edits
+    let mut spans: Vec<(usize, usize, usize, &str)> = edits
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
             let a = buf.position_to_byte(e.start.0, e.start.1);
             let b = buf.position_to_byte(e.end.0, e.end.1);
-            (a.min(b), a.max(b), e.new_text.as_str())
+            (a.min(b), a.max(b), i, e.new_text.as_str())
         })
         .collect();
-    // Descending by start (then end) so splicing one span never shifts another.
-    spans.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    // Descending by start so splicing one span never shifts another. Ties
+    // (e.g. several inserts at one position) go in *reverse* array order:
+    // each later splice lands in front of the earlier one, so the final text
+    // reads in array order, as the LSP spec requires.
+    spans.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)));
     let mut out = text.to_string();
-    for (start, end, new) in spans {
+    for (start, end, _, new) in spans {
         let start = start.min(out.len());
         let end = end.min(out.len());
         if start <= end {
@@ -1304,7 +1314,15 @@ fn percent_decode(s: &str) -> String {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            // Reap it, or it lingers as a zombie. SIGKILL makes `wait` return
+            // promptly, but do it off-thread so a drop on the UI thread never
+            // blocks.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
     }
 }
 
@@ -2173,11 +2191,13 @@ pub(crate) fn read_frames<R: BufRead>(mut reader: R, tx: &UnboundedSender<Value>
     }
 }
 
-/// Convert a filesystem path to a `file://` URI, percent-encoding every byte
-/// outside RFC 3986's unreserved set (plus `/`) — LSP servers send and compare
-/// encoded URIs, so a path with a space must go out as `%20` or diagnostics
-/// keyed by the server's URI won't match ours. On Windows, `\` separators
-/// become `/` and the drive path gains the leading slash (`file:///C:/…`).
+/// Convert a filesystem path to a `file://` URI, percent-encoding exactly what
+/// the `url` crate's `Url::from_file_path` encodes (controls, non-ASCII, space,
+/// `"`, `#`, `%`, `<`, `>`, `?`, `` ` ``, `{`, `}`) — most servers (rust-analyzer,
+/// gopls, …) build their URIs that way, and diagnostics are keyed by URI, so a
+/// stricter encoding (e.g. `@` → `%40`) would never match. On Windows, `\`
+/// separators become `/` and the drive path gains the leading slash
+/// (`file:///C:/…`).
 pub fn path_to_uri(path: &Path) -> String {
     let path = path.to_string_lossy();
     let mut out = String::with_capacity(path.len() + 8);
@@ -2187,14 +2207,78 @@ pub fn path_to_uri(path: &Path) -> String {
     }
     for &b in path.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                out.push(b as char)
-            }
             b'\\' if cfg!(windows) => out.push('/'),
-            _ => out.push_str(&format!("%{b:02X}")),
+            0x00..=0x20
+            | 0x7F..
+            | b'"'
+            | b'#'
+            | b'%'
+            | b'<'
+            | b'>'
+            | b'?'
+            | b'`'
+            | b'{'
+            | b'}'
+            | b'\\' => out.push_str(&format!("%{b:02X}")),
+            _ => out.push(b as char),
         }
     }
     out
+}
+
+/// Canonicalise a server-sent URI so it compares equal to ours: a `file://`
+/// URI is decoded and re-encoded with [`path_to_uri`]'s rules (servers differ
+/// on what they escape — `%40` vs `@`, `%3A` vs `:`, hex case). Other schemes
+/// pass through unchanged.
+pub fn normalize_uri(uri: &str) -> String {
+    if uri.starts_with("file://") {
+        path_to_uri(Path::new(&uri_to_path(uri)))
+    } else {
+        uri.to_string()
+    }
+}
+
+/// A spawned server's working directory must exist: otherwise `spawn` fails
+/// with `NotFound`, indistinguishable from a missing executable.
+pub(crate) fn check_spawn_cwd(cwd: &Path) -> Result<(), String> {
+    if cwd.as_os_str().is_empty() || cwd.is_dir() {
+        Ok(())
+    } else {
+        Err(format!(
+            "working directory `{}` does not exist (or is not a directory)",
+            cwd.display()
+        ))
+    }
+}
+
+/// Read `reader` (a child's stderr) line by line until EOF, passing each line
+/// (lossily decoded, without the trailing newline) to `f`. Non-UTF-8 output
+/// must not end the loop — dropping the pipe would let the server die on
+/// SIGPIPE/EPIPE. Once `f` returns `false` (nobody's listening) the pipe is
+/// still drained, just without forwarding.
+pub(crate) fn for_each_stderr_line<R: std::io::Read>(reader: R, mut f: impl FnMut(String) -> bool) {
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    let mut forwarding = true;
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+        if !forwarding {
+            continue;
+        }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+        }
+        forwarding = f(String::from_utf8_lossy(&buf).into_owned());
+    }
 }
 
 #[cfg(test)]
@@ -2968,6 +3052,98 @@ mod tests {
             parse_code_lens_title(&json!({ "command": { "title": "impl" } })).as_deref(),
             Some("impl")
         );
+    }
+
+    #[test]
+    fn same_position_inserts_apply_in_array_order() {
+        // LSP: inserts at one position appear in the result in array order.
+        let ins = |t: &str| TextEdit {
+            start: (0, 3),
+            end: (0, 3),
+            new_text: t.into(),
+        };
+        assert_eq!(
+            apply_edits_to_text("abcdef", &[ins("1"), ins("2"), ins("3")]),
+            "abc123def"
+        );
+        // An insert and a replace starting at the same position: the insert
+        // (first in the array) precedes the replacement text.
+        let edits = [
+            ins("<"),
+            TextEdit {
+                start: (0, 3),
+                end: (0, 4),
+                new_text: "D".into(),
+            },
+        ];
+        assert_eq!(apply_edits_to_text("abcdef", &edits), "abc<Def");
+    }
+
+    #[test]
+    fn completion_text_edit_wins_and_resolved_detail_is_single_line() {
+        let item = &parse_completion(&json!([{
+            "label": "foo",
+            "insertText": "wrong",
+            "textEdit": {
+                "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} },
+                "newText": "right"
+            }
+        }]))[0];
+        assert_eq!(item.insert_text, "right");
+
+        let mut item = parse_completion(&json!([{ "label": "map" }]))[0].clone();
+        merge_resolved_completion(&mut item, &json!({ "detail": "'a ->\n  'b" }));
+        assert_eq!(item.detail.as_deref(), Some("'a -> 'b"));
+    }
+
+    #[test]
+    fn stderr_lines_survive_invalid_utf8() {
+        let input: &[u8] = b"one\n\xff\xfebad\r\nthree";
+        let mut lines = Vec::new();
+        for_each_stderr_line(input, |l| {
+            lines.push(l);
+            true
+        });
+        assert_eq!(lines, vec!["one", "\u{FFFD}\u{FFFD}bad", "three"]);
+
+        // After the sink stops accepting, the rest is still drained (no panic,
+        // no further calls).
+        let mut calls = 0;
+        for_each_stderr_line(&b"a\nb\nc\n"[..], |_| {
+            calls += 1;
+            false
+        });
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn spawn_with_missing_cwd_reports_the_directory() {
+        let missing = Path::new("/definitely/not/a/real/dir/macros-test");
+        let err = LspClient::start("sh", missing).err().unwrap();
+        assert!(err.contains("working directory"), "{err}");
+        assert!(!err.contains("not found in PATH"), "{err}");
+    }
+
+    #[test]
+    fn uri_encoding_matches_url_crate_and_normalizes() {
+        // Characters the `url` crate leaves alone in file paths stay literal.
+        assert_eq!(
+            path_to_uri(Path::new("/tmp/a@b+c=d,e;f:g!h$i&j'k(l)m*n[o]p~q.rs")),
+            "file:///tmp/a@b+c=d,e;f:g!h$i&j'k(l)m*n[o]p~q.rs"
+        );
+        assert_eq!(
+            path_to_uri(Path::new("/tmp/a b#c?d%e{f}g`h\"i<j>.rs")),
+            "file:///tmp/a%20b%23c%3Fd%25e%7Bf%7Dg%60h%22i%3Cj%3E.rs"
+        );
+        // A server URI escaping more (or less, or lower-case hex) than we do
+        // normalises to ours, so diagnostics keyed by it match.
+        let ours = path_to_uri(Path::new("/tmp/my dir/@scope/a.ts"));
+        assert_eq!(normalize_uri("file:///tmp/my%20dir/%40scope/a.ts"), ours);
+        let (uri, _) = parse_diagnostics(&json!({
+            "uri": "file:///tmp/my%20dir/%40scope/a.ts", "diagnostics": []
+        }));
+        assert_eq!(uri, ours);
+        assert_eq!(normalize_uri("untitled:Untitled-1"), "untitled:Untitled-1");
     }
 
     #[test]

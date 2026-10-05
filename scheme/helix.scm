@@ -245,12 +245,26 @@
         (let* ((r (car rs)) (s (car r)) (e (cdr r)) (ns (- s dropped)))
           (loop (cdr rs) (+ dropped (- e s)) (cons (cons ns ns) acc))))))
 
+;; Merge ascending (start . end) ranges that overlap or touch into one, so a
+;; byte is never deleted / transformed twice by two overlapping selections.
+(define (helix-merge-ranges asc)
+  (let loop ((rs asc) (acc '()))
+    (cond ((null? rs) (reverse acc))
+          ((and (not (null? acc)) (<= (car (car rs)) (cdr (car acc))))
+           (loop (cdr rs)
+                 (cons (cons (car (car acc))
+                             (max (cdr (car acc)) (cdr (car rs))))
+                       (cdr acc))))
+          (else (loop (cdr rs) (cons (car rs) acc))))))
+
 ;; Delete every selection (yanking first), then leave one bare cursor per
-;; deletion. Deletes run high-offset-first so earlier edits don't shift later
-;; ranges; the resulting cursors are computed up front from the snapshot.
+;; deletion. Overlapping selections are merged first (else the second delete
+;; would remove bytes the first already shifted into its range). Deletes run
+;; high-offset-first so earlier edits don't shift later ranges; the resulting
+;; cursors are computed up front from the snapshot.
 (define (helix-delete-core)
   (set! *helix-extend* #f)
-  (let* ((asc  (helix-ranges-asc))
+  (let* ((asc  (helix-merge-ranges (helix-ranges-asc)))
          (desc (helix-sort asc (lambda (x y) (> (car x) (car y))))))
     (when (not (null? asc))
       (helix-copy-ranges asc)
@@ -399,14 +413,7 @@
                             (cons ls le))))
                     (helix-selections))
                (lambda (x y) (< (car x) (car y)))))
-         (merged (let loop ((rs asc) (acc '()))
-                   (cond ((null? rs) (reverse acc))
-                         ((and (not (null? acc)) (<= (car (car rs)) (cdr (car acc))))
-                          (loop (cdr rs)
-                                (cons (cons (car (car acc))
-                                            (max (cdr (car acc)) (cdr (car rs))))
-                                      (cdr acc))))
-                         (else (loop (cdr rs) (cons (car rs) acc))))))
+         (merged (helix-merge-ranges asc))
          ;; ((range . new-text) …) in ascending order.
          (blocks (map (lambda (r)
                         (cons r (transform (buffer-substring (car r) (cdr r)))))

@@ -65,7 +65,20 @@ impl Editor {
         // in turn instead of all but the last being silently dropped.
         let was_idle = self.pending_grammar_installs.is_empty();
         self.pending_grammar_installs.push_back(spec);
-        if was_idle {
+        // Don't clobber a read the user is in the middle of: the prompt then
+        // opens when that read closes (`resume_grammar_prompt`).
+        if was_idle && self.minibuffer.is_none() {
+            self.prompt_next_grammar_install(cx);
+        }
+    }
+
+    /// Re-open the trust prompt for the queue head once the minibuffer is free.
+    /// Called whenever a read closes: if another read replaced the grammar
+    /// prompt (or one was open when the install was queued), the head is still
+    /// waiting for an answer — without this the queue would stall forever and
+    /// every later untrusted install would be queued silently.
+    pub(super) fn resume_grammar_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.minibuffer.is_none() && !self.pending_grammar_installs.is_empty() {
             self.prompt_next_grammar_install(cx);
         }
     }

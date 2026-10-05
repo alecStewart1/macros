@@ -224,7 +224,7 @@
 
 ;; The headline title with keyword, priority cookie and trailing tags removed.
 (define (org--heading-title rest kw)
-  (let* ((s (if kw (replace-regexp-in-string "^[A-Z]+[ \t]+" "" rest) rest))
+  (let* ((s (if kw (replace-regexp-in-string "^[A-Z]+(?:[ \t]+|$)" "" rest) rest))
          (s (replace-regexp-in-string "^\\[#[A-Z]\\][ \t]*" "" s))
          (s (replace-regexp-in-string org--tag-strip-re "" s)))
     (string-trim s)))
@@ -260,9 +260,16 @@
 ;; ===========================================================================
 ;; Layer 1a — fontification
 ;; ===========================================================================
-;; Is the active buffer an Org buffer? (.org by name, or explicitly activated.)
+;; The visited file's path, or the buffer name for a fileless buffer. Name-based
+;; checks must use this: a uniquified buffer is named `notes.org<dir>`, which
+;; no longer ends in ".org".
+(define (org--file-or-name)
+  (let ((f (buffer-file-name)))
+    (if (or (not (string? f)) (equal? f "")) (current-buffer) f)))
+
+;; Is the active buffer an Org buffer? (.org file, or explicitly activated.)
 (define (org--active?)
-  (or (ends-with? (current-buffer) ".org")
+  (or (ends-with? (org--file-or-name) ".org")
       (equal? (buffer-local-get "org-active") "t")))
 
 (define (org--level-face n)
@@ -516,9 +523,30 @@
 ;; state ∈ 'folded | 'children. A heading absent from the list is 'subtree (fully
 ;; shown). This drives the three-state TAB cycle (subtree→folded→children→…).
 (define *org-fold-state* '())
+;; Each folded line's text anchor, so the line numbers can be relocated when
+;; edits above them shift the buffer (see fold-anchors-capture, folding.scm).
+(define *org-fold-anchors* '())
 (define (org--fold-state-get) (buffer-state-get *org-fold-state* '()))
 (define (org--fold-state-set v)
-  (set! *org-fold-state* (buffer-state-set *org-fold-state* v)))
+  (set! *org-fold-state* (buffer-state-set *org-fold-state* v))
+  (set! *org-fold-anchors*
+        (buffer-state-set *org-fold-anchors*
+                          (if (null? v) '() (fold-anchors-capture (org--lines) (map car v))))))
+;; Relocate every recorded fold to its heading/drawer's current line (dropping
+;; ones whose line is gone), so a toggle never re-folds a stale line number.
+(define (org--fold-state-resync)
+  (let ((v (org--fold-state-get)))
+    (when (not (null? v))
+      (let ((anchors (buffer-state-get *org-fold-anchors* '()))
+            (lines (org--lines)))
+        (org--fold-state-set
+         (fold--dedupe
+          (filter (lambda (p) p)
+                  (map (lambda (p)
+                         (let ((n (fold-anchor-remap anchors lines (car p))))
+                           (if n (cons n (cdr p)) #f)))
+                       v))
+          car))))))
 (define (org--heading-state H)
   (let loop ((ps (org--fold-state-get)))
     (cond ((null? ps) 'subtree)
@@ -600,6 +628,7 @@
 ;; Paint a gutter chevron on every headline (down = expanded, right = folded),
 ;; so the fold can be toggled by clicking the chevron as well as with TAB.
 (define (org--refresh-fold-markers)
+  (org--fold-state-resync)
   (clear-fold-markers)
   (for-each (lambda (h)
               (set-fold-marker (car h)
@@ -618,6 +647,7 @@
 ;; so the arrow always matches what's actually visible (no "open arrow but body
 ;; still hidden" `children` state).
 (define (org-fold-toggle-at-line line)
+  (org--fold-state-resync)
   (when (or (org--heading-level (org--line-text line))
             (org--drawer-opener? (org--line-text line)))
     (let ((next (if (eq? (org--heading-state line) 'folded) 'subtree 'folded)))
@@ -633,6 +663,7 @@
 ;; activity away. A drawer the user later expands (TAB) is removed from the fold
 ;; state, so it re-folds only if this runs again.
 (define (org-fold-all-drawers)
+  (org--fold-state-resync)
   (for-each (lambda (d) (org--set-heading-state (car d) 'folded)) (org--drawers))
   (org--reapply-folds)
   (org--refresh-fold-markers))
@@ -641,6 +672,7 @@
 ;; (like Emacs); inside a src block, indent the code; in plain body do nothing
 ;; (Emacs never inserts a tab at point there — it would just shove the line right).
 (define-command (org-cycle)
+  (org--fold-state-resync)
   (let* ((L (buffer-line)) (line (org--line-text L)))
     (cond
       ((org--heading-level line)
@@ -802,7 +834,10 @@
              (lvl (nth (org--find-heading headings H) 1))
              (end (org--subtree-end H lvl headings total))
              (next (org--next-heading-from headings (+ end 1))))
-        (if (and next (<= (nth next 1) lvl))
+        ;; Only a true sibling (same level) — a shallower heading after the
+        ;; subtree is the parent's next sibling, not ours (mirrors
+        ;; org--prev-sibling).
+        (if (and next (= (nth next 1) lvl))
             (let* ((H2 (car next))
                    (end2 (org--subtree-end H2 (nth next 1) headings total))
                    (blockA (org--slice lines H end))
@@ -998,13 +1033,32 @@
     (replace-regexp-in-string "<" "&lt;"
       (replace-regexp-in-string "&" "&amp;" s))))
 
-;; Inline markup → HTML. Escape first, then links, then emphasis.
+;; Split `s` around Org links ([[url]] / [[url][desc]]): link segments go
+;; through `link-fn`, the text between them through `text-fn`, and the results
+;; are concatenated. Emphasis regexes must never see a converted link — the
+;; `/.../` italic rule would otherwise mangle every URL path.
+(define org--link-split-re "(?s)^(.*?)(\\[\\[[^]]+\\](?:\\[[^]]+\\])?\\])(.*)$")
+(define (org--inline-split s link-fn text-fn)
+  (let loop ((s s) (acc '()))
+    (let ((c (regexp-captures org--link-split-re s)))
+      (if (null? c)
+          (string-concat (reverse (cons (text-fn s) acc)))
+          (loop (nth c 3)
+                (cons (link-fn (nth c 2)) (cons (text-fn (nth c 1)) acc)))))))
+
+;; Inline markup → HTML. Escape first, then split around links so emphasis only
+;; touches the plain text between them.
 (define (org--inline->html s)
-  (let* ((s (org--escape-html s))
-         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "<a href=\"$1\">$2</a>" s))
-         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "<a href=\"$1\">$1</a>" s))
+  (org--inline-split (org--escape-html s) org--link->html org--emphasis->html))
+(define (org--link->html s)
+  (let* ((s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "<a href=\"$1\">$2</a>" s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "<a href=\"$1\">$1</a>" s)))
+    s))
+;; Italic runs FIRST: every tag the other rules emit has a `/` in its closing
+;; half (`</strong>`), which the `/.../` rule would otherwise pair up.
+(define (org--emphasis->html s)
+  (let* ((s (replace-regexp-in-string "/([^/\n]+)/" "<em>$1</em>" s))
          (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "<strong>$1</strong>" s))
-         (s (replace-regexp-in-string "/([^/\n]+)/" "<em>$1</em>" s))
          (s (replace-regexp-in-string "=([^=\n]+)=" "<code>$1</code>" s))
          (s (replace-regexp-in-string "~([^~\n]+)~" "<code>$1</code>" s))
          (s (replace-regexp-in-string "\\+([^+\n]+)\\+" "<del>$1</del>" s))
@@ -1071,10 +1125,7 @@
     (string-concat (map org--block->html ast))
     "</body>\n</html>\n"))
 
-(define (org--html-output-path)
-  (let* ((b (current-buffer))
-         (stem (if (ends-with? b ".org") (substring b 0 (- (string-length b) 4)) b)))
-    (path-join (buffer-directory) (string-append stem ".html"))))
+(define (org--html-output-path) (org--output-path ".html"))
 
 ;; C-c C-e h — export the current buffer to a sibling .html file.
 (define-command (org-export-html)
@@ -1172,7 +1223,8 @@
 
 (define (org-agenda-visit)
   (let ((t (alist-ref *org-agenda-targets* (buffer-line))))
-    (when t (open-file (car t)) (goto-line (cdr t)))))
+    ;; open-file is async: jump once the file's buffer is current.
+    (when t (open-file (car t)) (goto-when-visiting "" (car t) (cdr t) 0))))
 
 ;; C-c c — capture a TODO headline, appended to the capture file on disk.
 (define *org-capture-target* #f)
@@ -1580,7 +1632,16 @@
                (rest-start (if ex (+ (nth ex 1) 1) (+ el 1)))
                (before (org--slice lines 0 el))
                (rest (org--slice lines rest-start (- n 1))))
-          (org--replace-all (join-lines (append before res-lines (list "") rest)))
+          ;; One blank line separates the results from what follows — but only
+          ;; add it when `rest` doesn't already start with one, or every re-run
+          ;; would stack another blank line (the old one survives in `rest`).
+          (org--replace-all
+           (join-lines (append before res-lines
+                               (if (and (not (null? rest))
+                                        (equal? (string-trim (car rest)) ""))
+                                   '()
+                                   (list ""))
+                               rest)))
           (goto-line L0)
           (message "Block executed")))))
 
@@ -2137,7 +2198,11 @@
 ;; ===========================================================================
 ;; Layer 7e — refile + archive
 ;; ===========================================================================
-(define (org--current-file-path) (path-join (buffer-directory) (current-buffer)))
+(define (org--current-file-path)
+  (let ((f (buffer-file-name)))
+    (if (or (not (string? f)) (equal? f ""))
+        (path-join (buffer-directory) (current-buffer))
+        f)))
 
 ;; (root-level . subtree-lines) for the subtree rooted at heading H.
 (define (org--subtree-text H)
@@ -2267,7 +2332,11 @@
          (s (replace-regexp-in-string "%U" (string-append "[" (org--now-stamp) "]") s))
          (s (replace-regexp-in-string "%u" (string-append "[" today "]") s)))
     s))
-(define (org--expand-template-final s input) (replace-regexp-in-string "%\\?" input s))
+;; `$` in a replace-regexp-in-string replacement is a group reference; double it
+;; so user text (a captured "$5 lunch") is inserted literally.
+(define (org--replacement-literal s) (replace-regexp-in-string "\\$" "$$$$" s))
+(define (org--expand-template-final s input)
+  (replace-regexp-in-string "%\\?" (org--replacement-literal input) s))
 
 (define (org--capture-pick)
   (completing-read "Template: "
@@ -2529,7 +2598,11 @@
           ((= i r) (loop (cdr g) (+ i 1) (cons (org--row-set (car g) col val) acc)))
           (else (loop (cdr g) (+ i 1) (cons (car g) acc))))))
 
-(define (org--apply-formula grid fstr)
+(define (org--apply-formula grid fstr) (org--apply-formula-from grid fstr 1))
+;; Like org--apply-formula, but a column formula ($C=...) only fills rows
+;; `first`.. — the rows above a table's first hline are its header, which Org
+;; never overwrites. Field formulas (@R$C=...) still address any row.
+(define (org--apply-formula-from grid fstr first)
   (let ((c (regexp-captures "^[ \t]*(@?[0-9]*\\$[0-9]+)[ \t]*=[ \t]*(.*)$" fstr)))
     (if (null? c) grid
         (let* ((lhs (nth c 1)) (rhs (nth c 2)) (atc (regexp-captures "@([0-9]+)\\$([0-9]+)" lhs)))
@@ -2537,7 +2610,7 @@
               (org--grid-set grid (string->number (nth atc 1)) (string->number (nth atc 2))
                              (org--fmt-num (org--eval-arith (org--subst-refs rhs grid (string->number (nth atc 1))))))
               (let ((col (string->number (nth (regexp-captures "\\$([0-9]+)" lhs) 1))))
-                (let loop ((r 1) (g grid))
+                (let loop ((r first) (g grid))
                   (if (> r (length grid)) g
                       (loop (+ r 1)
                             (org--grid-set g r col
@@ -2549,6 +2622,13 @@
     (cond ((null? ls) (reverse acc))
           ((org--table-sep? (car ls)) (loop (cdr ls) (+ i 1) acc))
           (else (loop (cdr ls) (+ i 1) (cons (cons i (org--table-cells (car ls))) acc))))))
+;; 1-based grid row of the first data row: the row after the header block when
+;; the table has an hline below at least one row, else 1 (no header).
+(define (org--table-first-data-row slice)
+  (let loop ((ls slice) (rows 0))
+    (cond ((null? ls) 1)
+          ((org--table-sep? (car ls)) (if (> rows 0) (+ rows 1) (loop (cdr ls) rows)))
+          (else (loop (cdr ls) (+ rows 1))))))
 (define (org--grid->slice slice rows grid2)
   (let loop ((ls slice) (i 0) (rs rows) (gs grid2) (acc '()))
     (cond ((null? ls) (reverse acc))
@@ -2573,8 +2653,10 @@
                      (rows (org--table-grid slice))
                      (grid (map cdr rows))
                      (formulas (org--tblfm-formulas (org--line-text fl)))
+                     (first (org--table-first-data-row slice))
                      (grid2 (let loop ((fs formulas) (g grid))
-                              (if (null? fs) g (loop (cdr fs) (org--apply-formula g (car fs)))))))
+                              (if (null? fs) g
+                                  (loop (cdr fs) (org--apply-formula-from g (car fs) first))))))
                 (org--replace-line-range start end (org--format-table (org--grid->slice slice rows grid2)))
                 (message "Table recalculated")))))))
 
@@ -2587,15 +2669,25 @@
 (define (org--ast-table->rows e)
   (map (lambda (r) (if (equal? (car r) "sep") "|-|" (org--row-from-cells (cdr r)))) (nth e 1)))
 (define (org--output-path ext)
-  (let* ((b (current-buffer)) (stem (if (ends-with? b ".org") (substring b 0 (- (string-length b) 4)) b)))
-    (path-join (buffer-directory) (string-append stem ext))))
+  ;; Prefer the visited file's real path: a uniquified buffer is named
+  ;; `notes.org<dir>`, so the buffer name can't be trusted for the stem.
+  (let ((f (buffer-file-name)))
+    (if (and (string? f) (not (equal? f "")))
+        (string-append (if (ends-with? f ".org") (substring f 0 (- (string-length f) 4)) f) ext)
+        (let* ((b (current-buffer))
+               (stem (if (ends-with? b ".org") (substring b 0 (- (string-length b) 4)) b)))
+          (path-join (buffer-directory) (string-append stem ext))))))
 
 ;; --- Markdown (GitHub-flavored) ---------------------------------------------
 (define (org--inline->md s)
+  (org--inline-split s org--link->md org--emphasis->md))
+(define (org--link->md s)
   (let* ((s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "[$2]($1)" s))
-         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "[$1]($1)" s))
-         (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "**$1**" s))
-         (s (replace-regexp-in-string "/([^/\n]+)/" "_$1_" s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "[$1]($1)" s)))
+    s))
+(define (org--emphasis->md s)
+  (let* ((s (replace-regexp-in-string "\\*([^*\n]+)\\*" "**$1**" s))
+         (s (replace-regexp-in-string "/([^/\n]+)/" "_${1}_" s))
          (s (replace-regexp-in-string "=([^=\n]+)=" "`$1`" s))
          (s (replace-regexp-in-string "~([^~\n]+)~" "`$1`" s))
          (s (replace-regexp-in-string "\\+([^+\n]+)\\+" "~~$1~~" s))
@@ -2650,10 +2742,13 @@
          (s (replace-regexp-in-string "_" "\\_" s)))
     s))
 (define (org--inline->latex s)
-  (let* ((s (org--escape-latex s))
-         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "\\href{$1}{$2}" s))
-         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "\\url{$1}" s))
-         (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "\\textbf{$1}" s))
+  (org--inline-split (org--escape-latex s) org--link->latex org--emphasis->latex))
+(define (org--link->latex s)
+  (let* ((s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "\\href{$1}{$2}" s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "\\url{$1}" s)))
+    s))
+(define (org--emphasis->latex s)
+  (let* ((s (replace-regexp-in-string "\\*([^*\n]+)\\*" "\\textbf{$1}" s))
          (s (replace-regexp-in-string "/([^/\n]+)/" "\\emph{$1}" s))
          (s (replace-regexp-in-string "=([^=\n]+)=" "\\texttt{$1}" s))
          (s (replace-regexp-in-string "~([^~\n]+)~" "\\texttt{$1}" s)))
@@ -2697,9 +2792,13 @@
 
 ;; --- ASCII ------------------------------------------------------------------
 (define (org--inline->ascii s)
+  (org--inline-split s org--link->ascii org--emphasis->ascii))
+(define (org--link->ascii s)
   (let* ((s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "$2 ($1)" s))
-         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "$1" s))
-         (s (replace-regexp-in-string "\\*([^*\n]+)\\*" "$1" s))
+         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "$1" s)))
+    s))
+(define (org--emphasis->ascii s)
+  (let* ((s (replace-regexp-in-string "\\*([^*\n]+)\\*" "$1" s))
          (s (replace-regexp-in-string "/([^/\n]+)/" "$1" s))
          (s (replace-regexp-in-string "=([^=\n]+)=" "$1" s))
          (s (replace-regexp-in-string "~([^~\n]+)~" "$1" s))
@@ -2878,7 +2977,7 @@
 
 ;; .org files: activate on open. (set-major-mode installs the org-mode keymap.)
 (define (org--maybe-activate)
-  (when (and (ends-with? (current-buffer) ".org")
+  (when (and (ends-with? (org--file-or-name) ".org")
              (not (equal? (buffer-local-get "org-active") "t")))
     (set-major-mode "org-mode")
     (buffer-local-set "org-active" "t")

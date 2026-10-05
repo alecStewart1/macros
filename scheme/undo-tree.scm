@@ -13,6 +13,7 @@
 ;; active buffer's tree — actual movement is via undo / redo in the buffer.
 
 (define-key "fundamental" "ctrl-?" 'redo)
+
 ;; C-r is vim's redo. (evil.scm binds this too — same command, so the duplicate
 ;; is harmless; it lives here as well so undo-tree is self-contained.) Helix
 ;; redoes with `U`, bound in helix.scm.

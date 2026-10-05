@@ -128,20 +128,22 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
             workspace.focus_editor(window, cx);
 
             // The OS title-bar close button: intercept it so unsaved buffers
-            // get the same save/cancel prompt as C-x C-c. With another window
-            // still open, a clean close drops just this window (return true)
-            // rather than quitting the whole app — `confirm_quit` calls
-            // `cx.quit()`, which is only what we want for the last window. A
-            // window with unsaved buffers still falls through to that prompt,
-            // so nothing is discarded silently.
+            // get the same save/cancel prompt as C-x C-c. The last window
+            // closing quits the app (`confirm_quit` — prompting across every
+            // window, then `cx.quit()`). With another window still open, only
+            // this window closes: straight away when clean (return true), or
+            // after the save/discard prompt when dirty — never quitting the
+            // app and discarding the other windows' edits.
             let ws = cx.entity();
             window.on_window_should_close(cx, move |_window, cx| {
-                let others_open = cx.windows().len() > 1;
-                let dirty = ws.read(cx).has_unsaved_buffers(cx);
-                if others_open && !dirty {
+                let others_open = workspace::workspace_window_count(cx) > 1;
+                if !others_open {
+                    return ws.update(cx, |workspace, cx| workspace.confirm_quit(cx));
+                }
+                if !ws.read(cx).has_unsaved_buffers(cx) {
                     return true;
                 }
-                ws.update(cx, |workspace, cx| workspace.confirm_quit(cx))
+                ws.update(cx, |workspace, cx| workspace.confirm_close_window(cx))
             });
 
             // (b) Backstop: reveal after WATCHDOG regardless of config state.
@@ -360,14 +362,16 @@ fn main() {
         });
         cx.on_action::<Quit>(|_, cx| {
             // Route through the focused window so unsaved buffers still
-            // prompt, matching the title-bar close button and C-x C-c.
-            // No active window → plain quit.
+            // prompt, matching the title-bar close button and C-x C-c; the
+            // quit flow then visits every other window with unsaved buffers
+            // before quitting. No active window → start that flow directly.
             if let Some(window) = cx.active_window().and_then(|w| w.downcast::<Workspace>()) {
                 window
                     .update(cx, |workspace, _window, cx| workspace.confirm_quit(cx))
                     .ok();
             } else {
-                cx.quit();
+                workspace::begin_app_quit(false, cx);
+                workspace::continue_app_quit(cx);
             }
         });
 
@@ -419,7 +423,15 @@ fn spawn_update_check(window: &mut gpui::Window, cx: &mut gpui::Context<Workspac
                     .await;
                 match moved {
                     Ok(()) => {
-                        cx.update(|_, cx| cx.quit()).ok();
+                        // Quit through the normal path (unsaved-buffer prompt
+                        // + every window's kill-emacs-hook). The reopen helper
+                        // waits for this process to exit, so a cancelled
+                        // prompt just defers the relaunch to the next quit.
+                        workspace
+                            .update(cx, |ws, cx| {
+                                ws.confirm_quit(cx);
+                            })
+                            .ok();
                     }
                     Err(err) => {
                         cx.update(|window, cx| {

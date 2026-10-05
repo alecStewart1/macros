@@ -325,6 +325,7 @@ impl Terminal {
                 bold: cell.flags.contains(Flags::BOLD),
                 italic: cell.flags.contains(Flags::ITALIC),
                 underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                wide: cell.flags.contains(Flags::WIDE_CHAR),
             });
         }
 
@@ -408,6 +409,9 @@ pub struct TermCell {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// A double-width (CJK/emoji) glyph: it owns this column *and* the next,
+    /// whose spacer cell is omitted from the snapshot.
+    pub wide: bool,
 }
 
 pub struct TermCursor {

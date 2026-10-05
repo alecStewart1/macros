@@ -262,6 +262,8 @@ impl Editor {
             self.move_to(st.origin, cx);
         }
         self.echo("Quit", cx);
+        // This read may have displaced a grammar trust prompt: re-ask it.
+        self.resume_grammar_prompt(cx);
     }
 
     /// Completion candidates for the active minibuffer's purpose and input.
@@ -536,6 +538,8 @@ impl Editor {
                 self.resolve_grammar_install_confirm(approved, cx);
             }
         }
+        // This read may have displaced a grammar trust prompt: re-ask it.
+        self.resume_grammar_prompt(cx);
     }
 
     pub(super) fn open_confirm(
@@ -550,10 +554,14 @@ impl Editor {
 
     pub(super) fn perform(&mut self, action: PendingAction, cx: &mut Context<Self>) {
         match action {
-            PendingAction::KillActiveBuffer => self.kill_active_buffer(cx),
-            PendingAction::KillBufferAndWindow => {
-                self.kill_active_buffer(cx);
-                self.delete_window(cx);
+            PendingAction::KillBuffer(name) => self.kill_buffer_named(&name, cx),
+            PendingAction::KillBufferAndWindow(name) => {
+                // Only close the window if it still shows the buffer.
+                let was_active = name == self.active.name;
+                self.kill_buffer_named(&name, cx);
+                if was_active {
+                    self.delete_window(cx);
+                }
             }
         }
     }

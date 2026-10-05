@@ -346,13 +346,14 @@ impl Editor {
                 // commands carry stale byte offsets, so the batch loop drops
                 // them (`apply_script_outcome`) and the caller's `on_stale`
                 // reschedules the repaint.
-                let (cur_name, cur_tick) = match self.render_redirect {
-                    Some(i) => (
-                        self.inactive[i].name.as_str(),
-                        self.inactive[i].buffer.tick(),
-                    ),
-                    None => (self.active.name.as_str(), self.active.buffer.tick()),
-                };
+                let (cur_name, cur_tick) =
+                    match self.render_redirect.filter(|&i| i < self.inactive.len()) {
+                        Some(i) => (
+                            self.inactive[i].name.as_str(),
+                            self.inactive[i].buffer.tick(),
+                        ),
+                        None => (self.active.name.as_str(), self.active.buffer.tick()),
+                    };
                 if cur_name != name || cur_tick != tick {
                     self.script_batch_stale = true;
                     if !on_stale.is_empty() {

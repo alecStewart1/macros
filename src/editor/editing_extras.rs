@@ -344,24 +344,30 @@ impl Editor {
             self.echo("multiple-cursors: no word at point", cx);
             return;
         }
-        // Search after the furthest existing cursor, wrapping once.
-        let from = self
-            .all_cursor_positions()
-            .into_iter()
-            .max()
-            .unwrap_or(primary);
+        // Every cursor sits `offset` bytes into its occurrence. Walk the
+        // occurrences after the primary's own (wrapping once) and take the
+        // first that has no cursor yet — the word under point and earlier
+        // marks are skipped, not mistaken for "no more matches".
+        let offset = primary.saturating_sub(start).min(word.len());
+        let from = end;
         let text = self.active.buffer.full_text();
+        let taken = self.all_cursor_positions();
         let found = text[from..]
-            .find(&word)
-            .map(|i| from + i)
-            .or_else(|| text.find(&word));
+            .match_indices(&word)
+            .map(|(i, _)| from + i)
+            .chain(text[..from].match_indices(&word).map(|(i, _)| i))
+            .map(|at| at + offset)
+            .find(|p| !taken.contains(p));
         match found {
-            Some(at) if self.mc_add_cursor_at(at) => {
-                self.collapse_to(at + word.len());
+            Some(at) => {
+                // Like mc/mark-next-like-this: the old point keeps a cursor
+                // and point moves on to the new occurrence.
+                self.collapse_to(at);
+                self.mc_add_cursor_at(primary);
                 self.ensure_cursor_visible();
                 cx.notify();
             }
-            _ => self.echo("multiple-cursors: no more matches", cx),
+            None => self.echo("multiple-cursors: no more matches", cx),
         }
     }
 }

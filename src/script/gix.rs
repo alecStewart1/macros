@@ -424,11 +424,17 @@ pub(crate) fn diff_one_file(
     let empty: &[u8] = &[];
     let oc = old.map_or(empty, |(c, _)| c);
     let nc = new.map_or(empty, |(c, _)| c);
+    // A mode change (e.g. `chmod +x`) gets git's `old mode`/`new mode` header,
+    // and is a change on its own even when the content is identical.
+    let mode_header = match (old, new) {
+        (Some((_, om)), Some((_, nm))) if om != nm => format!("old mode {om}\nnew mode {nm}\n"),
+        _ => String::new(),
+    };
 
     // Binary files: emit `Binary files … differ` with no body, exactly like git —
     // no content, so nothing to garble or to fail to parse.
-    if diff_is_binary(oc) || diff_is_binary(nc) {
-        let mut out = format!("diff --git a/{path} b/{path}\n");
+    if oc != nc && (diff_is_binary(oc) || diff_is_binary(nc)) {
+        let mut out = format!("diff --git a/{path} b/{path}\n{mode_header}");
         match (old, new) {
             (None, Some((_, mode))) => out.push_str(&format!(
                 "new file mode {mode}\nBinary files /dev/null and b/{path} differ\n"
@@ -442,9 +448,13 @@ pub(crate) fn diff_one_file(
     }
 
     let Some(hunks) = diff_hunks(oc, nc) else {
+        if !mode_header.is_empty() {
+            // Mode-only change: just the header, no hunks (as git prints it).
+            return format!("diff --git a/{path} b/{path}\n{mode_header}");
+        }
         return String::new(); // identical → nothing (callers pre-filter, but be safe)
     };
-    let mut out = format!("diff --git a/{path} b/{path}\n");
+    let mut out = format!("diff --git a/{path} b/{path}\n{mode_header}");
     match (old, new) {
         (None, Some((_, mode))) => {
             out.push_str(&format!(
@@ -529,7 +539,7 @@ pub(crate) fn diff_side_maps(
     };
     for k in keys {
         let (o, n) = match (old.get(k), new.get(k)) {
-            (Some(o), Some(n)) if o.0 != n.0 => (Some(o), Some(n)),
+            (Some(o), Some(n)) if o != n => (Some(o), Some(n)),
             (None, Some(n)) => (None, Some(n)),
             (Some(o), None) => (Some(o), None),
             _ => continue,
@@ -567,9 +577,17 @@ pub(crate) fn gix_diff_text(dir: &str, cached: bool) -> Result<String, Box<dyn s
             Ok(t) => tree_side_map(&t)?,
             Err(_) => BTreeMap::new(),
         };
+        let mut head = head;
         let mut idx: BTreeMap<Vec<u8>, GixSide> = BTreeMap::new();
         for e in index.entries() {
-            if e.stage() != gix::index::entry::Stage::Unconflicted || e.mode.is_sparse() {
+            if e.stage() != gix::index::entry::Stage::Unconflicted {
+                // An unmerged path has nothing staged (git shows it only as
+                // unmerged); without this its absent stage-0 entry would read
+                // as a staged deletion of the HEAD version.
+                head.remove(e.path(&index));
+                continue;
+            }
+            if e.mode.is_sparse() {
                 continue;
             }
             idx.insert(e.path(&index).to_vec(), (e.id, index_mode_str(e.mode)));
@@ -601,11 +619,11 @@ pub(crate) fn gix_diff_text(dir: &str, cached: bool) -> Result<String, Box<dyn s
                         out.push_str(&diff_one_file(&path, Some((&o, mode)), None));
                     }
                 }
-                Some(WorktreeChange::Modified { old, new }) => {
+                Some(WorktreeChange::Modified { old, new, new_mode }) => {
                     out.push_str(&diff_one_file(
                         &path,
                         Some((&old, mode)),
-                        Some((&new, mode)),
+                        Some((&new, new_mode)),
                     ));
                 }
                 None => {}
@@ -623,6 +641,9 @@ pub(crate) enum WorktreeChange {
     Modified {
         old: Vec<u8>,
         new: Vec<u8>,
+        /// The worktree file's git mode — differs from the index entry's on a
+        /// `chmod ±x`, which is a change even when the bytes are identical.
+        new_mode: &'static str,
     },
 }
 
@@ -655,10 +676,31 @@ pub(crate) fn worktree_change(
         return (head != e.id).then(|| WorktreeChange::Modified {
             old: gitlink_text(&e.id),
             new: gitlink_text(&head),
+            new_mode: GITLINK_MODE,
         });
     }
 
+    let is_link = e.mode.contains(gix::index::entry::Mode::SYMLINK);
+    let old_mode = index_mode_str(e.mode);
+    // The executable bit, as git tracks it: only for regular files, and only
+    // when `core.fileMode` is on (it's off on filesystems without exec bits).
+    let new_mode = if is_link
+        || !meta.is_file()
+        || !repo
+            .filesystem_options()
+            .map(|c| c.executable_bit)
+            .unwrap_or(true)
+    {
+        old_mode
+    } else if meta.is_executable() {
+        "100755"
+    } else {
+        "100644"
+    };
+    let mode_changed = new_mode != old_mode;
+
     if !racy
+        && !mode_changed
         && let Ok(disk_stat) = gix::index::entry::Stat::from_fs(&meta)
         && e.stat.matches(&disk_stat, stat_opts)
     {
@@ -666,13 +708,13 @@ pub(crate) fn worktree_change(
     }
 
     // Symlinks diff their target path (what git stores), not the pointee.
-    let new = if e.mode.contains(gix::index::entry::Mode::SYMLINK) {
+    let new = if is_link {
         link_target_bytes(&std::fs::read_link(&file).ok()?)
     } else {
         std::fs::read(&file).ok()?
     };
     let old = repo.find_object(e.id).ok()?.data.clone();
-    (new != old).then_some(WorktreeChange::Modified { old, new })
+    (mode_changed || new != old).then_some(WorktreeChange::Modified { old, new, new_mode })
 }
 
 /// A symlink target as the raw bytes git stores in the link's blob.
@@ -796,6 +838,12 @@ pub(crate) fn gix_log_decorated(
             .all()?
             .filter_map(Result::ok)
             .filter_map(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+            // A tag can point at a tree or blob; such a tip would make the
+            // whole rev-walk fail, so keep commits only.
+            .filter(|id| {
+                repo.find_header(*id)
+                    .is_ok_and(|h| h.kind() == gix::object::Kind::Commit)
+            })
             .collect()
     } else {
         vec![repo.head_id()?.detach()]
@@ -997,8 +1045,10 @@ pub(crate) struct StatusEntry {
     y: char,
 }
 
-/// `XY`-classified change rows for `gix-status`, sorted by path. X = index-vs-HEAD
-/// (staged), Y = worktree-vs-index (unstaged), `??` = untracked.
+/// `XY`-classified change rows for `gix-status`: tracked changes sorted by
+/// path, then untracked (`??`) ones, as git orders them. X = index-vs-HEAD
+/// (staged), Y = worktree-vs-index (unstaged); unmerged paths carry git's
+/// two-letter conflict code (`UU`, `AA`, `DU`, …).
 pub(crate) fn gix_status_entries(
     repo: &gix::Repository,
 ) -> Result<Vec<StatusEntry>, Box<dyn std::error::Error>> {
@@ -1006,9 +1056,11 @@ pub(crate) fn gix_status_entries(
     let index = repo.open_index()?;
     let workdir = repo.workdir().ok_or("bare repository")?.to_path_buf();
 
-    // index (stage 0) path→oid, plus every index path for the untracked test.
-    let mut idx: BTreeMap<Vec<u8>, gix::ObjectId> = BTreeMap::new();
+    // index (stage 0) path→(oid, mode), plus every index path (any stage) for
+    // the untracked test, plus the stages present for each unmerged path.
+    let mut idx: BTreeMap<Vec<u8>, GixSide> = BTreeMap::new();
     let mut idx_paths: HashSet<Vec<u8>> = HashSet::new();
+    let mut conflicts: BTreeMap<Vec<u8>, u8> = BTreeMap::new();
     // Submodule checkouts: their files belong to another repo, never untracked.
     let mut gitlink_dirs: HashSet<std::path::PathBuf> = HashSet::new();
     for e in index.entries() {
@@ -1016,29 +1068,33 @@ pub(crate) fn gix_status_entries(
         if e.mode.is_submodule() {
             gitlink_dirs.insert(workdir.join(String::from_utf8_lossy(e.path(&index)).as_ref()));
         }
-        if e.stage() == gix::index::entry::Stage::Unconflicted {
-            idx.insert(e.path(&index).to_vec(), e.id);
+        match e.stage() {
+            gix::index::entry::Stage::Unconflicted => {
+                idx.insert(e.path(&index).to_vec(), (e.id, index_mode_str(e.mode)));
+            }
+            stage => *conflicts.entry(e.path(&index).to_vec()).or_default() |= 1 << stage as u8,
         }
     }
-    let head: BTreeMap<Vec<u8>, gix::ObjectId> = match repo.head_tree() {
-        Ok(t) => t
-            .traverse()
-            .breadthfirst
-            .files()?
-            .into_iter()
-            .filter(|e| e.mode.is_blob_or_symlink() || e.mode.is_commit()) // drop tree/submodule entries
-            .map(|e| (Vec::from(e.filepath), e.oid))
-            .collect(),
+    let head = match repo.head_tree() {
+        Ok(t) => tree_side_map(&t)?,
         Err(_) => BTreeMap::new(),
     };
 
     let mut codes: BTreeMap<Vec<u8>, [char; 2]> = BTreeMap::new();
 
-    // X — staged (HEAD tree vs index).
+    // Unmerged paths get git's two-letter conflict code instead of X/Y.
+    for (k, stages) in &conflicts {
+        codes.insert(k.clone(), unmerged_code(*stages));
+    }
+
+    // X — staged (HEAD tree vs index). Mode counts too (`chmod +x` + add).
     let mut staged: Vec<&Vec<u8>> = head.keys().chain(idx.keys()).collect();
     staged.sort();
     staged.dedup();
     for k in staged {
+        if conflicts.contains_key(k) {
+            continue;
+        }
         let x = match (head.get(k), idx.get(k)) {
             (None, Some(_)) => 'A',
             (Some(_), None) => 'D',
@@ -1074,40 +1130,88 @@ pub(crate) fn gix_status_entries(
         codes.entry(rel).or_insert([' ', ' '])[1] = y;
     }
 
-    // Untracked — gitignore-aware worktree walk; files absent from the index.
+    // Untracked — gitignore-aware worktree walk; files absent from the index
+    // (at any stage: `git rm --cached foo` leaves foo in HEAD but untracked).
+    // Only git's ignore rules apply — not ripgrep's `.ignore` files. A nested
+    // repository that isn't a submodule is one untracked `dir/` entry, as git
+    // reports it, rather than every file inside it.
+    let nested: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> = Default::default();
+    let nested_w = nested.clone();
     let walker = ignore::WalkBuilder::new(&workdir)
         .hidden(false) // dotfiles are tracked by git
+        .ignore(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .parents(true)
-        .filter_entry(move |d| !gitlink_dirs.contains(d.path()))
+        .filter_entry(move |d| {
+            if d.depth() == 0 {
+                return true;
+            }
+            if d.file_name() == ".git" || gitlink_dirs.contains(d.path()) {
+                return false;
+            }
+            if d.file_type().is_some_and(|t| t.is_dir()) && d.path().join(".git").exists() {
+                nested_w.lock().unwrap().push(d.path().to_path_buf());
+                return false;
+            }
+            true
+        })
         .build();
+    // Kept apart from `codes`: a path can be both (`git rm --cached foo` is a
+    // staged `D ` *and* an untracked `??`), and git lists untracked last.
+    let mut untracked: std::collections::BTreeSet<Vec<u8>> = Default::default();
+    let rel_of = |path: &std::path::Path| -> Option<Vec<u8>> {
+        let rel = path.strip_prefix(&workdir).ok()?;
+        Some(rel.to_string_lossy().replace('\\', "/").into_bytes())
+    };
     for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+        if !entry
+            .file_type()
+            .is_some_and(|t| t.is_file() || t.is_symlink())
+        {
             continue;
         }
-        let path = entry.path();
-        if path.components().any(|c| c.as_os_str() == ".git") {
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(&workdir) else {
+        let Some(rel) = rel_of(entry.path()) else {
             continue;
         };
-        let rel = rel.to_string_lossy().replace('\\', "/").into_bytes();
-        if !idx_paths.contains(&rel) && !head.contains_key(&rel) {
-            codes.insert(rel, ['?', '?']);
+        if !idx_paths.contains(&rel) {
+            untracked.insert(rel);
+        }
+    }
+    for dir in nested.lock().unwrap().iter() {
+        if let Some(mut rel) = rel_of(dir) {
+            rel.push(b'/');
+            untracked.insert(rel);
         }
     }
 
     Ok(codes
         .into_iter()
+        .chain(untracked.into_iter().map(|p| (p, ['?', '?'])))
         .map(|(p, [x, y])| StatusEntry {
             path: String::from_utf8_lossy(&p).into_owned(),
             x,
             y,
         })
         .collect())
+}
+
+/// git's porcelain code for an unmerged path, from the bitmask of index stages
+/// present (bit 1 = base, 2 = ours, 3 = theirs).
+fn unmerged_code(stages: u8) -> [char; 2] {
+    const BASE: u8 = 1 << 1;
+    const OURS: u8 = 1 << 2;
+    const THEIRS: u8 = 1 << 3;
+    match stages & (BASE | OURS | THEIRS) {
+        BASE => ['D', 'D'],
+        OURS => ['A', 'U'],
+        x if x == BASE | OURS => ['U', 'D'],
+        THEIRS => ['U', 'A'],
+        x if x == BASE | THEIRS => ['D', 'U'],
+        x if x == OURS | THEIRS => ['A', 'A'],
+        _ => ['U', 'U'],
+    }
 }
 
 /// `(gix-status dir)` backend: porcelain v1 lines, header first.
@@ -1285,6 +1389,154 @@ mod tests {
             cached.contains(&format!("+Subproject commit {}\n", sub_head.to_hex())),
             "{cached}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn status_map(d: &str) -> std::collections::BTreeMap<String, String> {
+        status_rows(d)
+            .into_iter()
+            .map(|r| (r[3..].to_string(), r[..2].to_string()))
+            .collect()
+    }
+
+    fn status_rows(d: &str) -> Vec<String> {
+        let repo = gix::discover(d).unwrap();
+        gix_status_entries(&repo)
+            .unwrap()
+            .into_iter()
+            .map(|e| format!("{}{} {}", e.x, e.y, e.path))
+            .collect()
+    }
+
+    fn fresh_repo(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("macros-gix-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        root
+    }
+
+    /// Unmerged paths are `UU`/`AA` (not a staged `D`), and the staged diff
+    /// shows nothing for them.
+    #[test]
+    fn status_reports_conflicts_like_git() {
+        let root = fresh_repo("conflict");
+        let d = root.to_str().unwrap();
+        std::fs::write(root.join("both.txt"), "base\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "base"]);
+        git(&root, &["checkout", "-qb", "other"]);
+        std::fs::write(root.join("both.txt"), "theirs\n").unwrap();
+        std::fs::write(root.join("new.txt"), "theirs\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "theirs"]);
+        git(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("both.txt"), "ours\n").unwrap();
+        std::fs::write(root.join("new.txt"), "ours\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "ours"]);
+        // The merge conflicts (non-zero exit), so don't assert success.
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "merge",
+                "-q",
+                "other",
+            ])
+            .output();
+
+        let st = status_map(d);
+        assert_eq!(st.get("both.txt").map(String::as_str), Some("UU"), "{st:?}");
+        assert_eq!(st.get("new.txt").map(String::as_str), Some("AA"), "{st:?}");
+        let cached = gix_diff_text(d, true).unwrap();
+        assert!(!cached.contains("both.txt"), "{cached}");
+        assert!(!cached.contains("new.txt"), "{cached}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `git rm --cached` → untracked; `.ignore` files don't hide anything;
+    /// a nested repository collapses to one `dir/` entry.
+    #[test]
+    fn status_untracked_matches_git() {
+        let root = fresh_repo("untracked");
+        let d = root.to_str().unwrap();
+        std::fs::write(root.join("foo"), "x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        git(&root, &["rm", "-q", "--cached", "foo"]);
+        std::fs::write(root.join(".ignore"), "hidden.txt\n").unwrap();
+        std::fs::write(root.join("hidden.txt"), "x\n").unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q"]);
+        std::fs::write(nested.join("inner.txt"), "x\n").unwrap();
+
+        // git prints the staged deletion and the untracked copy as two rows,
+        // untracked last.
+        let rows = status_rows(d);
+        let del = rows.iter().position(|r| r == "D  foo");
+        let unt = rows.iter().position(|r| r == "?? foo");
+        assert!(del.is_some() && unt.is_some() && del < unt, "{rows:?}");
+        let st = status_map(d);
+        assert_eq!(
+            st.get("hidden.txt").map(String::as_str),
+            Some("??"),
+            "{st:?}"
+        );
+        assert_eq!(st.get("nested/").map(String::as_str), Some("??"), "{st:?}");
+        assert!(!st.contains_key("nested/inner.txt"), "{st:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `chmod +x` with identical content is a change, unstaged and staged.
+    #[cfg(unix)]
+    #[test]
+    fn mode_only_changes_show_in_status_and_diff() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fresh_repo("mode");
+        let d = root.to_str().unwrap();
+        let f = root.join("run.sh");
+        std::fs::write(&f, "echo hi\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(status_map(d).get("run.sh").map(String::as_str), Some(" M"));
+        let diff = gix_diff_text(d, false).unwrap();
+        assert_eq!(
+            diff,
+            "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
+        );
+
+        git(&root, &["add", "run.sh"]);
+        assert_eq!(status_map(d).get("run.sh").map(String::as_str), Some("M "));
+        assert_eq!(gix_diff_text(d, false).unwrap(), "");
+        let cached = gix_diff_text(d, true).unwrap();
+        assert_eq!(
+            cached,
+            "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A tag pointing at a tree must not blank `--all` log output.
+    #[test]
+    fn log_decorated_all_skips_non_commit_tips() {
+        let root = fresh_repo("tagtree");
+        let d = root.to_str().unwrap();
+        std::fs::write(root.join("a"), "a\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "first"]);
+        git(&root, &["tag", "treetag", "HEAD^{tree}"]);
+        let rows = gix_log_decorated(d, true, 10).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].ends_with("first"), "{rows:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

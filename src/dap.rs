@@ -64,6 +64,8 @@ impl DapClient {
         args: &[String],
         cwd: &Path,
     ) -> Result<(Self, UnboundedReceiver<Value>), String> {
+        // A missing cwd would otherwise surface as "not found in PATH".
+        crate::lsp::check_spawn_cwd(cwd)?;
         let mut cmd = Command::new(program);
         cmd.args(args)
             .current_dir(cwd)
@@ -103,16 +105,13 @@ impl DapClient {
         if let Some(stderr) = child.stderr.take() {
             let tx_err = tx.clone();
             std::thread::spawn(move || {
-                use std::io::BufRead;
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                crate::lsp::for_each_stderr_line(stderr, |line| {
                     let msg = json!({
                         "seq": 0, "type": "event", "event": "output",
                         "body": { "category": "stderr", "output": format!("{line}\n") }
                     });
-                    if tx_err.unbounded_send(msg).is_err() {
-                        break;
-                    }
-                }
+                    tx_err.unbounded_send(msg).is_ok()
+                });
             });
         }
         std::thread::spawn(move || crate::lsp::read_frames(BufReader::new(stdout), &tx));
@@ -298,6 +297,13 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use std::io::BufRead;
+
+    #[test]
+    fn start_with_missing_cwd_reports_the_directory() {
+        let missing = Path::new("/definitely/not/a/real/dir/macros-dap-test");
+        let err = DapClient::start("sh", &[], missing).err().unwrap();
+        assert!(err.contains("working directory"), "{err}");
+    }
 
     fn read_frame<R: BufRead>(reader: &mut R) -> Option<Value> {
         let mut len = 0usize;

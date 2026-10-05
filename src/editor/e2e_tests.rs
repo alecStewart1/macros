@@ -581,3 +581,365 @@ fn render_buffer_refresh_keeps_scroll_position(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// `]` (last changed char) lands on the START of a multibyte last char, never
+/// inside it.
+#[gpui::test]
+fn change_end_mark_is_a_char_boundary(cx: &mut TestAppContext) {
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, _| {
+        e.edit(0..0, "aé");
+    });
+    ed.read_with(cx, |e, _| {
+        let m = e.vim.marks.get("test.txt").expect("marks");
+        assert_eq!(m.get(&']'), Some(&1), "`]` on é's first byte");
+        assert_eq!(m.get(&'['), Some(&0));
+    });
+}
+
+/// An electric-pair opener refused by read-only text leaves point alone
+/// (it used to step back by the closer's length — underflowing at 0).
+#[gpui::test]
+fn electric_pair_on_read_only_text_keeps_point(cx: &mut TestAppContext) {
+    // Next char is a space, so `(` would pair (`()`) were the text writable.
+    let ed = setup(cx, " ab\n");
+    ed.update(cx, |e, cx| {
+        e.electric_pair = true;
+        e.active
+            .overlays
+            .props
+            .push((0..3, "read-only".into(), "t".into()));
+        e.collapse_to(0);
+        assert!(e.electric_pair_insert(&(0..0), "(", cx));
+        assert_eq!(e.point(), 0);
+        assert_eq!(e.active.buffer.full_text(), " ab\n");
+    });
+}
+
+/// Nested undo groups merge into the outer one; an edit in another buffer
+/// mid-group starts its own node there.
+#[gpui::test]
+fn undo_groups_nest_and_respect_buffer_switches(cx: &mut TestAppContext) {
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, _| {
+        let before = e.active.undo_tree.len();
+        e.begin_undo_group();
+        e.edit(0..0, "a");
+        e.begin_undo_group(); // e.g. a `C-u 3` repeat inside a Scheme batch
+        e.edit(1..1, "b");
+        e.end_undo_group();
+        e.edit(2..2, "c"); // still inside the outer group
+        e.end_undo_group();
+        assert_eq!(e.active.undo_tree.len(), before + 1, "one undo node");
+        assert_eq!(e.active.undo_tree[e.active.undo_current].edit.len(), 3);
+
+        // Group open in buffer A, then the batch switches to B and edits.
+        e.begin_undo_group();
+        e.edit(0..0, "x");
+        let current = e.snapshot_active();
+        e.inactive.push(current);
+        e.install_active(make_document("other.txt".into(), None, "zz"));
+        e.edit(0..0, "y");
+        e.end_undo_group();
+        // B's edit is its own node off B's root — not appended to the root.
+        assert_eq!(e.active.undo_tree.len(), 2);
+        assert_eq!(e.active.undo_current, 1);
+        assert!(e.active.undo_tree[0].edit.is_empty());
+    });
+}
+
+/// Backward isearch repeat from a match at byte 0 wraps to the last match.
+#[gpui::test]
+fn isearch_backward_repeat_wraps_from_buffer_start(cx: &mut TestAppContext) {
+    let ed = setup(cx, "foo bar foo\n");
+    ed.update(cx, |e, cx| {
+        e.collapse_to(0);
+        e.isearch_start(false, cx);
+        e.minibuffer.as_mut().unwrap().input = "foo".into();
+        e.isearch_update(cx);
+        assert_eq!(e.point(), 0);
+        e.isearch_repeat(false, cx);
+        assert_eq!(e.point(), 8, "wrapped to the last match");
+    });
+}
+
+/// Trimming an inactive log buffer's head shifts point back with its text.
+#[gpui::test]
+fn log_buffer_trim_shifts_selection(cx: &mut TestAppContext) {
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, _| {
+        let body: String = (0..LOG_BUFFER_LINES_CAP)
+            .map(|i| format!("l{i:05}\n"))
+            .collect();
+        let mut doc = make_log_document("*log*".into(), &body);
+        // Point on the start of line 100 (`l00100`).
+        let at = doc.buffer.line_range(100).start;
+        doc.selected_range = at..at;
+        e.inactive.push(doc);
+        e.append_to_log_buffer("*log*", "new");
+        let doc = e.inactive.iter().find(|d| d.name == "*log*").unwrap();
+        let p = doc.selected_range.start;
+        let line = doc.buffer.line_range_at(p);
+        assert_eq!(doc.buffer.slice_to_string(line), "l00100");
+    });
+}
+
+/// A chained counted run whose script errors ends the chain.
+#[gpui::test]
+fn counted_chain_error_clears_count_repeat(cx: &mut TestAppContext) {
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, cx| {
+        e.count_repeat = Some(CountRepeat {
+            source: "(begin (boom) (count-repeat-step))".into(),
+            total: 3,
+            done: 0,
+            undo_base: e.undo_base(),
+        });
+        e.apply_script_outcome(
+            crate::script::ScriptOutcome::Commands {
+                commands: Vec::new(),
+                message: Some("error: boom".into()),
+            },
+            cx,
+        );
+        assert!(e.count_repeat.is_none());
+    });
+}
+
+/// Async completion replies computed against since-changed text are dropped;
+/// fresh ones are snapped to char boundaries.
+#[gpui::test]
+fn stale_completion_replies_are_dropped(cx: &mut TestAppContext) {
+    let ed = setup(cx, "é\n");
+    ed.update(cx, |e, cx| {
+        e.collapse_to(2);
+        e.stamp_completion_request();
+        e.edit(0..0, "zz"); // typed after the request went out
+        e.apply_capf_result(0, 2, vec![("éa".into(), None)], cx);
+        assert!(e.completion_popup.is_none(), "stale reply dropped");
+
+        e.collapse_to(4);
+        e.stamp_completion_request();
+        // A mid-codepoint start (byte 3 is inside `é`) is snapped, not sliced.
+        e.apply_capf_result(3, 4, vec![("éa".into(), None)], cx);
+        let anchor = e.completion_popup.as_ref().map(|p| p.anchor);
+        assert_eq!(anchor, Some(2));
+        let _ = e.completion_view();
+    });
+}
+
+/// Session restore names two same-named files uniquely and treats a symlink
+/// to an open file as already open.
+#[cfg(unix)]
+#[gpui::test]
+fn restore_file_buffers_uniquifies_and_dedups(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!("macros-restore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    std::fs::write(dir.join("a/mod.rs"), "a\n").unwrap();
+    std::fs::write(dir.join("b/mod.rs"), "b\n").unwrap();
+    std::os::unix::fs::symlink(dir.join("a/mod.rs"), dir.join("link.rs")).unwrap();
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, cx| {
+        let s = |p: &str| dir.join(p).to_string_lossy().into_owned();
+        let entries = vec![(s("a/mod.rs"), 0), (s("b/mod.rs"), 0), (s("link.rs"), 1)];
+        e.restore_file_buffers(entries, cx);
+        let mods: Vec<&str> = e
+            .inactive
+            .iter()
+            .filter(|d| d.name.starts_with("mod.rs") || d.name == "link.rs")
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(mods.len(), 2, "symlink reused the open buffer: {mods:?}");
+        assert_ne!(mods[0], mods[1], "unique names: {mods:?}");
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A workspace edit for a file open through a symlink edits the buffer.
+#[cfg(unix)]
+#[gpui::test]
+fn workspace_edit_matches_buffers_by_file_identity(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!("macros-wsedit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let real = dir.join("real.txt");
+    std::fs::write(&real, "old\n").unwrap();
+    let link = dir.join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, cx| {
+        let current = e.snapshot_active();
+        e.inactive.push(current);
+        e.install_active(make_document(
+            "link.txt".into(),
+            Some(link.clone()),
+            "old\n",
+        ));
+        let edit = lsp::WorkspaceEdit {
+            changes: vec![(
+                lsp::path_to_uri(&real),
+                vec![lsp::TextEdit {
+                    start: (0, 0),
+                    end: (0, 3),
+                    new_text: "new".into(),
+                }],
+            )],
+        };
+        let failed = e.apply_workspace_edit(edit, cx);
+        assert!(failed.is_empty());
+        assert_eq!(e.active.buffer.full_text(), "new\n");
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui::test]
+fn ex_move_keeps_anchors_and_marks(cx: &mut TestAppContext) {
+    // :g/x/m$ moves every match, not just the first (anchors survive :m).
+    let ed = setup(cx, "x1\na\nx2\nb\n");
+    ex(&ed, cx, "g/x/m$");
+    assert_eq!(text(&ed, cx), "a\nb\nx1\nx2\n");
+    ex(&ed, cx, "g/x/m0");
+    assert_eq!(text(&ed, cx), "x2\nx1\na\nb\n");
+    // A mark on a line in between stays on it; one on the moved line moves.
+    let ed = setup(cx, "one\ntwo\nthree\n");
+    keys(&ed, cx, "m a j m b");
+    ex(&ed, cx, "1m$");
+    assert_eq!(text(&ed, cx), "two\nthree\none\n");
+    keys(&ed, cx, "' b");
+    assert_eq!(point(&ed, cx), 0);
+    keys(&ed, cx, "' a");
+    assert_eq!(point(&ed, cx), 10);
+    // Moving up over the buffer's last (unterminated) line.
+    let ed = setup(cx, "a\nb");
+    ex(&ed, cx, "2m0");
+    assert_eq!(text(&ed, cx), "b\na");
+    ex(&ed, cx, "1m$");
+    assert_eq!(text(&ed, cx), "a\nb");
+}
+
+#[gpui::test]
+fn dot_counts_and_registers(cx: &mut TestAppContext) {
+    // "add then 3. deletes three lines (the count skips the register prefix).
+    let ed = setup(cx, "1\n2\n3\n4\n5\n6\n");
+    keys(&ed, cx, "\" a d d");
+    assert_eq!(text(&ed, cx), "2\n3\n4\n5\n6\n");
+    keys(&ed, cx, "3 .");
+    assert_eq!(text(&ed, cx), "5\n6\n");
+    // 3rx then . replaces three more.
+    let ed = setup(cx, "abcdefgh\n");
+    keys(&ed, cx, "3 r x");
+    assert_eq!(text(&ed, cx), "xxxdefgh\n");
+    keys(&ed, cx, "l .");
+    assert_eq!(text(&ed, cx), "xxxxxxgh\n");
+}
+
+#[gpui::test]
+fn ex_put_zero_and_crlf(cx: &mut TestAppContext) {
+    // :0put goes above the first line.
+    let ed = setup(cx, "a\nb\n");
+    keys(&ed, cx, "j y y");
+    ex(&ed, cx, "0put");
+    assert_eq!(text(&ed, cx), "b\na\nb\n");
+    // CRLF: :d removes the whole break, :t / :put / :m use CRLF.
+    let ed = setup(cx, "a\r\nb\r\n");
+    ex(&ed, cx, "1d");
+    assert_eq!(text(&ed, cx), "b\r\n");
+    let ed = setup(cx, "a\r\nb\r\n");
+    ex(&ed, cx, "1t$");
+    assert_eq!(text(&ed, cx), "a\r\nb\r\na\r\n");
+    ex(&ed, cx, "1m$");
+    assert_eq!(text(&ed, cx), "b\r\na\r\na\r\n");
+    keys(&ed, cx, "g g y y");
+    ex(&ed, cx, "$put");
+    assert_eq!(text(&ed, cx), "b\r\na\r\na\r\nb\r\n");
+    // The last line (no trailing break) takes the CRLF before it.
+    let ed = setup(cx, "a\r\nb");
+    ex(&ed, cx, "2d");
+    assert_eq!(text(&ed, cx), "a");
+}
+
+#[gpui::test]
+fn block_ops_respect_registers(cx: &mut TestAppContext) {
+    // "_ block delete leaves the unnamed register alone.
+    let ed = setup(cx, "keep\nabc\nabc\n");
+    keys(&ed, cx, "y w j ctrl-v j l \" _ d");
+    assert_eq!(text(&ed, cx), "keep\nc\nc\n");
+    keys(&ed, cx, "g g shift-p");
+    assert_eq!(text(&ed, cx), "keepkeep\nc\nc\n");
+    // "a block change fills register a.
+    let ed = setup(cx, "abc\nabc\n");
+    keys(&ed, cx, "ctrl-v j \" a c Z escape");
+    assert_eq!(text(&ed, cx), "Zbc\nZbc\n");
+    let a = ed.update(cx, |e, cx| e.evil_register_value('a', cx).map(|v| v.text));
+    assert_eq!(a.as_deref(), Some("a\na"));
+    // "_ block yank doesn't touch the unnamed register either.
+    let ed = setup(cx, "keep\nxy\n");
+    keys(&ed, cx, "y w j ctrl-v l \" _ y");
+    keys(&ed, cx, "g g shift-p");
+    assert_eq!(text(&ed, cx), "keepkeep\nxy\n");
+}
+
+#[gpui::test]
+fn sub_pattern_case_atoms_and_n(cx: &mut TestAppContext) {
+    let ed = setup(cx, "Foo\nbar\nfoo\nFOO\n");
+    ex(&ed, cx, "s/foo\\c/X/");
+    assert_eq!(text(&ed, cx), "X\nbar\nfoo\nFOO\n");
+    keys(&ed, cx, "n");
+    assert_eq!(point(&ed, cx), 6);
+    keys(&ed, cx, "n");
+    assert_eq!(point(&ed, cx), 10);
+    let ed = setup(cx, "a\nfoo\nFoo\n");
+    ex(&ed, cx, "g/\\cfoo/y");
+    keys(&ed, cx, "g g n");
+    assert_eq!(point(&ed, cx), 2);
+    keys(&ed, cx, "n");
+    assert_eq!(point(&ed, cx), 6);
+}
+
+#[gpui::test]
+fn mc_mark_next_keeps_the_original_cursor(cx: &mut TestAppContext) {
+    let ed = setup(cx, "foo bar foo baz foo\n");
+    ed.update(cx, |e, cx| e.mc_mark_next(cx));
+    let cursors = ed.read_with(cx, |e, _| e.all_cursor_positions());
+    assert_eq!(cursors, vec![0, 8]);
+    ed.update(cx, |e, cx| e.mc_mark_next(cx));
+    let cursors = ed.read_with(cx, |e, _| e.all_cursor_positions());
+    assert_eq!(cursors, vec![0, 8, 16]);
+    ed.update(cx, |e, cx| e.mc_mark_next(cx));
+    let cursors = ed.read_with(cx, |e, _| e.all_cursor_positions());
+    assert_eq!(cursors, vec![0, 8, 16]);
+}
+
+#[gpui::test]
+fn marks_and_jumps_into_gone_buffers(cx: &mut TestAppContext) {
+    // A file mark / jump into a fileless buffer that no longer exists is
+    // reported gone — it must not land in some other fileless buffer.
+    let ed = setup(cx, "l1\nl2\n");
+    ed.update(cx, |e, _| {
+        e.vim.global_marks.insert(
+            'A',
+            vim::GlobalMark {
+                buffer: "*gone*".into(),
+                path: None,
+                pos: 3,
+            },
+        );
+    });
+    keys(&ed, cx, "' shift-a");
+    let (name, pt) = ed.read_with(cx, |e, _| (e.active.name.clone(), e.point()));
+    assert_eq!((name.as_str(), pt), ("test.txt", 0));
+    ed.update(cx, |e, _| {
+        e.vim.jumps = vec![vim::Jump {
+            buffer: "*gone*".into(),
+            path: None,
+            pos: 3,
+        }];
+        e.vim.jump_idx = 1;
+    });
+    keys(&ed, cx, "ctrl-o");
+    let (name, n) = ed.read_with(cx, |e, _| (e.active.name.clone(), e.vim.jumps.len()));
+    assert_eq!(name, "test.txt");
+    assert_eq!(n, 1, "the gone entry is dropped, the current spot stays");
+}

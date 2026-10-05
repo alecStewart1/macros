@@ -3,12 +3,14 @@
 ;; refreshes. Built entirely on tabulated-list (scheme/tabulated.scm) — no new
 ;; Rust. Bound to C-x C-b (the traditional list-buffers key).
 
-;; A buffer "name" is its file path for file buffers (so the name is the most
-;; useful column) and "*scratch*"/"*magit*"/… for special buffers.
+;; Buffer names are (possibly uniquified `name<dir>`) basenames, so classify by
+;; the buffer's visited path; fileless buffers have "".
 (define (ibuffer-type name)
-  (cond ((file-directory? name) "dir")
-        ((file-exists? name) "file")
-        (else "special")))
+  (let ((path (buffer-file-name-of name)))
+    (cond ((equal? path "") "special")
+          ((file-directory? path) "dir")
+          ((file-exists? path) "file")
+          (else "special"))))
 
 ;; Buffers killed from within this view. `kill-buffer-named` is queued, so the
 ;; `buffer-names` snapshot in the same command still lists the killed buffer —

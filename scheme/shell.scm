@@ -78,7 +78,7 @@
     ;; cancellable via kill-compilation / C-g in *compilation*.
     ;; `2>&1`: make-process captures stdout only, but compilers report on stderr.
     (when (async-lane-run "compile" "/bin/sh"
-                          (list "-c" (string-append "cd " dir " && " cmd " 2>&1"))
+                          (list "-c" (string-append "cd " (shell-quote dir) " && " cmd " 2>&1"))
                           'compile-output 'compile-done)
       (set! *compile-dir* dir)
       (set! *compile-fixed-dir* (and pinned dir))
@@ -153,7 +153,7 @@
               (ln (nth e 2)))
          (if (file-exists? path)
              (begin (open-file-other-window path)
-                    (goto-line (max 0 (- ln 1)))
+                    (goto-when-visiting "" path (max 0 (- ln 1)) 0)
                     (message (string-append "Error " (int->string (+ idx 1)) "/"
                                             (int->string (length errs)) ": "
                                             (nth e 1) ":" (int->string ln))))

@@ -178,14 +178,21 @@ impl Editor {
     }
 
     /// Group all edits made by one Scheme command batch into a single undo unit.
+    /// Groups nest: only the outermost begin opens a node and only the matching
+    /// outermost end closes it, so an inner group (a `C-u N` repeat, `:s`, a
+    /// block op inside a batch) merges into the enclosing one.
     pub(super) fn begin_undo_group(&mut self) {
-        self.undo_grouping = true;
-        self.undo_group_started = false;
+        if self.undo_group_depth == 0 {
+            self.undo_group_started = false;
+        }
+        self.undo_group_depth += 1;
     }
 
     pub(super) fn end_undo_group(&mut self) {
-        self.undo_grouping = false;
-        self.undo_group_started = false;
+        self.undo_group_depth = self.undo_group_depth.saturating_sub(1);
+        if self.undo_group_depth == 0 {
+            self.undo_group_started = false;
+        }
     }
 
     /// `(undo-boundary)`: close the current group so the next edit starts a new

@@ -165,8 +165,10 @@
        (if (and (not (null? loc)) (file-exists? (car loc)))
            (begin
              (open-file (car loc))
-             ;; function-source reports 1-based lines; goto-line is 0-based.
-             (goto-line (max 0 (- (cadr loc) 1))))
+             ;; function-source reports 1-based lines; the jump is 0-based.
+             ;; open-file is async, so wait for the file's buffer to be
+             ;; current (a bare goto-line would move the OLD buffer).
+             (goto-when-visiting "" (car loc) (max 0 (- (cadr loc) 1)) 0))
            (describe-function-show name))))))
 
 ;; A LIVE (self-filtered) Helm source: type words from a name or doc-comment

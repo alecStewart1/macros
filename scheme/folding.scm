@@ -15,14 +15,75 @@
 ;; only hold strings, so the set lives in a Scheme alist like org's fold state.)
 ;; This drives the chevron direction; the actual hiding lives in Rust `folds`,
 ;; which the editor shifts to track edits on its own.
+;; --- fold anchors: keep line-number fold state valid across edits ----------
+;; Fold state is recorded as line numbers, but the buffer's lines shift on every
+;; edit above a fold (the Rust-side folds shift themselves; this Scheme state
+;; doesn't). So each recorded line also remembers its TEXT — an anchor — and a
+;; resync relocates it: still at the same line ⇒ unchanged; moved ⇒ the nearest
+;; line with identical text; gone ⇒ dropped. Shared by folding/markdown/org
+;; (this file loads before both).
+
+;; `lines`' entry `i`, or "" out of range.
+(define (fold--line-text lines i)
+  (if (and (>= i 0) (< i (length lines))) (list-ref lines i) ""))
+
+;; Anchors (line . text) for each line number in `nums`.
+(define (fold-anchors-capture lines nums)
+  (map (lambda (n) (cons n (fold--line-text lines n))) nums))
+
+;; Current line of anchor (line . text) in `lines`, or #f when no line has that
+;; text any more. Ties (duplicate text) go to the line nearest the old one.
+(define (fold-anchor-locate lines anchor)
+  (let ((line (car anchor)) (text (cdr anchor)))
+    (if (equal? (fold--line-text lines line) text)
+        line
+        (let loop ((ls lines) (i 0) (best #f))
+          (cond ((null? ls) best)
+                ((and (equal? (car ls) text)
+                      (or (not best) (< (abs (- i line)) (abs (- best line)))))
+                 (loop (cdr ls) (+ i 1) i))
+                (else (loop (cdr ls) (+ i 1) best)))))))
+
+;; Map an old line through the anchors: its relocated line, #f if its anchor is
+;; gone, or the line itself when it has no anchor recorded.
+(define (fold-anchor-remap anchors lines line)
+  (let ((a (assoc line anchors)))
+    (if a (fold-anchor-locate lines a) line)))
+
+;; Drop entries whose key (via `key`) repeats an earlier one.
+(define (fold--dedupe xs key)
+  (let loop ((xs xs) (seen '()) (acc '()))
+    (cond ((null? xs) (reverse acc))
+          ((member (key (car xs)) seen) (loop (cdr xs) seen acc))
+          (else (loop (cdr xs) (cons (key (car xs)) seen) (cons (car xs) acc))))))
+
+;; Relocate a list of folded line numbers; vanished ones are dropped.
+(define (fold-anchors-relocate-lines anchors lines nums)
+  (fold--dedupe
+   (filter (lambda (x) x) (map (lambda (n) (fold-anchor-remap anchors lines n)) nums))
+   (lambda (x) x)))
+
+(define (fold--buffer-lines) (split-many (buffer-string) "\n"))
+
 (define *fold-folded* '())
+(define *fold-anchors* '())
 (define (fold--folded-get)
   (let ((e (alist-ref *fold-folded* (current-buffer)))) (if e e '())))
 (define (fold--folded-set v)
   (set! *fold-folded*
         (cons (cons (current-buffer) v)
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *fold-folded*))))
+              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *fold-folded*)))
+  (set! *fold-anchors*
+        (cons (cons (current-buffer) (fold-anchors-capture (fold--buffer-lines) v))
+              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *fold-anchors*))))
 (define (fold--folded? line) (if (member line (fold--folded-get)) #t #f))
+
+;; Bring the recorded fold lines up to date with the current buffer text.
+(define (fold--resync)
+  (let ((v (fold--folded-get)))
+    (when (not (null? v))
+      (let ((anchors (let ((e (alist-ref *fold-anchors* (current-buffer)))) (if e e '()))))
+        (fold--folded-set (fold-anchors-relocate-lines anchors (fold--buffer-lines) v))))))
 
 ;; Don't auto-scan very large buffers on open (the marker pass is O(lines));
 ;; `M-x fold-refresh` still works on demand.
@@ -71,6 +132,7 @@
 ;; Paint a chevron on every fold header (down = open, right = folded), and drop
 ;; recorded folded lines that are no longer headers so state can't go stale.
 (define (fold-refresh-markers)
+  (fold--resync)
   (clear-fold-markers)
   (let ((total (line-count)) (still '()))
     (let loop ((i 0))
@@ -84,6 +146,7 @@
 
 ;; --- toggle (indentation style) --------------------------------------------
 (define (fold--indent-toggle line)
+  (fold--resync)
   (let ((total (line-count)))
     (when (fold--header-indent line total)
       (fold--folded-set
@@ -134,6 +197,7 @@
 ;; zc / zo — close / open the fold at (or around) point. Other fold styles
 ;; (org, markdown) only know toggling, so these toggle there.
 (define (fold--set-at-point closed)
+  (fold--resync)
   (if (not (equal? (fold--style) "indent"))
       (fold-toggle-at-point)
       (let ((h (fold--header-for (buffer-line))))

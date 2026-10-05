@@ -102,14 +102,32 @@
   (cond ((string? lbl) lbl)
         ((list? lbl) (apply string-append (map (lambda (p) (or (jget p 'value) "")) lbl)))
         (else "")))
+;; A line holds ONE suffix (set-line-suffix replaces), so gather every hint on a
+;; line — ordered by character — and set them as a single joined suffix.
+;; Hints become (line char text); returns ((line . "  a  b") ...).
+(define (lsp--inlay-group hints)
+  (let loop ((hs (sort hints (lambda (a b)
+                               (or (< (car a) (car b))
+                                   (and (= (car a) (car b)) (< (cadr a) (cadr b)))))))
+             (acc '()))
+    (cond ((null? hs) (reverse acc))
+          ((and (not (null? acc)) (= (car (car acc)) (car (car hs))))
+           (loop (cdr hs) (cons (cons (car (car acc))
+                                      (string-append (cdr (car acc)) "  " (caddr (car hs))))
+                                (cdr acc))))
+          (else (loop (cdr hs) (cons (cons (car (car hs)) (string-append "  " (caddr (car hs))))
+                                     acc))))))
 (define (lsp--inlay-apply json)
   (clear-line-suffixes)             ; drop stale hints before repainting
   (for-each
-   (lambda (h)
-     (let ((line (lsp-int (jget (jget h 'position) 'line)))
-           (text (lsp--inlay-label (jget h 'label))))
-       (set-line-suffix line (string-append "  " text) "lsp-inlay-hint")))
-   (as-list (string->jsexpr json))))
+   (lambda (ls) (set-line-suffix (car ls) (cdr ls) "lsp-inlay-hint"))
+   (lsp--inlay-group
+    (map (lambda (h)
+           (let ((pos (jget h 'position)))
+             (list (lsp-int (jget pos 'line))
+                   (lsp-int (jget pos 'character))
+                   (lsp--inlay-label (jget h 'label)))))
+         (as-list (string->jsexpr json))))))
 
 ;; --- code lens --------------------------------------------------------------
 ;; Show resolved lens titles as virtual text above their line's end.
@@ -120,10 +138,14 @@
 ;; Fold every server-reported region (use `unfold-all` to reveal).
 (define (lsp-fold-all)
   (lsp-request "textDocument/foldingRange" "document" "" 'lsp--fold-apply))
+;; Keep the header (startLine) visible and hide the body, like folding.scm —
+;; folding from startLine itself would hide the very line that says what's folded.
 (define (lsp--fold-apply json)
   (for-each
    (lambda (f)
-     (fold-lines (lsp-int (jget f 'startLine)) (+ 1 (lsp-int (jget f 'endLine)))))
+     (let ((s (lsp-int (jget f 'startLine)))
+           (e (lsp-int (jget f 'endLine))))
+       (when (> e s) (fold-lines (+ s 1) (+ e 1)))))
    (as-list (string->jsexpr json))))
 
 ;; --- selection range (expand-region / contract) -----------------------------
@@ -288,6 +310,11 @@
   (for-each (lambda (e) (set! *lsp-auto-features* (cons (cons e fnname) *lsp-auto-features*)))
             (or (alist-ref *lsp-lang-exts* lang) '())))
 
+;; The current buffer's visited path — its NAME may be uniquified
+;; (`mod.rs<parser>`), which hides the extension. Fileless buffers: the name.
+(define (lsp--buffer-path)
+  (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f)))
+
 ;; The extension of a file name ("src/main.rs" -> "rs"; "" if none).
 (define (lsp--file-ext name)
   (let loop ((i (- (string-length name) 1)))
@@ -307,7 +334,7 @@
     (when (and (equal? code "0") (> (string-length out) 0))
       (replace-region 0 (point-max) out))))
 (define (lsp-run-before-save-formatter)
-  (let ((spec (alist-ref *lsp-formatters* (lsp--file-ext (current-buffer)))))
+  (let ((spec (alist-ref *lsp-formatters* (lsp--file-ext (lsp--buffer-path)))))
     (cond ((not spec) #f)
           ((list? spec) (lsp--shell-format spec))
           ((string? spec) (eval-string (string-append "(" spec ")")))
@@ -320,7 +347,7 @@
 ;; started is a silent no-op (no "No language server" spam).
 (define (lsp-run-auto-features)
   (when (lsp-server-ready?)
-    (let ((ext (lsp--file-ext (current-buffer))))
+    (let ((ext (lsp--file-ext (lsp--buffer-path))))
       (let loop ((fs *lsp-auto-features*))
         (when (not (null? fs))
           (when (equal? (car (car fs)) ext)
@@ -331,7 +358,7 @@
 
 ;; Does the current buffer's language have any live feature configured?
 (define (lsp--has-live-features?)
-  (let ((ext (lsp--file-ext (current-buffer))))
+  (let ((ext (lsp--file-ext (lsp--buffer-path))))
     (let loop ((fs *lsp-auto-features*))
       (cond ((null? fs) #f)
             ((equal? (car (car fs)) ext) #t)
@@ -357,30 +384,30 @@
 (define-key "fundamental" "ctrl-c d" 'lsp-hover)           ; doc at point
 ;; eglot's C-c C-l prefix for the rest
 (define-key "fundamental" "ctrl-c ctrl-l d" 'lsp-find-definition)
-(define-key "fundamental" "ctrl-c ctrl-l D" 'lsp-find-declaration)
+(define-key "fundamental" "ctrl-c ctrl-l shift-d" 'lsp-find-declaration)
 (define-key "fundamental" "ctrl-c ctrl-l t" 'lsp-find-type-definition)
 (define-key "fundamental" "ctrl-c ctrl-l i" 'lsp-find-implementation)
 (define-key "fundamental" "ctrl-c ctrl-l r" 'lsp-find-references)
 (define-key "fundamental" "ctrl-c ctrl-l n" 'lsp-rename)
 (define-key "fundamental" "ctrl-c ctrl-l h" 'lsp-hover)
 (define-key "fundamental" "ctrl-c ctrl-l s" 'lsp-document-symbols)
-(define-key "fundamental" "ctrl-c ctrl-l S" 'lsp-workspace-symbol)
+(define-key "fundamental" "ctrl-c ctrl-l shift-s" 'lsp-workspace-symbol)
 (define-key "fundamental" "ctrl-c ctrl-l f" 'lsp-format-buffer)
 (define-key "fundamental" "ctrl-c ctrl-l a" 'lsp-code-action)
 (define-key "fundamental" "ctrl-c ctrl-l k" 'lsp-signature-help)
 ;; the rest (built in Scheme above)
 (define-key "fundamental" "alt-*" 'xref-pop-marker)            ; M-*  pop-tag-mark
 (define-key "fundamental" "ctrl-c ctrl-l p" 'xref-pop-marker)
-(define-key "fundamental" "ctrl-c ctrl-l H" 'lsp-document-highlight)
-(define-key "fundamental" "ctrl-c ctrl-l I" 'lsp-inlay-hints)
-(define-key "fundamental" "ctrl-c ctrl-l L" 'lsp-code-lens)
+(define-key "fundamental" "ctrl-c ctrl-l shift-h" 'lsp-document-highlight)
+(define-key "fundamental" "ctrl-c ctrl-l shift-i" 'lsp-inlay-hints)
+(define-key "fundamental" "ctrl-c ctrl-l shift-l" 'lsp-code-lens)
 (define-key "fundamental" "ctrl-c ctrl-l z" 'lsp-fold-all)
 (define-key "fundamental" "ctrl-c ctrl-l e" 'lsp-expand-selection)
-(define-key "fundamental" "ctrl-c ctrl-l E" 'lsp-contract-selection)
+(define-key "fundamental" "ctrl-c ctrl-l shift-e" 'lsp-contract-selection)
 (define-key "fundamental" "ctrl-c ctrl-l o" 'lsp-open-link)
-(define-key "fundamental" "ctrl-c ctrl-l T" 'lsp-semantic-tokens-apply)
+(define-key "fundamental" "ctrl-c ctrl-l shift-t" 'lsp-semantic-tokens-apply)
 (define-key "fundamental" "ctrl-c ctrl-l c" 'lsp-call-hierarchy-incoming)
-(define-key "fundamental" "ctrl-c ctrl-l C" 'lsp-call-hierarchy-outgoing)
+(define-key "fundamental" "ctrl-c ctrl-l shift-c" 'lsp-call-hierarchy-outgoing)
 
 ;; --- M-x discoverability ----------------------------------------------------
 ;; The lsp-find-*/lsp-hover/lsp-format-buffer/call-hierarchy/xref-*/etc. commands

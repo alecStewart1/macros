@@ -1152,6 +1152,11 @@ pub(crate) fn build_engine(
             .parent()
             .map(|d| {
                 let mut s = d.to_string_lossy().into_owned();
+                // A bare name ("foo.txt") has an empty parent: that's the
+                // current directory, not the filesystem root.
+                if s.is_empty() {
+                    return "./".to_string();
+                }
                 if !s.ends_with('/') {
                     s.push('/');
                 }
@@ -2037,12 +2042,21 @@ pub(crate) fn build_engine(
                 Ok(c) => c,
                 Err(e) => return vec!["-1".into(), String::new(), e.to_string()],
             };
-            // Write stdin then close it (drop) so the child sees EOF — otherwise
-            // a filter like `git apply -` blocks waiting for input.
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(input.as_bytes());
+            // Write stdin on its own thread, then close it (drop) so the child
+            // sees EOF — otherwise a filter like `git apply -` blocks waiting
+            // for input. Not inline: a child that writes more than a pipe
+            // buffer of output before draining its input would deadlock
+            // against us while we're still blocked writing.
+            let writer = child.stdin.take().map(|mut stdin| {
+                std::thread::spawn(move || {
+                    let _ = stdin.write_all(input.as_bytes());
+                })
+            });
+            let output = child.wait_with_output();
+            if let Some(writer) = writer {
+                let _ = writer.join();
             }
-            match child.wait_with_output() {
+            match output {
                 Ok(o) => vec![
                     o.status
                         .code()
@@ -2542,6 +2556,7 @@ pub(crate) fn build_engine(
         |id: usize, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
     );
     reg.register_fn("socket-close", |id: usize| -> bool {
+        sock_pending().lock().unwrap().remove(&id);
         sock_conns().lock().unwrap().remove(&id).is_some()
     });
     reg.register_fn("socket-last-error", || -> String {
@@ -2558,6 +2573,7 @@ pub(crate) fn build_engine(
         socket_recv_bytes_impl(id, n)
     });
     reg.register_fn("tls-close", |id: usize| -> bool {
+        sock_pending().lock().unwrap().remove(&id);
         sock_conns().lock().unwrap().remove(&id).is_some()
     });
     reg.register_fn("tls-last-error", || -> String {
@@ -3408,17 +3424,13 @@ pub(crate) fn build_engine(
         // point, or `()` if none. Scheme drives point/edits from the result.
         let shared = snapshot.clone();
         reg.register_fn("re-search-forward", move |pattern: String| -> Vec<usize> {
-            let Ok(re) = Regex::new(&pattern) else {
-                return Vec::new();
-            };
             let (rope, p) = {
                 let snap = shared.load();
                 (snap.text.clone(), snap.point)
             };
             let from = snap_byte(&rope, p);
-            let tail = rope.byte_slice(from..).to_string();
-            match re.find(&tail) {
-                Some(m) => vec![from + m.start(), from + m.end()],
+            match re_search_forward_in(&rope.to_string(), from, &pattern) {
+                Some((start, end)) => vec![start, end],
                 None => Vec::new(),
             }
         });
@@ -3426,6 +3438,26 @@ pub(crate) fn build_engine(
     // Session persistence (savehist / desktop) — see src/script/session.rs.
     register_session(&mut reg, queue, session);
     (engine, names)
+}
+
+/// The pure core of `re-search-forward`: the first match of `pattern` in
+/// `text` starting at byte `from`, as byte offsets into `text`. The whole text
+/// is searched (from `from`), not a slice, so `^`, `\b` and lookbehind-ish
+/// anchors still see the context before point. `^`/`$` match at line
+/// boundaries, as in Emacs. `None` on no match or an invalid pattern.
+pub(crate) fn re_search_forward_in(
+    text: &str,
+    from: usize,
+    pattern: &str,
+) -> Option<(usize, usize)> {
+    let re = regex::RegexBuilder::new(pattern)
+        .multi_line(true)
+        .build()
+        .ok()?;
+    if from > text.len() || !text.is_char_boundary(from) {
+        return None;
+    }
+    re.find_at(text, from).map(|m| (m.start(), m.end()))
 }
 
 /// Registers Steel functions into the engine while recording every registered
@@ -3698,6 +3730,36 @@ fn sock_conns() -> &'static Mutex<HashMap<usize, Conn>> {
     CONNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Bytes a `recv-line`/`recv-bytes` already pulled off connection `id` before
+/// a read timeout (or other error) cut it short. They're handed back first on
+/// the next receive, so a timeout mid-line never loses data.
+fn sock_pending() -> &'static Mutex<HashMap<usize, Vec<u8>>> {
+    static PENDING: std::sync::OnceLock<Mutex<HashMap<usize, Vec<u8>>>> =
+        std::sync::OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Take connection `id`'s pending bytes (see [`sock_pending`]).
+fn sock_take_pending(id: usize) -> Vec<u8> {
+    sock_pending()
+        .lock()
+        .unwrap()
+        .remove(&id)
+        .unwrap_or_default()
+}
+
+/// Stash undelivered bytes for connection `id`'s next receive.
+fn sock_put_pending(id: usize, bytes: Vec<u8>) {
+    if !bytes.is_empty() {
+        sock_pending().lock().unwrap().insert(id, bytes);
+    }
+}
+
+/// Bytes as the byte-preserving latin-1 string the socket primitives return.
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
 fn sock_listeners() -> &'static Mutex<HashMap<usize, std::net::TcpListener>> {
     static L: std::sync::OnceLock<Mutex<HashMap<usize, std::net::TcpListener>>> =
         std::sync::OnceLock::new();
@@ -3818,14 +3880,22 @@ fn socket_recv_line_impl(id: usize) -> String {
         tls_set_error(format!("recv-line: no connection {id}"));
         return String::new();
     };
-    let mut buf = Vec::new();
+    let mut buf = sock_take_pending(id);
+    if let Some(i) = buf.iter().position(|&b| b == b'\n') {
+        let rest = buf.split_off(i + 1);
+        sock_put_pending(id, rest);
+        return latin1(&buf);
+    }
+    // `read_until` appends whatever it got before an error to `buf`; those
+    // bytes are already out of the reader, so keep them for the next call.
     match reader.read_until(b'\n', &mut buf) {
-        Ok(0) => {
+        Ok(0) if buf.is_empty() => {
             tls_set_error("recv-line: connection closed".into());
             String::new()
         }
-        Ok(_) => buf.iter().map(|&b| b as char).collect(),
+        Ok(_) => latin1(&buf),
         Err(e) => {
+            sock_put_pending(id, buf);
             tls_set_error(format!("recv-line: {e}"));
             String::new()
         }
@@ -3851,32 +3921,77 @@ fn socket_recv_bytes_impl(id: usize, n: usize) -> String {
         tls_set_error(format!("recv-bytes: no connection {id}"));
         return String::new();
     };
-    let mut buf = vec![0u8; n];
-    match reader.read_exact(&mut buf) {
-        Ok(()) => buf.iter().map(|&b| b as char).collect(),
-        Err(e) => {
-            tls_set_error(format!("recv-bytes: {e}"));
-            String::new()
-        }
+    let mut buf = sock_take_pending(id);
+    if buf.len() >= n {
+        let rest = buf.split_off(n);
+        sock_put_pending(id, rest);
+        return latin1(&buf);
     }
-}
-
-/// The first `nameserver` in /etc/resolv.conf, else Google public DNS. macOS
-/// keeps a usable resolv.conf for the primary resolver even though scutil is
-/// the system-of-record; the 8.8.8.8 fallback covers the rare empty case.
-fn dns_nameserver() -> String {
-    if let Ok(conf) = std::fs::read_to_string("/etc/resolv.conf") {
-        for line in conf.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("nameserver") {
-                let ns = rest.trim();
-                if !ns.is_empty() {
-                    return ns.to_string();
-                }
+    // Read the remainder piecewise (not `read_exact`, whose partial bytes are
+    // unspecified on error) so a timeout keeps what already arrived.
+    let mut have = buf.len();
+    buf.resize(n, 0);
+    while have < n {
+        match reader.read(&mut buf[have..]) {
+            Ok(0) => {
+                buf.truncate(have);
+                sock_put_pending(id, buf);
+                tls_set_error("recv-bytes: connection closed".into());
+                return String::new();
+            }
+            Ok(k) => have += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                buf.truncate(have);
+                sock_put_pending(id, buf);
+                tls_set_error(format!("recv-bytes: {e}"));
+                return String::new();
             }
         }
     }
-    "8.8.8.8".to_string()
+    latin1(&buf)
+}
+
+/// The `nameserver`s in /etc/resolv.conf, in order, else Google public DNS.
+/// macOS keeps a usable resolv.conf for the primary resolver even though
+/// scutil is the system-of-record; the 8.8.8.8 fallback covers the rare empty
+/// case. Unparseable entries (e.g. a link-local `fe80::1%en0`) are skipped.
+fn dns_nameservers() -> Vec<std::net::IpAddr> {
+    let conf = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    let mut servers = parse_resolv_conf_nameservers(&conf);
+    if servers.is_empty() {
+        servers.push(std::net::IpAddr::from([8, 8, 8, 8]));
+    }
+    servers
+}
+
+/// The parseable `nameserver` addresses in resolv.conf text, in order.
+pub(crate) fn parse_resolv_conf_nameservers(conf: &str) -> Vec<std::net::IpAddr> {
+    conf.lines()
+        .filter_map(|line| line.trim().strip_prefix("nameserver"))
+        .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+        .collect()
+}
+
+/// One query/response round trip to nameserver `ns`, from a socket of the
+/// matching address family (an IPv4 socket can't reach an IPv6 server).
+fn dns_query(ns: std::net::IpAddr, msg: &[u8]) -> Result<Vec<u8>, String> {
+    let bind = if ns.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = std::net::UdpSocket::bind(bind).map_err(|e| e.to_string())?;
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
+    // `connect` filters out datagrams from anyone but the nameserver.
+    socket
+        .connect((ns, 53))
+        .map_err(|e| format!("connect to {ns}: {e}"))?;
+    socket.send(msg).map_err(|e| format!("send to {ns}: {e}"))?;
+    let mut resp = vec![0u8; 4096];
+    let n = socket
+        .recv(&mut resp)
+        .map_err(|e| format!("recv from {ns}: {e}"))?;
+    resp.truncate(n);
+    Ok(resp)
 }
 
 /// A hand-rolled DNS resolver over UDP (one query, one datagram). Builds the
@@ -3910,19 +4025,15 @@ fn dns_resolve_impl(host: &str, rtype: &str) -> Result<Vec<String>, String> {
     msg.push(0); // root label
     msg.extend_from_slice(&qtype.to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes()); // QCLASS = IN
-    // --- send + receive --------------------------------------------------
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    socket
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok();
-    let ns = dns_nameserver();
-    socket
-        .send_to(&msg, (ns.as_str(), 53))
-        .map_err(|e| format!("send to {ns}: {e}"))?;
-    let mut resp = vec![0u8; 4096];
-    let n = socket.recv(&mut resp).map_err(|e| e.to_string())?;
-    resp.truncate(n);
-    dns_parse_answers(&resp, qtype)
+    // --- send + receive: each nameserver in turn until one answers ---------
+    let mut last_err = String::from("no nameservers");
+    for ns in dns_nameservers() {
+        match dns_query(ns, &msg).and_then(|resp| dns_parse_answers(&resp, qtype)) {
+            Ok(records) => return Ok(records),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 /// Read a (possibly compression-pointer-following) domain name starting at

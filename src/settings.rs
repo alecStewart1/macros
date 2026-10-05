@@ -99,8 +99,9 @@ const fn opt(name: &'static str, kind: Kind, min: Option<f64>, max: Option<f64>)
 /// options (stored verbatim) aren't listed — Rust doesn't know their names
 /// ahead of time.
 const OPTIONS: &[OptionSpec] = &[
-    opt("font-size", Kind::Float, None, None),
-    opt("line-height", Kind::Float, None, None),
+    // Zero/negative sizes would divide by zero in the renderer's row math.
+    opt("font-size", Kind::Float, Some(4.0), None),
+    opt("line-height", Kind::Float, Some(4.0), None),
     opt("helm-height", Kind::Float, Some(0.1), Some(0.95)),
     opt("cursor-width", Kind::Float, Some(1.0), None),
     opt("divider-width", Kind::Float, Some(1.0), None),
@@ -195,14 +196,19 @@ fn coerce(
     max: Option<f64>,
     raw: &OptionValue,
 ) -> Option<OptionValue> {
-    let clamp = |mut x: f64| {
+    // NaN / ±inf never make a usable number: reject them (the option keeps
+    // its default) rather than letting them reach the renderer.
+    let clamp = |mut x: f64| -> Option<f64> {
+        if !x.is_finite() {
+            return None;
+        }
         if let Some(lo) = min {
             x = x.max(lo);
         }
         if let Some(hi) = max {
             x = x.min(hi);
         }
-        x
+        Some(x)
     };
     Some(match kind {
         Kind::Bool => OptionValue::Bool(match raw {
@@ -216,13 +222,13 @@ fn coerce(
             OptionValue::Float(f) => *f,
             OptionValue::Str(s) => s.trim().parse::<f64>().ok()?,
             _ => return None,
-        }) as i64),
+        })? as i64),
         Kind::Float => OptionValue::Float(clamp(match raw {
             OptionValue::Float(f) => *f,
             OptionValue::Int(i) => *i as f64,
             OptionValue::Str(s) => s.trim().parse::<f64>().ok()?,
             _ => return None,
-        })),
+        })?),
         Kind::Str => OptionValue::Str(match raw {
             OptionValue::Str(s) => s.clone(),
             OptionValue::Bool(b) => b.to_string(),
@@ -681,6 +687,23 @@ mod tests {
         // String-typed option.
         s.set("cursor-style".into(), OptionValue::Str("bar".into()));
         assert_eq!(s.cursor_style(), "bar");
+    }
+
+    #[test]
+    fn rejects_degenerate_font_metrics() {
+        let mut s = Settings::default();
+        // Zero / negative sizes clamp to the floor instead of reaching the
+        // renderer (a zero line height divides by zero there).
+        s.set("line-height".into(), OptionValue::Float(0.0));
+        assert_eq!(s.line_height(), 4.0);
+        s.set("font-size".into(), OptionValue::Int(-3));
+        assert_eq!(s.font_size(), 4.0);
+        // Non-finite values are rejected; the previous value stays in force.
+        s.set("line-height".into(), OptionValue::Float(20.0));
+        s.set("line-height".into(), OptionValue::Float(f64::NAN));
+        assert_eq!(s.line_height(), 20.0);
+        s.set("font-size".into(), OptionValue::Str("inf".into()));
+        assert_eq!(s.font_size(), 4.0);
     }
 
     #[test]

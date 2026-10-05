@@ -592,6 +592,11 @@
 ;; an older one, and it gives up after ~2s.
 (define *visit-pending* #f)
 
+;; Quote `s` as ONE POSIX shell word: wrap in single quotes, each embedded ' as
+;; '\''. Use for every path / user-supplied value spliced into a `sh -c` string.
+(define (shell-quote s)
+  (string-append "'" (string-replace s "'" "'\\''") "'"))
+
 ;; Whether two paths name the same file (spelled differently: relative vs
 ;; absolute, through a symlink, /var vs /private/var, ...).
 (define (same-file? a b)

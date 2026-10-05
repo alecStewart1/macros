@@ -448,7 +448,6 @@ mod macos {
     //! swap-while-running technique is safe (Sparkle and friends do the same).
     //! Ported from sigma's `crates/licensing/src/platform/macos.rs`.
 
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -585,17 +584,19 @@ mod macos {
         let needs_admin = app_path.starts_with("/Applications") && !writable_by_me(&app_path);
 
         if needs_admin {
-            // `mv old → bak; mv new → old; rm -rf bak`, quoted by AppleScript's
-            // `quoted form of` (shell-injection-safe for any path).
+            // `mv old → bak; mv new → old; rm -rf bak` (rolling `bak` back if
+            // the second move fails), quoted by AppleScript's `quoted form of`
+            // (shell-injection-safe for any path).
             let bak = app_path.with_extension("app.bak");
             let bak_lit = applescript_string_literal(&bak.to_string_lossy());
             let app_lit = applescript_string_literal(&app_path.to_string_lossy());
             let new_lit = applescript_string_literal(&new_app.to_string_lossy());
+            let shell = admin_swap_command(r#"" & b & ""#, r#"" & a & ""#, r#"" & n & ""#);
             let script = format!(
                 "set b to quoted form of {bak_lit}\n\
                  set a to quoted form of {app_lit}\n\
                  set n to quoted form of {new_lit}\n\
-                 do shell script \"rm -rf \" & b & \" && mv \" & a & \" \" & b & \" && mv \" & n & \" \" & a & \" && rm -rf \" & b with administrator privileges"
+                 do shell script \"{shell}\" with administrator privileges"
             );
             let status = Command::new("osascript")
                 .arg("-e")
@@ -731,8 +732,31 @@ mod macos {
             .map_err(|e| format!("spawning relaunch helper: {e}"))
     }
 
+    /// The shell command behind the admin bundle swap, over already-quoted
+    /// `bak` / `app` / `new` operands: move the old bundle aside, move the new
+    /// one in — restoring the old one if that fails, so a failed update never
+    /// leaves the app missing — then delete the old one.
+    pub(super) fn admin_swap_command(bak: &str, app: &str, new: &str) -> String {
+        format!(
+            "rm -rf {bak} && mv {app} {bak} && {{ mv {new} {app} || {{ mv {bak} {app}; exit 1; }}; }} && rm -rf {bak}"
+        )
+    }
+
+    /// Can this process swap the bundle at `path` without admin rights? The
+    /// rename needs write permission on the containing directory (and, for a
+    /// directory moved by rename, on the bundle itself). `access(2)` checks
+    /// against our real uid/gid, so a root-owned bundle with the owner-write
+    /// bit set no longer looks writable to a regular user.
     fn writable_by_me(path: &Path) -> bool {
-        std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o200 != 0)
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let can_write = |p: &Path| {
+            CString::new(p.as_os_str().as_bytes())
+                // SAFETY: a valid NUL-terminated path; `access` only reads it.
+                .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0)
+        };
+        path.parent().is_some_and(can_write) && can_write(path)
     }
 
     /// True if the filesystem holding `path` is mounted read-only. Mode bits on
@@ -807,6 +831,44 @@ mod tests {
         );
         assert_eq!(manifest_url_from(Some(String::new()), true), default);
         assert_eq!(manifest_url_from(None, true), default);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn admin_swap_rolls_back_when_the_new_bundle_cannot_move_in() {
+        let dir = std::env::temp_dir().join(format!("macros-swap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Macros.app")).unwrap();
+        std::fs::write(dir.join("Macros.app/marker"), "old").unwrap();
+        let q = |name: &str| format!("'{}'", dir.join(name).display());
+        // The new bundle doesn't exist, so its `mv` fails.
+        let cmd = macos::admin_swap_command(&q("Macros.app.bak"), &q("Macros.app"), &q("New.app"));
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .status()
+            .unwrap();
+        assert!(!status.success(), "a failed swap must report failure");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Macros.app/marker")).unwrap(),
+            "old",
+            "the old bundle is restored"
+        );
+        // And the happy path swaps + cleans up the backup.
+        std::fs::create_dir_all(dir.join("New.app")).unwrap();
+        std::fs::write(dir.join("New.app/marker"), "new").unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Macros.app/marker")).unwrap(),
+            "new"
+        );
+        assert!(!dir.join("Macros.app.bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "macos")]
