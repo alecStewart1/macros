@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { plotFont } from "./_spectrum/plotFont";
 
 const DESCRIPTION =
   "Macros is an Emacs-style, GPU-rendered code editor scripted in Steel (Scheme). Modal editing, a built-in git porcelain, LSP, projects, org-mode, an embedded terminal — every keybinding and command is yours to redefine.";
@@ -7,7 +8,7 @@ const DESCRIPTION =
 export const metadata: Metadata = {
   metadataBase: new URL("https://macros.dev"),
   title: {
-    default: "Macros — the editor you program",
+    default: "Macros — rewrite it while it runs",
     template: "%s — Macros",
   },
   description: DESCRIPTION,
@@ -35,13 +36,13 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "Macros",
-    title: "Macros — the editor you program",
+    title: "Macros — rewrite it while it runs",
     description: DESCRIPTION,
     url: "https://macros.dev",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Macros — the editor you program",
+    title: "Macros — rewrite it while it runs",
     description: DESCRIPTION,
   },
   icons: {
@@ -53,6 +54,8 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  themeColor: "#0b0a10",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({
@@ -61,7 +64,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={plotFont.variable}>
       <body>{children}</body>
     </html>
   );

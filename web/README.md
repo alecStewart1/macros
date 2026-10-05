@@ -54,14 +54,26 @@ The side rail, the `/docs` overview, prev/next paging, and the static routes
 all read from `NAV_GROUPS`. `##`/`###` headings get anchor links and feed the
 "On this page" table of contents automatically.
 
+### Design
+
+The site is dark-only, built on the "Spectrum" palette: viridis ramp
+colors over near-black ink, defined as CSS tokens in `app/globals.css`.
+
+- **Homepage** — `app/page.tsx` renders `app/_spectrum/SpectrumHome.tsx`.
+  The hero (`SpectrumHero.tsx`) is a canvas heatmap of half-block text
+  cells; the gallery and feature art are generated text charts
+  (`textplot.ts`, rendered by `Art.tsx`) in the bundled `MacrosPlot` font.
+  Styles live in `spectrum.module.css`.
+- **Design candidates** — alternate homepage explorations live under
+  `app/designs/<name>/` (served at `/designs/<name>`).
+
 ### Screenshots
 
-Drop images into `public/screenshots/`. The landing hero looks for
-`public/screenshots/editor.png`; until a file exists it shows a styled
-placeholder. Reference other images from markdown or components by their
-`/screenshots/...` path.
+Editor screenshots live in `public/screenshots/`. Reference them from
+markdown or components by their `/screenshots/...` path.
 
 ### Brand assets
 
 Logo, wordmark, and icons live in `public/brand/` (copied from the repo's
-`assets/brand/`).
+`assets/brand/`). `wordmark.svg` uses a near-black fill for light
+backgrounds; on the dark site use `wordmark-light.svg` instead.

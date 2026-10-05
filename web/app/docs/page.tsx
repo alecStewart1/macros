@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { NAV_GROUPS } from "@/lib/docs";
+import { DocStrip } from "./DocStrip";
 
 export const metadata: Metadata = {
   title: "Documentation",
@@ -10,24 +11,15 @@ export const metadata: Metadata = {
 
 export default function DocsOverview() {
   return (
-    <article style={{ padding: "44px 40px 24px", maxWidth: 880 }}>
-      <div
-        style={{
-          fontSize: 12.5,
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.1em",
-          color: "var(--accent)",
-          marginBottom: 12,
-        }}
-      >
-        Documentation
-      </div>
+    <article className="doc-article" style={{ padding: "44px 40px 24px", maxWidth: 880 }}>
+      <DocStrip seed="docs-overview" cells={56} />
+      <div className="doc-eyebrow">Documentation</div>
       <h1
         style={{
-          fontSize: 38,
+          fontSize: "clamp(34px, 5vw, 48px)",
           fontWeight: 700,
-          letterSpacing: "-0.8px",
+          letterSpacing: "-1.4px",
+          lineHeight: 1.05,
           margin: "0 0 16px",
         }}
       >
@@ -44,7 +36,7 @@ export default function DocsOverview() {
       >
         Everything you need to install, configure, and extend Macros. New here?
         Start with{" "}
-        <Link href="/docs/getting-started" style={{ color: "var(--accent)" }}>
+        <Link href="/docs/getting-started" style={{ color: "var(--link)" }}>
           Getting started
         </Link>
         , then open the in-editor tutorial with <kbd>C-h t</kbd>.
@@ -53,16 +45,7 @@ export default function DocsOverview() {
       <div style={{ marginTop: 40, display: "flex", flexDirection: "column", gap: 38 }}>
         {NAV_GROUPS.map((group) => (
           <section key={group.title}>
-            <h2
-              style={{
-                fontSize: 14,
-                fontWeight: 600,
-                textTransform: "uppercase",
-                letterSpacing: "0.07em",
-                color: "var(--text3)",
-                margin: "0 0 14px",
-              }}
-            >
+            <h2 className="docs-group-title" style={{ padding: 0, margin: "0 0 14px" }}>
               {group.title}
             </h2>
             <div
@@ -84,6 +67,7 @@ export default function DocsOverview() {
                     color: "inherit",
                   }}
                 >
+                  <DocStrip seed={item.slug} cells={10} />
                   <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 5 }}>
                     {item.label}
                   </div>

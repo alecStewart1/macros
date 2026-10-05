@@ -23,7 +23,7 @@ For one session, run <kbd>M-x</kbd> `mcp-server-start` (and `mcp-server-stop` to
 | `mcp-server-port` | `7811` | Port on 127.0.0.1 |
 | `mcp-server-token` | (generated) | Bearer token clients must send |
 
-Changing any of these restarts the server. Without `mcp-server-token`, a random token is generated on first start and saved in `mcp-token` in your config directory (readable only by you), so a client's saved configuration keeps working across restarts.
+Changing any of these restarts the server. Without `mcp-server-token`, a random 256-bit token is generated on first start and saved in `mcp-token` in your config directory, so a client's saved configuration keeps working across restarts. On macOS and Linux the file is set to be readable only by you each time it's used; on Windows it has your config folder's permissions. If you set your own token, make it long and random (32 or more characters): any program on your machine can try tokens against the port.
 
 ## Connecting Claude Code
 
@@ -46,7 +46,7 @@ claude mcp add --transport http macros http://127.0.0.1:7811/mcp --header "Autho
 
 A typical package-development loop: edit your package file, `eval` the changed definitions (or `(load "…/my-package.scm")`), run the command, then check the result with `buffer_text` and `messages`.
 
-`eval` runs on the Scheme engine thread, so the editor stays responsive during a long evaluation.
+`eval` runs on the Scheme engine thread, the same one that runs commands, hooks, and keymaps. The editor keeps drawing and you can keep typing, but anything that needs Scheme waits until the evaluation finishes. An evaluation that never finishes (an infinite loop) leaves Scheme stuck until you restart the editor, so test risky code in small steps.
 
 ## Security
 
@@ -55,5 +55,6 @@ A typical package-development loop: edit your package file, `eval` the changed d
 - It listens only on 127.0.0.1.
 - Every request must carry the bearer token.
 - Requests with a non-local `Host` or `Origin` header are refused, so a web page open in your browser can't reach it.
+- Nothing is read past the request headers until the token checks out, and it serves at most 16 connections at once, so a misbehaving local program can't exhaust the editor's memory.
 
-Treat the token like a password and only turn the server on while you're using it.
+Treat the token like a password and only turn the server on while you're using it. On a computer other people also log in to, keep in mind that a configured client sends the token to whatever is listening on that port; if the server can't start because the port is taken, find out what holds it before reconnecting.

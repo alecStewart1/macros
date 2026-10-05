@@ -8,6 +8,7 @@ import {
   navItem,
   NAV_GROUPS,
 } from "@/lib/docs";
+import { DocStrip } from "../DocStrip";
 
 export const dynamicParams = false;
 
@@ -44,25 +45,14 @@ export default async function DocPage({
 
   return (
     <div style={{ display: "flex", alignItems: "flex-start" }}>
-      <article style={{ flex: 1, minWidth: 0, padding: "44px 40px 24px", maxWidth: 820 }}>
-        {item && (
-          <div
-            style={{
-              fontSize: 12.5,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: "0.1em",
-              color: "var(--accent)",
-              marginBottom: 14,
-            }}
-          >
-            {groupTitleFor(slug)}
-          </div>
-        )}
+      <article className="doc-article" style={{ flex: 1, minWidth: 0, padding: "44px 40px 24px", maxWidth: 820 }}>
+        <DocStrip seed={slug} />
+        {item && <div className="doc-eyebrow">{groupTitleFor(slug)}</div>}
 
         <div className="prose" dangerouslySetInnerHTML={{ __html: doc.html }} />
 
         <nav
+          className="doc-pager"
           style={{
             display: "flex",
             justifyContent: "space-between",
@@ -108,16 +98,7 @@ export default async function DocPage({
             padding: "52px 20px 40px 4px",
           }}
         >
-          <div
-            style={{
-              fontSize: 11.5,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: "0.07em",
-              color: "var(--text3)",
-              marginBottom: 10,
-            }}
-          >
+          <div className="docs-group-title" style={{ padding: 0, marginBottom: 12 }}>
             On this page
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -146,7 +127,10 @@ const pagerStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   gap: 4,
-  padding: 0,
+  padding: "14px 18px",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  background: "var(--surface)",
   textDecoration: "none",
   color: "inherit",
   flex: "0 1 auto",
