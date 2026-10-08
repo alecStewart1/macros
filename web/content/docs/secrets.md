@@ -14,9 +14,9 @@ The store needs **gpg**, which does the encryption (`brew install gnupg` on macO
 It's authinfo (netrc) text, one entry per line, encrypted with your master passphrase:
 
 ```
-machine db.example.com login kyle port 5432 password hunter2
+machine db.example.com login alice port 5432 password hunter2
 machine imap.gmail.com login me@example.com password "has spaces"
-machine psql-url-1 login kyle password postgres://kyle:s3cret@db.example.com/app
+machine psql-url-1 login alice password postgres://alice:s3cret@db.example.com/app
 ```
 
 An entry is looked up by **machine** (a real hostname, or any name you choose) plus **login**, optionally narrowed by **port**. Two keys are needed because one host can have several accounts. An empty login or port in a lookup matches any entry for that machine. Lines that aren't entries (comments, blanks, `default …`) are kept as-is when the editor rewrites the file.
@@ -28,8 +28,8 @@ You don't create the file by hand. The first time you save a secret, Macros asks
 The first time a command needs a secret in a session:
 
 1. **`authinfo.gpg passphrase:`** You type the master passphrase once. After that, lookups are answered from memory until you quit or run `M-x secrets-lock`. A wrong passphrase asks again, up to three tries.
-2. If there's **no entry**, you get a prompt like **`Password for kyle@db.example.com:5432:`**.
-3. **`Save kyle@db.example.com:5432 to authinfo.gpg? (y/n)`** If you answer `n`, the value is still remembered until you quit or run `secrets-lock`, so you're not asked again on every command.
+2. If there's **no entry**, you get a prompt like **`Password for alice@db.example.com:5432:`**.
+3. **`Save alice@db.example.com:5432 to authinfo.gpg? (y/n)`** If you answer `n`, the value is still remembered until you quit or run `secrets-lock`, so you're not asked again on every command.
 
 Secret prompts are masked (`•` per character). What you type is never added to minibuffer history, and on macOS **Secure Event Input** is on while the prompt is open, so other apps can't watch the keystrokes. <kbd>cmd-v</kbd> and <kbd>C-y</kbd> paste. In a secret prompt both read the clipboard directly and never put the secret on the kill ring (which [session state](/docs/configuration#session-state) may save to disk). A trailing newline is dropped, and only the first line of a multi-line paste goes in. <kbd>C-g</kbd> cancels.
 
@@ -60,22 +60,23 @@ The editor is a GUI app, so it doesn't inherit your shell's `PATH`. `gpg-command
 Any option can be set to a **secret reference** instead of a value. Call `secret-get` with a machine and a login and **no callback**:
 
 ```scheme
-(set-option "psql-url" (secret-get "psql-url-1" "kyle"))
+(set-option "psql-url" (secret-get "psql-url-1" "alice"))
 ```
 
-- **Only the reference is stored**, never the secret. It prints as `#<secret kyle@psql-url-1>`. Your `init.scm` and the option table never contain the value, and loading your config doesn't prompt.
+- **Only the reference is stored**, never the secret. It prints as `#<secret alice@psql-url-1>`. Your `init.scm` and the option table never contain the value, and loading your config doesn't prompt.
 - **`(get-option "psql-url")` returns the real value** once the store (or this session) has it, and `#f` until then.
-- **The first command that needs it prompts.** A package gates its commands with `option-ensure` (below), which asks for the master passphrase and, if there's no entry yet, for the value itself, masked (`psql-url (kyle@psql-url-1):`). It then offers to save it.
+- **The first command that needs it prompts.** A package gates its commands with `option-ensure` (below), which asks for the master passphrase and, if there's no entry yet, for the value itself, masked (`psql-url (alice@psql-url-1):`). It then offers to save it.
 
 Pass `'port "5432"` as a third argument to narrow the lookup to a port.
 
 For example, the `macros-psql-dashboard` package keeps its whole connection URL in the store this way:
 
 ```scheme
-(package-install-local "~/workspace/macros-psql-dashboard"
+(package-install "https://codeberg.org/macros-app/psql-dashboard"
+  'name "macros-psql-dashboard"      ; the entry file is macros-psql-dashboard.scm
   'config (lambda ()
             (set-option "psql-command" "/opt/homebrew/opt/libpq/bin/psql")
-            (set-option "psql-url" (secret-get "psql-url-1" "kyle"))
+            (set-option "psql-url" (secret-get "psql-url-1" "alice"))
             #f))
 ```
 
@@ -86,7 +87,7 @@ Never prompt for a password yourself. Ask the store, and let it handle prompting
 ### `secret-get`: get a secret, prompting if needed
 
 ```scheme
-(secret-get "db.example.com" "kyle"
+(secret-get "db.example.com" "alice"
   (lambda (pw) (connect pw))                       ; called with the secret
   'port "5432"                                     ; optional extra match key
   'on-cancel (lambda (_) (message "cancelled"))    ; optional: the user gave up
@@ -98,7 +99,7 @@ This is asynchronous. The callback runs once the secret is available: straight a
 ### `secret-lookup`: synchronous, never prompts
 
 ```scheme
-(secret-lookup "db.example.com" "kyle" "5432")   ; → the secret, or #f
+(secret-lookup "db.example.com" "alice" "5432")   ; → the secret, or #f
 ```
 
 This answers only from the unlocked store and this session's memory. Use it in code that must stay synchronous, such as a completion source or a catalog query, after gating the command that led there with `secret-get`.
@@ -106,7 +107,7 @@ This answers only from the unlocked store and this session's memory. Use it in c
 ### `secret-forget`: the service rejected it
 
 ```scheme
-(secret-forget "db.example.com" "kyle" "5432")
+(secret-forget "db.example.com" "alice" "5432")
 ```
 
 This deletes the entry from session memory, the unlocked store, and `authinfo.gpg`, so the next `secret-get` prompts again.
@@ -118,7 +119,7 @@ This deletes the entry from session memory, the unlocked store, and `authinfo.gp
   (lambda () (my-pkg-connect (get-option "my-pkg-url")))
   'on-cancel (lambda (_) (message "cancelled")))
 
-(option-secret-label "my-pkg-url")          ; → "kyle@my-pkg-1" if it's a reference, else #f
+(option-secret-label "my-pkg-url")          ; → "alice@my-pkg-1" if it's a reference, else #f
 (option-secret-forget "my-pkg-url")         ; rejected: forget the entry it refers to → #t / #f
 (secret-ref? v)                             ; is v a secret reference?
 ```
@@ -131,7 +132,7 @@ Gate each user-facing command with `secret-get` (or `option-ensure`), then do th
 
 ```scheme
 (define-command (my-db-report)
-  (secret-get "db.example.com" "kyle"
+  (secret-get "db.example.com" "alice"
     (lambda (_) (my-db--render))      ; inside, (secret-lookup …) now answers
     'port "5432"))
 ```
@@ -157,7 +158,7 @@ Gate each user-facing command with `secret-get` (or `option-ensure`), then do th
 
 `env` is a list of `"KEY=VALUE"` strings layered over the editor's own environment, which never changes. A bare `"KEY"` removes that variable for the child; in a terminal, where removal isn't possible, it's set to empty instead. See [Scripting](/docs/scripting#running-processes).
 
-If a secret comes as part of a URL (`postgres://kyle:s3cret@host/db`), split the password out before spawning and pass it through the environment. `(url-decode s)` decodes `%XX` escapes, as the client itself would.
+If a secret comes as part of a URL (`postgres://alice:s3cret@host/db`), split the password out before spawning and pass it through the environment. `(url-decode s)` decodes `%XX` escapes, as the client itself would.
 
 ## Reading a secret yourself
 

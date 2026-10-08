@@ -92,7 +92,7 @@ Read an option back from Scheme with `(get-option "name")`. It returns the curre
 Don't write passwords or tokens into `init.scm`. Set the option to a **reference** into the encrypted [secrets store](/docs/secrets) instead:
 
 ```scheme
-(set-option "psql-url" (secret-get "psql-url-1" "kyle"))
+(set-option "psql-url" (secret-get "psql-url-1" "alice"))
 ```
 
 Only the reference is stored. `get-option` returns the real value once the store has it (`#f` until then), and the first command that needs it asks for it, masked, and offers to save it. Nothing prompts at startup. See [Secrets in your config](/docs/secrets#secrets-in-your-config).

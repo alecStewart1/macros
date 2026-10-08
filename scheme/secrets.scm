@@ -4,23 +4,23 @@
 ;; Passwords live in ~/.config/macros/authinfo.gpg, authinfo lines encrypted
 ;; with one master passphrase:
 ;;
-;;   machine db.example.com login kyle port 5432 password hunter2
+;;   machine db.example.com login alice port 5432 password hunter2
 ;;   machine imap.gmail.com login me@example.com password "has spaces"
 ;;
 ;; A package never prompts for a password itself; it asks the store:
 ;;
-;;   (secret-get "db.example.com" "kyle"
+;;   (secret-get "db.example.com" "alice"
 ;;     (lambda (pw) (connect pw))
 ;;     'port "5432"                                ; optional extra match key
 ;;     'on-cancel (lambda (_) (message "cancelled")))
 ;;
 ;; The first lookup of a session asks for the master passphrase (once). A hit
-;; goes straight to the callback; a miss prompts "Password for kyle@db…:",
+;; goes straight to the callback; a miss prompts "Password for alice@db…:",
 ;; offers to save it, and then calls back. The first save creates the file
 ;; (you pick the master passphrase then). When a service REJECTS a password
 ;; (changed, expired), the package calls
 ;;
-;;   (secret-forget "db.example.com" "kyle" "5432")
+;;   (secret-forget "db.example.com" "alice" "5432")
 ;;
 ;; which deletes it, and the next `secret-get` prompts again.
 ;; A password you choose NOT to save is still remembered for the session.
@@ -28,7 +28,7 @@
 ;; Config can name a secret instead of writing it out: called WITHOUT a
 ;; callback, `secret-get` returns a reference that `set-option` stores as-is:
 ;;
-;;   (set-option "psql-url" (secret-get "psql-url-1" "kyle"))
+;;   (set-option "psql-url" (secret-get "psql-url-1" "alice"))
 ;;
 ;; `get-option` then reads the real value whenever the store can answer (#f
 ;; until then), so the secret is never in init.scm or the option table. A
@@ -38,7 +38,7 @@
 ;;
 ;; Code that must stay synchronous (a catalog query, a completion source) uses
 ;;
-;;   (secret-lookup "db.example.com" "kyle" "5432")   ; → password or #f
+;;   (secret-lookup "db.example.com" "alice" "5432")   ; → password or #f
 ;;
 ;; which never prompts: it answers from the unlocked store or the session, so
 ;; gate the user-facing command with `secret-get` first and look up inside.
@@ -239,7 +239,7 @@
                       'on-cancel (secrets--opt opts 'on-cancel #f)))))
 
 ;; (option-secret-label name) → "user@host" naming the entry option `name`
-;; refers to, or #f for a plain option — for display ("locked: kyle@db").
+;; refers to, or #f for a plain option — for display ("locked: alice@db").
 (define (option-secret-label name)
   (let ((ref (option-secret-ref name)))
     (and ref (secrets--label (car ref) (cadr ref) (car (cddr ref))))))
