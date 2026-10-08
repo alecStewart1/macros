@@ -5,6 +5,62 @@ use gpui::{App, Context, Entity, SharedString, Window, div, prelude::*, px, rela
 use crate::editor::{Editor, TitlebarDropdownView};
 use crate::theme::Theme;
 
+/// Width of the Windows caption buttons (three 46px buttons, the system size)
+/// that `caption_buttons` draws at the title bar's right edge; zero elsewhere.
+const CAPTION_BUTTONS_WIDTH: gpui::Pixels = px(if cfg!(target_os = "windows") {
+    138.
+} else {
+    0.
+});
+
+/// Minimize / maximize-restore / close for Windows. The transparent title bar
+/// (see `main.rs`) drops the system-drawn caption buttons there, so we paint
+/// them; each tags a `WindowControlArea`, and gpui answers `WM_NCHITTEST`
+/// with the matching `HT*BUTTON`, so the OS handles the click itself.
+fn caption_buttons(window: &Window, fg: gpui::Hsla) -> impl IntoElement {
+    // Segoe Fluent Icons (Windows 11) / MDL2 Assets (Windows 10) glyphs.
+    let max_glyph = if window.is_maximized() {
+        "\u{e923}"
+    } else {
+        "\u{e922}"
+    };
+    let button = |glyph: &'static str,
+                  area: gpui::WindowControlArea,
+                  hover_bg: gpui::Hsla,
+                  hover_fg: gpui::Hsla| {
+        div()
+            .id(glyph)
+            .w(px(46.))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .font_family("Segoe Fluent Icons")
+            .text_size(px(10.))
+            .window_control_area(area)
+            .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+            .child(glyph)
+    };
+    let hover = fg.opacity(0.12);
+    let close_red: gpui::Hsla = gpui::rgb(0xc42b1c).into();
+    div()
+        .occlude()
+        .absolute()
+        .right_0()
+        .top_0()
+        .h_full()
+        .flex()
+        .flex_row()
+        .child(button("\u{e921}", gpui::WindowControlArea::Min, hover, fg))
+        .child(button(max_glyph, gpui::WindowControlArea::Max, hover, fg))
+        .child(button(
+            "\u{e8bb}",
+            gpui::WindowControlArea::Close,
+            close_red,
+            gpui::white(),
+        ))
+}
+
 /// The echo-area row beneath the minibuffer/mode line: a full-width line that
 /// wraps long messages (LSP diagnostics, completion hints) instead of clipping
 /// them at the window edge, capped at a few lines so it can't swallow the
@@ -789,7 +845,7 @@ impl Workspace {
             div()
                 .occlude()
                 .absolute()
-                .right(px(8.))
+                .right(px(8.) + CAPTION_BUTTONS_WIDTH)
                 .top_0()
                 .h_full()
                 .flex()
@@ -1045,7 +1101,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font_family = cx
             .global::<crate::settings::Settings>()
             .font_family()
@@ -1114,6 +1170,9 @@ impl Render for Workspace {
             );
         if let Some(pill) = self.render_update_pill(cx) {
             title_bar = title_bar.child(pill);
+        }
+        if cfg!(target_os = "windows") {
+            title_bar = title_bar.child(caption_buttons(window, title_bar_fg));
         }
         // The perspectives dropdown trigger floats left of the centered title,
         // just past the traffic lights (the same layering as the update pill).
