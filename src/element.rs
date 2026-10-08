@@ -2126,11 +2126,13 @@ fn line_runs(
         line.start + rel
     };
     for (range, face) in overlays {
-        let os = snap(range.start.max(line.start), false);
-        let oe = snap(range.end.min(line.end), true);
+        // Skip overlays that miss this line before snapping: `snap` assumes
+        // its offset lies within `line`.
+        let (os, oe) = (range.start.max(line.start), range.end.min(line.end));
         if os >= oe {
             continue;
         }
+        let (os, oe) = (snap(os, false), snap(oe, true));
         let face_bg = theme.background_of(face);
         let bg_only = face_bg.is_some() && !theme.has_color(face);
         let family = theme
@@ -2591,6 +2593,33 @@ mod tests {
         assert_eq!(runs[1].color, red, "overlay colors its sub-range");
         assert_eq!(runs[0].color, default);
         assert_eq!(runs[2].color, default);
+    }
+
+    #[test]
+    fn overlay_outside_line_is_skipped() {
+        let mut theme = Theme::default();
+        theme.set("hl", rgb(0xff0000).into());
+        let font = font("Lilex");
+        let default: Hsla = rgb(0x000000).into();
+        // Line [10,20) with its text; overlays wholly before and after it
+        // must be skipped, not snapped (snapping one underflowed).
+        let overlays = vec![
+            (0usize..5usize, SharedString::from("hl")),
+            (25usize..30usize, SharedString::from("hl")),
+        ];
+        let text = "0123456789";
+        let runs = line_runs(
+            &[],
+            &overlays,
+            10..20,
+            &font,
+            default,
+            false,
+            &theme,
+            Some(text),
+        );
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![10]);
+        assert_eq!(runs[0].color, default);
     }
 
     #[test]
