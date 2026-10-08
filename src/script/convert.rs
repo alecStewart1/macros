@@ -138,7 +138,10 @@ pub(crate) fn option_from_steelval(value: &SteelVal) -> crate::settings::OptionV
                 .map(|(k, v)| (option_from_steelval(k), option_from_steelval(v)))
                 .collect(),
         ),
-        other => OptionValue::Str(other.to_string()),
+        other => match crate::authinfo::secret_ref_of(other) {
+            Some(r) => OptionValue::Secret(r),
+            None => OptionValue::Str(other.to_string()),
+        },
     }
 }
 
@@ -158,6 +161,11 @@ pub(crate) fn option_to_steelval(v: &crate::settings::OptionValue) -> SteelVal {
                 .map(|(k, v)| (option_to_steelval(k), option_to_steelval(v)))
                 .collect();
             SteelVal::HashMapV(steel::gc::Gc::new(map).into())
+        }
+        // Nested references stay references; only a top-level `get-option`
+        // resolves (see `get-option`).
+        OptionValue::Secret(r) => {
+            steel::rvals::IntoSteelVal::into_steelval(r.clone()).unwrap_or(SteelVal::BoolV(false))
         }
     }
 }

@@ -303,6 +303,16 @@ impl Editor {
             // C-r within isearch: repeat backward.
             self.isearch_repeat(false, cx);
             cx.stop_propagation();
+        } else if ks.modifiers.platform
+            && ks.key == "v"
+            && !ks.modifiers.control
+            && !ks.modifiers.alt
+        {
+            self.mb_paste(false, cx); // cmd-v: the system clipboard
+            cx.stop_propagation();
+        } else if ks.modifiers.control && ks.key == "y" && !ks.modifiers.alt {
+            self.mb_paste(true, cx); // C-y: yank (Emacs minibuffer)
+            cx.stop_propagation();
         } else if ks.modifiers.alt && ks.key == "p" {
             self.mb_history(-1, cx); // M-p: older history
             cx.stop_propagation();

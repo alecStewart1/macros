@@ -132,6 +132,7 @@ A few conventions that make a package well-behaved:
 - **Register interactive commands** with `register-command` so they appear in `M-x`.
 - **Document with a `;;` comment** immediately above each `(define …)` — the editor scrapes it when your package loads, so your functions and variables get help text for free and become findable through `describe-function`, `apropos`, and the live `helm-apropos` search (<kbd>C-h C-a</kbd>), whose <kbd>Enter</kbd> jumps straight to your source. See [Getting help](/docs/getting-help).
 - **Stay idempotent.** Your entry (and the user's `'config` thunk) runs on *every* launch, not just install — see [Configuring a package after it loads](#configuring-a-package-after-it-loads). Defining commands, binding keys, and setting options are all naturally re-runnable; avoid one-time side effects like appending to a file.
+- **Never prompt for passwords or keep them in options.** Ask the [secrets store](/docs/secrets) with `secret-get` / `secret-lookup`, let users point your options at it with `(secret-get …)` references (gate commands with `option-ensure`), and pass secrets to subprocesses through the environment (`call-process-env`), never argv.
 - **Don't bind keys in `"global"` aggressively** — prefer a mode keymap or leave bindings to the user's `'config`, so installing your package doesn't clobber their keys.
 
 ### Multi-file packages

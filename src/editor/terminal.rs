@@ -215,18 +215,23 @@ impl Editor {
     /// through the normal outcome drain — so `(append-to-buffer …)` etc. work.
     pub(super) fn make_process(
         &mut self,
-        id: u64,
-        program: String,
-        args: Vec<String>,
-        on_output: String,
-        on_exit: Option<String>,
+        spec: crate::script::MakeProcessArgs,
         cx: &mut Context<Self>,
     ) {
+        let crate::script::MakeProcessArgs {
+            id,
+            program,
+            args,
+            env,
+            on_output,
+            on_exit,
+        } = spec;
         // Spawn here (not on the worker) so we can keep the child for stdin/kill.
         // Expand a leading `~/` — `Command::new` does no shell expansion.
         let program = crate::util::expand_tilde(&program);
         let mut cmd = Command::new(&program);
         cmd.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped());
+        env.apply(&mut cmd);
         // Its own process group, so kill_process can take down the whole tree
         // — a shell-wrapped command (`sh -c "make && …"`) dies with its shell
         // instead of being orphaned by it.
@@ -358,7 +363,7 @@ impl Editor {
         } else {
             std::path::PathBuf::from(&args.cwd)
         };
-        match crate::dap::DapClient::start(&args.program, &args.args, &dir) {
+        match crate::dap::DapClient::start(&args.program, &args.args, &args.env, &dir) {
             Ok((client, rx)) => {
                 self.dap_sessions.insert(args.id, client);
                 self.dap_pump(args.id, rx, args.on_message, args.on_exit, cx);
@@ -957,13 +962,17 @@ impl Editor {
     /// name already exists, just switch to it (reuse the running shell).
     pub(super) fn make_terminal(
         &mut self,
-        id: u64,
-        name: String,
-        program: String,
-        args: Vec<String>,
-        directory: String,
+        spec: crate::script::MakeTerminalArgs,
         cx: &mut Context<Self>,
     ) {
+        let crate::script::MakeTerminalArgs {
+            id,
+            name,
+            program,
+            args,
+            directory,
+            env,
+        } = spec;
         if self.terminals.values().any(|t| t.buffer_name == name) {
             self.switch_to_buffer(&name, cx);
             return;
@@ -1001,6 +1010,7 @@ impl Editor {
             cell_h,
             program,
             cwd,
+            &env,
             self.term_events_tx.clone(),
         ) {
             Ok(terminal) => {

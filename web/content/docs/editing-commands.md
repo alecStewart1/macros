@@ -23,6 +23,8 @@ Set the mark with <kbd>C-Space</kbd>, then move point; the text between mark and
 
 The kill ring and the system clipboard are kept in sync by the clipboard commands (<kbd>cmd-c</kbd>/<kbd>x</kbd>/<kbd>v</kbd>), so copying in Macros and pasting in another app just works.
 
+The same keys paste into a **minibuffer** prompt: <kbd>cmd-v</kbd> inserts the clipboard, and <kbd>C-y</kbd> inserts the latest kill (taking in anything copied elsewhere first). A prompt is one line, so a trailing newline is dropped and only the first line of a multi-line paste goes in. In a password prompt both read the clipboard directly and never put the secret on the kill ring; see [Passwords & secrets](/docs/secrets#what-you-see).
+
 ## Killing & transposing
 
 | Key | Command |

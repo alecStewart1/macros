@@ -62,6 +62,7 @@ impl DapClient {
     pub fn start(
         program: &str,
         args: &[String],
+        env: &crate::process::EnvOverrides,
         cwd: &Path,
     ) -> Result<(Self, UnboundedReceiver<Value>), String> {
         // A missing cwd would otherwise surface as "not found in PATH".
@@ -72,6 +73,7 @@ impl DapClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        env.apply(&mut cmd);
         // Its own process group, so `kill` takes down the debuggee the adapter
         // spawned too, not just the adapter (mirrors `make-process`).
         #[cfg(unix)]
@@ -301,7 +303,9 @@ mod tests {
     #[test]
     fn start_with_missing_cwd_reports_the_directory() {
         let missing = Path::new("/definitely/not/a/real/dir/macros-dap-test");
-        let err = DapClient::start("sh", &[], missing).err().unwrap();
+        let err = DapClient::start("sh", &[], &Default::default(), missing)
+            .err()
+            .unwrap();
         assert!(err.contains("working directory"), "{err}");
     }
 
@@ -403,6 +407,7 @@ sys.exit(5)
         let (client, mut rx) = DapClient::start(
             "python3",
             &["-c".to_string(), script.to_string()],
+            &Default::default(),
             Path::new("."),
         )
         .unwrap();

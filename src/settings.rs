@@ -29,6 +29,11 @@ pub enum OptionValue {
     /// A Scheme hash — `(set-option "k" (hash 'a 1 …))`. Keys and values both
     /// recurse; iteration order is not preserved (hashes are unordered).
     Map(Vec<(OptionValue, OptionValue)>),
+    /// A reference to an authinfo.gpg entry (`(secret-get host user)` with no
+    /// callback). Only the reference is stored; `get-option` resolves it from
+    /// the unlocked store on every read, so the secret itself never sits in
+    /// the option table.
+    Secret(crate::authinfo::SecretRef),
 }
 
 /// Compare an option value against a string literal — true only for the `Str`
@@ -51,6 +56,7 @@ impl OptionValue {
             OptionValue::Str(s) | OptionValue::Symbol(s) => parse_bool(s),
             OptionValue::List(v) => !v.is_empty(),
             OptionValue::Map(m) => !m.is_empty(),
+            OptionValue::Secret(_) => true,
         }
     }
 

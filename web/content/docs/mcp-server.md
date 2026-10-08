@@ -42,7 +42,10 @@ claude mcp add --transport http macros http://127.0.0.1:7811/mcp --header "Autho
 | `list_buffers` | Every open buffer with its mode and file. |
 | `messages` | Recent `*Messages*` lines, where errors from hooks and async callbacks end up. |
 | `describe` | Documentation for a function, command, or option. |
+| `api` | The package-API reference. With no arguments, an index of every primitive category (buffers, overlays, processes, http, sockets, sqlite, git, …) and bundled Scheme library module. With `category`, each function's signature, argument and return types, and doc. With `search`, matches across names, signatures, and docs. |
 | `apropos` | Searches names and documentation. |
+
+Before writing a package, have the agent call `api` to see what it can build on. The reference is generated from the running editor, so it always matches the build you're connected to. The same text is available from Scheme as `(api-reference category search)`.
 
 A typical package-development loop: edit your package file, `eval` the changed definitions (or `(load "…/my-package.scm")`), run the command, then check the result with `buffer_text` and `messages`.
 

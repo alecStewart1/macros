@@ -306,6 +306,14 @@ struct Minibuffer {
     /// user submits an answer. Used for permission prompts that must resolve a
     /// pending request (a dropped read would strand the requester forever).
     sticky: bool,
+    /// Set for a secret read (`read-passwd`): the input renders as `•`, never
+    /// enters or browses history, is passed untrimmed, and is dispatched as a
+    /// secret call (errors can't echo it). Holding the guard keeps macOS
+    /// Secure Event Input on for exactly as long as this read is open.
+    secret: Option<crate::secure_input::SecureInputGuard>,
+    /// Steel fn called with "" when this read ends WITHOUT a submit — C-g, or
+    /// displaced by another read — so a caller waiting on it can unwind.
+    on_cancel: Option<String>,
 }
 
 /// A snapshot of the active minibuffer for rendering, split at the cursor.

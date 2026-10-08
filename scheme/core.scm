@@ -299,6 +299,18 @@
 ;;   (read-string "Tags: " (lambda (input) (apply-tags H input)))
 (define (read-string prompt callback . rest)
   (read-string-impl prompt (callback->name callback) (if (null? rest) "" (car rest))))
+;; Masked read for a secret (Emacs `read-passwd`): echoed as •, never added
+;; to minibuffer history, passed to `callback` untrimmed. The optional
+;; `on-cancel` runs (with "") if the read is aborted or displaced by another,
+;; so a caller waiting on the password can unwind. A callback error is
+;; reported without its message (Steel quotes the offending value — the
+;; password). Closures are one-shot: both are freed once either fires.
+;;   (read-passwd "Password: " (lambda (pw) (connect user pw))
+;;                (lambda (_) (message "login cancelled")))
+(define (read-passwd prompt callback . rest)
+  (let ((names (callback-group->names
+                (list callback (if (null? rest) #f (car rest))))))
+    (read-passwd-impl prompt (car names) (cadr names))))
 (define (completing-read prompt candidates callback . rest)
   (completing-read-impl prompt candidates (callback->name callback)
                         (if (null? rest) "" (car rest))))
@@ -469,6 +481,46 @@
             (name (string-append "callback-fn-" id)))
        (eval-string (string-append "(define (" name " x) (run-thunk-1 \"" id "\" x))"))
        name))))
+
+;; One-shot callbacks for a read with alternative outcomes (submit vs cancel):
+;; → one name per entry of `cbs` ("" for #f). Procedures are stashed like
+;; `callback->name`, but the first of the group to fire frees EVERY closure in
+;; it, so neither the fired one nor its never-to-fire sibling stays reachable
+;; (with whatever it captured) for the life of the session.
+(define (callback-group->names cbs)
+  (let* ((ids (map (lambda (cb) (if (procedure? cb) (register-thunk cb) #f)) cbs))
+         (group (string-append
+                 "(list"
+                 (apply string-append
+                        (map (lambda (id) (if id (string-append " \"" id "\"") "")) ids))
+                 ")")))
+    (map (lambda (cb id)
+           (cond
+             ((not cb) "")
+             (id (let ((name (string-append "callback-fn-" id)))
+                   (eval-string (string-append "(define (" name " x) (run-thunk-group-1 \""
+                                               id "\" " group " x))"))
+                   name))
+             (else (callback->name cb))))
+         cbs ids)))
+
+;; Call the thunk `id` with `arg` after unregistering every id in `group`.
+(define (run-thunk-group-1 id group arg)
+  (let ((p (hash-try-get *thunk-table* id)))
+    (for-each (lambda (g) (set! *thunk-table* (hash-remove *thunk-table* g))) group)
+    (when p (p arg))))
+
+;; Run `thunk` with extra environment for every process it spawns — call-process*,
+;; make-process*, make-terminal, dap-start (Emacs's `process-environment`
+;; let-binding). `env` is a list of "KEY=VALUE" (bare "KEY" = unset); nested
+;; extents layer, inner wins. Async spawns capture the env when queued.
+;;   (with-process-env (list (string-append "PGPASSWORD=" pw))
+;;     (lambda () (call-process-full "psql" args "")))
+(define (with-process-env env thunk)
+  (process-env-push! env)
+  (let ((result (thunk)))
+    (process-env-pop!)
+    result))
 
 ;; --- debounce ----------------------------------------------------------------
 ;; (make-debounce name delay-ms thunk) → a schedule procedure. Each call bumps a

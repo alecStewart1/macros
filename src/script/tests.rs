@@ -3014,8 +3014,8 @@ mod magit_tests {
             let cmds = engine.call_action("compile-run", Some("make"));
             cmds.iter()
                 .find_map(|c| match c {
-                    EditorCommand::MakeProcess { args, .. } => {
-                        args.iter().find(|s| s.contains("cd ")).cloned()
+                    EditorCommand::MakeProcess(p) => {
+                        p.args.iter().find(|s| s.contains("cd ")).cloned()
                     }
                     _ => None,
                 })
@@ -5701,19 +5701,12 @@ mod magit_tests {
             .commands
             .as_slice()
         {
-            [
-                EditorCommand::MakeProcess {
-                    program,
-                    args,
-                    on_output,
-                    on_exit,
-                    ..
-                },
-            ] => {
-                assert_eq!(program, "grep");
-                assert_eq!(args, &["-rn", "x", "."]);
-                assert_eq!(on_output, "on-line");
-                assert_eq!(on_exit.as_deref(), Some("on-done"));
+            [EditorCommand::MakeProcess(p)] => {
+                assert_eq!(p.program, "grep");
+                assert_eq!(p.args, ["-rn", "x", "."]);
+                assert_eq!(p.on_output, "on-line");
+                assert_eq!(p.on_exit.as_deref(), Some("on-done"));
+                assert!(p.env.0.is_empty(), "no extent open → no env");
             }
             other => panic!("expected MakeProcess, got {other:?}"),
         }
@@ -5724,7 +5717,7 @@ mod magit_tests {
             .commands
             .as_slice()
         {
-            [EditorCommand::MakeProcess { on_exit, .. }] => assert!(on_exit.is_none()),
+            [EditorCommand::MakeProcess(p)] => assert!(p.on_exit.is_none()),
             other => panic!("expected MakeProcess, got {other:?}"),
         }
         assert!(matches!(
@@ -5787,20 +5780,12 @@ mod magit_tests {
             .commands
             .as_slice()
         {
-            [
-                EditorCommand::MakeTerminal {
-                    name,
-                    program,
-                    args,
-                    directory,
-                    id,
-                },
-            ] => {
-                assert_eq!(name, "*terminal*");
-                assert_eq!(program, "/bin/fish");
-                assert_eq!(args, &["-l"]);
-                assert_eq!(directory, "/w/proj");
-                assert!(*id > 0);
+            [EditorCommand::MakeTerminal(t)] => {
+                assert_eq!(t.name, "*terminal*");
+                assert_eq!(t.program, "/bin/fish");
+                assert_eq!(t.args, ["-l"]);
+                assert_eq!(t.directory, "/w/proj");
+                assert!(t.id > 0);
             }
             other => panic!("expected MakeTerminal, got {other:?}"),
         }
@@ -7690,8 +7675,8 @@ mod compile_lib {
         engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
         let result = engine.eval(r#"(compile-run "make")"#).unwrap();
         let cd_in_proj = result.commands.iter().any(|c| match c {
-            EditorCommand::MakeProcess { args, .. } => {
-                args.iter().any(|a| a.contains("cd '/w/proj' && make"))
+            EditorCommand::MakeProcess(p) => {
+                p.args.iter().any(|a| a.contains("cd '/w/proj' && make"))
             }
             _ => false,
         });
@@ -10010,7 +9995,7 @@ mod tests {
         });
         let ran = |out: &EvalResult| {
             out.commands.iter().any(|c| match c {
-                EditorCommand::MakeProcess { args, .. } => args.iter().any(|a| {
+                EditorCommand::MakeProcess(p) => p.args.iter().any(|a| {
                     a.contains(&format!(
                         "cd '{root}' && cargo test calc::tests::adds_numbers"
                     ))
@@ -11204,5 +11189,577 @@ mod audit_fixes {
         client.join().unwrap();
         assert!(val("(socket-close conn)").contains("#t"));
         assert!(val("(tcp-listener-close srv)").contains("#t"));
+    }
+}
+
+/// Secret-handling primitives: `read-passwd` (masked read + one-shot
+/// callbacks), the child-env spawners, and `with-process-env`.
+#[cfg(test)]
+mod secrets_primitives {
+    use super::*;
+
+    fn core_engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
+        let (engine, rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        (engine, rx)
+    }
+
+    fn val(engine: &ScriptEngine, src: &str) -> String {
+        engine.eval(src).unwrap().value.unwrap_or_default()
+    }
+
+    /// `call-process-env` layers "KEY=VALUE" over the inherited env (split at
+    /// the first `=`), and a bare "KEY" unsets — for the child only.
+    #[cfg(unix)]
+    #[test]
+    fn call_process_env_sets_and_unsets_child_env() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(
+                r#"(define r (call-process-env "/bin/sh"
+                     (list "-c" "printf '%s|%s' \"$MACROS_T1\" \"${HOME-unset}\"")
+                     "" (list "MACROS_T1=a=b c" "HOME")))"#,
+            )
+            .unwrap();
+        assert_eq!(val(&engine, "(car r)"), "\"0\"");
+        assert_eq!(val(&engine, "(cadr r)"), "\"a=b c|unset\"");
+        assert!(std::env::var("MACROS_T1").is_err());
+    }
+
+    /// `with-process-env` reaches the sync spawners inside its extent, nests
+    /// (inner wins, explicit env wins over both), and is gone afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn with_process_env_scopes_sync_spawns() {
+        let (engine, _rx) = core_engine();
+        let sh = r#"(lambda () (cadr (call-process-full "/bin/sh" (list "-c" "printf %s \"${MACROS_W-none}\"") "")))"#;
+        assert_eq!(
+            val(
+                &engine,
+                &format!(r#"(with-process-env (list "MACROS_W=outer") {sh})"#)
+            ),
+            "\"outer\""
+        );
+        assert_eq!(
+            val(
+                &engine,
+                &format!(
+                    r#"(with-process-env (list "MACROS_W=outer")
+                         (lambda () (with-process-env (list "MACROS_W=inner") {sh})))"#
+                )
+            ),
+            "\"inner\""
+        );
+        assert_eq!(
+            val(
+                &engine,
+                r#"(with-process-env (list "MACROS_W=dyn")
+                     (lambda () (cadr (call-process-env "/bin/sh"
+                       (list "-c" "printf %s \"$MACROS_W\"") "" (list "MACROS_W=explicit")))))"#
+            ),
+            "\"explicit\""
+        );
+        // The extent closed: nothing leaks into a later spawn.
+        assert_eq!(val(&engine, &format!("({sh})")), "\"none\"");
+        // call-process (stdout-only) honours it too.
+        assert_eq!(
+            val(
+                &engine,
+                r#"(with-process-env (list "MACROS_W=cp")
+                     (lambda () (call-process "/bin/sh" (list "-c" "printf %s \"$MACROS_W\""))))"#
+            ),
+            "\"cp\""
+        );
+    }
+
+    /// An error escaping the thunk skips the pop — the engine's per-job reset
+    /// must still keep the override out of the NEXT job.
+    #[cfg(unix)]
+    #[test]
+    fn with_process_env_error_does_not_leak_into_next_job() {
+        let (engine, _rx) = core_engine();
+        assert!(
+            engine
+                .eval(r#"(with-process-env (list "MACROS_L=leak") (lambda () (car '())))"#)
+                .is_err()
+        );
+        assert_eq!(
+            val(
+                &engine,
+                r#"(cadr (call-process-full "/bin/sh" (list "-c" "printf %s \"${MACROS_L-none}\"") ""))"#
+            ),
+            "\"none\""
+        );
+    }
+
+    /// Async spawners capture the extent's env into their command (the spawn
+    /// itself happens later on the UI thread); explicit env layers on top.
+    #[test]
+    fn async_spawners_capture_env() {
+        let (engine, _rx) = core_engine();
+        let cmds = engine
+            .eval(
+                r#"(with-process-env (list "A=dyn" "B=dyn")
+                     (lambda ()
+                       (make-process-env "psql" (list) "on-line" "" (list "B=explicit"))
+                       (make-terminal "*t*" "" (list) "")
+                       (dap-start "dlv" (list) "" "on-msg" "")))"#,
+            )
+            .unwrap()
+            .commands;
+        let pairs = |e: &EnvOverrides| e.0.clone();
+        let dyn_then = vec![
+            ("A".to_string(), Some("dyn".to_string())),
+            ("B".to_string(), Some("dyn".to_string())),
+        ];
+        let mut seen = 0;
+        for c in &cmds {
+            match c {
+                EditorCommand::MakeProcess(p) => {
+                    let mut want = dyn_then.clone();
+                    want.push(("B".into(), Some("explicit".into())));
+                    assert_eq!(pairs(&p.env), want);
+                    seen += 1;
+                }
+                EditorCommand::MakeTerminal(t) => {
+                    assert_eq!(pairs(&t.env), dyn_then);
+                    seen += 1;
+                }
+                EditorCommand::DapStart(a) => {
+                    assert_eq!(pairs(&a.env), dyn_then);
+                    seen += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(seen, 3, "{cmds:?}");
+        // Debug never shows the values.
+        assert!(!format!("{cmds:?}").contains("explicit"));
+    }
+
+    /// `async-lane-run`'s optional trailing env rides on its MakeProcess.
+    #[test]
+    fn async_lane_run_passes_env() {
+        let (engine, _rx) = core_engine();
+        engine
+            .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        match engine
+            .eval(r#"(async-lane-run "psql" "/bin/sh" (list "-c" "psql") 'on-line 'on-done (list "PGPASSWORD=pw"))"#)
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [EditorCommand::MakeProcess(p)] => {
+                assert_eq!(p.env.0, vec![("PGPASSWORD".to_string(), Some("pw".to_string()))]);
+            }
+            other => panic!("expected MakeProcess, got {other:?}"),
+        }
+    }
+
+    /// `read-passwd` emits ReadPasswd; on-cancel is optional.
+    #[test]
+    fn read_passwd_parses() {
+        let (engine, _rx) = core_engine();
+        match engine
+            .eval(r#"(read-passwd "Password: " 'got-pw)"#)
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [
+                EditorCommand::ReadPasswd {
+                    prompt,
+                    callback,
+                    on_cancel,
+                },
+            ] => {
+                assert_eq!(prompt, "Password: ");
+                assert_eq!(callback, "got-pw");
+                assert!(on_cancel.is_none());
+            }
+            other => panic!("expected ReadPasswd, got {other:?}"),
+        }
+        match engine
+            .eval(r#"(read-passwd "Password: " 'got-pw 'gave-up)"#)
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [EditorCommand::ReadPasswd { on_cancel, .. }] => {
+                assert_eq!(on_cancel.as_deref(), Some("gave-up"));
+            }
+            other => panic!("expected ReadPasswd, got {other:?}"),
+        }
+    }
+
+    /// Closure callbacks are one-shot as a group: firing either frees both.
+    #[test]
+    fn read_passwd_closures_are_freed_after_either_fires() {
+        let (engine, _rx) = core_engine();
+        engine.eval("(define got #f)").unwrap();
+        let names = |src: &str| match engine.eval(src).unwrap().commands.as_slice() {
+            [
+                EditorCommand::ReadPasswd {
+                    callback,
+                    on_cancel,
+                    ..
+                },
+            ] => (callback.clone(), on_cancel.clone().unwrap()),
+            other => panic!("expected ReadPasswd, got {other:?}"),
+        };
+        let (ok, cancel) = names(
+            r#"(read-passwd "pw: " (lambda (pw) (set! got pw)) (lambda (_) (set! got 'cancelled)))"#,
+        );
+        let before = val(&engine, "(hash-length *thunk-table*)");
+        engine.call_action(&ok, Some(" s3cret "));
+        assert_eq!(val(&engine, "got"), "\" s3cret \"");
+        assert_eq!(
+            val(&engine, "(hash-length *thunk-table*)")
+                .parse::<i64>()
+                .unwrap(),
+            before.parse::<i64>().unwrap() - 2,
+            "both closures freed"
+        );
+        // The sibling is now a no-op.
+        engine.call_action(&cancel, Some(""));
+        assert_eq!(val(&engine, "got"), "\" s3cret \"");
+    }
+
+    /// A failing secret callback reports an error that does NOT contain the
+    /// secret (Steel's own message would quote it).
+    #[test]
+    fn secret_callback_error_hides_the_value() {
+        let (engine, mut rx) = core_engine();
+        engine.eval("(define (bad-cb pw) (+ pw 1))").unwrap();
+        engine.dispatch_secret_action("bad-cb", "hunter2-secret");
+        let outcome = futures::executor::block_on(futures::StreamExt::next(&mut rx)).unwrap();
+        match outcome {
+            ScriptOutcome::Commands { message, .. } => {
+                let m = message.unwrap();
+                assert!(m.contains("bad-cb") && !m.contains("hunter2"), "{m}");
+            }
+            _ => panic!("expected a Commands outcome"),
+        }
+    }
+}
+
+/// scheme/secrets.scm end to end through real gpg: a miss prompts, the first
+/// save creates authinfo.gpg (new passphrase, confirmed), a locked store asks
+/// for the passphrase once and then answers from memory, concurrent requests
+/// queue, and `secret-forget` makes the next lookup prompt again. The store
+/// file lands in the per-thread test persistence dir. Skipped without gpg.
+#[cfg(test)]
+mod secrets_store {
+    use super::*;
+
+    fn gpg_available() -> bool {
+        [
+            "/opt/homebrew/bin/gpg",
+            "/usr/local/bin/gpg",
+            "/usr/bin/gpg",
+        ]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists())
+    }
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/secrets.scm"))
+            .unwrap();
+        engine
+            .eval("(define got '()) (define (got! x) (set! got (cons x got)))")
+            .unwrap();
+        engine
+    }
+
+    fn val(engine: &ScriptEngine, src: &str) -> String {
+        engine.eval(src).unwrap().value.unwrap_or_default()
+    }
+
+    /// The (prompt, callback, on-cancel) of the ReadPasswd among `cmds`.
+    fn passwd(cmds: &[EditorCommand]) -> (String, String, String) {
+        cmds.iter()
+            .find_map(|c| match c {
+                EditorCommand::ReadPasswd {
+                    prompt,
+                    callback,
+                    on_cancel,
+                } => Some((
+                    prompt.clone(),
+                    callback.clone(),
+                    on_cancel.clone().unwrap_or_default(),
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected ReadPasswd in {cmds:?}"))
+    }
+
+    fn yes_no(cmds: &[EditorCommand]) -> (String, String) {
+        cmds.iter()
+            .find_map(|c| match c {
+                EditorCommand::YesOrNo {
+                    prompt,
+                    callback,
+                    sticky,
+                } => {
+                    assert!(sticky, "the save prompt must be sticky");
+                    Some((prompt.clone(), callback.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected YesOrNo in {cmds:?}"))
+    }
+
+    fn has_prompt(cmds: &[EditorCommand]) -> bool {
+        cmds.iter().any(|c| {
+            matches!(
+                c,
+                EditorCommand::ReadPasswd { .. } | EditorCommand::YesOrNo { .. }
+            )
+        })
+    }
+
+    #[test]
+    fn secret_get_full_flow() {
+        if !gpg_available() {
+            eprintln!("gpg not installed; skipping");
+            return;
+        }
+        let e = engine();
+        let get = r#"(secret-get "db" "kyle" got! 'port "5432" 'on-cancel (lambda (_) (got! 'cancelled)))"#;
+
+        // 1. No file yet: prompt for the password, offer to save, create the store.
+        let (prompt, cb, _) = passwd(&e.eval(get).unwrap().commands);
+        assert_eq!(prompt, "Password for kyle@db:5432: ");
+        let (save_prompt, yes) = yes_no(&e.call_action(&cb, Some("pw one")));
+        assert!(save_prompt.contains("kyle@db:5432"), "{save_prompt}");
+        let (prompt, cb, _) = passwd(&e.call_action(&yes, Some("yes")));
+        assert_eq!(prompt, "New authinfo.gpg passphrase: ");
+        let (prompt, cb2, _) = passwd(&e.call_action(&cb, Some("master")));
+        assert_eq!(prompt, "Confirm passphrase: ");
+        assert!(!has_prompt(&e.call_action(&cb2, Some("master"))));
+        assert_eq!(val(&e, "got"), r#"("pw one")"#);
+        assert_eq!(val(&e, "(file-exists? (secrets-file))"), "#true");
+
+        // 2. Unlocked: a hit answers with no prompt at all.
+        assert!(!has_prompt(&e.eval(get).unwrap().commands));
+        assert_eq!(val(&e, "(car got)"), r#""pw one""#);
+
+        // 3. Locked: one passphrase prompt (a wrong one re-prompts), then two
+        //    queued requests are both answered from the store.
+        e.eval("(authinfo-lock) (set! got '())").unwrap();
+        let first = e.eval(get).unwrap().commands;
+        let (prompt, cb, _) = passwd(&first);
+        assert_eq!(prompt, "authinfo.gpg passphrase: ");
+        assert!(
+            !has_prompt(&e.eval(get).unwrap().commands),
+            "the second request waits its turn"
+        );
+        let (prompt, cb, _) = passwd(&e.call_action(&cb, Some("wrong")));
+        assert_eq!(prompt, "(wrong passphrase) authinfo.gpg passphrase: ");
+        assert!(!has_prompt(&e.call_action(&cb, Some("master"))));
+        assert_eq!(val(&e, "got"), r#"("pw one" "pw one")"#);
+
+        // 4. Forget (the service rejected it): deleted, so the next lookup
+        //    prompts. Declining to save still delivers, and the password is
+        //    remembered for the session — but not past `authinfo-lock`.
+        e.eval(r#"(secret-forget "db" "kyle" "5432")"#).unwrap();
+        assert_eq!(val(&e, r#"(secret-lookup "db" "kyle" "5432")"#), "#false");
+        let (_, cb, _) = passwd(&e.eval(get).unwrap().commands);
+        let (_, no) = yes_no(&e.call_action(&cb, Some("pw two")));
+        assert!(!has_prompt(&e.call_action(&no, Some("no"))));
+        assert_eq!(val(&e, "(car got)"), r#""pw two""#);
+        assert!(!has_prompt(&e.eval(get).unwrap().commands), "session hit");
+        e.eval("(authinfo-lock)").unwrap();
+        assert_eq!(val(&e, r#"(secret-lookup "db" "kyle" "5432")"#), "#false");
+        // Re-unlock: the forgotten entry is gone from the file, so it prompts.
+        let (_, cb, _) = passwd(&e.eval(get).unwrap().commands);
+        let (prompt, _, cancel) = passwd(&e.call_action(&cb, Some("master")));
+        assert_eq!(prompt, "Password for kyle@db:5432: ");
+
+        // 5. Cancelling a prompt calls on-cancel, and the queue moves on.
+        e.call_action(&cancel, Some(""));
+        assert_eq!(val(&e, "(car got)"), "cancelled");
+        assert!(has_prompt(&e.eval(get).unwrap().commands));
+    }
+}
+
+/// Secret references as option values: `(set-option k (secret-get h u))`
+/// stores a reference (never the value), `get-option` resolves it only once
+/// the store/session can answer, and `option-ensure` prompts on a miss. Uses
+/// session memory (`authinfo-remember`), so no gpg is needed.
+#[cfg(test)]
+mod secret_options {
+    use super::*;
+    use crate::settings::OptionValue;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/secrets.scm"))
+            .unwrap();
+        engine
+    }
+
+    fn val(engine: &ScriptEngine, src: &str) -> String {
+        engine.eval(src).unwrap().value.unwrap_or_default()
+    }
+
+    fn secret_ref(host: &str, user: &str) -> OptionValue {
+        OptionValue::Secret(crate::authinfo::SecretRef {
+            host: host.into(),
+            user: user.into(),
+            port: String::new(),
+        })
+    }
+
+    /// Options with psql-url as a reference and a store file that doesn't
+    /// exist (so nothing asks for a master passphrase).
+    fn with_ref(engine: &ScriptEngine) {
+        let missing = std::env::temp_dir().join(format!("no-authinfo-{}.gpg", std::process::id()));
+        let mut opts = HashMap::new();
+        opts.insert("psql-url".to_string(), secret_ref("psql-url-1", "kyle"));
+        opts.insert(
+            "authinfo-file".to_string(),
+            OptionValue::Str(missing.to_string_lossy().into_owned()),
+        );
+        engine.set_options(opts);
+    }
+
+    #[test]
+    fn set_option_stores_the_reference_not_a_value() {
+        let e = engine();
+        let cmds = e
+            .eval(r#"(set-option "psql-url" (secret-get "psql-url-1" "kyle"))"#)
+            .unwrap()
+            .commands;
+        match cmds.as_slice() {
+            [EditorCommand::SetOption(key, OptionValue::Secret(r))] => {
+                assert_eq!(key, "psql-url");
+                assert_eq!(
+                    (r.host.as_str(), r.user.as_str(), r.port.as_str()),
+                    ("psql-url-1", "kyle", "")
+                );
+            }
+            other => panic!("expected SetOption(Secret), got {other:?}"),
+        }
+        // 'port rides along; the reference is its own opaque type.
+        assert_eq!(
+            val(&e, r#"(secret-ref? (secret-get "h" "u" 'port "5432"))"#),
+            "#true"
+        );
+        assert_eq!(val(&e, r#"(secret-ref? "postgres://x")"#), "#false");
+        assert_eq!(
+            val(&e, r#"(secret-get "h" "u" 'port "5432")"#),
+            "#<secret u@h:5432>"
+        );
+    }
+
+    #[test]
+    fn get_option_resolves_only_when_known() {
+        let e = engine();
+        with_ref(&e);
+        assert_eq!(
+            val(&e, r#"(get-option "psql-url")"#),
+            "#false",
+            "unknown → #f"
+        );
+        assert_eq!(
+            val(&e, r#"(option-secret-ref "psql-url")"#),
+            r#"("psql-url-1" "kyle" "")"#
+        );
+        assert_eq!(
+            val(&e, r#"(option-secret-label "psql-url")"#),
+            r#""kyle@psql-url-1""#
+        );
+        assert_eq!(
+            val(&e, r#"(option-secret-label "authinfo-file")"#),
+            "#false"
+        );
+        e.eval(r#"(authinfo-remember "psql-url-1" "kyle" "" "postgres://kyle:pw@db/app")"#)
+            .unwrap();
+        assert_eq!(
+            val(&e, r#"(get-option "psql-url")"#),
+            r#""postgres://kyle:pw@db/app""#
+        );
+        // Forgetting it (the server rejected it) makes it unknown again.
+        assert_eq!(val(&e, r#"(option-secret-forget "psql-url")"#), "#true");
+        assert_eq!(val(&e, r#"(get-option "psql-url")"#), "#false");
+        assert_eq!(
+            val(&e, r#"(option-secret-forget "authinfo-file")"#),
+            "#false"
+        );
+    }
+
+    /// A miss prompts (masked) for the value, naming the option; declining to
+    /// save keeps it for the session and runs the gated thunk.
+    #[test]
+    fn option_ensure_prompts_then_runs() {
+        let e = engine();
+        with_ref(&e);
+        e.eval("(define ran 0)").unwrap();
+        let cmds = e
+            .eval(r#"(option-ensure "psql-url" (lambda () (set! ran (+ ran 1))))"#)
+            .unwrap()
+            .commands;
+        let (prompt, cb) = cmds
+            .iter()
+            .find_map(|c| match c {
+                EditorCommand::ReadPasswd {
+                    prompt, callback, ..
+                } => Some((prompt.clone(), callback.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected ReadPasswd in {cmds:?}"));
+        assert_eq!(prompt, "psql-url (kyle@psql-url-1): ");
+        assert_eq!(val(&e, "ran"), "0");
+        let save = e.call_action(&cb, Some("postgres://kyle:pw@db/app"));
+        let no = save
+            .iter()
+            .find_map(|c| match c {
+                EditorCommand::YesOrNo {
+                    prompt, callback, ..
+                } => {
+                    assert_eq!(prompt, "Save kyle@psql-url-1 to authinfo.gpg?");
+                    Some(callback.clone())
+                }
+                _ => None,
+            })
+            .expect("save offer");
+        e.call_action(&no, Some("no"));
+        assert_eq!(val(&e, "ran"), "1");
+        assert_eq!(
+            val(&e, r#"(get-option "psql-url")"#),
+            r#""postgres://kyle:pw@db/app""#
+        );
+        // Known now: no prompt, runs immediately.
+        let again = e
+            .eval(r#"(option-ensure "psql-url" (lambda () (set! ran (+ ran 1))))"#)
+            .unwrap()
+            .commands;
+        assert!(
+            !again
+                .iter()
+                .any(|c| matches!(c, EditorCommand::ReadPasswd { .. }))
+        );
+        assert_eq!(val(&e, "ran"), "2");
+        // A plain option never prompts.
+        e.eval(r#"(option-ensure "authinfo-file" (lambda () (set! ran 10)))"#)
+            .unwrap();
+        assert_eq!(val(&e, "ran"), "10");
+    }
+
+    #[test]
+    fn url_decode() {
+        let e = engine();
+        assert_eq!(val(&e, r#"(url-decode "p%40ss%3Aw%2Fd")"#), r#""p@ss:w/d""#);
+        assert_eq!(
+            val(&e, r#"(url-decode "caf%C3%A9+%zz%4")"#),
+            r#""café+%zz%4""#
+        );
     }
 }

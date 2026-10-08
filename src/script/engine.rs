@@ -57,6 +57,11 @@ pub(crate) enum Reply {
 pub(crate) enum Task {
     Eval(String),
     Call(String, Option<String>),
+    /// Like `Call`, but the argument is a secret (a `read-passwd` result): an
+    /// error is reported WITHOUT Steel's message, which quotes the offending
+    /// value verbatim (`+ expects a number, found: "hunter2"`) and would put
+    /// it in the echo area and `*Messages*`.
+    CallSecret(String, String),
     /// Compute dynamic Helm candidates: call `function` with the pattern.
     Candidates {
         source: usize,
@@ -352,6 +357,15 @@ impl ScriptEngine {
         });
     }
 
+    /// Async call of `name` with a secret argument (see [`Task::CallSecret`]).
+    pub fn dispatch_secret_action(&self, name: &str, secret: &str) {
+        let _ = self.jobs.send(Job {
+            task: Task::CallSecret(name.to_string(), secret.to_string()),
+            interactive: false,
+            reply: Reply::Async,
+        });
+    }
+
     /// A cheap `Send + Clone` handle that can deliver `dispatch_action` calls
     /// from another thread — for work that must leave the UI thread entirely
     /// (the spell-check worker) yet still hand its result to a named Scheme
@@ -461,6 +475,9 @@ pub(crate) fn engine_thread(
         reply,
     }) = jobs.recv()
     {
+        // `with-process-env` extents never span jobs (one an error escaped
+        // without popping would otherwise leak into every later spawn).
+        crate::process::reset_dynamic();
         let raw = match task {
             // Dynamic Helm candidates: call the fn, parse a string list, reply
             // directly on the async channel (no command/value semantics).
@@ -546,6 +563,18 @@ pub(crate) fn engine_thread(
                     .call_function_by_name_with_args(&name, args)
                     .err()
                     .map(|e| steel_error_string(&e));
+                RawResult {
+                    commands: drain(&queue),
+                    value: None,
+                    error,
+                }
+            }
+            Task::CallSecret(name, secret) => {
+                let args: Vec<SteelVal> = secret.into_steelval().into_iter().collect();
+                let error = engine
+                    .call_function_by_name_with_args(&name, args)
+                    .err()
+                    .map(|_| format!("{name} failed (details hidden: its argument is secret)"));
                 RawResult {
                     commands: drain(&queue),
                     value: None,

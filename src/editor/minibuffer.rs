@@ -13,10 +13,19 @@ impl Editor {
     pub fn minibuffer_view(&self) -> Option<MinibufferView> {
         self.minibuffer.as_ref().map(|mb| {
             let (before, after) = mb.input.split_at(mb.cursor);
+            // A password read shows one bullet per char — the real text never
+            // reaches the render path.
+            let shown = |s: &str| {
+                if mb.secret.is_some() {
+                    "•".repeat(s.chars().count())
+                } else {
+                    s.to_string()
+                }
+            };
             MinibufferView {
                 prompt: mb.prompt.clone(),
-                before: before.to_string(),
-                after: after.to_string(),
+                before: shown(before),
+                after: shown(after),
                 message: mb.message.clone(),
             }
         })
@@ -34,6 +43,10 @@ impl Editor {
         if !matches!(purpose, MinibufferPurpose::Isearch) {
             self.isearch = None;
         }
+        // A read displaced by this one ends without a submit: tell its caller.
+        if let Some(old) = self.minibuffer.take() {
+            self.mb_cancelled(old);
+        }
         self.minibuffer = Some(Minibuffer {
             prompt: prompt.to_string(),
             input: initial.to_string(),
@@ -41,6 +54,8 @@ impl Editor {
             message: String::new(),
             purpose,
             sticky: false,
+            secret: None,
+            on_cancel: None,
         });
         self.minibuffer_history_pos = None;
         self.minibuffer_stash = String::new();
@@ -93,7 +108,7 @@ impl Editor {
     /// Browse minibuffer history: `delta < 0` recalls older entries, `delta > 0`
     /// newer ones; stepping past the newest restores the in-progress input.
     pub(super) fn mb_history(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.minibuffer.is_none() || self.minibuffer_history.is_empty() {
+        if self.minibuffer.is_none() || self.minibuffer_history.is_empty() || self.mb_is_secret() {
             return;
         }
         let len = self.minibuffer_history.len();
@@ -168,6 +183,39 @@ impl Editor {
         self.mb_dynamic_requery();
     }
 
+    /// Paste into the minibuffer: cmd-v inserts the system clipboard; C-y
+    /// (`yank`) the kill ring's top, synced from the clipboard first as the
+    /// buffer `yank` does. A SECRET read takes the clipboard directly either
+    /// way and never touches the kill ring, which savehist may write to disk.
+    /// The read is one line: trailing newlines (common when copying from a
+    /// terminal or `pbcopy < file`) are dropped, and only the first line of a
+    /// multi-line paste goes in.
+    pub(super) fn mb_paste(&mut self, yank: bool, cx: &mut Context<Self>) {
+        let text = if yank && !self.mb_is_secret() {
+            self.sync_clipboard_into_kill_ring(cx);
+            self.kill_ring.last().cloned()
+        } else {
+            cx.read_from_clipboard().and_then(|item| item.text())
+        };
+        let Some(text) = text.filter(|t| !t.is_empty()) else {
+            if let Some(mb) = self.minibuffer.as_mut() {
+                mb.message = if yank {
+                    "[Kill ring is empty]"
+                } else {
+                    "[Clipboard is empty]"
+                }
+                .into();
+            }
+            cx.notify();
+            return;
+        };
+        let (line, more) = single_line(&text);
+        self.mb_insert(line, cx);
+        if more && let Some(mb) = self.minibuffer.as_mut() {
+            mb.message = "[Pasted the first line only]".into();
+        }
+    }
+
     pub(super) fn mb_backspace(&mut self, cx: &mut Context<Self>) {
         if let Some(mb) = self.minibuffer.as_mut()
             && mb.cursor > 0
@@ -187,6 +235,21 @@ impl Editor {
             self.isearch_update(cx);
         }
         self.mb_dynamic_requery();
+    }
+
+    /// Whether the open read is a secret one (`read-passwd`).
+    pub(super) fn mb_is_secret(&self) -> bool {
+        self.minibuffer
+            .as_ref()
+            .is_some_and(|mb| mb.secret.is_some())
+    }
+
+    /// A read that ended without a submit: run its `on_cancel`, if any. Takes
+    /// the read by value so its Secure Input guard drops here too.
+    pub(super) fn mb_cancelled(&mut self, mb: Minibuffer) {
+        if let Some(on_cancel) = mb.on_cancel {
+            self.script.dispatch_action(&on_cancel, Some(""));
+        }
     }
 
     /// Whether an incremental-search minibuffer is currently open.
@@ -248,7 +311,9 @@ impl Editor {
             self.minibuffer.as_ref().map(|m| &m.purpose),
             Some(MinibufferPurpose::ConfirmGrammarInstall)
         );
-        self.minibuffer = None;
+        if let Some(old) = self.minibuffer.take() {
+            self.mb_cancelled(old);
+        }
         // An operator waiting on its `/` motion is abandoned with the read.
         self.vim.op = None;
         if grammar_confirm {
@@ -414,6 +479,18 @@ impl Editor {
             return;
         };
         cx.notify();
+        // A secret is passed through verbatim (leading/trailing spaces can be
+        // part of a password), kept out of history, and dispatched so a
+        // failing callback can't echo it. `mb` (and its Secure Input guard)
+        // drops on return.
+        if mb.secret.is_some() {
+            if let MinibufferPurpose::SchemeCallback(callback) = &mb.purpose {
+                self.publish_point();
+                self.script.dispatch_secret_action(callback, &mb.input);
+            }
+            self.resume_grammar_prompt(cx);
+            return;
+        }
         let input = mb.input.trim().to_string();
         // Record text-entry reads in the shared history (not yes/no prompts).
         if !matches!(
@@ -567,4 +644,27 @@ impl Editor {
     }
 
     // --- kill-buffer / quit ----------------------------------------------
+}
+
+/// The first line of `text` minus its line ending, and whether non-empty text
+/// followed it (a trailing newline alone doesn't count).
+fn single_line(text: &str) -> (&str, bool) {
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    match trimmed.find(['\r', '\n']) {
+        Some(i) => (&trimmed[..i], true),
+        None => (trimmed, false),
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::single_line;
+
+    #[test]
+    fn single_line_shapes() {
+        assert_eq!(single_line("s3cret\n"), ("s3cret", false));
+        assert_eq!(single_line("s3cret\r\n\n"), ("s3cret", false));
+        assert_eq!(single_line(" sp ace "), (" sp ace ", false));
+        assert_eq!(single_line("one\ntwo\n"), ("one", true));
+    }
 }

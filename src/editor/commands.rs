@@ -1028,15 +1028,7 @@ impl Editor {
     ) -> Result<(), EditorCommand> {
         use EditorCommand::*;
         match command {
-            MakeProcess {
-                id,
-                program,
-                args,
-                on_output,
-                on_exit,
-            } => {
-                self.make_process(id, program, args, on_output, on_exit, cx);
-            }
+            MakeProcess(args) => self.make_process(*args, cx),
             SendProcess { id, text } => self.send_to_process(id, &text, cx),
             KillProcess { id } => self.kill_process(id),
             SetProcessBuffer { id, name } => self.set_process_buffer(id, name),
@@ -1130,15 +1122,7 @@ impl Editor {
                     None => self.echo("", cx),
                 }
             }
-            MakeTerminal {
-                id,
-                name,
-                program,
-                args,
-                directory,
-            } => {
-                self.make_terminal(id, name, program, args, directory, cx);
-            }
+            MakeTerminal(args) => self.make_terminal(*args, cx),
             RunWithTimer { ms, callback } => self.run_with_timer(ms, callback, cx),
             other => return Err(other),
         }
@@ -1405,6 +1389,17 @@ impl Editor {
                     &initial,
                     cx,
                 );
+            }
+            ReadPasswd {
+                prompt,
+                callback,
+                on_cancel,
+            } => {
+                self.open_minibuffer(&prompt, MinibufferPurpose::SchemeCallback(callback), "", cx);
+                if let Some(mb) = self.minibuffer.as_mut() {
+                    mb.secret = Some(crate::secure_input::SecureInputGuard::new());
+                    mb.on_cancel = on_cancel;
+                }
             }
             CompletingRead {
                 prompt,

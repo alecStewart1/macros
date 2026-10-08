@@ -87,6 +87,16 @@ Read an option back from Scheme with `(get-option "name")`. It returns the curre
   (message "auto-completion is on"))
 ```
 
+### Secrets as option values
+
+Don't write passwords or tokens into `init.scm`. Set the option to a **reference** into the encrypted [secrets store](/docs/secrets) instead:
+
+```scheme
+(set-option "psql-url" (secret-get "psql-url-1" "kyle"))
+```
+
+Only the reference is stored. `get-option` returns the real value once the store has it (`#f` until then), and the first command that needs it asks for it, masked, and offers to save it. Nothing prompts at startup. See [Secrets in your config](/docs/secrets#secrets-in-your-config).
+
 ### Per-mode options
 
 Append `:mode-name` to scope an option to one major mode. For example, the dired sidebar turns its line-number gutter off:

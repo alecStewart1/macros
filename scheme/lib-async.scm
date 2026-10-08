@@ -48,13 +48,17 @@
 
 ;; Spawn `program`/`args` on the lane → the process id, or #f (after a
 ;; message) when the lane already has a live process. `on-output` / `on-exit`
-;; are callback names ('symbols), passed straight to make-process.
-(define (async-lane-run name program args on-output on-exit)
+;; are callback names ('symbols), passed straight to make-process. An optional
+;; trailing `env` list ("KEY=VALUE" / bare "KEY" = unset) applies to the child
+;; only, via make-process-env — e.g. a password as PGPASSWORD instead of argv.
+(define (async-lane-run name program args on-output on-exit . rest)
   (if (async-lane-live? name)
       (begin
         (message (string-append name ": a process is still running — C-g cancels it"))
         #f)
-      (let ((id (make-process program args on-output on-exit)))
+      (let ((id (if (null? rest)
+                    (make-process program args on-output on-exit)
+                    (make-process-env program args on-output on-exit (car rest)))))
         (set! *async-lanes* (cons (cons name (cons id #f)) *async-lanes*))
         id)))
 

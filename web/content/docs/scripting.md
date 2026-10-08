@@ -58,7 +58,7 @@ Macros exposes Emacs-style primitives. Point and the buffer are addressed by **b
   (insert-string ";; generated\n"))
 ```
 
-Other building blocks you'll reach for: `range-edit` (replace a byte range), regexp search, undo grouping (a command's edits coalesce into one undo step), buffer-local variables, marker tracking, and minibuffer reads for prompting the user.
+Other building blocks you'll reach for: `range-edit` (replace a byte range), regexp search, undo grouping (a command's edits coalesce into one undo step), buffer-local variables, marker tracking, and minibuffer reads for prompting the user (`read-string`, `completing-read`, `y-or-n-p`, and `read-passwd` for a masked, history-free secret). For passwords and API keys, don't prompt yourself: ask the [secrets store](/docs/secrets) with `secret-get`.
 
 ## Running processes
 
@@ -66,11 +66,25 @@ Other building blocks you'll reach for: `range-edit` (replace a byte range), reg
 ;; Synchronous — returns stdout as a string:
 (call-process "git" '("rev-parse" "--abbrev-ref" "HEAD"))
 
+;; Synchronous with stdin, exit code and stderr → (code stdout stderr):
+(call-process-full "git" '("apply" "-") patch-text)
+
 ;; Asynchronous — make-process / run-with-timer for long-running work
 ;; without blocking the UI.
 ```
 
 `call-process` is the foundation of Magit, compile, grep, and dired.
+
+To give a child extra environment, without changing the editor's own, use `call-process-env` / `make-process-env`, which take a trailing list of `"KEY=VALUE"` strings (a bare `"KEY"` removes the variable). To cover everything spawned inside a block, use `with-process-env`:
+
+```scheme
+(call-process-env "psql" args "" (list (string-append "PGPASSWORD=" pw)))
+
+(with-process-env (list "RUST_LOG=debug")
+  (lambda () (make-process "cargo" '("run") 'on-output 'on-exit)))
+```
+
+`with-process-env` applies to `call-process*`, `make-process*`, `make-terminal`, and `dap-start`; blocks nest, and the inner one wins. This is how to hand a subprocess a **secret**: argv is visible to every local user through `ps`, but the environment isn't. See [Passwords & secrets](/docs/secrets#handing-a-secret-to-a-subprocess).
 
 ## Special (read-only) buffers
 

@@ -442,8 +442,10 @@ pub fn handle_message(message: &Value, backend: &dyn Backend) -> Option<Value> {
 const INSTRUCTIONS: &str = "This server is a live Macros editor (an Emacs-style editor \
 scripted in Steel Scheme). Use `eval` to run Steel in the running editor — define or \
 redefine functions, call commands like (plot-demo), inspect state — then `buffer_text`, \
-`list_buffers`, and `messages` to see the effect. `describe` and `apropos` look up the \
-editor's Scheme API. Buffer and overlay positions are BYTE offsets.";
+`list_buffers`, and `messages` to see the effect. Before writing package code, call `api` \
+for the categorized reference of every primitive (signatures, types, docs) and the bundled \
+Scheme library; `describe` and `apropos` look up single names. Buffer and overlay positions \
+are BYTE offsets.";
 
 fn tool_definitions() -> Value {
     json!([
@@ -495,6 +497,22 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"]
+            }
+        },
+        {
+            "name": "api",
+            "description": "The package-API reference. No arguments: an index of every Rust \
+                primitive category (buffers, overlays, processes, http, sockets, sqlite, git, …) \
+                and bundled Scheme library module. `category` (e.g. \"sockets\" or \"lib/core\"): \
+                each function's signature with argument/return types and its doc. `search`: words \
+                matched against names, signatures and docs (within `category` if given). Use it to \
+                find what to build a package on before reading source.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "A category from the index; omit for the index or to search everything."},
+                    "search": {"type": "string", "description": "Space-separated words; all must match."}
+                }
             }
         },
         {
@@ -550,6 +568,14 @@ fn call_tool(name: &str, args: &Value, backend: &dyn Backend) -> Option<(String,
                 ),
             )
         }
+        "api" => scheme_text(
+            backend,
+            &format!(
+                "(api-reference {} {})",
+                scheme_string(str_arg("category").unwrap_or("")),
+                scheme_string(str_arg("search").unwrap_or(""))
+            ),
+        ),
         "apropos" => {
             let Some(p) = str_arg("pattern") else {
                 return Some(("missing argument: pattern".into(), true));
@@ -675,6 +701,12 @@ mod tests {
                     ..Default::default()
                 };
             }
+            if code.contains("api-reference") {
+                return EvalReport {
+                    value: Some(format!("{code:?}")),
+                    ..Default::default()
+                };
+            }
             if code.contains("function-doc") {
                 return EvalReport {
                     value: Some("\"insert\\n\\nInsert text.\"".into()),
@@ -752,6 +784,7 @@ mod tests {
                 "list_buffers",
                 "messages",
                 "describe",
+                "api",
                 "apropos"
             ]
         );
@@ -816,6 +849,15 @@ mod tests {
             json!({"name": "describe", "arguments": {"name": "insert"}}),
         );
         assert_eq!(text(&r), "insert\n\nInsert text.");
+
+        let r = call(
+            &fake,
+            "tools/call",
+            json!({"name": "api", "arguments": {"category": "sockets"}}),
+        );
+        assert_eq!(text(&r), "(api-reference \"sockets\" \"\")");
+        let r = call(&fake, "tools/call", json!({"name": "api"}));
+        assert_eq!(text(&r), "(api-reference \"\" \"\")");
 
         let r = call(
             &fake,

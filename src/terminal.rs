@@ -117,6 +117,7 @@ impl Terminal {
         cell_height: u16,
         program: Option<(String, Vec<String>)>,
         working_directory: Option<std::path::PathBuf>,
+        extra_env: &crate::process::EnvOverrides,
         tx: UnboundedSender<(u64, TermEvent)>,
     ) -> std::io::Result<Self> {
         let columns = columns.max(1);
@@ -128,6 +129,7 @@ impl Terminal {
         let mut env = std::collections::HashMap::new();
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
+        extra_env.apply_to_map(&mut env);
 
         let options = PtyOptions {
             shell: program.map(|(p, a)| Shell::new(p, a)),
@@ -553,6 +555,7 @@ mod tests {
                 vec!["-c".to_string(), "printf ZXCV".to_string()],
             )),
             None,
+            &Default::default(),
             tx,
         )
         .expect("spawn pty");
@@ -594,6 +597,7 @@ mod tests {
                 vec!["-c".to_string(), "printf ABCD".to_string()],
             )),
             None,
+            &Default::default(),
             tx,
         )
         .expect("spawn pty");

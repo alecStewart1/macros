@@ -53,6 +53,36 @@ pub(crate) fn define_name(line: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// The head of a define line `define_name` accepted: the balanced `(name …)`
+/// form when it's a procedure (cut at end of line if it continues), else the
+/// bare name.
+fn define_signature(line: &str, name: &str) -> String {
+    if line.starts_with("(define-syntax ") {
+        return format!("{name} (macro)");
+    }
+    let rest = line
+        .split_once(' ')
+        .map(|(_, r)| r.trim_start())
+        .unwrap_or("");
+    if !rest.starts_with('(') {
+        return name.to_string();
+    }
+    let mut depth = 0;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[..=i].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    format!("{} …)", rest.trim_end())
+}
+
 /// One documented top-level definition: its name, the `;;` comment block
 /// immediately preceding it (markers stripped), the source file it lives in, and
 /// the 1-based line of its `define`. Steel has no runtime docstrings, so the
@@ -64,6 +94,9 @@ pub struct DocEntry {
     pub doc: String,
     pub file: String,
     pub line: usize,
+    /// The define's head as written: `(name a b)` for a procedure, `name` for
+    /// a value, `name (macro)` for a `define-syntax`.
+    pub sig: String,
 }
 
 /// Scrape every top-level `(define …)` / `(define-syntax …)` in `src`, pairing
@@ -84,6 +117,7 @@ pub fn scrape_docs(src: &str, file: &str) -> Vec<DocEntry> {
         }
         if let Some(name) = define_name(line) {
             docs.push(DocEntry {
+                sig: define_signature(line, &name),
                 name,
                 doc: comment.join("\n").trim().to_string(),
                 file: file.to_string(),

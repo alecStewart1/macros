@@ -7,7 +7,9 @@
 //!   * [`registry`] — `build_engine`: every registered Scheme bridge function.
 //!   * [`convert`] — SteelVal parsing/formatting helpers.
 //!   * [`session`] — session-persistence primitives (savehist / desktop).
+//!   * [`api`] — the package-API reference (categories, types, docs).
 
+mod api;
 mod commands;
 mod convert;
 mod engine;
@@ -16,6 +18,7 @@ mod registry;
 mod session;
 mod state;
 
+pub(crate) use api::{ApiEntry, render as render_api};
 pub use commands::*;
 pub(crate) use convert::*;
 pub use engine::*;

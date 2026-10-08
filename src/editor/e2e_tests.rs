@@ -943,3 +943,125 @@ fn marks_and_jumps_into_gone_buffers(cx: &mut TestAppContext) {
     assert_eq!(name, "test.txt");
     assert_eq!(n, 1, "the gone entry is dropped, the current spot stays");
 }
+
+/// `read-passwd` renders masked, skips history (both recording and M-p
+/// browsing), and keeps the input verbatim (spaces are part of a password).
+#[gpui::test]
+fn read_passwd_masks_and_skips_history(cx: &mut TestAppContext) {
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, cx| {
+        e.push_minibuffer_history("older entry");
+        e.script
+            .eval("(define got-pw #f) (define (take-pw pw) (set! got-pw pw))")
+            .unwrap();
+        e.apply_command(
+            EditorCommand::ReadPasswd {
+                prompt: "Password: ".into(),
+                callback: "take-pw".into(),
+                on_cancel: None,
+            },
+            cx,
+        );
+        assert!(e.mb_is_secret());
+        e.mb_insert(" pä ss ", cx);
+        let view = e.minibuffer_view().unwrap();
+        assert_eq!(view.before, "•••••••", "one bullet per char, no plaintext");
+        // M-p must not pull history into (or out of) a password read.
+        e.mb_history(-1, cx);
+        assert_eq!(e.minibuffer.as_ref().unwrap().input, " pä ss ");
+        e.mb_submit(cx);
+        assert!(e.minibuffer.is_none());
+        assert_eq!(e.minibuffer_history, vec!["older entry".to_string()]);
+        // The engine is FIFO: this sync eval runs after the dispatched call.
+        assert_eq!(
+            e.script.eval("got-pw").unwrap().value.as_deref(),
+            Some("\" pä ss \""),
+            "callback gets the input untrimmed"
+        );
+    });
+}
+
+/// C-g on a password read, or another read displacing it, runs on-cancel.
+#[gpui::test]
+fn read_passwd_cancel_and_displace_run_on_cancel(cx: &mut TestAppContext) {
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, cx| {
+        e.script
+            .eval("(define cancels 0) (define (pw-cancel _) (set! cancels (+ cancels 1)))")
+            .unwrap();
+        let open = |e: &mut Editor, cx: &mut Context<Editor>| {
+            e.apply_command(
+                EditorCommand::ReadPasswd {
+                    prompt: "Password: ".into(),
+                    callback: "ignore".into(),
+                    on_cancel: Some("pw-cancel".into()),
+                },
+                cx,
+            );
+        };
+        open(e, cx);
+        e.mb_abort(cx);
+        assert!(e.minibuffer.is_none());
+        open(e, cx);
+        e.find_file_prompt(cx); // displaces the password read
+        assert!(!e.mb_is_secret());
+        assert_eq!(
+            e.script.eval("cancels").unwrap().value.as_deref(),
+            Some("2")
+        );
+    });
+}
+
+/// cmd-v / C-y paste into a minibuffer read. A secret read takes the
+/// clipboard (one line, newline dropped) and leaves the kill ring alone; a
+/// normal read's C-y yanks the kill ring's top.
+#[gpui::test]
+fn minibuffer_paste_and_yank(cx: &mut TestAppContext) {
+    let ed = setup(cx, "\n");
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("s3 cret\n".into()));
+    ed.update(cx, |e, cx| {
+        e.apply_command(
+            EditorCommand::ReadPasswd {
+                prompt: "Password: ".into(),
+                callback: "ignore".into(),
+                on_cancel: None,
+            },
+            cx,
+        );
+    });
+    keys(&ed, cx, "cmd-v");
+    keys(&ed, cx, "ctrl-y");
+    ed.update(cx, |e, _| {
+        assert_eq!(e.minibuffer.as_ref().unwrap().input, "s3 crets3 cret");
+        assert_eq!(e.minibuffer_view().unwrap().before, "••••••••••••••");
+        assert!(
+            e.kill_ring.is_empty(),
+            "a secret never enters the kill ring"
+        );
+        assert_eq!(
+            e.active.buffer.full_text(),
+            "\n",
+            "nothing pasted into the buffer behind"
+        );
+    });
+    // A normal read: C-y yanks (clipboard adopted into the ring first).
+    ed.update(cx, |e, cx| {
+        e.mb_abort(cx);
+        e.apply_command(
+            EditorCommand::ReadString {
+                prompt: "Name: ".into(),
+                initial: String::new(),
+                callback: "ignore".into(),
+            },
+            cx,
+        );
+    });
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("one\ntwo".into()));
+    keys(&ed, cx, "ctrl-y");
+    ed.update(cx, |e, _| {
+        let mb = e.minibuffer.as_ref().unwrap();
+        assert_eq!(mb.input, "one");
+        assert_eq!(mb.message, "[Pasted the first line only]");
+        assert_eq!(e.kill_ring.last().map(String::as_str), Some("one\ntwo"));
+    });
+}

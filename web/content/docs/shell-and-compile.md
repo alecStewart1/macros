@@ -56,4 +56,4 @@ All of this is built on `call-process`, which you can call directly in your own 
   (call-process "git" '("rev-parse" "--abbrev-ref" "HEAD")))
 ```
 
-See [Scripting with Steel](/docs/scripting) for more on `call-process` and the async `make-process`.
+See [Scripting with Steel](/docs/scripting#running-processes) for more on `call-process`, the async `make-process`, and giving a child extra environment (`call-process-env`, `with-process-env`). That's also how to pass it a password safely; see [Passwords & secrets](/docs/secrets#handing-a-secret-to-a-subprocess).

@@ -29,6 +29,8 @@ pub struct DapStartArgs {
     pub id: u64,
     pub program: String,
     pub args: Vec<String>,
+    /// Adapter env (any `with-process-env` extent open at `dap-start`).
+    pub env: EnvOverrides,
     /// Working directory; "" = inherit the editor's.
     pub cwd: String,
     pub on_message: String,
@@ -97,6 +99,34 @@ pub struct HttpServeArgs {
     pub body: String,
     /// Steel fn called with each request target string as it arrives.
     pub on_request: String,
+}
+
+pub use crate::process::EnvOverrides;
+
+/// Payload for [`EditorCommand::MakeTerminal`] (boxed: keeps the enum small).
+#[derive(Debug, Clone)]
+pub struct MakeTerminalArgs {
+    pub id: u64,
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+    /// Working directory to launch the shell in; empty = the active buffer's
+    /// directory (or the process cwd for a fileless buffer).
+    pub directory: String,
+    /// Shell env (any `with-process-env` extent open at `make-terminal`).
+    pub env: EnvOverrides,
+}
+
+/// Payload for [`EditorCommand::MakeProcess`] (boxed: keeps the enum small).
+#[derive(Debug, Clone)]
+pub struct MakeProcessArgs {
+    pub id: u64,
+    pub program: String,
+    pub args: Vec<String>,
+    /// Child-only env (`make-process-env` + any `with-process-env` extent).
+    pub env: EnvOverrides,
+    pub on_output: String,
+    pub on_exit: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -657,6 +687,14 @@ pub enum EditorCommand {
         initial: String,
         callback: String,
     },
+    /// Read a secret in the minibuffer — echoed as `•`, kept out of history,
+    /// not trimmed — then call Steel fn `callback` with it (Emacs `read-passwd`).
+    ReadPasswd {
+        prompt: String,
+        callback: String,
+        /// Called with "" if the read is aborted (C-g) or displaced by another.
+        on_cancel: Option<String>,
+    },
     /// Append `text` to the end of buffer `name`, creating it if needed and
     /// switching to it (Emacs `append-to-buffer`; an output-buffer primitive).
     AppendToBuffer {
@@ -822,13 +860,7 @@ pub enum EditorCommand {
     // Async.
     /// Spawn `program` async under `id`; call Steel fn `on_output` per stdout
     /// line, and `on_exit` (if non-empty) with the exit code (Emacs `make-process`).
-    MakeProcess {
-        id: u64,
-        program: String,
-        args: Vec<String>,
-        on_output: String,
-        on_exit: Option<String>,
-    },
+    MakeProcess(Box<MakeProcessArgs>),
     /// Spawn a debug adapter (see [`DapStartArgs`]): Content-Length-framed DAP
     /// JSON on stdio. Boxed like [`HttpStream`](Self::HttpStream): its payload
     /// would otherwise bloat every `Result<(), EditorCommand>` (clippy
@@ -959,15 +991,7 @@ pub enum EditorCommand {
     // Terminal emulator.
     /// Open a terminal running `program` (login shell if empty) in a new
     /// `term-mode` buffer named `name`, backed by terminal `id`.
-    MakeTerminal {
-        id: u64,
-        name: String,
-        program: String,
-        args: Vec<String>,
-        /// Working directory to launch the shell in; empty = the active buffer's
-        /// directory (or the process cwd for a fileless buffer).
-        directory: String,
-    },
+    MakeTerminal(Box<MakeTerminalArgs>),
     /// Call Steel fn `callback` after `ms` milliseconds (Emacs `run-with-timer`).
     RunWithTimer {
         ms: u64,
