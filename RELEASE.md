@@ -1,10 +1,10 @@
 # Releasing Macros
 
 GitHub (`github.com/macros-app/macros`) is the main repository: PRs, CI, and
-every push happen there. The self-hosted Forgejo instance keeps a **pull
-mirror** of it and runs only the release and web-deploy workflows, because its
-runners and secrets do the signing and publishing. Never push to the Forgejo
-copy; it only ever pulls from GitHub.
+day-to-day pushes happen there. Releases and web deploys run on the self-hosted
+Forgejo instance, whose runners and secrets do the signing and publishing. It
+only receives what you push to it when cutting a release — never commit there
+directly, so it stays a copy of GitHub's `main`.
 
 `.forgejo/workflows/release.yml` builds, signs, and publishes every platform
 artifact for a tagged release. The version always comes from `Cargo.toml`'s
@@ -51,17 +51,16 @@ point `latest.json` at the new version.
 
 1. Bump the version: `cargo set-version <x.y.z>` (or edit `[package].version`)
    in a PR on GitHub, and merge it.
-2. Tag the merged `main` and push the tag to GitHub:
+2. Tag the merged `main` and push it to GitHub **and** Forgejo — the tag push to
+   the `forgejo` remote is what starts the release:
    ```sh
    git switch main && git pull origin main
    git tag v<x.y.z>
    git push origin v<x.y.z>
+   git push forgejo main v<x.y.z>
    ```
-   The release starts when the Forgejo mirror picks up the tag, which a mirror
-   sync reports as a tag push. Mirrors sync on an interval, so start the sync
-   yourself: **Synchronize now** in the Forgejo repo's settings, or
-   `POST /api/v1/repos/<owner>/<repo>/mirror-sync` with a Forgejo token.
-   (Or run the workflow manually via **workflow_dispatch** and pass `version`.)
+   (Or push `main` to `forgejo` and run the workflow manually via
+   **workflow_dispatch**, passing `version`.)
 3. The pipeline runs: macOS (notarized), Linux (deb/rpm), Windows (signed msi),
    then publishes everything to R2.
 
