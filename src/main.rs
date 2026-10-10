@@ -11,6 +11,7 @@ mod grammar;
 mod grid;
 mod grid_fn;
 mod highlight;
+mod json_format;
 mod lsp;
 mod mcp;
 mod mode;

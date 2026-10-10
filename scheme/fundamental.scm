@@ -50,6 +50,9 @@
 ;; M-: evaluate a Steel expression in the minibuffer (echoes => result).
 (define-key "fundamental" "alt-:" 'eval-expression)
 (define-key "fundamental" "alt-i" 'completion-at-point)
+;; C-M-\ reindent the region (no region: the whole buffer) from the language's
+;; structure — Emacs `indent-region`. (Our `indent-region` is vim's `>` shift.)
+(define-key "fundamental" "ctrl-alt-\\" 'reindent-region)
 
 ;; Prefix (C-x) commands
 (define-key "fundamental" "ctrl-x ctrl-x" 'exchange-point-and-mark)

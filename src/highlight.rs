@@ -856,6 +856,11 @@ impl Highlighter {
         self.tree.as_ref()
     }
 
+    /// Whether this grammar carries a structural indent query.
+    pub fn has_indent_query(&self) -> bool {
+        self.indent.is_some()
+    }
+
     pub fn node_at(&self, byte: usize) -> Vec<(String, usize, usize)> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
@@ -891,23 +896,35 @@ impl Highlighter {
         };
         let opening = matches!(node.kind(), "(" | "[" | "{");
         let parent = node.parent()?;
-        // The pair's other delimiter is a sibling token of the partner kind: the
-        // nearest one after an opener, or before a closer.
-        let mut best: Option<usize> = None;
+        // The pair's other delimiter is a sibling token of the partner kind,
+        // walking away from `byte` and counting nesting: a well-formed node has
+        // just the one pair, but an ERROR node flattens every bracket it
+        // swallowed into one sibling list (`{ … { }` mid-edit), where the
+        // nearest partner token is not the match.
+        let mut siblings = Vec::new();
         let mut i = 0;
         while let Some(child) = parent.child(i) {
             i += 1;
-            if child.kind() != partner {
-                continue;
-            }
-            let s = child.start_byte();
-            match (opening, s > byte, s < byte) {
-                (true, true, _) => best = Some(best.map_or(s, |b: usize| b.min(s))),
-                (false, _, true) => best = Some(best.map_or(s, |b: usize| b.max(s))),
-                _ => {}
+            siblings.push(child);
+        }
+        let at = siblings.iter().position(|c| c.start_byte() == byte)?;
+        let walk: Box<dyn Iterator<Item = &Node>> = if opening {
+            Box::new(siblings[at + 1..].iter())
+        } else {
+            Box::new(siblings[..at].iter().rev())
+        };
+        let mut depth = 0usize;
+        for child in walk {
+            if child.kind() == node.kind() {
+                depth += 1;
+            } else if child.kind() == partner {
+                if depth == 0 {
+                    return Some(child.start_byte());
+                }
+                depth -= 1;
             }
         }
-        best
+        None
     }
 
     /// The structural indentation depth, in steps (each step = one `tab_width`),

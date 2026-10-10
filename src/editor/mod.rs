@@ -49,6 +49,7 @@ mod grid_xlsx;
 mod helm;
 mod input;
 mod isearch;
+mod json_print;
 mod kill_ring;
 mod lisp_indent;
 mod lsp_methods;
@@ -2707,6 +2708,20 @@ impl Editor {
                     indent = cur;
                 }
             }
+            // Just after an opening bracket, the body goes one step past the
+            // opener's line. The tree normally says so already, but not while the
+            // bracket is still unclosed (typing fresh JSON without electric-pair):
+            // the parse is an error node the query can't place, so the result
+            // above would leave the body flush with the opener.
+            if matches!(
+                self.active
+                    .buffer
+                    .slice_to_string(anchor..self.active.buffer.next_grapheme(anchor))
+                    .as_str(),
+                "{" | "[" | "("
+            ) {
+                indent = indent.max(self.line_leading_width(anchor, tab) + step);
+            }
             // Trailing-token rules (the token-level layer): a line ending in an
             // `indent-after` token (OCaml `->`) opens a body one step past the
             // current line — the tree can't distinguish a dangling `->` from a
@@ -2821,6 +2836,64 @@ impl Editor {
             return Some(m);
         }
         self.scan_bracket_match(byte)
+    }
+
+    /// The opener matching the closing bracket at `closer`, by scanning the
+    /// text backwards with nesting — skipping brackets inside single-line
+    /// `"…"` / `'…'` strings and `//` comments, which a plain balanced scan
+    /// would count. For an error-laden parse, where the tree's pairing can't be
+    /// trusted. Bounded to a few thousand lines back.
+    fn opener_by_text(&self, closer: usize) -> Option<usize> {
+        let close = self.active.buffer.slice_to_string(closer..closer + 1);
+        let (open, close) = match close.as_str() {
+            "}" => (b'{', b'}'),
+            "]" => (b'[', b']'),
+            ")" => (b'(', b')'),
+            _ => return None,
+        };
+        let first = self.active.buffer.line_index_at_byte(closer);
+        let mut depth = 0usize;
+        for row in (first.saturating_sub(5000)..=first).rev() {
+            let lr = self.active.buffer.line_range(row);
+            let end = if row == first { closer } else { lr.end };
+            let line = self.active.buffer.slice_to_string(lr.start..end);
+            // This line's code-level brackets of our kind, left to right.
+            let mut brackets = Vec::new();
+            let mut quote: Option<u8> = None;
+            let bytes = line.as_bytes();
+            let mut k = 0;
+            while k < bytes.len() {
+                let c = bytes[k];
+                match quote {
+                    Some(q) => {
+                        if c == b'\\' {
+                            k += 1;
+                        } else if c == q {
+                            quote = None;
+                        }
+                    }
+                    // A quote opens a string only if it closes on this line, so a
+                    // Rust lifetime (`&'a str`) isn't taken for one.
+                    None if (c == b'"' || c == b'\'') && bytes[k + 1..].contains(&c) => {
+                        quote = Some(c);
+                    }
+                    None if c == b'/' && bytes.get(k + 1) == Some(&b'/') => break,
+                    None if c == open || c == close => brackets.push((k, c)),
+                    None => {}
+                }
+                k += 1;
+            }
+            for &(k, c) in brackets.iter().rev() {
+                if c == close {
+                    depth += 1;
+                } else if depth == 0 {
+                    return Some(lr.start + k);
+                } else {
+                    depth -= 1;
+                }
+            }
+        }
+        None
     }
 
     /// Balanced bracket scan over buffer text (counting only the delimiter's own
@@ -2954,6 +3027,66 @@ impl Editor {
         };
         self.collapse_to(cursor);
         cx.notify();
+    }
+
+    /// electric-indent for a just-typed closing bracket: when it is the first
+    /// thing on its line, reindent the line so the closer lines up with its
+    /// opener's line (`{` … `}`), rather than staying at the body's depth until
+    /// a TAB. Matching via the opener — not the indent query — keeps this right
+    /// while an outer bracket is still unclosed and the tree can't place the
+    /// line. Only for languages with a structural indent query.
+    fn electric_closer_reindent(&mut self, cx: &mut Context<Self>) {
+        if !cx.global::<crate::settings::Settings>().electric_indent()
+            || self.has_extra_cursors()
+            || self
+                .active_language()
+                .as_deref()
+                .is_some_and(is_lisp_language)
+            || !self
+                .active
+                .highlighter
+                .as_ref()
+                .is_some_and(|h| h.has_indent_query())
+        {
+            return;
+        }
+        let p = self.point();
+        let closer = self.active.buffer.prev_grapheme(p);
+        let line = self.active.buffer.line_range_at(closer);
+        if !self
+            .active
+            .buffer
+            .slice_to_string(line.start..closer)
+            .chars()
+            .all(|c| c == ' ' || c == '\t')
+        {
+            return;
+        }
+        let tab = cx.global::<crate::settings::Settings>().tab_width();
+        // Mid-edit the parse usually has an error, and then the tree's pairing
+        // is a guess: `{ "a": {…}, {` ⏎ `}` reads that `}` as closing the
+        // OUTER object. Trust the tree only when it parsed cleanly.
+        let clean = self
+            .active
+            .highlighter
+            .as_ref()
+            .and_then(|h| h.tree())
+            .is_some_and(|t| !t.root_node().has_error());
+        let open = if clean {
+            self.bracket_match(closer)
+        } else {
+            self.opener_by_text(closer)
+        };
+        match open {
+            Some(open) if open < line.start => {
+                let target = self.line_leading_width(open, tab);
+                self.reindent_current_line(target, cx);
+            }
+            _ => {
+                let step = self.structural_indent_width(cx);
+                self.structural_reindent_line(step, cx);
+            }
+        }
     }
 
     fn open_line(&mut self, cx: &mut Context<Self>) {
@@ -5360,6 +5493,9 @@ impl Editor {
 
         let cursor = self.edit(range, new_text);
         self.collapse_to(cursor);
+        if matches!(new_text, "}" | "]" | ")") {
+            self.electric_closer_reindent(cx);
+        }
         self.ensure_cursor_visible();
         // A trigger character (e.g. `.`) always starts a fresh completion, even
         // mid-word with a popup already open — otherwise typing `List.` would just

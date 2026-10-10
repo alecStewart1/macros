@@ -171,6 +171,12 @@ pub enum EditorCommand {
     /// the primitive behind vim `>>` / `<<` and visual `>` / `<`.
     IndentRegion,
     OutdentRegion,
+    /// Emacs `indent-region` (`C-M-\`): reindent the region's lines (the whole
+    /// buffer with no region) from the language's structure.
+    ReindentRegion,
+    /// Pretty-print the buffer / the region as indented JSON.
+    JsonPrettyPrintBuffer,
+    JsonPrettyPrintRegion,
     BeginningOfLine,
     EndOfLine,
     BeginningOfBuffer,
