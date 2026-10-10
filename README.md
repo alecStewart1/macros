@@ -1,21 +1,6 @@
 # Macros
 
-Macros is a code editor that works like Emacs, renders on the GPU, and is scripted in [Steel](https://github.com/mattwparas/steel), a Scheme you can embed.
-
-![Macros](web/public/macros-dark.png)
-
-I wanted an editor that keeps the parts of Emacs I love, like the keybindings, M-x, buffers, and the fact that you can change anything, without carrying forty years of Emacs Lisp and a single-threaded redisplay along with it. So the core is written in Rust on top of Zed's [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and almost everything you actually touch is Steel code. That includes the commands, keymaps, modes, modeline, and even the git interface. It all lives in [`scheme/`](scheme), ships inside the binary, and you can read it, rebind it, or replace it from your own config.
-
-Some things that already work:
-
-- Emacs keybindings out of the box, with `(evil-mode)` or `(helix-mode)` if you'd rather go modal
-- Tree-sitter highlighting, LSP, and debugging over DAP
-- A magit-style git interface, dired, ediff, and a real terminal
-- Org mode, org-roam, snippets, multiple cursors, and helm-style completion
-- A spreadsheet-like grid buffer and text plotting, mostly because I wanted them
-- A package system so you can pull in extra stuff from Git
-
-It runs on macOS, Linux, and Windows.
+Macros is a code editor that works like Emacs, renders on the GPU, and is scripted in [Steel](https://github.com/mattwparas/steel).
 
 ## Getting it
 
