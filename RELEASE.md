@@ -94,8 +94,7 @@ prefix for the bucket, no trailing slash).
 
 **Checkout:** `ACCESS_TOKEN` (a Forgejo token with repo read access).
 
-All of the above are Forgejo secrets. GitHub only needs `CODEBERG_TOKEN`, for
-the Codeberg mirror (`.github/workflows/mirror.yml`).
+All of the above are Forgejo secrets; GitHub CI needs none.
 
 ## Runner labels
 
