@@ -21,6 +21,28 @@ The minimal form is just a URL:
 
 Packages live under your config directory — `~/.config/macros/packages/` (or `$XDG_CONFIG_HOME/macros/packages`, `%APPDATA%/macros/packages` on Windows). The exact path is available from Scheme as `(packages-directory)`.
 
+## Official packages
+
+These live under [github.com/macros-app](https://github.com/macros-app). Each repo's entry file carries a `macros-` prefix, so pass `'name` to match it:
+
+| Package | What it is | Launch |
+| --- | --- | --- |
+| [agent-shell](https://github.com/macros-app/agent-shell) | ACP chat client and agent; the transcript is an Org buffer | <kbd>M-x</kbd> `agent-shell` |
+| [email-client](https://github.com/macros-app/email-client) | mu4e-style mail client: Gmail via OAuth, or IMAP/SMTP | <kbd>M-x</kbd> `email` |
+| [feeds](https://github.com/macros-app/feeds) | elfeed-style RSS/Atom reader | <kbd>M-x</kbd> `feeds` |
+| [k8s-dashboard](https://github.com/macros-app/k8s-dashboard) | Magit-style `kubectl` dashboard | <kbd>M-x</kbd> `k8s-dashboard` |
+| [psql-dashboard](https://github.com/macros-app/psql-dashboard) | PostgreSQL dashboard with a SQL query pane | <kbd>M-x</kbd> `psql-dashboard` |
+
+```scheme
+(package-install "https://github.com/macros-app/agent-shell"    'name "macros-agent-shell")
+(package-install "https://github.com/macros-app/email-client"   'name "macros-email-client")
+(package-install "https://github.com/macros-app/feeds"          'name "macros-feeds")
+(package-install "https://github.com/macros-app/k8s-dashboard"  'name "macros-k8s")
+(package-install "https://github.com/macros-app/psql-dashboard" 'name "macros-psql-dashboard")
+```
+
+Each README covers setup (agent-shell needs `MACROS_AGENT` set before it loads; email-client needs a login). See the [example config](/docs/example-config) for agent-shell and k8s-dashboard in context.
+
 ## Pinning a version
 
 Track a specific commit, tag, or branch with `'ref`. **Pinning is recommended** — it makes your config reproducible and keeps an upstream change from silently altering your editor:

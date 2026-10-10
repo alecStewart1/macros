@@ -3,7 +3,7 @@ name = "macros"
 version = "0.5.2"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
-repository = "https://codeberg.org/macros-app/macros"
+repository = "https://github.com/macros-app/macros"
 authors = ["Kyle Gwinnup"]
 license = "MIT"
 

@@ -79,4 +79,4 @@ In help/list buffers (`*Help*`, the diagnostics list, xref results, …) the sta
 
 - Open the [tutorial](/docs/tutorial) with <kbd>C-h t</kbd> and practice hands-on.
 - Browse this documentation — start at the [overview](/docs).
-- File an issue on [GitHub](https://github.com/kgwinnup/macros).
+- File an issue on [GitHub](https://github.com/macros-app/macros/issues).

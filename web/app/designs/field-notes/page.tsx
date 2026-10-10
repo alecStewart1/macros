@@ -56,7 +56,7 @@ const plotFont = localFont({
   adjustFontFallback: false,
 });
 
-const REPO = "https://codeberg.org/macros-app/macros";
+const REPO = "https://github.com/macros-app/macros";
 const VERSION = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 
 /* ── Figures (computed at build time) ──────────────────────────────────── */
@@ -329,7 +329,7 @@ export default function FieldNotes() {
             <Link href="/docs">Docs</Link>
             <Link href="/docs/getting-started">Get started</Link>
             <a href={REPO} target="_blank" rel="noreferrer">
-              Codeberg
+              GitHub
             </a>
             <Link href="/download" className={s.navcta}>
               Download
@@ -825,7 +825,7 @@ export default function FieldNotes() {
               <>
                 Free software under the MIT license. Source and issue tracker on{" "}
                 <a href={REPO} target="_blank" rel="noreferrer">
-                  Codeberg
+                  GitHub
                 </a>
                 .
               </>
@@ -863,7 +863,7 @@ export default function FieldNotes() {
                     ["Modal editing (helix)", "Selection-first verbs, multiple selections.", "/docs/helix"],
                     ["Git (Magit)", "Stage, commit, branch, read diffs.", "/docs/git"],
                     ["Org mode", "Headings, TODOs, agenda, tables, babel.", "/docs/org-mode"],
-                    ["Source code", "codeberg.org/macros-app/macros", REPO],
+                    ["Source code", "github.com/macros-app/macros", REPO],
                   ] as const
                 ).map(([t, d, href], i) => (
                   <li key={href} id={`ref-${i + 1}`}>
@@ -900,7 +900,7 @@ export default function FieldNotes() {
             <Link href="/docs/plotting">Text charts</Link>
             <Link href="/docs/keybindings">Keybindings</Link>
             <a href={REPO} target="_blank" rel="noreferrer">
-              Codeberg
+              GitHub
             </a>
           </nav>
         </div>

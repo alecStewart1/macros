@@ -37,7 +37,7 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-const REPO = "https://codeberg.org/macros-app/macros";
+const REPO = "https://github.com/macros-app/macros";
 const VERSION: string = latest.version;
 
 export default function PhosphorHome() {
@@ -80,7 +80,7 @@ function TabLine() {
             plotting
           </Link>
           <a href={REPO} className={`${s.tab} ${s.hideSm}`} target="_blank" rel="noreferrer">
-            codeberg
+            github
           </a>
           <Link href="/download" className={`${s.tab} ${s.tabActive}`}>
             download
@@ -571,7 +571,7 @@ function ModeLineFooter() {
         <Link href="/docs/keybindings">keybindings</Link>
         <Link href="/docs/plotting">plotting</Link>
         <a href={REPO} target="_blank" rel="noreferrer">
-          codeberg
+          github
         </a>
         <span className={s.dim}>· free software, MIT</span>
       </nav>

@@ -72,7 +72,7 @@ Pass `'port "5432"` as a third argument to narrow the lookup to a port.
 For example, the `macros-psql-dashboard` package keeps its whole connection URL in the store this way:
 
 ```scheme
-(package-install "https://codeberg.org/macros-app/psql-dashboard"
+(package-install "https://github.com/macros-app/psql-dashboard"
   'name "macros-psql-dashboard"      ; the entry file is macros-psql-dashboard.scm
   'config (lambda ()
             (set-option "psql-command" "/opt/homebrew/opt/libpq/bin/psql")

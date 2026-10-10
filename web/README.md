@@ -26,7 +26,7 @@ overridden with the `APP_VERSION` env var.
 ## Deploy (Cloudflare)
 
 Deploys are manual via the **Deploy Web (Cloudflare)** workflow
-(`.forgejo/workflows/deploy-web.yml`). It builds `out/` and uploads it with
+(`.forgejo/workflows/deploy-web.yml`, run on the Forgejo instance). It builds `out/` and uploads it with
 Wrangler. Required repo secrets:
 
 - `CLOUDFLARE_API_TOKEN`

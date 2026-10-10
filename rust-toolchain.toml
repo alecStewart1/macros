@@ -1,9 +1,9 @@
 # The Rust toolchain for this repo, shared by local builds and CI.
 #
 # rustup reads this file for every `cargo`/`rustc` run inside the repo and
-# installs the pinned toolchain on first use, so a laptop and the Forgejo
-# runners always build with the same compiler — and the same rustfmt and
-# clippy, whose output changes between releases. Bump `channel` deliberately
+# installs the pinned toolchain on first use, so a laptop, GitHub CI, and the
+# Forgejo release runners always build with the same compiler — and the same
+# rustfmt and clippy, whose output changes between releases. Bump `channel` deliberately
 # (and fix any new clippy lints in the same change) rather than letting each
 # machine drift with its own `stable`.
 #

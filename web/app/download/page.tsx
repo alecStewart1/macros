@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 };
 
 const VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "0.1.0";
-const REPO = "https://codeberg.org/macros-app/macros";
+const REPO = "https://github.com/macros-app/macros";
 
 // Release artifacts live on R2 behind downloads.macros.dev. Filenames are fixed
 // by scripts/publish-release.mjs; the in-app updater resolves the same URLs from
