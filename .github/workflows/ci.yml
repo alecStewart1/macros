@@ -14,8 +14,11 @@
 
 name: CI
 
+# PRs run on `pull_request`; `push` is limited to main so a PR branch isn't
+# checked twice (once per event). The push run re-checks main after a merge.
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
