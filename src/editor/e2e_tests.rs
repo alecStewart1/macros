@@ -712,6 +712,7 @@ fn counted_chain_error_clears_count_repeat(cx: &mut TestAppContext) {
 fn stale_completion_replies_are_dropped(cx: &mut TestAppContext) {
     let ed = setup(cx, "é\n");
     ed.update(cx, |e, cx| {
+        e.evil = EvilState::Insert; // completion runs while typing
         e.collapse_to(2);
         e.stamp_completion_request();
         e.edit(0..0, "zz"); // typed after the request went out
@@ -1253,4 +1254,47 @@ fn electric_closer_text_match_skips_strings_and_lifetimes(cx: &mut TestAppContex
         text(&editor, cx),
         "fn f<'a>(x: &'a str) {\n    let y = (\n    )"
     );
+}
+
+/// A completion popup left up after Esc caught the Enter of `:w<RET>` (the
+/// popup is checked before the minibuffer), so the first `:w` did nothing.
+#[gpui::test]
+fn escape_and_ex_prompt_close_completion_popup(cx: &mut TestAppContext) {
+    let popup = || {
+        let items = crate::lsp::parse_completion(&serde_json::json!([{"label": "foobar"}]));
+        Some(CompletionPopup {
+            items,
+            anchor: 0,
+            selected: 0,
+        })
+    };
+    let ed = setup(cx, "\n");
+    keys(&ed, cx, "i f o");
+    ed.update(cx, |e, _| e.completion_popup = popup());
+    keys(&ed, cx, "escape");
+    ed.read_with(cx, |e, _| assert!(e.completion_popup.is_none()));
+    // However a popup got there, the `:` prompt closes it.
+    ed.update(cx, |e, _| e.completion_popup = popup());
+    keys(&ed, cx, ": w");
+    ed.read_with(cx, |e, _| {
+        assert!(e.minibuffer.is_some());
+        assert!(e.completion_popup.is_none());
+    });
+}
+
+/// An async completion reply arriving after Esc (or after `:` opened) must
+/// not open the popup: it would catch the prompt's RET.
+#[gpui::test]
+fn late_completion_reply_is_dropped_outside_insert(cx: &mut TestAppContext) {
+    let items = || crate::lsp::parse_completion(&serde_json::json!([{"label": "foobar"}]));
+    let ed = setup(cx, "\n");
+    keys(&ed, cx, "i f o escape");
+    ed.update(cx, |e, cx| e.show_completion(items(), 0..2, cx));
+    ed.read_with(cx, |e, _| assert!(e.completion_popup.is_none()));
+    keys(&ed, cx, ": w");
+    ed.update(cx, |e, cx| e.show_completion(items(), 0..2, cx));
+    ed.read_with(cx, |e, _| {
+        assert!(e.completion_popup.is_none());
+        assert!(e.minibuffer.is_some());
+    });
 }

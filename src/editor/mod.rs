@@ -4503,6 +4503,13 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let was_auto = std::mem::take(&mut self.completion_auto_pending);
+        // A reply that lands after the user left the buffer's text — Esc to
+        // evil Normal, or a prompt opened (`:`, M-x) — is dropped: the popup
+        // is consulted before the minibuffer and the modal keymap for
+        // Enter/Tab/arrows, so it would steal e.g. the RET of `:w`.
+        if self.evil_intercepts() || self.minibuffer.is_some() || self.helm.is_some() {
+            return;
+        }
         if items.is_empty() {
             if !was_auto {
                 self.echo("No completions", cx); // stay quiet for auto-triggers

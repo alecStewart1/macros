@@ -47,6 +47,9 @@ impl Editor {
         if let Some(old) = self.minibuffer.take() {
             self.mb_cancelled(old);
         }
+        // The in-buffer completion popup is consulted before the minibuffer
+        // for Enter/Tab/arrows; left open, it would eat the read's keys.
+        self.completion_popup = None;
         self.minibuffer = Some(Minibuffer {
             prompt: prompt.to_string(),
             input: initial.to_string(),

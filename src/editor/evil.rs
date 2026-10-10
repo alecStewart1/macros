@@ -138,6 +138,9 @@ impl Editor {
         // One insert session (with the command that opened it: `cw`, `o`, …)
         // undoes as one step, as in Vim.
         if was_insert {
+            // Esc closes the completion popup with Insert (vim); a popup left
+            // up would still catch Enter/Tab — e.g. swallow a `:w<RET>`.
+            self.completion_popup = None;
             self.squash_insert_session();
             // `".` — the text typed in the session.
             let typed = std::mem::take(&mut self.vim.insert_acc);

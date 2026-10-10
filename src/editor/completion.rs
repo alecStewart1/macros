@@ -219,7 +219,9 @@ impl Editor {
     /// action paths (`act_tab`, `act_newline`), since those are gpui action
     /// keys that never reach `on_key_down`.
     pub(super) fn ghost_special_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        if self.ghost_at().is_none() {
+        // Never in evil Normal/Visual: a suggestion shown late (after Esc)
+        // must not turn TAB (vim's C-i) into an insert.
+        if self.ghost_at().is_none() || self.evil_intercepts() {
             return false;
         }
         match self.keymap.resolve_mode("ghost", key).map(str::to_string) {
