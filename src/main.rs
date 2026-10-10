@@ -1,3 +1,10 @@
+// Windows: link as a GUI-subsystem app so launching it (Start menu, Explorer)
+// doesn't open a console window alongside the editor. Debug builds keep the
+// console so `eprintln!` / panics stay visible during development. Child
+// processes are spawned with `util::HideConsole` so they don't each pop up a
+// console of their own.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod analyze;
 mod anvil;
 mod assets;

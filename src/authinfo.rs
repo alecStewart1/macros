@@ -19,6 +19,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::util::HideConsole;
+
 /// One authinfo line: a parsed entry, or anything else kept as-is.
 #[derive(Clone, Debug, PartialEq)]
 enum Line {
@@ -176,7 +178,8 @@ fn run_gpg(
     .args(args)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    .stderr(Stdio::piped())
+    .hide_console();
     if let Some(home) = gnupg_home {
         cmd.env("GNUPGHOME", home);
     }

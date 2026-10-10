@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use serde_json::{Value, json};
 
+use crate::util::HideConsole;
+
 /// How long a TCP connect (`dap-connect`) may take before the session is
 /// declared dead. The connect runs on the transport's writer thread.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -72,7 +74,8 @@ impl DapClient {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .hide_console();
         env.apply(&mut cmd);
         // Its own process group, so `kill` takes down the debuggee the adapter
         // spawned too, not just the adapter (mirrors `make-process`).

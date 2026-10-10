@@ -19,6 +19,28 @@ pub(crate) fn expand_tilde(input: &str) -> String {
     input.to_string()
 }
 
+/// Spawn a child without giving it a console window of its own. The Windows
+/// build is a GUI-subsystem app (no console — see the `windows_subsystem`
+/// attribute in main.rs), so every console program it starts (LSP servers,
+/// git, gpg, `call-process`, …) would otherwise pop up a fresh terminal
+/// window. `CREATE_NO_WINDOW` suppresses that; piped stdio is unaffected. A
+/// no-op off Windows. Apply it at every production `Command` spawn site.
+pub(crate) trait HideConsole {
+    fn hide_console(&mut self) -> &mut Self;
+}
+
+impl HideConsole for std::process::Command {
+    fn hide_console(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            self.creation_flags(CREATE_NO_WINDOW);
+        }
+        self
+    }
+}
+
 /// Collapse every run of whitespace (spaces, tabs, newlines) to a single space
 /// and trim the ends. Used anywhere multi-line text must render on ONE line —
 /// gpui's `shape_line` *panics* (aborting the app) on an embedded newline, and

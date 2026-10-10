@@ -120,6 +120,7 @@ pub fn current_then(items: &[String]) -> EnvOverrides {
 /// Run `program` to completion → `[exit-code, stdout, stderr]` (the Scheme
 /// `call-process-full` shape), writing `input` to stdin (empty = none).
 pub fn call_full(program: &str, args: &[String], input: String, env: &EnvOverrides) -> Vec<String> {
+    use crate::util::HideConsole;
     use std::io::Write;
     use std::process::Stdio;
     let program = crate::util::expand_tilde(program);
@@ -127,7 +128,8 @@ pub fn call_full(program: &str, args: &[String], input: String, env: &EnvOverrid
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .hide_console();
     env.apply(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,

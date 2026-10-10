@@ -10,6 +10,7 @@ use steel::steel_vm::engine::Engine;
 use steel::steel_vm::register_fn::RegisterFn;
 
 use super::*;
+use crate::util::HideConsole;
 
 /// The nullary commands: each Steel name pushes its variant. Shared by engine
 /// registration (on the thread) and the handle's fast-path table.
@@ -2161,7 +2162,7 @@ pub(crate) fn build_engine(
             let args = steel_string_list(&args);
             let program = crate::util::expand_tilde(&program);
             let mut cmd = std::process::Command::new(&program);
-            cmd.args(&args);
+            cmd.args(&args).hide_console();
             crate::process::current().apply(&mut cmd);
             cmd.output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

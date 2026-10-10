@@ -8,6 +8,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::util::HideConsole;
+
 use futures::StreamExt;
 use gpui::{Context, Pixels, Point};
 
@@ -230,7 +232,10 @@ impl Editor {
         // Expand a leading `~/` — `Command::new` does no shell expansion.
         let program = crate::util::expand_tilde(&program);
         let mut cmd = Command::new(&program);
-        cmd.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped());
+        cmd.args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .hide_console();
         env.apply(&mut cmd);
         // Its own process group, so kill_process can take down the whole tree
         // — a shell-wrapped command (`sh -c "make && …"`) dies with its shell

@@ -391,6 +391,7 @@ pub(crate) fn open_url(url: &str) -> Result<(), String> {
     let mut cmd = {
         let mut c = std::process::Command::new("cmd");
         c.args(["/C", "start", "", url]);
+        crate::util::HideConsole::hide_console(&mut c);
         c
     };
     #[cfg(target_os = "linux")]

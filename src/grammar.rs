@@ -646,7 +646,9 @@ fn unique_temp(base: &Path) -> PathBuf {
 
 /// Run a command, mapping a non-zero exit or spawn failure to its stderr.
 fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
+    use crate::util::HideConsole;
     let out = cmd
+        .hide_console()
         .output()
         .map_err(|e| format!("{what}: failed to run ({e})"))?;
     if out.status.success() {

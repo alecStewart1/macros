@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use steel::rvals::SteelVal;
 use steel::steel_vm::engine::Engine;
 
+use crate::util::HideConsole;
+
 /// An LSP diagnostic severity. Declared worst-first so the derived `Ord`
 /// makes "worst severity" an explicit `min()` (matching the wire encoding,
 /// where 1 = error is the smallest value).
@@ -81,6 +83,7 @@ impl LspClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .hide_console()
             .spawn()
         {
             Ok(child) => child,
