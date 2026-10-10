@@ -155,7 +155,7 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 ;; for nodes / deployments / pods / services, with describe / logs / shell / scale
 ;; / delete actions. Requires kubectl on PATH. The 'config thunk runs after the
 ;; package loads — here it makes `s` shell into pods with /bin/sh.
-(package-install "https://codeberg.org/macros-app/k8s-dashboard.git"
+(package-install "https://github.com/macros-app/k8s-dashboard.git"
   'config (lambda () (set-option "k8s-shell" "/bin/sh")))
 ;; Launch with M-x k8s-dashboard.
 ```
@@ -302,7 +302,7 @@ The last section pulls in two [packages](/docs/packages) with `package-install`,
 The second package takes a `'config` thunk — a `(lambda () …)` that runs *after* the entry file loads, the right place for settings that call into the package:
 
 ```scheme
-(package-install "https://codeberg.org/macros-app/k8s-dashboard.git"
+(package-install "https://github.com/macros-app/k8s-dashboard.git"
   'config (lambda () (set-option "k8s-shell" "/bin/sh")))
 ```
 
