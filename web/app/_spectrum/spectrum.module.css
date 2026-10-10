@@ -277,7 +277,6 @@
   font-weight: 700;
   line-height: 0.98;
   letter-spacing: -0.04em;
-  max-width: 15ch;
 }
 .h2Dim {
   background: linear-gradient(90deg, var(--v4), var(--v5) 40%, var(--v6) 70%, var(--v7));
@@ -389,6 +388,7 @@
 /* ── Gallery ──────────────────────────────────────────────────────────── */
 
 .gallery { padding: 112px 0 0; }
+.gridSection { padding: 40px 0 16px; }
 
 .band {
   display: flex;

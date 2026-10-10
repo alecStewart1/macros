@@ -17,7 +17,7 @@
   (string-append kind "\t" payload "\t" face "\t" prefix "\t" suffix))
 
 ;; A live field. `name` is one of: modified buffer-name modes evil-mode lsp
-;; diagnostics. Plain form takes no styling; `ml-field*` adds face/prefix/suffix.
+;; diagnostics grid grid-cell grid-filter. Plain form takes no styling; `ml-field*` adds face/prefix/suffix.
 (define (ml-field name) (ml--seg "field" (symbol->string name) "" "" ""))
 (define (ml-field* name face prefix suffix)
   (ml--seg "field" (symbol->string name) face prefix suffix))
@@ -46,7 +46,10 @@
        (ml-slot* "git" "magit-branch" "  git:" "")
        (ml-field* 'lsp "" "  lsp " "")
        (ml-slot* "lsp-progress" "" "  [" "]")   ; server $/progress (indexing …)
-       (ml-field* 'diagnostics "" "  " "")))
+       (ml-field* 'diagnostics "" "  " "")
+       (ml-field* 'grid-cell "" "  " "")         ; grid cursor: C7 · int
+       (ml-field* 'grid-filter "warning" "  [" "]") ; grid filters: C>10 · 12/90 rows
+       (ml-field* 'grid "" "  " "")))           ; grid range: count · sum · avg …
 
 (set-mode-line-format *mode-line-format*)
 

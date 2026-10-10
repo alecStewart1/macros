@@ -184,6 +184,7 @@ impl Editor {
     pub(super) fn begin_undo_group(&mut self) {
         if self.undo_group_depth == 0 {
             self.undo_group_started = false;
+            self.undo_batch_seq += 1;
         }
         self.undo_group_depth += 1;
     }

@@ -528,7 +528,10 @@ impl Editor {
                     return;
                 };
                 let name = doc.name.clone();
-                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
+                match doc
+                    .save_bytes()
+                    .and_then(|b| crate::save::write_now(&path, &b))
+                {
                     Ok(()) => {
                         doc.modified = false;
                         self.echo(format!("Wrote {name}"), cx);

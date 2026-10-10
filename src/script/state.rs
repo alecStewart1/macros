@@ -106,6 +106,45 @@ pub struct EditorSnapshot {
     /// The buffer's current syntax tree (a refcounted copy), for the
     /// synchronous `ts-*` reads behind tree-sitter text objects and motions.
     pub tree: Option<tree_sitter::Tree>,
+    /// The active grid buffer's state, for the `grid-*` reads; `None` when
+    /// the active buffer isn't a grid.
+    pub grid: Option<GridSnapshot>,
+}
+
+/// What Scheme can read about the active grid without a round trip: small,
+/// bounded values only (cell *data* in bulk goes through `grid-read-range`).
+#[derive(Default, Clone)]
+pub struct GridSnapshot {
+    pub cursor: (usize, usize),
+    /// Selected rectangle `(r0, c0, r1, c1)`, inclusive; the cursor cell
+    /// alone when nothing is selected.
+    pub selection: (usize, usize, usize, usize),
+    pub rows: usize,
+    pub cols: usize,
+    /// The cursor cell's value (the text being typed while editing).
+    pub value: String,
+    pub header: bool,
+    /// Row 1's values when it is a header, else empty.
+    pub header_names: Vec<String>,
+    /// Inferred type per used column: "int", "float", "bool", "date", "text".
+    pub col_types: Vec<String>,
+    pub frozen_rows: usize,
+    /// Zoom in percent.
+    pub zoom: f64,
+    pub editing: bool,
+    /// The cursor cell's formula (`=SUM(A1:A3)`), if it holds one.
+    pub formula: Option<String>,
+    /// Every cell, for the synchronous `grid-cell` / `grid-column-values`
+    /// reads; `None` when the grid is too large to copy per change (those
+    /// reads then report an error and `grid-read-range` remains).
+    pub cells: Option<Arc<crate::grid::model::CellsSnapshot>>,
+    /// The active row filter, for `(grid-row-visible? r)`.
+    pub filter: Option<Arc<crate::grid::view::Only>>,
+    /// Rows shown (all rows when unfiltered).
+    pub visible_rows: usize,
+    /// An `.xlsx`'s sheet names (empty for CSV), and the one shown.
+    pub sheets: Vec<String>,
+    pub sheet: Option<String>,
 }
 
 /// The published editor snapshot. An [`ArcSwap`] rather than a `Mutex`: the

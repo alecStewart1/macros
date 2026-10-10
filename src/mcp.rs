@@ -15,7 +15,7 @@
 //! [`Backend`] (implemented in `editor/mcp.rs`), which keeps it testable.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -36,6 +36,9 @@ const MAX_CONNECTIONS: usize = 16;
 /// Wall-clock budget for a whole request to arrive (a slow-drip client can't
 /// hold a connection slot by sending a byte every few seconds).
 const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
+/// How long a refused request's remaining bytes are read off before closing
+/// (see [`close_unread`]).
+const LINGER: Duration = Duration::from_millis(500);
 
 /// What the server needs from the editor. Every method may block; each runs
 /// on the connection's own thread, never on the UI thread.
@@ -281,6 +284,34 @@ fn respond(mut stream: &TcpStream, status: &str, extra_headers: &[&str], body: &
     let _ = stream.flush();
 }
 
+/// Close a connection answered before its request was read in full (a
+/// refused or malformed one). Closing a socket with unread bytes makes the
+/// OS reset the connection, and a client still sending its body can then
+/// lose the response just written. So half-close, and discard what the
+/// client still sends for a moment, within a small byte and time budget so a
+/// refused client can't hold the connection.
+fn close_unread(mut stream: &TcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+    let until = Instant::now() + LINGER;
+    let mut left = MAX_HEAD as usize;
+    let mut buf = [0u8; 8192];
+    while left > 0 {
+        let Some(wait) = until
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+        else {
+            break;
+        };
+        if stream.set_read_timeout(Some(wait)).is_err() {
+            break;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => left = left.saturating_sub(n),
+        }
+    }
+}
+
 /// `localhost[:port]`, `127.0.0.1[:port]`, or `[::1][:port]`.
 fn is_local_host(host: &str) -> bool {
     let name = if let Some(rest) = host.strip_prefix('[') {
@@ -338,6 +369,7 @@ fn serve_connection(stream: TcpStream, token: &str, backend: &dyn Backend) {
     let stream = &stream;
     let Some((req, body_reader)) = read_head(stream) else {
         respond(stream, "400 Bad Request", &[], "");
+        close_unread(stream);
         return;
     };
     // Authenticate on the head alone: nothing unauthenticated gets to make
@@ -352,12 +384,14 @@ fn serve_connection(stream: TcpStream, token: &str, backend: &dyn Backend) {
             vec![header]
         };
         respond(stream, status, &headers, "");
+        close_unread(stream);
         return;
     }
     let body = match read_body(&req, body_reader) {
         Ok(body) => body,
         Err(status) => {
             respond(stream, status, &[], "");
+            close_unread(stream);
             return;
         }
     };
@@ -465,7 +499,10 @@ fn tool_definitions() -> Value {
             "name": "buffer_text",
             "description": "A buffer's text plus its name, file, major mode, point and modified \
                 flag. Defaults to the current buffer. Optionally a line range and the overlay \
-                face spans (byte offsets) that color it.",
+                face spans (byte offsets) that color it. A grid (CSV/TSV/.xlsx) buffer shows its \
+                cells instead: tab-separated rows under column letters (the line range picks \
+                rows; 1000 by default; a row a filter hides is marked `(hidden)`), the cursor and \
+                sheet, then its formulas, and with `faces` its hand-set formatting.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

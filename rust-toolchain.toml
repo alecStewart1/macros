@@ -1,0 +1,15 @@
+# The Rust toolchain for this repo, shared by local builds and CI.
+#
+# rustup reads this file for every `cargo`/`rustc` run inside the repo and
+# installs the pinned toolchain on first use, so a laptop and the Forgejo
+# runners always build with the same compiler — and the same rustfmt and
+# clippy, whose output changes between releases. Bump `channel` deliberately
+# (and fix any new clippy lints in the same change) rather than letting each
+# machine drift with its own `stable`.
+#
+# Cross-compilation targets are not listed: the release workflow adds the one
+# it needs with `rustup target add`, so other machines don't download them.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

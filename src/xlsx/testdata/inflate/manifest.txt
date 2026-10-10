@@ -1,0 +1,8 @@
+empty 0 00000000
+stored 1000 1b1373a6
+stored_multi 150000 968987e7
+fixed 20000 0247b59d
+dynamic 68136 1423dd42
+long_matches 553400 9594848c
+binary 45000 596fb3f6
+mixed 30000 35bd65c4

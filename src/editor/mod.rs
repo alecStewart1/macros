@@ -37,6 +37,15 @@ mod editing_extras;
 mod evil;
 mod ex;
 mod grammars;
+mod grid;
+#[cfg(test)]
+mod grid_e2e_tests;
+mod grid_element;
+mod grid_formula;
+mod grid_ops;
+#[cfg(test)]
+mod grid_regression_tests;
+mod grid_xlsx;
 mod helm;
 mod input;
 mod isearch;
@@ -124,6 +133,8 @@ fn new_undo_tree() -> Vec<UndoNode> {
 enum PendingAction {
     KillBuffer(String),
     KillBufferAndWindow(String),
+    /// Open this (very large) file as a grid anyway.
+    OpenLargeGrid(String),
 }
 
 /// What a minibuffer read is for, deciding completion candidates and what
@@ -157,6 +168,21 @@ enum MinibufferPurpose {
     Isearch,
     /// evil `:` — an ex command line (e.g. `%s/a/b/g`, `w`, `q`).
     ExCommand,
+    /// Grid `gn` / `C-x g`: jump to a cell address (`C7`, `B2:D9`).
+    GridGoto,
+    /// Grid `/`: search cell contents (regex).
+    GridSearch,
+    /// Saving a CSV grid that holds formulas: the `.xlsx` path to save as.
+    GridSaveAsXlsx,
+    /// Grid `C-r` / `?`: search cell contents backward.
+    GridSearchBackward,
+    /// Grid `grid-filter`: a filter for column `.0`.
+    GridFilter(usize),
+    /// Grid `grid-complete-cell`: the new value of cell `(row, col)`,
+    /// completing against `completing_candidates`.
+    GridComplete(usize, usize),
+    /// Grid `grid-jump-to-column`: a column, completing on header names.
+    GridColumn,
     /// `M-:` — evaluate the entered Steel expression, echoing the result.
     EvalExpression,
     /// `read-string`: call the named Steel fn with the entered text.
@@ -224,6 +250,45 @@ struct Document {
     diff_marks: HashMap<usize, DiffMark>,
     /// Copilot-style inline suggestion (`ghost-text-show`), if one is showing.
     ghost: Option<GhostText>,
+    /// For a grid buffer (a CSV/TSV shown as a spreadsheet): its data and
+    /// view. The rope above stays empty; see [`Document::save_bytes`].
+    grid: Option<Box<grid::GridDoc>>,
+    /// A grid shown as raw text (`grid-toggle-view`): what only the grid
+    /// holds, put back when it turns into a grid again.
+    grid_stash: Option<Box<grid::GridStash>>,
+}
+
+impl Document {
+    /// The bytes this buffer saves as: the serialized workbook for a grid,
+    /// the rope's text otherwise. Every write path goes through here, so an
+    /// inactive grid can never be saved as its (empty) rope.
+    ///
+    /// A CSV grid holding formulas or formatting can't be written — CSV
+    /// stores neither — so it's an error naming the fix (save it as `.xlsx`).
+    fn save_bytes(&self) -> std::io::Result<Vec<u8>> {
+        match &self.grid {
+            // Only part of a big file is parsed yet: saving now would cut it.
+            Some(g) if g.loading.is_some() => Err(std::io::Error::other(format!(
+                "{} is still loading — save it once the load finishes",
+                self.name
+            ))),
+            Some(g) if g.csv_blocked() => Err(std::io::Error::other(format!(
+                "{} has {}, which CSV can't store — save it as .xlsx",
+                self.name,
+                g.csv_would_lose().unwrap_or("formulas")
+            ))),
+            Some(g) if !g.xlsx_lossy.is_empty() => Err(std::io::Error::other(format!(
+                "{} has {}, which saving over it would lose — save a copy with :w",
+                self.name,
+                g.xlsx_lossy.join(", ")
+            ))),
+            Some(g) => match g.encoding_error() {
+                Some(e) => Err(std::io::Error::other(e)),
+                None => Ok(g.bytes()),
+            },
+            None => Ok(self.buffer.full_text().into_bytes()),
+        }
+    }
 }
 
 /// The URI identifying `doc` for LSP. File buffers use a `file://` URI;
@@ -482,6 +547,9 @@ pub struct Editor {
     /// each edit is its own group. Counted, so a nested begin/end (a `C-u N`
     /// repeat or `:s` inside a Scheme batch) merges into the outer group.
     undo_group_depth: usize,
+    /// Bumped each time an outermost undo group opens, so grid edits can tell
+    /// which Scheme command batch they belong to (one batch = one undo step).
+    undo_batch_seq: u64,
     /// Whether the current group has received an edit yet (lazily created).
     undo_group_started: bool,
     /// The buffer the open group's node lives in. An edit in another buffer
@@ -749,6 +817,45 @@ pub struct Editor {
     terminal_geom: HashMap<u64, TermGeom>,
     /// The terminal id whose selection a drag is currently extending, if any.
     terminal_drag: Option<u64>,
+    /// File extensions that open as a grid (`grid-extensions`, lower case).
+    grid_extensions: Vec<String>,
+    /// Painted geometry per grid pane (set by `GridElement` each frame).
+    grid_geom: HashMap<usize, grid::GridGeom>,
+    /// A mouse drag (selection or header resize) on a grid pane.
+    grid_drag: Option<grid::GridDrag>,
+    /// The echo the grid last showed (formula-bar fallback), so it only
+    /// replaces its own text, never someone else's message.
+    grid_echo: Option<SharedString>,
+    /// Count handed to a grid command dispatched through the command path.
+    grid_count: usize,
+    /// A `C-u` typed before a grid command whose prefix is a flag (see
+    /// `GridCmd::prefix_is_flag`).
+    grid_flag: bool,
+    /// Editor-wide grid settings (`grid-default-column-width`, …).
+    grid_opts: grid::GridOptions,
+    /// An open `ge` popup: (popup buffer, grid buffer, row, col).
+    grid_cell_popup: Option<(String, String, usize, usize)>,
+    /// Cells the user changed in the current command, for
+    /// `grid-cell-changed-hook` (fired from `grid_after`).
+    grid_changes: Vec<(usize, usize, String, String)>,
+    /// A background slice loop is finishing a large recalculation.
+    grid_recalc_scheduled: bool,
+    /// The formulas of the last grid copy (see `FormulaClip`).
+    grid_formula_clip: Option<grid_formula::FormulaClip>,
+    /// The interpreter for Scheme functions called from formulas (started
+    /// the first time one is defined), and its outcome drain.
+    grid_fns: Option<crate::grid_fn::GridFnEngine>,
+    grid_fn_task: Option<Task<()>>,
+    /// Formula name (upper case) → the Scheme function's own name.
+    grid_fn_names: HashMap<String, String>,
+    /// Calls in flight: id → (grid buffer, the call).
+    /// In-flight Scheme formula calls: id → (the grid's epoch, the call).
+    grid_fn_calls: HashMap<u64, (u64, crate::formula::engine::ExternalCall)>,
+    grid_fn_next_id: u64,
+    /// `grid-function-timeout`, in seconds.
+    grid_fn_timeout: u64,
+    /// Where the grid's function-name dropdown was painted (for clicks).
+    grid_completion_hit: Option<PopupHit>,
     /// The keyboard macro being recorded (`C-x (`), if any.
     macro_recording: Option<Vec<MacroEvent>>,
     /// The last completed keyboard macro, for replay (`C-x e`).
@@ -1362,6 +1469,7 @@ impl Editor {
             last_yank: None,
             last_was_yank: false,
             undo_group_depth: 0,
+            undo_batch_seq: 0,
             undo_group_started: false,
             undo_group_buffer: String::new(),
             pending_keys: Vec::new(),
@@ -1466,6 +1574,27 @@ impl Editor {
             terminal_task: None,
             terminal_geom: HashMap::new(),
             terminal_drag: None,
+            grid_extensions: ["csv", "tsv", "tab", "psv", "xlsx"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            grid_geom: HashMap::new(),
+            grid_drag: None,
+            grid_echo: None,
+            grid_count: 0,
+            grid_flag: false,
+            grid_opts: Default::default(),
+            grid_cell_popup: None,
+            grid_changes: Vec::new(),
+            grid_recalc_scheduled: false,
+            grid_formula_clip: None,
+            grid_fns: None,
+            grid_fn_task: None,
+            grid_fn_names: HashMap::new(),
+            grid_fn_calls: HashMap::new(),
+            grid_fn_next_id: 0,
+            grid_fn_timeout: crate::grid_fn::DEFAULT_TIMEOUT_SECS,
+            grid_completion_hit: None,
             macro_recording: None,
             last_macro: Vec::new(),
             blink: BlinkState {
@@ -3482,6 +3611,7 @@ impl Editor {
                 .last()
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
+            grid: self.active.grid.as_deref().map(|g| g.snapshot()),
         });
     }
 
@@ -4029,7 +4159,8 @@ impl Editor {
     }
 
     /// Run the active buffer's mode hooks once (Emacs `run-mode-hooks`). For each
-    /// active mode, every Scheme function registered with `add-hook` is called
+    /// active mode, every Scheme function registered with `add-hook` on the
+    /// mode's name or on `<mode>-hook` is called
     /// (deduplicated, so a function on both `fundamental` and `steel` runs once).
     /// This is where steel-mode's `(add-hook "steel" "enable-lsp")` brings up the
     /// LSP — entirely Scheme-driven, with the default set in `steel-mode.scm`.
@@ -4041,10 +4172,15 @@ impl Editor {
         let mut seen = std::collections::HashSet::new();
         let mut to_run = Vec::new();
         for mode in self.active.modes.names() {
-            if let Some(functions) = self.hooks.get(mode) {
-                for function in functions {
-                    if seen.insert(function.clone()) {
-                        to_run.push(function.clone());
+            // `(add-hook "grid-mode" f)` and Emacs's `(add-hook "grid-mode-hook" f)`
+            // both run.
+            let emacs_name = format!("{mode}-hook");
+            for key in [mode, emacs_name.as_str()] {
+                if let Some(functions) = self.hooks.get(key) {
+                    for function in functions {
+                        if seen.insert(function.clone()) {
+                            to_run.push(function.clone());
+                        }
                     }
                 }
             }
@@ -4696,6 +4832,8 @@ fn blank_document(
         locals: HashMap::new(),
         diff_marks: HashMap::new(),
         ghost: None,
+        grid: None,
+        grid_stash: None,
     }
 }
 
@@ -5165,6 +5303,9 @@ impl Editor {
             self.mb_insert(new_text, cx);
             return;
         }
+        if self.grid_type_text(new_text, cx) {
+            return; // grid: the cell editor (or spreadsheet typing) took it
+        }
         if self.evil_intercepts() {
             return; // Normal/Visual: plain keys are commands, not text
         }
@@ -5324,6 +5465,9 @@ impl EntityInputHandler for Editor {
         }
         if self.minibuffer.is_some() {
             self.mb_insert(new_text, cx);
+            return;
+        }
+        if self.grid_type_text(new_text, cx) {
             return;
         }
         // Surfaces where plain keys are never text: evil Normal/Visual (they're

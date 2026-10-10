@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://codeberg.org/macros-app/macros"
@@ -132,7 +132,20 @@ getrandom = "0.2"
 # Charset decoding for the `decode-charset` Scheme primitive: legacy-encoded
 # bytes (hex interchange) → UTF-8 string, by WHATWG label ("windows-1252",
 # "iso-8859-1", "shift_jis", …). Already in the tree transitively; a promotion.
+# The grid buffer (src/grid/) also uses it to transcode UTF-16 / Windows-1252
+# CSV files to UTF-8 on load and back again on save.
 encoding_rs = "0.8"
+# Grid buffer (src/grid/): SIMD byte search for the CSV record scanner
+# (`memchr3` over delimiter + CR + LF). Already in the tree via regex.
+memchr = "2"
+# Grid buffer string interner: FxHash is fast on the short keys typical of
+# spreadsheet cells. Already in the tree transitively.
+rustc-hash = "2"
+# Grid buffer string interner: `HashTable<u32>` stores only ids and re-hashes
+# from the arena on demand, so each distinct cell string is stored once (std's
+# HashMap would need the string — a second copy — as its key). Same version is
+# already in the tree; no default hasher needed since we bring FxHash.
+hashbrown = { version = "0.15", default-features = false }
 # Blocking TLS client sockets for the `tls-*` Scheme primitives (IMAP/SMTP
 # protocol code in Steel — macros-email-client). Both already in the tree via
 # ureq; direct promotions, same major versions.
@@ -219,3 +232,9 @@ cc = "1"
 # Headless gpui (TestAppContext) for end-to-end editor tests.
 [dev-dependencies]
 gpui = { version = "0.2.2", features = ["test-support"] }
+# Reference CSV reader for the grid parser's tests: generated inputs go through
+# both and the field values are compared. Not a runtime dependency — the grid
+# parser needs each field's and each record's exact source byte range (for
+# zero-copy Span cells and byte-exact saves), which csv-core's copy-into-an-
+# output-buffer API doesn't expose, and csv-core silently skips blank lines.
+csv-core = "0.1"

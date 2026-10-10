@@ -160,6 +160,7 @@ impl Editor {
             Self::key_read_key,
             Self::key_evil_capture,
             Self::key_evil_modal,
+            Self::key_grid,
             Self::key_leader,
             Self::key_evil_insert,
             Self::key_special_chord_overlay,
@@ -638,7 +639,7 @@ impl Editor {
         }
         let chord = chord_string(ks);
         let plain = !ks.modifiers.control && !ks.modifiers.alt;
-        let typing = insert || self.active_running_terminal_id().is_some();
+        let typing = insert || self.active_running_terminal_id().is_some() || self.grid_editing();
         if self.pending_keys.is_empty() && plain && typing {
             return Handled::No;
         }
@@ -907,6 +908,16 @@ impl Editor {
             self.run_script(&format!("(fold-toggle-at-line {line})"), cx);
             return;
         }
+        // A click in a grid pane: cell / header / border / formula bar.
+        if self.grid_mouse_down(
+            event.position,
+            event.button,
+            event.click_count,
+            event.modifiers.shift,
+            cx,
+        ) {
+            return;
+        }
         // A click in a terminal pane starts a grid text selection (and focuses it).
         if self.terminal_selection_begin(event.position, cx) {
             return;
@@ -1100,6 +1111,9 @@ impl Editor {
             self.terminal_selection_drag(event.position, cx);
             return;
         }
+        if self.grid_mouse_move(event.position, cx) {
+            return;
+        }
         if self.is_selecting {
             let offset = self.offset_for_position(event.position);
             self.select_to(offset, cx);
@@ -1151,7 +1165,8 @@ impl Editor {
         }
     }
 
-    pub(super) fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    pub(super) fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.grid_mouse_up(cx);
         self.is_selecting = false;
         // The autoscroll timer chain checks `is_selecting` and stops itself.
         self.autoscroll.dy = 0.0;
@@ -1243,6 +1258,17 @@ impl Editor {
     ) {
         let line_height = window.line_height();
         let pixel_delta = event.delta.pixel_delta(line_height);
+        // Over a grid pane, the wheel scrolls the grid (Cmd/Ctrl zooms).
+        if self.grid_scroll(
+            event.position,
+            f32::from(pixel_delta.x),
+            f32::from(pixel_delta.y),
+            event.modifiers.platform || event.modifiers.control,
+            event.modifiers.shift,
+            cx,
+        ) {
+            return;
+        }
         // Over a terminal pane, the wheel scrolls the terminal's scrollback.
         if let Some(pane) = self.pane_at_position(event.position)
             && let Some(tid) = self.pane_terminal_id(pane)
@@ -1288,6 +1314,8 @@ impl Editor {
             self.helm_backspace(cx);
         } else if self.minibuffer.is_some() {
             self.mb_backspace(cx);
+        } else if self.grid_action_key("backspace", cx) {
+            // grid: cell editor or grid keymap
         } else if self.terminal_action_key("backspace", cx) {
             // terminal: sent to the shell (DEL)
         } else if self.special_key("backspace", cx) {
@@ -1317,6 +1345,8 @@ impl Editor {
             // forward-delete, but the key must not edit the buffer underneath.
         } else if self.minibuffer.is_some() {
             self.mb_delete(cx);
+        } else if self.grid_action_key("delete", cx) {
+            // grid: cell editor or grid keymap
         } else if self.terminal_action_key("delete", cx) {
             // terminal: sent to the shell
         } else if self.special_key("delete", cx) {
@@ -1344,6 +1374,8 @@ impl Editor {
         self.completion_popup = None; // horizontal motion dismisses the popup
         if self.minibuffer.is_some() {
             self.mb_left(cx);
+        } else if self.grid_action_key("left", cx) {
+            // grid: cell editor or grid keymap
         } else if self.modal_action_key("left", cx) {
             // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("left", cx) {
@@ -1363,6 +1395,8 @@ impl Editor {
         self.completion_popup = None; // horizontal motion dismisses the popup
         if self.minibuffer.is_some() {
             self.mb_right(cx);
+        } else if self.grid_action_key("right", cx) {
+            // grid: cell editor or grid keymap
         } else if self.modal_action_key("right", cx) {
             // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("right", cx) {
@@ -1388,6 +1422,8 @@ impl Editor {
         }
         if self.minibuffer.is_some() {
             self.mb_history(-1, cx); // older
+        } else if self.grid_action_key("up", cx) {
+            // grid: cell editor or grid keymap
         } else if self.modal_action_key("up", cx) {
             // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("up", cx) {
@@ -1413,6 +1449,8 @@ impl Editor {
         }
         if self.minibuffer.is_some() {
             self.mb_history(1, cx); // newer
+        } else if self.grid_action_key("down", cx) {
+            // grid: cell editor or grid keymap
         } else if self.modal_action_key("down", cx) {
             // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("down", cx) {
@@ -1429,6 +1467,8 @@ impl Editor {
             self.titlebar_dropdown_cursor_set(0, cx);
         } else if self.minibuffer.is_some() {
             self.mb_move(0, cx);
+        } else if self.grid_action_key("home", cx) {
+            // grid: cell editor or grid keymap
         } else if self.modal_action_key("home", cx) {
             // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("home", cx) {
@@ -1445,6 +1485,8 @@ impl Editor {
             self.titlebar_dropdown_cursor_set(usize::MAX, cx);
         } else if let Some(len) = self.minibuffer.as_ref().map(|mb| mb.input.len()) {
             self.mb_move(len, cx);
+        } else if self.grid_action_key("end", cx) {
+            // grid: cell editor or grid keymap
         } else if self.modal_action_key("end", cx) {
             // an evil/helix keymap binding for this key wins
         } else if self.terminal_action_key("end", cx) {
@@ -1473,6 +1515,8 @@ impl Editor {
         }
         if self.minibuffer.is_some() {
             self.mb_submit(cx);
+        } else if self.grid_action_key("enter", cx) {
+            // grid: cell editor or grid keymap
         } else if self.terminal_action_key("enter", cx) {
             // terminal: RET sent to the shell (carriage return)
         } else if self.special_key("enter", cx) {
@@ -1507,6 +1551,8 @@ impl Editor {
         }
         if self.minibuffer.is_some() {
             self.mb_complete(cx);
+        } else if self.grid_action_key("tab", cx) {
+            // grid: cell editor or grid keymap
         } else if self.terminal_action_key("tab", cx) {
             // terminal: TAB sent to the shell (completion)
         } else if self.special_key("tab", cx) {
@@ -1545,6 +1591,9 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if self.minibuffer.is_none() && !self.titlebar_dropdown_open() {
+            if self.grid_action_key("shift-left", cx) {
+                return;
+            }
             self.apply_command(EditorCommand::ExtendBackwardChar, cx);
         }
     }
@@ -1555,6 +1604,9 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if self.minibuffer.is_none() && !self.titlebar_dropdown_open() {
+            if self.grid_action_key("shift-right", cx) {
+                return;
+            }
             self.apply_command(EditorCommand::ExtendForwardChar, cx);
         }
     }

@@ -27,6 +27,14 @@ pub enum MlField {
     Lsp,
     /// The LSP diagnostic summary ("E:n W:n"), "" when clean.
     Diagnostics,
+    /// A grid buffer's range summary (`24 cells · Sum 1,204 · Avg 50.2`),
+    /// "" outside a grid or without a multi-cell selection.
+    Grid,
+    /// The grid cursor's address and column type (`C7 · int`), or the
+    /// selected range.
+    GridCell,
+    /// The grid's active filters and how many rows they show.
+    GridFilter,
     /// A named register written from Scheme via `set-mode-line-slot`.
     Slot(String),
 }
@@ -71,6 +79,9 @@ pub(super) fn default_mode_line_format() -> Vec<MlSeg> {
         MlSeg::new(Lsp, None, "  lsp ", ""),
         MlSeg::new(Slot("lsp-progress".into()), None, "  [", "]"),
         MlSeg::new(Diagnostics, None, "  ", ""),
+        MlSeg::new(GridCell, None, "  ", ""),
+        MlSeg::new(GridFilter, Some("warning"), "  [", "]"),
+        MlSeg::new(Grid, None, "  ", ""),
     ]
 }
 
@@ -100,6 +111,9 @@ pub(super) fn parse_mode_line_format(tokens: Vec<String>) -> Vec<MlSeg> {
                     "evil-mode" => MlField::EvilMode,
                     "lsp" => MlField::Lsp,
                     "diagnostics" => MlField::Diagnostics,
+                    "grid" => MlField::Grid,
+                    "grid-cell" => MlField::GridCell,
+                    "grid-filter" => MlField::GridFilter,
                     other => MlField::Literal(format!("?{other}")),
                 },
                 "slot" => MlField::Slot(payload.to_string()),
@@ -129,6 +143,24 @@ impl Editor {
                     MlField::EvilMode => self.evil_mode_name().unwrap_or("").to_string(),
                     MlField::Lsp => self.active_lsp_servers().join(" "),
                     MlField::Diagnostics => self.diagnostic_summary().unwrap_or_default(),
+                    MlField::Grid => self
+                        .active
+                        .grid
+                        .as_ref()
+                        .map(|g| g.summary.clone())
+                        .unwrap_or_default(),
+                    MlField::GridCell => self
+                        .active
+                        .grid
+                        .as_ref()
+                        .map(|g| g.cell_status())
+                        .unwrap_or_default(),
+                    MlField::GridFilter => self
+                        .active
+                        .grid
+                        .as_ref()
+                        .map(|g| g.filter_status())
+                        .unwrap_or_default(),
                     MlField::Slot(key) => self
                         .mode_line_slots
                         .get(key)
@@ -187,9 +219,13 @@ mod tests {
     #[test]
     fn default_mode_line_format_is_the_known_layout() {
         let segs = default_mode_line_format();
-        // Leads with the modified marker and ends with the diagnostics field.
+        // Leads with the modified marker and ends with the diagnostics field,
+        // then the grid fields (all empty outside a grid).
         assert!(matches!(segs.first().unwrap().field, MlField::Modified));
-        assert!(matches!(segs.last().unwrap().field, MlField::Diagnostics));
+        assert!(matches!(segs[segs.len() - 4].field, MlField::Diagnostics));
+        assert!(matches!(segs[segs.len() - 3].field, MlField::GridCell));
+        assert!(matches!(segs[segs.len() - 2].field, MlField::GridFilter));
+        assert!(matches!(segs.last().unwrap().field, MlField::Grid));
         // The git slot is colored with the magit branch face.
         let git = segs
             .iter()

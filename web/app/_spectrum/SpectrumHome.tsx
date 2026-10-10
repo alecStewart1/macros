@@ -4,6 +4,7 @@ import { Footer } from "../components/Footer";
 import { SpectrumHero } from "./SpectrumHero";
 import { Art, ArtLine, Scheme } from "./Art";
 import { EditorShots } from "./EditorShots";
+import { GridShowcase } from "./GridShowcase";
 import {
   RAMP,
   bars,
@@ -233,6 +234,12 @@ const FEATURES: Feature[] = [
     href: "/docs/plotting",
     accent: "heat",
   },
+  {
+    title: "Grid & formulas",
+    body: "Open CSV, TSV, and .xlsx files as a spreadsheet, switch back to plain text whenever you like, and write Excel-style formulas.",
+    href: "/docs/grid",
+    accent: "spark",
+  },
 ];
 
 /* ── Page ──────────────────────────────────────────────────────────────── */
@@ -304,6 +311,23 @@ export default function SpectrumHome() {
               write your config in, so any of it can be rewritten while it runs.
             </p>
             <EditorShots />
+          </div>
+        </section>
+
+        {/* ── Grid buffers ─────────────────────────────────────────── */}
+        <section className={s.gridSection} aria-labelledby="grid-title">
+          <div className={s.wrap}>
+            <p className={s.eyebrow}>New in Macros · grid buffers</p>
+            <h2 id="grid-title" className={s.h2}>
+              Spreadsheets, <span className={s.h2Dim}>in a buffer.</span>
+            </h2>
+            <p className={s.sectionLede}>
+              Turn any CSV or TSV into a spreadsheet in an instant, and flip back to the raw text
+              with one key. Write formulas the way you would in any other spreadsheet, and open
+              .xlsx files with their formulas intact and calculated. It&apos;s a spreadsheet with the
+              keybindings you love and the configurability you expect.
+            </p>
+            <GridShowcase />
           </div>
         </section>
 

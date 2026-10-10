@@ -6,7 +6,10 @@ mod buffer;
 mod dap;
 mod editor;
 mod element;
+mod formula;
 mod grammar;
+mod grid;
+mod grid_fn;
 mod highlight;
 mod lsp;
 mod mcp;
@@ -24,6 +27,7 @@ mod theme;
 mod update;
 mod util;
 mod workspace;
+mod xlsx;
 
 use std::borrow::Cow;
 use std::sync::Arc;

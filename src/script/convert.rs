@@ -350,6 +350,24 @@ pub(crate) fn format_value(value: &SteelVal) -> Option<String> {
     }
 }
 
+/// A Steel string literal for `s` (quotes, backslashes, newlines and tabs
+/// escaped), for splicing text into generated Scheme source.
+pub(crate) fn steel_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// SteelErr's Display is "Error: <Kind>: <message>". Drop the redundant
 /// "Error: " label and the internal "<Kind>: " category token (e.g.
 /// `FreeIdentifier`, `ConversionError`) so callers can apply their own single

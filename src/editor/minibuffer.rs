@@ -366,6 +366,15 @@ impl Editor {
                 .filter(|c| c.starts_with(input))
                 .cloned()
                 .collect(),
+            // Grid values and column names: any part, ignoring case.
+            Some(MinibufferPurpose::GridComplete(..) | MinibufferPurpose::GridColumn) => {
+                let needle = input.to_lowercase();
+                self.completing_candidates
+                    .iter()
+                    .filter(|c| c.to_lowercase().contains(&needle))
+                    .cloned()
+                    .collect()
+            }
             // Dynamic: the Scheme fn already filtered for the pattern — show as-is.
             Some(MinibufferPurpose::SchemeCompletingDynamic(_)) => {
                 self.completing_candidates.clone()
@@ -384,6 +393,11 @@ impl Editor {
                 | MinibufferPurpose::OperatorSearch(_)
                 | MinibufferPurpose::Isearch
                 | MinibufferPurpose::ExCommand
+                | MinibufferPurpose::GridGoto
+                | MinibufferPurpose::GridSearch
+                | MinibufferPurpose::GridSaveAsXlsx
+                | MinibufferPurpose::GridSearchBackward
+                | MinibufferPurpose::GridFilter(_)
                 | MinibufferPurpose::EvalExpression
                 | MinibufferPurpose::SchemeCallback(_),
             ) => Vec::new(),
@@ -584,6 +598,33 @@ impl Editor {
                 self.evil_operator_search_submit(forward, &input, cx)
             }
             MinibufferPurpose::ExCommand => self.run_ex_command(&input, cx),
+            MinibufferPurpose::GridGoto => {
+                if !input.trim().is_empty() {
+                    self.grid_goto_address(input.trim(), cx);
+                }
+            }
+            MinibufferPurpose::GridSaveAsXlsx => {
+                if !input.trim().is_empty() {
+                    self.grid_save_as_xlsx(input.trim(), cx);
+                }
+            }
+            MinibufferPurpose::GridSearch => {
+                if !input.is_empty() {
+                    self.grid_search(&input, true, cx);
+                }
+            }
+            MinibufferPurpose::GridSearchBackward => {
+                if !input.is_empty() {
+                    self.grid_search(&input, false, cx);
+                }
+            }
+            MinibufferPurpose::GridFilter(col) => self.grid_filter_submit(col, &input, cx),
+            MinibufferPurpose::GridComplete(r, c) => self.grid_complete_submit(r, c, &input, cx),
+            MinibufferPurpose::GridColumn => {
+                if !input.trim().is_empty() {
+                    self.grid_jump_submit(&input, cx);
+                }
+            }
             MinibufferPurpose::EvalExpression => {
                 if !input.is_empty() {
                     self.eval_interactive(&input, cx); // echoes `=> value`
@@ -638,6 +679,17 @@ impl Editor {
                 self.kill_buffer_named(&name, cx);
                 if was_active {
                     self.delete_window(cx);
+                }
+            }
+            PendingAction::OpenLargeGrid(path) => {
+                let path = std::path::PathBuf::from(path);
+                let identity = super::buffers::file_identity(&path);
+                if self.pending_opens.insert(identity.clone()) {
+                    let name = path
+                        .file_name()
+                        .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+                    self.echo(format!("Loading {name}…"), cx);
+                    self.read_and_open(name, path, identity, true, cx);
                 }
             }
         }

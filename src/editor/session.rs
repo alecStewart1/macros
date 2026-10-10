@@ -147,7 +147,9 @@ impl Editor {
         let mut file_buffers: Vec<(String, usize)> = self
             .inactive
             .iter()
-            .filter(|d| d.special.is_none())
+            // Grid buffers are special (read-only rope) but visit a file, so
+            // they're restored like any file buffer.
+            .filter(|d| d.special.is_none() || d.grid.is_some())
             .filter_map(|d| {
                 let path = d.path.as_deref()?;
                 let point = if d.selection_reversed {
@@ -158,7 +160,7 @@ impl Editor {
                 Some((self.session_abs(path), point))
             })
             .collect();
-        if self.active.special.is_none()
+        if (self.active.special.is_none() || self.active.grid.is_some())
             && let Some(path) = self.active.path.as_deref()
         {
             file_buffers.push((self.session_abs(path), self.cursor_offset()));

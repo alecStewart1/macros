@@ -815,7 +815,13 @@ impl Editor {
             WindowLayout::Leaf(id) => {
                 // A terminal pane draws the grid via `TerminalElement`; everything
                 // else uses the text `EditorElement`.
-                let content = if let Some(tid) = self.pane_terminal_id(*id) {
+                let content = if self.pane_grid(*id).is_some() {
+                    super::grid_element::GridElement {
+                        editor: cx.entity(),
+                        pane: *id,
+                    }
+                    .into_any_element()
+                } else if let Some(tid) = self.pane_terminal_id(*id) {
                     crate::element::TerminalElement {
                         editor: cx.entity(),
                         pane: *id,

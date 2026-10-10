@@ -131,6 +131,24 @@ pub struct MakeProcessArgs {
 
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
+    /// A grid-buffer command (scheme/grid.scm); see [`crate::grid::cmd`].
+    Grid(crate::grid::cmd::GridCmd),
+    /// `(grid-extensions '("csv" …))`: extensions that open as a grid.
+    GridExtensions(Vec<String>),
+    /// `(grid-goto-address "C7")`: move the grid cursor (or select a range).
+    GridGotoAddress(String),
+    /// A grid operation with arguments from the Scheme API.
+    GridOp(crate::grid::cmd::GridOp),
+    /// An editor-wide grid setting (`grid-default-column-width`, …).
+    GridOption(crate::grid::cmd::GridOption),
+    /// `define-grid-function` / `define-grid-helper`: share a definition with
+    /// the grid-function interpreter; a function also becomes callable from
+    /// formulas under its upper-cased name.
+    GridRegisterFunction {
+        name: String,
+        source: String,
+        helper: bool,
+    },
     // Motion
     ForwardChar,
     BackwardChar,

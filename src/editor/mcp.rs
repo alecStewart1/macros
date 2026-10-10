@@ -307,8 +307,9 @@ impl Editor {
     }
 
     /// `buffer_text`: a header describing the buffer, then its text (or a
-    /// line range of it), then optionally the overlay face spans.
-    fn mcp_buffer_text(
+    /// line range of it), then optionally the overlay face spans. A grid
+    /// shows its cells instead ([`grid_text`]).
+    pub(super) fn mcp_buffer_text(
         &self,
         name: Option<&str>,
         lines: Option<(usize, usize)>,
@@ -337,6 +338,11 @@ impl Editor {
             buffer.len(),
             doc.modified,
         );
+        if let Some(g) = doc.grid.as_deref() {
+            // A grid holds its data in cells, not text.
+            out.push_str(&grid_text(g, lines, faces));
+            return Ok(out);
+        }
         if current {
             let point = self.point();
             let (line, col) = buffer.byte_to_position(point);
@@ -419,4 +425,123 @@ impl Editor {
             cx,
         );
     }
+}
+
+/// Rows `buffer_text` shows of a grid when no line range is given.
+const GRID_TEXT_ROWS: usize = 1000;
+
+/// A grid as `buffer_text` shows it: what it is and where the cursor is,
+/// then its cells as tab-separated rows (`lines` picks rows, 0-based), each
+/// led by its row number and under a row of column letters. Cells show what
+/// the grid shows (a formula's result); the formulas follow, and with
+/// `faces`, the cells formatted by hand.
+fn grid_text(g: &super::grid::GridDoc, lines: Option<(usize, usize)>, faces: bool) -> String {
+    use crate::grid::cellfmt::color_name;
+    use crate::grid::view::{cell_name, col_name, range_name};
+    let (rows, cols) = g.used();
+    let mut out = format!(
+        "grid: {rows} rows x {cols} columns, header row: {}\n",
+        if g.wb.header(super::grid::SHEET) {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    if let Some(name) = g.xlsx_sheets.get(g.xlsx_sheet) {
+        out.push_str(&format!(
+            "sheet: {name} ({} of {}; all: {})\n",
+            g.xlsx_sheet + 1,
+            g.xlsx_sheets.len(),
+            g.xlsx_sheets.join(", ")
+        ));
+    }
+    let (cr, cc) = g.view.cursor;
+    out.push_str(&format!(
+        "cursor: {} (row {cr}, column {cc}, 0-based)",
+        cell_name(cr, cc)
+    ));
+    if g.view.anchor.is_some() {
+        out.push_str(&format!("  selection: {}", range_name(&g.selection())));
+    }
+    out.push('\n');
+    if let Some(only) = g.view.rows.only() {
+        out.push_str(&format!(
+            "filtered: {} of {rows} rows shown\n",
+            only.shown.len()
+        ));
+    }
+    let (from, to) = match lines {
+        Some((s, e)) => (s.min(rows), e.min(rows).max(s.min(rows))),
+        None => (0, rows.min(GRID_TEXT_ROWS)),
+    };
+    if lines.is_some() || to < rows {
+        out.push_str(&format!(
+            "showing rows {from}..{to} of {rows} (start_line/end_line pick rows)\n"
+        ));
+    }
+    // Tabs and newlines inside a cell would break the layout.
+    let clean = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
+    out.push_str("---\n");
+    out.push_str(
+        &(0..cols)
+            .map(|c| format!("\t{}", col_name(c)))
+            .collect::<String>(),
+    );
+    out.push('\n');
+    let mut formulas = Vec::new();
+    for r in from..to {
+        out.push_str(&(r + 1).to_string());
+        // A row a filter hides is listed, marked.
+        if !g.row_shown(r) {
+            out.push_str(" (hidden)");
+        }
+        for c in 0..cols {
+            out.push('\t');
+            out.push_str(&clean(g.cell(r, c)));
+            if g.is_formula_at(r, c) {
+                formulas.push((r, c));
+            }
+        }
+        out.push('\n');
+    }
+    if !formulas.is_empty() {
+        out.push_str("--- formulas (cell: formula)\n");
+        for (r, c) in formulas {
+            out.push_str(&format!(
+                "{}: {}\n",
+                cell_name(r, c),
+                clean(&g.source(r, c))
+            ));
+        }
+    }
+    if faces && !g.formats.is_empty() {
+        let mut cells: Vec<(usize, usize)> = g
+            .formats
+            .positions()
+            .filter(|&(r, _)| (from..to).contains(&r))
+            .collect();
+        cells.sort_unstable();
+        if !cells.is_empty() {
+            out.push_str("--- formatting (cell: bold, text color, fill, number format)\n");
+            for (r, c) in cells {
+                let f = g.formats.get(r, c);
+                let color = |i: Option<u8>| i.map_or("none", color_name);
+                out.push_str(&format!(
+                    "{}: {}, {}, {}, {}\n",
+                    cell_name(r, c),
+                    if f.bold { "bold" } else { "normal" },
+                    color(f.text),
+                    color(f.fill),
+                    f.num
+                        .map_or_else(|| "General".into(), |n| n.code().to_string())
+                ));
+            }
+        }
+    }
+    out
 }

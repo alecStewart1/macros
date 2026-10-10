@@ -1,0 +1,40 @@
+//! Grid buffer data model: delimited text (CSV/TSV/…) as a spreadsheet.
+//!
+//! This is the pure model layer — no UI. See `docs/plans/grid-buffer.md`.
+//!
+//! - [`cell`]: [`CellRef`], the packed 8-byte cell (Empty / Span into the
+//!   source bytes / Inline ≤7 bytes / Interned id).
+//! - [`intern`]: [`StringPool`], one stored copy per distinct string.
+//! - [`sheet`]: [`Sheet`], column-major chunked storage plus per-row source
+//!   metadata that makes byte-exact saves possible.
+//! - [`model`]: [`Workbook`], the owner of sheets and the pool, and the editing
+//!   API with undo/redo and saved-state tracking.
+//! - [`infer`]: column type inference ([`ColType`]).
+//! - [`dialect`]: encoding / delimiter / quoting / header sniffing.
+//! - [`parse`]: the loader. [`write`]: the saver.
+//! - [`cellfmt`]: bold and colors set by hand on single cells.
+//! - [`series`]: continuing a series down a column (copy-down / fill).
+//! - [`export`]: cells as org / Markdown / JSON / CSV, and org tables back.
+//!
+//! The core invariant: a row loaded from the file and never edited ("clean")
+//! is written back by copying its original bytes, so saving an untouched file
+//! reproduces it exactly and saving an edited one changes only edited records.
+
+pub mod cell;
+pub mod cellfmt;
+pub mod cmd;
+pub mod dialect;
+pub mod export;
+pub mod infer;
+pub mod intern;
+pub mod model;
+pub mod parse;
+#[cfg(test)]
+mod regression_tests;
+pub mod series;
+pub mod sheet;
+pub mod style;
+#[cfg(test)]
+mod testgen;
+pub mod view;
+pub mod write;

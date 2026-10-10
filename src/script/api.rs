@@ -81,6 +81,10 @@ const SECTIONS: &[(&str, &str)] = &[
         "prompts",
         "Messages, minibuffer reads, pickers (helm), y-or-n-p, transients",
     ),
+    (
+        "grid",
+        "Grid (CSV) buffers: read cells and state, edit, view, and style",
+    ),
     ("ui", "Mode line and titlebar"),
     ("keymaps", "Key bindings and the command list"),
     ("modal", "Evil/Helix state: marks, ex, counts, search query"),
@@ -238,6 +242,8 @@ fn rust_docs() -> &'static HashMap<String, String> {
 pub(crate) fn scrape_rust_docs(src: &str, docs: &mut HashMap<String, String>) {
     let mut comment: Vec<&str> = Vec::new();
     let mut pending = false; // a `register…(` whose name is on the next line
+    // Inside a multi-line `for … in [` table: its doc.
+    let mut table: Option<String> = None;
     for line in src.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("//") {
@@ -255,13 +261,19 @@ pub(crate) fn scrape_rust_docs(src: &str, docs: &mut HashMap<String, String>) {
             continue;
         }
         // `for (name, …) in [("a", …), ("b", …)] {` registering in a loop:
-        // the block documents every name in the table.
-        if t.starts_with("for ") && t.contains("in [") {
-            let doc = comment.join("\n").trim().to_string();
+        // the block documents every name in the table, which may run over
+        // several lines (until the line that closes it with `]`).
+        if t.starts_with("for ") && t.contains("in [") || table.is_some() {
+            let doc = table
+                .take()
+                .unwrap_or_else(|| comment.join("\n").trim().to_string());
             for name in t.split("(\"").skip(1).filter_map(|r| r.split('"').next()) {
                 if !doc.is_empty() {
                     docs.entry(name.to_string()).or_insert_with(|| doc.clone());
                 }
+            }
+            if !t.contains(']') {
+                table = Some(doc);
             }
             comment.clear();
             continue;
@@ -511,6 +523,14 @@ mod tests {
     for (name, full) in [("zeta", false), ("zeta-full", true)] {
         reg.register_fn(name, || 3);
     }
+    // Eta's table spans lines
+    for (name, n) in [
+        ("eta", 1),
+        ("eta-2", 2),
+    ] {
+        reg.register_fn(name, || 4);
+    }
+    reg.register_fn("theta", || 5);
 "#;
         let mut docs = HashMap::new();
         scrape_rust_docs(src, &mut docs);
@@ -521,6 +541,9 @@ mod tests {
         assert!(!docs.contains_key("epsilon"));
         assert_eq!(docs["zeta"], "Both of zeta's");
         assert_eq!(docs["zeta-full"], "Both of zeta's");
+        assert_eq!(docs["eta"], "Eta's table spans lines");
+        assert_eq!(docs["eta-2"], "Eta's table spans lines");
+        assert!(!docs.contains_key("theta"), "the table ended");
     }
 
     #[test]
@@ -532,6 +555,20 @@ mod tests {
             docs.get("set-face-font")
         );
         assert!(docs["buffer-regex-matches"].contains("byte ranges"));
+        for name in [
+            "grid-sheets",
+            "grid-current-sheet",
+            "grid-open-sheet",
+            "grid-set-cell-bold",
+            "grid-set-cell-text-color",
+            "grid-set-cell-fill-color",
+            "grid-clear-cell-formats",
+            "grid-set-cell-number-format",
+            "grid-set-number-format",
+        ] {
+            assert!(docs.contains_key(name), "no doc for {name}");
+        }
+        assert!(docs["grid-set-cell-fill-color"].contains("purple"));
     }
 
     #[test]

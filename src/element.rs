@@ -337,10 +337,10 @@ pub struct PrepaintState {
 
 /// A laid-out completion popup: background/border/selection quads plus the
 /// shaped candidate lines and where to paint each.
-struct PopupLayout {
-    quads: Vec<PaintQuad>,
-    labels: Vec<(ShapedLine, Point<Pixels>)>,
-    hit: crate::editor::PopupHit,
+pub(crate) struct PopupLayout {
+    pub(crate) quads: Vec<PaintQuad>,
+    pub(crate) labels: Vec<(ShapedLine, Point<Pixels>)>,
+    pub(crate) hit: crate::editor::PopupHit,
 }
 
 /// Per-line geometry shared by the prepaint helpers: which buffer line it is,
@@ -1790,7 +1790,7 @@ fn push_range_quads(
 /// shape each visible candidate, size the box to the widest, and produce the
 /// background/border/selection quads plus positioned label lines.
 #[allow(clippy::too_many_arguments)]
-fn build_popup(
+pub(crate) fn build_popup(
     anchor: Point<Pixels>,
     view: CompletionView,
     max_rows: usize,

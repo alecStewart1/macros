@@ -265,20 +265,54 @@ impl Editor {
             |f| f.to_string_lossy().into_owned(),
         );
 
+        // CSV/TSV (by `grid-extensions`) open as a grid; a huge one asks first.
+        let as_grid = self.is_grid_path(&path);
+        if as_grid && self.grid_guard_large(&path, cx) {
+            self.pending_opens.remove(&identity);
+            return;
+        }
+        self.read_and_open(name, path, identity, as_grid, cx);
+    }
+
+    /// The read half of [`Self::find_file`] (also run after the large-grid
+    /// confirm): read the file off the UI thread, then install it as a text
+    /// buffer or, when `as_grid`, a grid.
+    pub(super) fn read_and_open(
+        &mut self,
+        name: String,
+        path: PathBuf,
+        identity: PathBuf,
+        as_grid: bool,
+        cx: &mut Context<Self>,
+    ) {
         // Read off the UI thread so opening a large file never freezes the
         // editor; install the buffer back on the foreground when it's ready.
+        // Raw bytes: a grid parses them directly (it may not even be UTF-8);
+        // a text buffer validates them below.
         let read_path = path.clone();
         let read = cx
             .background_executor()
-            .spawn(async move { std::fs::read_to_string(&read_path) });
+            .spawn(async move { std::fs::read(&read_path) });
         cx.spawn(async move |this, cx| {
             let result = read.await;
             this.update(cx, |editor, cx| {
                 editor.pending_opens.remove(&identity);
+                let result = match result {
+                    Ok(bytes) if as_grid => {
+                        editor.open_grid(name, path, bytes, cx);
+                        return;
+                    }
+                    Ok(bytes) => String::from_utf8(bytes)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                    Err(err) => Err(err),
+                };
                 match result {
                     Ok(contents) => editor.open_file(name, path, contents, cx),
                     // A missing file is the ordinary "visit a new file" flow: an
                     // empty buffer that creates the file on first save.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound && as_grid => {
+                        editor.open_grid(name, path, Vec::new(), cx)
+                    }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                         editor.open_file(name, path, String::new(), cx)
                     }
@@ -295,7 +329,7 @@ impl Editor {
 
     /// If some buffer already visits the file `identity` (a [`file_identity`]),
     /// show it and return `true`.
-    fn switch_to_visiting(&mut self, identity: &Path, cx: &mut Context<Self>) -> bool {
+    pub(super) fn switch_to_visiting(&mut self, identity: &Path, cx: &mut Context<Self>) -> bool {
         let visits = |doc: &Document| {
             doc.path
                 .as_deref()
@@ -414,14 +448,21 @@ fn uniquified_name(
 
 impl Editor {
     /// Open files dropped onto the window from the OS (Finder, a terminal, etc.).
-    /// Each dropped file is visited in its own buffer; the last one ends up
-    /// active. Directories are skipped — `find_file` only reads regular files.
+    /// Each dropped file is visited in its own buffer, in the pane it was
+    /// dropped on; the last one ends up active. CSV/TSV files open as a grid
+    /// (see `find_file`). Directories are skipped — `find_file` only reads
+    /// regular files.
     pub(super) fn on_drop_files(
         &mut self,
         paths: &ExternalPaths,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(pane) = self.pane_at_position(window.mouse_position())
+            && pane != self.selected_pane
+        {
+            self.select_pane(pane, cx);
+        }
         let mut skipped = 0;
         for path in paths.paths() {
             if path.is_dir() {
@@ -442,11 +483,38 @@ impl Editor {
     /// buffer keeps its own file; this just drops a copy.
     pub(super) fn write_buffer_to(&mut self, path: &str, cx: &mut Context<Self>) {
         let target = expand_path(path.trim());
-        match crate::save::write_now(
-            Path::new(&target),
-            self.active.buffer.full_text().as_bytes(),
-        ) {
-            Ok(()) => self.echo(format!("Wrote {target}"), cx),
+        self.grid_commit_pending(cx);
+        let same = |p: &Path| file_identity(p) == file_identity(Path::new(&target));
+        let own_file = self.active.path.as_deref().is_some_and(same);
+        // A grid written as `.tsv` (from a `.csv`, or the reverse) switches
+        // delimiter to match the new extension.
+        let bytes = match self.active.grid.as_deref() {
+            // Only part of the file is parsed yet: writing now would save
+            // just that part.
+            Some(g) if g.loading.is_some() => Err(std::io::Error::other(
+                "still loading — write it once the load finishes",
+            )),
+            // One sheet of a workbook written over the workbook would drop
+            // its other sheets.
+            Some(g) if g.xlsx_source.as_deref().is_some_and(same) => Err(std::io::Error::other(
+                "this is one sheet of that workbook — writing it there would drop the others; \
+                 save it under another name",
+            )),
+            // A protected .xlsx is never written over itself (save_bytes says
+            // why).
+            Some(g) if own_file && !g.xlsx_lossy.is_empty() => self.active.save_bytes(),
+            Some(g) => g.bytes_for(Path::new(&target)),
+            None => self.active.save_bytes(),
+        };
+        match bytes.and_then(|b| crate::save::write_now(Path::new(&target), &b)) {
+            Ok(()) => {
+                // Writing a grid to its own file is a save.
+                if own_file && let Some(g) = self.active.grid.as_deref_mut() {
+                    g.saved_externally();
+                    self.active.modified = false;
+                }
+                self.echo(format!("Wrote {target}"), cx)
+            }
             Err(err) => self.echo(format!("Save failed: {err}"), cx),
         }
     }
@@ -476,6 +544,10 @@ impl Editor {
     /// `:e!` / `M-x revert-buffer`: re-read the visited file from disk,
     /// discarding unsaved changes. Point is kept (clamped to the new length).
     pub(super) fn revert_buffer(&mut self, cx: &mut Context<Self>) {
+        if self.active.grid.is_some() {
+            self.grid_revert(cx);
+            return;
+        }
         let Some(path) = self.active.path.clone() else {
             self.echo("Buffer is not visiting a file", cx);
             return;
@@ -538,6 +610,9 @@ impl Editor {
                 .iter()
                 .any(|d| d.path.as_deref() == Some(path));
         if !visited {
+            return;
+        }
+        if self.grid_auto_revert(path, cx) {
             return;
         }
         let Ok(disk) = std::fs::read_to_string(path) else {
@@ -696,6 +771,10 @@ impl Editor {
 
     /// `C-x C-s`: write the active buffer back to its file.
     pub(super) fn save_buffer(&mut self, cx: &mut Context<Self>) {
+        if self.active.grid.is_some() {
+            self.grid_save(cx);
+            return;
+        }
         if self.active.path.is_none() {
             self.echo("Buffer is not visiting a file", cx);
             return;
@@ -732,8 +811,14 @@ impl Editor {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
-                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
+                match doc
+                    .save_bytes()
+                    .and_then(|b| crate::save::write_now(&path, &b))
+                {
                     Ok(()) => {
+                        if let Some(g) = doc.grid.as_deref_mut() {
+                            g.saved_externally();
+                        }
                         doc.modified = false;
                         saved += 1;
                         saved_uris.push(document_uri(doc));
@@ -751,7 +836,11 @@ impl Editor {
         }
         if self.active.path.is_some() && self.active.modified {
             // Async; reports its own failure (and restores `modified`) later.
-            self.write_active_to_disk(cx);
+            if self.active.grid.is_some() {
+                self.grid_save(cx);
+            } else {
+                self.write_active_to_disk(cx);
+            }
             saved += 1;
         }
         let mut message = match saved {
@@ -772,6 +861,10 @@ impl Editor {
     /// ticket taken here, with the text snapshot, guarantees an older save
     /// still in flight can't land after this one.
     pub(super) fn write_active_to_disk(&mut self, cx: &mut Context<Self>) {
+        if self.active.grid.is_some() {
+            self.grid_save(cx);
+            return;
+        }
         let Some(path) = self.active.path.clone() else {
             return;
         };
@@ -1013,11 +1106,32 @@ impl Editor {
     /// silently discard the changes.
     pub(super) fn save_all_modified(&mut self, cx: &mut Context<Self>) -> bool {
         let mut failed: Vec<String> = Vec::new();
+        // A modified grid with no file of its own (a sheet of a workbook, an
+        // imported table) can't be saved here: say so rather than quit and
+        // lose it.
+        for doc in std::iter::once(&self.active).chain(self.inactive.iter()) {
+            if doc.modified && doc.path.is_none() && doc.grid.is_some() {
+                failed.push(format!(
+                    "{}: no file to save to (save it with :w)",
+                    doc.name
+                ));
+            }
+        }
         if self.active.modified
             && let Some(path) = self.active.path.clone()
         {
-            match crate::save::write_now(&path, self.active.buffer.full_text().as_bytes()) {
-                Ok(()) => self.active.modified = false,
+            self.grid_commit_pending(cx);
+            match self
+                .active
+                .save_bytes()
+                .and_then(|b| crate::save::write_now(&path, &b))
+            {
+                Ok(()) => {
+                    if let Some(g) = self.active.grid.as_deref_mut() {
+                        g.saved_externally();
+                    }
+                    self.active.modified = false;
+                }
                 Err(err) => failed.push(format!("{}: {err}", self.active.name)),
             }
         }
@@ -1025,8 +1139,16 @@ impl Editor {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
-                match crate::save::write_now(&path, doc.buffer.full_text().as_bytes()) {
-                    Ok(()) => doc.modified = false,
+                match doc
+                    .save_bytes()
+                    .and_then(|b| crate::save::write_now(&path, &b))
+                {
+                    Ok(()) => {
+                        if let Some(g) = doc.grid.as_deref_mut() {
+                            g.saved_externally();
+                        }
+                        doc.modified = false;
+                    }
                     Err(err) => failed.push(format!("{}: {err}", doc.name)),
                 }
             }
@@ -1051,8 +1173,16 @@ impl Editor {
             return false;
         };
         self.run_hook_blocking("before-save-hook", cx);
-        match crate::save::write_now(&path, self.active.buffer.full_text().as_bytes()) {
+        self.grid_commit_pending(cx);
+        match self
+            .active
+            .save_bytes()
+            .and_then(|b| crate::save::write_now(&path, &b))
+        {
             Ok(()) => {
+                if let Some(g) = self.active.grid.as_deref_mut() {
+                    g.saved_externally();
+                }
                 self.active.modified = false;
                 self.echo(format!("Wrote {}", self.active.name), cx);
                 let uri = document_uri(&self.active);
@@ -1072,7 +1202,9 @@ impl Editor {
     /// (*scratch*, a package's query pane) has nowhere to save to, so killing
     /// it just discards, no prompt.
     fn kill_needs_confirm(&self) -> bool {
-        self.active.modified && self.active.path.is_some()
+        // A modified grid counts even without a file (a workbook's sheet, an
+        // imported table): killing it loses the edits.
+        self.active.modified && (self.active.path.is_some() || self.active.grid.is_some())
     }
 
     /// `C-x k`: kill the active buffer (confirming first if it's a modified

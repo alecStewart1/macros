@@ -334,22 +334,7 @@ pub(super) fn parse_string_call(expr: &str) -> Option<(String, Vec<String>)> {
     Some((name.to_string(), args))
 }
 
-/// A Steel string literal for `s` (quotes and backslashes escaped).
-pub(super) fn steel_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+pub(super) use crate::script::steel_quote;
 
 /// The operator count times the motion count (`2d3w` = 6), or 0 when neither
 /// was typed (so a motion can tell `G` from `1G`). Capped like the plain count.

@@ -43,6 +43,12 @@ impl Editor {
     /// `cmd_*` handler returns `Err(command)` for variants it does not own, so
     /// the command falls through to the next; the partition is exhaustive.
     fn dispatch_command(&mut self, command: EditorCommand, cx: &mut Context<Self>) {
+        // Grid commands, and generic ones (undo, save, clipboard) that mean
+        // something else in a grid buffer, go first.
+        let command = match self.cmd_grid(command, cx) {
+            Ok(()) => return,
+            Err(c) => c,
+        };
         let command = match self.cmd_motion(command, cx) {
             Ok(()) => return,
             Err(c) => c,

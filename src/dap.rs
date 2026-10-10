@@ -367,12 +367,9 @@ mod tests {
     /// blocking the caller or hanging the session in "starting".
     #[test]
     fn tcp_connect_failure_closes_channel_with_reason() {
-        // Bind then drop: the port is (almost certainly) closed now.
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        let (client, mut rx) = DapClient::connect("127.0.0.1", port);
+        // Port 0 never accepts. (A bound-then-dropped ephemeral port isn't
+        // safe: a test running in parallel can be handed it and listen.)
+        let (client, mut rx) = DapClient::connect("127.0.0.1", 0);
         assert!(futures::executor::block_on(rx.next()).is_none());
         let (code, why) = client.finish();
         assert_eq!(code, -1);

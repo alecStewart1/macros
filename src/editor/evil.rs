@@ -687,6 +687,11 @@ impl Editor {
             self.vim.last_ex = cmd.to_string();
             self.vim.registers.set(':', cmd, false);
         }
+        // In a grid, `:12` / `:C7` / `:$` move between cells and line commands
+        // don't apply; everything else (`:w`, `:q`, `:e`, …) runs as usual.
+        if self.grid_ex(cmd, cx) {
+            return;
+        }
         // Ranges and the line commands (`:%s`, `:'<,'>d`, `:g/…/`, `:12`, …).
         let parsed = super::ex::parse_ex_line(cmd);
         if self.ex_dispatch(&parsed, cx) {
