@@ -123,10 +123,6 @@
         ((number? x) (textplot-format x))
         (else "")))
 
-(define (plot--pad-left s width)
-  (let ((len (string-length s)))
-    (if (>= len width) s (string-append (string-repeat " " (- width len)) s))))
-
 (define (plot--series-face i)
   (string-append "plot-series-" (number->string (modulo i 6))))
 
@@ -246,7 +242,7 @@
                        (loop (cdr rows) (+ r 1)
                              (cons (plot--concat
                                      (plot--segments
-                                       (list (list (plot--pad-left (or label "") lw) "plot-label")
+                                       (list (list (pad-left (or label "") lw) "plot-label")
                                              (list (if label " ┤" " │") "plot-axis")))
                                      (car rows))
                                    acc))))))

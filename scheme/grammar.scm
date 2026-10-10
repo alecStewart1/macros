@@ -41,13 +41,6 @@
 ;; Self-contained on purpose: scheme/ files eval in sorted order, and this loads
 ;; before language-modes.scm, so it can't lean on that file's helpers.
 
-;; Space-join a list of strings (the wire format `grammar-install` expects for
-;; the extension list — it splits on whitespace in Rust).
-(define (grammar--join items)
-  (cond ((null? items) "")
-        ((null? (cdr items)) (car items))
-        (else (string-append (car items) " " (grammar--join (cdr items))))))
-
 ;; Define `<id>-mode` as a nullary interactive command, so once the grammar has
 ;; loaded you can `M-x <id>-mode` on any buffer to colorize it (set-major-mode is
 ;; registry-aware). Defined eagerly at install time because the name is data; the
@@ -70,4 +63,4 @@
   (let ((symbol (if (>= (length opts) 1) (list-ref opts 0) ""))
         (subdir (if (>= (length opts) 2) (list-ref opts 1) "")))
     (grammar--define-mode id)
-    (grammar-install id repo rev (grammar--join extensions) symbol subdir)))
+    (grammar-install id repo rev (string-join extensions " ") symbol subdir)))

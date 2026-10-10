@@ -67,21 +67,6 @@
 (define (record-prefix r) (list-ref r 3))
 (define (record-text r) (list-ref r 4))
 
-;; `s` right-aligned in `width` chars.
-(define (pad-left s width)
-  (let ((len (string-length s)))
-    (if (>= len width) s (string-append (string-repeat " " (- width len)) s))))
-
-;; Concatenate strings with `sep` in one pass (core's string-join recurses once
-;; per element — too deep, and quadratic, for a 50k-line file rewrite).
-(define (results-join strs sep)
-  (if (null? strs)
-      ""
-      (let loop ((rest (cdr strs)) (acc (list (car strs))))
-        (if (null? rest)
-            (apply string-append (reverse acc))
-            (loop (cdr rest) (cons (car rest) (cons sep acc)))))))
-
 ;; Lay out a spec: `(text overlay-triples read-only-ranges)`. Offsets are BYTES.
 ;; The first read-only range spans the header, its newline and the first
 ;; prefix; each later one starts at its line start. The editor also refuses
@@ -95,7 +80,7 @@
     (let loop ((rs records) (sp spans) (off hb) (lines (list header))
                (ovs '()) (ros '()) (first? #t))
       (if (null? rs)
-          (list (results-join (reverse lines) "\n") ovs (reverse ros))
+          (list (string-join (reverse lines) "\n") ovs (reverse ros))
           (let* ((r (car rs))
                  (prefix (record-prefix r))
                  (text (record-text r))
@@ -333,7 +318,7 @@
       (if (null? es)
           (begin
             (when (not (null? applied))
-              (write-file path (results-join (vector->list lines) "\n")))
+              (write-file path (string-join (vector->list lines) "\n")))
             (cons applied skipped))
           (let* ((e (car es)) (line0 (list-ref e 1)) (old (list-ref e 2)) (new (list-ref e 3))
                  (cur (if (< line0 n) (vector-ref lines line0) #f)))

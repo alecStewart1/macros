@@ -62,11 +62,6 @@
       "\\t" "\t")
     *session-sentinel* "\\"))
 
-;; The last `n` elements of `lst` (all of it when shorter).
-(define (session-take-last lst n)
-  (let ((len (length lst)))
-    (if (<= len n) lst (list-tail lst (- len n)))))
-
 ;; =============================================================================
 ;; savehist
 ;; =============================================================================
@@ -91,11 +86,11 @@
 (define (savehist-entries ring items)
   (if (equal? ring "kill")
       (if *savehist-kill-ring*
-          (session-take-last
+          (take-last
             (filter (lambda (s) (<= (string-length s) *savehist-kill-entry-max*)) items)
             *savehist-kill-ring-max*)
           '())
-      (session-take-last items *savehist-max*)))
+      (take-last items *savehist-max*)))
 
 ;; ring name -> entries (oldest first) ⇒ the file text: one "ring<TAB>entry"
 ;; line per entry. Pure (the caller passes the rings), so it's testable.

@@ -1382,64 +1382,10 @@
 ;; --- gc — comment operator (vim-commentary) -------------------------------------
 ;; Toggle line comments over [s, e): when every non-blank line is commented,
 ;; uncomment them all; otherwise comment them all at the shallowest indent.
-;; The comment leader is the buffer-local "comment-string" when a mode set
-;; one, else by language.
-(define *evil-comment-strings*
-  (list (cons "python" "# ") (cons "ruby" "# ") (cons "bash" "# ") (cons "yaml" "# ")
-        (cons "toml" "# ") (cons "r" "# ") (cons "elixir" "# ") (cons "makefile" "# ")
-        (cons "lua" "-- ") (cons "sql" "-- ") (cons "haskell" "-- ")
-        (cons "scheme" ";; ") (cons "racket" ";; ") (cons "clojure" ";; ") (cons "steel" ";; ")
-        (cons "latex" "% ") (cons "erlang" "% ") (cons "typst" "// ")
-        (cons "ocaml" "(* ") (cons "html" "<!-- ") (cons "css" "/* ")
-        (cons "markdown" "<!-- ")))
-(define (evil-comment-string)
-  (let ((local (buffer-local-get "comment-string")))
-    (if (not (equal? local ""))
-        local
-        (let ((by-lang (or (alist-ref *evil-comment-strings* (buffer-language))
-                           (alist-ref *evil-comment-strings* (major-mode)))))
-          (if by-lang by-lang "// ")))))
-;; Block-style leaders close the line too.
-(define (evil-comment-closer cs)
-  (cond ((equal? cs "(* ") " *)") ((equal? cs "<!-- ") " -->") ((equal? cs "/* ") " */") (else "")))
+;; The toggle, the per-language leader table and the buffer-local
+;; "comment-string" override are shared with M-; (comment-lines in core.scm).
 (define (evil-comment-lines s e)
-  (let* ((cs (evil-comment-string))
-         (close (evil-comment-closer cs))
-         (bare (string-trim cs))
-         (ls (line-start-pos s))
-         (le (line-end-pos (max s (- e 1))))
-         (lines (split-many (buffer-substring ls le) "\n"))
-         (blank? (lambda (l) (equal? (string-trim l) "")))
-         (indent-of (lambda (l) (let loop ((i 0) (cs (string->list l)))
-                                  (if (and (pair? cs) (or (char=? (car cs) #\space) (char=? (car cs) #\tab)))
-                                      (loop (+ i 1) (cdr cs))
-                                      i))))
-         (commented? (lambda (l) (starts-with? (trim-start l) bare)))
-         (content (filter (lambda (l) (not (blank? l))) lines))
-         (uncomment (and (pair? content) (all? commented? content)))
-         (col (if (null? content) 0 (apply min (map indent-of content))))
-         (new (map (lambda (l)
-                     (cond ((blank? l) l)
-                           (uncomment (evil-uncomment-line l bare (string-trim close)))
-                           (else (string-append (substring l 0 col) cs
-                                                (substring l col (string-length l)) close))))
-                   lines)))
-    (replace-region ls le (string-join new "\n"))
-    (goto-char (evil-first-nonblank-pos ls))))
-(define (all? pred lst)
-  (cond ((null? lst) #t) ((pred (car lst)) (all? pred (cdr lst))) (else #f)))
-;; Drop the first `bare` leader (and one following space) and a trailing
-;; `closer`, keeping the indentation.
-(define (evil-uncomment-line l bare closer)
-  (let* ((n (string-length l))
-         (ind (- n (string-length (trim-start l))))
-         (after (+ ind (string-length bare)))
-         (after (if (and (< after n) (equal? (substring l after (+ after 1)) " ")) (+ after 1) after))
-         (body (substring l after n))
-         (body (if (and (not (equal? closer "")) (ends-with? (trim-end body) closer))
-                   (trim-end (substring body 0 (- (string-length (trim-end body)) (string-length closer))))
-                   body)))
-    (string-append (substring l 0 ind) body)))
+  (goto-char (evil-first-nonblank-pos (comment-lines s e))))
 
 ;; --- C-a / C-x — increment / decrement the number at or after the cursor ------
 ;; Decimal (with a leading `-`), hex `0x…` (case and width kept) and binary

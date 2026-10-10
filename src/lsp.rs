@@ -77,15 +77,22 @@ impl LspClient {
         // A missing working directory makes `spawn` fail with `NotFound` too,
         // which would otherwise be misreported as the program missing from PATH.
         check_spawn_cwd(root)?;
-        let mut child = match Command::new(&program)
-            .args(parts)
+        let mut cmd = Command::new(&program);
+        cmd.args(parts)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .hide_console()
-            .spawn()
+            .hide_console();
+        // Its own process group, so dropping the client takes down whatever a
+        // wrapper (`npx`, `sh -c`, `opam exec`) spawned too, not just the
+        // wrapper (mirrors `make-process` and DAP adapters).
+        #[cfg(unix)]
         {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!(
@@ -1318,6 +1325,12 @@ fn percent_decode(s: &str) -> String {
 impl Drop for LspClient {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            // Kill the whole group (see `start`). The child is not reaped yet,
+            // so its pid (= the pgid) can't have been recycled.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
             let _ = child.kill();
             // Reap it, or it lingers as a zombie. SIGKILL makes `wait` return
             // promptly, but do it off-thread so a drop on the UI thread never

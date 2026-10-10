@@ -1301,28 +1301,70 @@ impl Editor {
     }
 
     // --- GPUI action handlers (OS-special keys -> commands) ----------------
+    //
+    // Backspace/Delete/Enter/Tab/arrows/Home/End are bound as gpui actions,
+    // which dispatch before `on_key_down` — so none of them reach
+    // `dispatch_keystroke`'s layers. [`Self::route_action_key`] is their
+    // equivalent: ONE precedence order shared by every such key (mirroring
+    // `dispatch_keystroke`: modal surfaces, then grid, terminal, special
+    // buffer, ghost, modal keymap). Each `act_*` handler only describes how its
+    // key behaves in each surface ([`ActionKey`]) and supplies the plain-buffer
+    // fallback for when no layer claimed it.
 
-    pub(super) fn act_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("backspace", cx) {
-            return;
+    /// Route an OS-special key through the shared layers. True when a layer
+    /// handled (or deliberately swallowed) it; false means "run the fallback".
+    pub(super) fn route_action_key(&mut self, k: &ActionKey, cx: &mut Context<Self>) -> bool {
+        if self.read_key_action(k.name, cx) {
+            return true;
         }
         if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_backspace(cx);
-        } else if self.transient.is_some() {
-            // transient is modal; ignore editing keys
-        } else if self.helm.is_some() {
-            self.helm_backspace(cx);
-        } else if self.minibuffer.is_some() {
-            self.mb_backspace(cx);
-        } else if self.grid_action_key("backspace", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.terminal_action_key("backspace", cx) {
-            // terminal: sent to the shell (DEL)
-        } else if self.special_key("backspace", cx) {
-            // read-only buffer: consumed (ran any binding)
-        } else if self.modal_action_key("backspace", cx) {
-            // an evil/helix keymap binding for Backspace wins
-        } else if self.evil_intercepts() {
+            (k.titlebar)(self, cx);
+            return true;
+        }
+        if self.transient.is_some() {
+            return true; // transient is modal; unbound keys are ignored
+        }
+        if self.helm.is_some() {
+            // Helm is modal: a key with no Helm meaning must still not edit or
+            // move in the buffer underneath.
+            if let Some(f) = k.helm {
+                f(self, cx);
+            }
+            return true;
+        }
+        match &k.popup {
+            PopupKey::Ignore => {}
+            PopupKey::Dismiss => self.completion_popup = None,
+            PopupKey::Run(cmd) => {
+                if self.popup_special_key(k.name, cmd(), cx) {
+                    return true;
+                }
+            }
+        }
+        if self.minibuffer.is_some() {
+            (k.minibuffer)(self, cx);
+            return true;
+        }
+        // grid: cell editor or grid keymap
+        self.grid_action_key(k.name, cx)
+            // terminal: sent to the shell, like every plain key in a terminal
+            // (before the modal keymap, matching `dispatch_keystroke`)
+            || self.terminal_action_key(k.name, cx)
+            // read-only buffer: the key is consumed whether or not it's bound
+            || (k.special && self.special_key(k.name, cx))
+            // a visible ghost suggestion's `ghost`-keymap binding (after the
+            // popup and the modal surfaces, so a suggestion left showing behind
+            // an open minibuffer can't steal its key)
+            || (k.ghost && self.ghost_special_key(k.name, cx))
+            // an evil/helix keymap binding for this key wins over the default
+            || self.modal_action_key(k.name, cx)
+    }
+
+    pub(super) fn act_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.route_action_key(&KEY_BACKSPACE, cx) {
+            return;
+        }
+        if self.evil_intercepts() {
             self.apply_command(EditorCommand::BackwardChar, cx); // vim: move left
         } else {
             self.record_event(MacroEvent::Command("(delete-backward-char)".into()));
@@ -1333,240 +1375,64 @@ impl Editor {
         }
     }
     pub(super) fn act_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("delete", cx) {
+        if self.route_action_key(&KEY_DELETE, cx) {
             return;
         }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_delete(cx);
-        } else if self.transient.is_some() {
-            // transient is modal; ignore editing keys
-        } else if self.helm.is_some() {
-            // Helm is modal (mirrors act_backspace): its input has no
-            // forward-delete, but the key must not edit the buffer underneath.
-        } else if self.minibuffer.is_some() {
-            self.mb_delete(cx);
-        } else if self.grid_action_key("delete", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.terminal_action_key("delete", cx) {
-            // terminal: sent to the shell
-        } else if self.special_key("delete", cx) {
-            // read-only buffer: consumed
-        } else if self.modal_action_key("delete", cx) {
-            // an evil/helix keymap binding for Delete wins
-        } else {
-            // No `evil_intercepts` branch on purpose: in vim, Del in Normal mode
-            // deletes the char under the cursor (like `x`), unlike Backspace
-            // which only moves left — see act_backspace.
-            if !self.evil_intercepts() {
-                self.record_event(MacroEvent::Command("(delete-char)".into()));
-            }
-            self.apply_command(EditorCommand::DeleteChar, cx);
+        // No `evil_intercepts` branch on purpose: in vim, Del in Normal mode
+        // deletes the char under the cursor (like `x`), unlike Backspace which
+        // only moves left — see act_backspace.
+        if !self.evil_intercepts() {
+            self.record_event(MacroEvent::Command("(delete-char)".into()));
         }
+        self.apply_command(EditorCommand::DeleteChar, cx);
     }
     pub(super) fn act_left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("left", cx) {
-            return;
-        }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_cursor_move(-1, cx);
-            return;
-        }
-        self.completion_popup = None; // horizontal motion dismisses the popup
-        if self.minibuffer.is_some() {
-            self.mb_left(cx);
-        } else if self.grid_action_key("left", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.modal_action_key("left", cx) {
-            // an evil/helix keymap binding for this key wins
-        } else if self.terminal_action_key("left", cx) {
-            // terminal: arrow sent to the shell
-        } else {
+        if !self.route_action_key(&KEY_LEFT, cx) {
             self.apply_command(EditorCommand::BackwardChar, cx);
         }
     }
     pub(super) fn act_right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("right", cx) {
-            return;
-        }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_cursor_move(1, cx);
-            return;
-        }
-        self.completion_popup = None; // horizontal motion dismisses the popup
-        if self.minibuffer.is_some() {
-            self.mb_right(cx);
-        } else if self.grid_action_key("right", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.modal_action_key("right", cx) {
-            // an evil/helix keymap binding for this key wins
-        } else if self.terminal_action_key("right", cx) {
-            // terminal: arrow sent to the shell
-        } else {
+        if !self.route_action_key(&KEY_RIGHT, cx) {
             self.apply_command(EditorCommand::ForwardChar, cx);
         }
     }
     pub(super) fn act_up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("up", cx) {
-            return;
-        }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_move(-1, cx);
-            return;
-        }
-        if self.helm.is_some() {
-            self.helm_previous(cx);
-            return;
-        }
-        if self.popup_special_key("up", EditorCommand::CompletionPrevious, cx) {
-            return;
-        }
-        if self.minibuffer.is_some() {
-            self.mb_history(-1, cx); // older
-        } else if self.grid_action_key("up", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.modal_action_key("up", cx) {
-            // an evil/helix keymap binding for this key wins
-        } else if self.terminal_action_key("up", cx) {
-            // terminal: arrow sent to the shell (history)
-        } else {
+        if !self.route_action_key(&KEY_UP, cx) {
             self.apply_command(EditorCommand::PreviousLine, cx);
         }
     }
     pub(super) fn act_down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("down", cx) {
-            return;
-        }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_move(1, cx);
-            return;
-        }
-        if self.helm.is_some() {
-            self.helm_next(cx);
-            return;
-        }
-        if self.popup_special_key("down", EditorCommand::CompletionNext, cx) {
-            return;
-        }
-        if self.minibuffer.is_some() {
-            self.mb_history(1, cx); // newer
-        } else if self.grid_action_key("down", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.modal_action_key("down", cx) {
-            // an evil/helix keymap binding for this key wins
-        } else if self.terminal_action_key("down", cx) {
-            // terminal: arrow sent to the shell (history)
-        } else {
+        if !self.route_action_key(&KEY_DOWN, cx) {
             self.apply_command(EditorCommand::NextLine, cx);
         }
     }
     pub(super) fn act_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("home", cx) {
-            return;
-        }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_cursor_set(0, cx);
-        } else if self.minibuffer.is_some() {
-            self.mb_move(0, cx);
-        } else if self.grid_action_key("home", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.modal_action_key("home", cx) {
-            // an evil/helix keymap binding for this key wins
-        } else if self.terminal_action_key("home", cx) {
-            // terminal: sent to the shell
-        } else {
+        if !self.route_action_key(&KEY_HOME, cx) {
             self.apply_command(EditorCommand::BeginningOfLine, cx);
         }
     }
     pub(super) fn act_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("end", cx) {
-            return;
-        }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_cursor_set(usize::MAX, cx);
-        } else if let Some(len) = self.minibuffer.as_ref().map(|mb| mb.input.len()) {
-            self.mb_move(len, cx);
-        } else if self.grid_action_key("end", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.modal_action_key("end", cx) {
-            // an evil/helix keymap binding for this key wins
-        } else if self.terminal_action_key("end", cx) {
-            // terminal: sent to the shell
-        } else {
+        if !self.route_action_key(&KEY_END, cx) {
             self.apply_command(EditorCommand::EndOfLine, cx);
         }
     }
     pub(super) fn act_newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("enter", cx) {
+        if self.route_action_key(&KEY_ENTER, cx) {
             return;
         }
-        if self.titlebar_dropdown_open() {
-            self.titlebar_dropdown_select_current(cx);
-            return;
-        }
-        if self.transient.is_some() {
-            return; // transient is modal
-        }
-        if self.helm.is_some() {
-            self.helm_accept(cx);
-            return;
-        }
-        if self.popup_special_key("enter", EditorCommand::CompletionAccept, cx) {
-            return;
-        }
-        if self.minibuffer.is_some() {
-            self.mb_submit(cx);
-        } else if self.grid_action_key("enter", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.terminal_action_key("enter", cx) {
-            // terminal: RET sent to the shell (carriage return)
-        } else if self.special_key("enter", cx) {
-            // read-only buffer: RET runs its binding (e.g. visit/expand)
-        } else if self.ghost_special_key("enter", cx) {
-            // a `ghost`-keymap RET binding (some setups accept on RET) —
-            // unbound falls through to the normal newline below
-        } else if self.modal_action_key("enter", cx) {
-            // an evil/helix keymap binding for RET wins
-        } else if !self.evil_intercepts() && !self.mode_key("enter", cx) {
+        if !self.evil_intercepts() && !self.mode_key("enter", cx) {
             // a mode may rebind RET (comint send-input); else insert a newline
             self.record_event(MacroEvent::Command("(newline)".into()));
             self.apply_command(EditorCommand::Newline, cx);
         }
     }
     pub(super) fn act_tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_key_action("tab", cx) {
+        // A modal user's explicit TAB binding is consulted (last) by the
+        // router, so it isn't shadowed by a mode map like org-tab.
+        if self.route_action_key(&KEY_TAB, cx) {
             return;
         }
-        if self.titlebar_dropdown_open() {
-            return; // dropdown is modal; TAB has no filter binding
-        }
-        if self.transient.is_some() {
-            return; // transient is modal
-        }
-        if self.helm.is_some() {
-            self.helm_complete(cx); // TAB → complete to selection / descend folders
-            return;
-        }
-        if self.popup_special_key("tab", EditorCommand::CompletionNext, cx) {
-            return;
-        }
-        if self.minibuffer.is_some() {
-            self.mb_complete(cx);
-        } else if self.grid_action_key("tab", cx) {
-            // grid: cell editor or grid keymap
-        } else if self.terminal_action_key("tab", cx) {
-            // terminal: TAB sent to the shell (completion)
-        } else if self.special_key("tab", cx) {
-            // read-only buffer: TAB runs its binding (e.g. toggle section)
-        } else if self.ghost_special_key("tab", cx) {
-            // A visible ghost suggestion claims TAB (after the popup — the more
-            // explicit UI — and the modal surfaces above, so a suggestion left
-            // showing behind an open minibuffer can't steal its completion):
-            // scheme/ghost.scm binds it to ghost-text-accept. Before the mode
-            // map, so e.g. org-tab doesn't shadow an accept.
-        } else if self.modal_action_key("tab", cx) {
-            // an evil/helix keymap binding for TAB wins (before the mode map,
-            // so a modal user's explicit binding isn't shadowed by org-tab)
-        } else if !self.mode_key("tab", cx) {
+        if !self.mode_key("tab", cx) {
             // A mode binding (e.g. org-mode's `org-tab` heading cycle) wins in
             // every state, including evil Normal/Visual — TAB is a gpui action
             // key that never reaches the evil keymap, so consult the mode map
@@ -1616,6 +1482,133 @@ impl Editor {
         }
     }
 }
+
+/// How one OS-special (gpui action) key behaves in each modal surface; see
+/// [`Editor::route_action_key`].
+pub(super) struct ActionKey {
+    /// The key's name in keymaps and the PTY encoder ("backspace", "up", …).
+    pub(super) name: &'static str,
+    /// While the title-bar dropdown is open.
+    titlebar: fn(&mut Editor, &mut Context<Editor>),
+    /// While Helm is open; `None` swallows the key.
+    helm: Option<fn(&mut Editor, &mut Context<Editor>)>,
+    /// While the completion popup is open.
+    popup: PopupKey,
+    /// While the minibuffer is open.
+    minibuffer: fn(&mut Editor, &mut Context<Editor>),
+    /// Consult (and be consumed by) a special buffer's keymap. Off for motion
+    /// keys, which must keep moving point in read-only buffers.
+    special: bool,
+    /// Consult the `ghost` keymap while a suggestion is visible.
+    ghost: bool,
+}
+
+/// What an action key does while the completion popup is open.
+pub(super) enum PopupKey {
+    /// Nothing: fall through to the next layer.
+    Ignore,
+    /// Close the popup, then fall through.
+    Dismiss,
+    /// The `completion`-keymap binding, or this default command if unbound.
+    Run(fn() -> EditorCommand),
+}
+
+pub(super) const KEY_BACKSPACE: ActionKey = ActionKey {
+    name: "backspace",
+    titlebar: |e, cx| e.titlebar_dropdown_backspace(cx),
+    helm: Some(|e, cx| e.helm_backspace(cx)),
+    popup: PopupKey::Ignore,
+    minibuffer: |e, cx| e.mb_backspace(cx),
+    special: true,
+    ghost: false,
+};
+pub(super) const KEY_DELETE: ActionKey = ActionKey {
+    name: "delete",
+    titlebar: |e, cx| e.titlebar_dropdown_delete(cx),
+    helm: None, // Helm's input has no forward-delete
+    popup: PopupKey::Ignore,
+    minibuffer: |e, cx| e.mb_delete(cx),
+    special: true,
+    ghost: false,
+};
+pub(super) const KEY_LEFT: ActionKey = ActionKey {
+    name: "left",
+    titlebar: |e, cx| e.titlebar_dropdown_cursor_move(-1, cx),
+    helm: None,
+    popup: PopupKey::Dismiss, // horizontal motion dismisses the popup
+    minibuffer: |e, cx| e.mb_left(cx),
+    special: false,
+    ghost: false,
+};
+pub(super) const KEY_RIGHT: ActionKey = ActionKey {
+    name: "right",
+    titlebar: |e, cx| e.titlebar_dropdown_cursor_move(1, cx),
+    helm: None,
+    popup: PopupKey::Dismiss, // horizontal motion dismisses the popup
+    minibuffer: |e, cx| e.mb_right(cx),
+    special: false,
+    ghost: false,
+};
+pub(super) const KEY_UP: ActionKey = ActionKey {
+    name: "up",
+    titlebar: |e, cx| e.titlebar_dropdown_move(-1, cx),
+    helm: Some(|e, cx| e.helm_previous(cx)),
+    popup: PopupKey::Run(|| EditorCommand::CompletionPrevious),
+    minibuffer: |e, cx| e.mb_history(-1, cx), // older
+    special: false,
+    ghost: false,
+};
+pub(super) const KEY_DOWN: ActionKey = ActionKey {
+    name: "down",
+    titlebar: |e, cx| e.titlebar_dropdown_move(1, cx),
+    helm: Some(|e, cx| e.helm_next(cx)),
+    popup: PopupKey::Run(|| EditorCommand::CompletionNext),
+    minibuffer: |e, cx| e.mb_history(1, cx), // newer
+    special: false,
+    ghost: false,
+};
+pub(super) const KEY_HOME: ActionKey = ActionKey {
+    name: "home",
+    titlebar: |e, cx| e.titlebar_dropdown_cursor_set(0, cx),
+    helm: None,
+    popup: PopupKey::Ignore,
+    minibuffer: |e, cx| e.mb_move(0, cx),
+    special: false,
+    ghost: false,
+};
+pub(super) const KEY_END: ActionKey = ActionKey {
+    name: "end",
+    titlebar: |e, cx| e.titlebar_dropdown_cursor_set(usize::MAX, cx),
+    helm: None,
+    popup: PopupKey::Ignore,
+    minibuffer: |e, cx| {
+        let len = e.minibuffer.as_ref().map_or(0, |mb| mb.input.len());
+        e.mb_move(len, cx);
+    },
+    special: false,
+    ghost: false,
+};
+pub(super) const KEY_ENTER: ActionKey = ActionKey {
+    name: "enter",
+    titlebar: |e, cx| e.titlebar_dropdown_select_current(cx),
+    helm: Some(|e, cx| e.helm_accept(cx)),
+    popup: PopupKey::Run(|| EditorCommand::CompletionAccept),
+    minibuffer: |e, cx| e.mb_submit(cx),
+    special: true, // RET runs its binding (e.g. visit/expand)
+    ghost: true,   // some setups accept a suggestion on RET
+};
+pub(super) const KEY_TAB: ActionKey = ActionKey {
+    name: "tab",
+    titlebar: |_, _| {}, // dropdown is modal; TAB has no filter binding
+    // complete to selection / descend folders
+    helm: Some(|e, cx| e.helm_complete(cx)),
+    popup: PopupKey::Run(|| EditorCommand::CompletionNext),
+    minibuffer: |e, cx| e.mb_complete(cx),
+    special: true, // TAB runs its binding (e.g. toggle section)
+    // scheme/ghost.scm binds TAB to ghost-text-accept. Before the
+    // modal and mode maps, so e.g. org-tab doesn't shadow an accept.
+    ghost: true,
+};
 
 /// Whether a keystroke in a live terminal belongs to the editor instead of the
 /// shell: an in-progress editor sequence continues, `C-x` is the editor prefix,

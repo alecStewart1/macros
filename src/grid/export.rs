@@ -14,7 +14,7 @@ fn numeric_column(rows: &[Vec<String>], c: usize, header: bool) -> bool {
         .collect();
     let nums = vals
         .iter()
-        .filter(|v| v.trim().parse::<f64>().is_ok())
+        .filter(|v| super::infer::cell_number(v).is_some())
         .count();
     !vals.is_empty() && nums * 2 > vals.len()
 }

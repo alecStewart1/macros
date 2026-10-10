@@ -162,7 +162,7 @@ impl<'a> Key<'a> {
         }
         let s = cell.get(source, pool);
         let num = match kind {
-            SortKind::Numeric => s.trim().parse::<f64>().ok().filter(|v| !v.is_nan()),
+            SortKind::Numeric => super::infer::cell_number(s),
             SortKind::Time => time_key(s),
             SortKind::Auto | SortKind::Alpha => None,
         };

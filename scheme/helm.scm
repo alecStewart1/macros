@@ -116,14 +116,10 @@
 ;; real files (skip *scratch*, *magit*, …).
 (define *recentf* '())
 (define *recentf-max* 50)
-(define (helm-take lst n)
-  (if (or (= n 0) (null? lst)) '() (cons (car lst) (helm-take (cdr lst) (- n 1)))))
 (define (recentf-track)
   (let ((f (buffer-file-name)))
     (when (and (not (equal? f "")) (file-exists? f))
-      (set! *recentf*
-            (helm-take (cons f (filter (lambda (x) (not (equal? x f))) *recentf*))
-                       *recentf-max*)))))
+      (set! *recentf* (mru-push f *recentf* *recentf-max*)))))
 (add-hook "find-file-hook" "recentf-track")
 (define (helm-recentf)
   (helm (list (list "Recent files" *recentf* 'open-file))))

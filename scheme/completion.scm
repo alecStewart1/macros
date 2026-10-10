@@ -50,7 +50,9 @@
        (loop (cdr chars) (cons (car chars) cur) acc))
       (else (loop (cdr chars) '() (flush acc))))))
 
-;; Distinct elements of `lst`, preserving first-seen order.
+;; Distinct elements of `lst`, preserving first-seen order. (Same as core.scm's
+;; `dedup`, but this file sorts before core.scm and Steel rejects references to
+;; not-yet-defined globals, even inside function bodies.)
 (define (capf-dedup lst)
   (let loop ((lst lst) (seen '()) (acc '()))
     (cond ((null? lst) (reverse acc))

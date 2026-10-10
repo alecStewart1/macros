@@ -89,6 +89,23 @@ fn is_short_date(s: &str) -> bool {
     (1..=2).contains(&a) && (1..=2).contains(&b) && (y == 2 || y == 4)
 }
 
+/// The number a cell's text holds, if it is one — the single "is this cell
+/// numeric" rule for the grid (sorting, rules, summaries, alignment, export).
+/// Surrounding whitespace is ignored. The alphabet is restricted first: Rust's
+/// float parser also accepts "inf", "NaN" and "infinity", which are words, not
+/// numbers, in a spreadsheet; an overflow like `1e999` is not a number either.
+pub fn cell_number(value: &str) -> Option<f64> {
+    let s = value.trim();
+    if !s.bytes().any(|b| b.is_ascii_digit())
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b"+-.eE".contains(&b))
+    {
+        return None;
+    }
+    s.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
 /// The type of one non-empty value.
 pub fn classify(value: &str) -> ColType {
     let s = value.trim();
@@ -102,13 +119,7 @@ pub fn classify(value: &str) -> ColType {
     if all_digits(unsigned) {
         return ColType::Int;
     }
-    // Restrict the alphabet first: Rust's float parser also accepts "inf",
-    // "NaN" and "infinity", which are words, not numbers, in a spreadsheet.
-    if s.bytes().any(|b| b.is_ascii_digit())
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || b"+-.eE".contains(&b))
-        && s.parse::<f64>().is_ok()
-    {
+    if cell_number(s).is_some() {
         return ColType::Float;
     }
     if is_iso_date(s) || is_short_date(s) {
@@ -197,6 +208,17 @@ mod tests {
         assert_eq!(classify("1.2.3.4"), ColType::Text);
         assert_eq!(classify("hello"), ColType::Text);
         assert_eq!(classify("12abc"), ColType::Text);
+    }
+
+    #[test]
+    fn grid_cell_number() {
+        assert_eq!(cell_number(" 42 "), Some(42.0));
+        assert_eq!(cell_number("-1.5e2"), Some(-150.0));
+        for word in [
+            "inf", "-inf", "NaN", "infinity", "1e999", "", "  ", "12abc", "$5",
+        ] {
+            assert_eq!(cell_number(word), None, "{word:?}");
+        }
     }
 
     #[test]

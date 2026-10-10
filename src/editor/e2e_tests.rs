@@ -1298,3 +1298,40 @@ fn late_completion_reply_is_dropped_outside_insert(cx: &mut TestAppContext) {
         assert!(e.minibuffer.is_some());
     });
 }
+
+/// OS-special keys (gpui actions) share one precedence order: a modal surface
+/// swallows every one of them — arrows included, which used to slip past an
+/// open transient and move point underneath it.
+#[gpui::test]
+fn action_keys_share_one_precedence_order(cx: &mut TestAppContext) {
+    use super::input::{KEY_BACKSPACE, KEY_LEFT, KEY_UP};
+    let ed = setup(cx, "abcdef");
+    ed.update(cx, |e, cx| {
+        e.move_to(3, cx);
+        e.transient = Some(TransientState {
+            title: "menu".into(),
+            columns: Vec::new(),
+            sticky: false,
+        });
+        for key in [&KEY_LEFT, &KEY_UP, &KEY_BACKSPACE] {
+            assert!(
+                e.route_action_key(key, cx),
+                "{} swallowed by the transient",
+                key.name
+            );
+        }
+        assert_eq!(e.point(), 3, "nothing moved under the transient");
+        assert_eq!(e.active.buffer.full_text(), "abcdef");
+
+        e.transient = None;
+        assert!(
+            !e.route_action_key(&KEY_LEFT, cx),
+            "plain buffer: fallback runs"
+        );
+
+        // A special buffer consumes editing keys, but motion keys still move.
+        e.active.special = Some("test-special".into());
+        assert!(e.route_action_key(&KEY_BACKSPACE, cx));
+        assert!(!e.route_action_key(&KEY_LEFT, cx));
+    });
+}

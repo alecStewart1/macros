@@ -3,33 +3,21 @@
 ;; command batch), so they undo as a unit.
 
 ;; --- comment-dwim -----------------------------------------------------------
-;; The comment prefix is a buffer-local ("comment-string"); modes set it (e.g.
-;; steel-mode below). Default "// ".
-(define (comment-string)
-  (let ((c (buffer-local-get "comment-string")))
-    (if (equal? c "") "// " c)))
+;; The comment leader table, `comment-string` (buffer-local "comment-string"
+;; override, else by language), `comment-closer` and the `comment-lines` toggle
+;; live in core.scm, shared with evil's `gc` operator.
 
-;; Toggle a line comment on the current line.
+;; M-; — toggle a line comment on the current line (at its indentation). A
+;; blank line gets a fresh comment leader.
 (define (comment-dwim)
   (let* ((b (line-bounds))
          (s (car b))
          (e (cadr b))
-         (line (buffer-substring s e))
-         (cs (comment-string)))
-    (if (starts-with? (trim-start line) cs)
-        ;; Uncomment: drop the first `cs` (keeping leading indentation).
-        (replace-region s e (uncomment-line line cs))
-        ;; Comment: prepend `cs`.
-        (replace-region s e (string-append cs line)))))
-
-;; Remove the first occurrence of `cs` from `line` (after leading whitespace).
-(define (uncomment-line line cs)
-  (let loop ((i 0))
-    (cond ((> (+ i (string-length cs)) (string-length line)) line)
-          ((equal? (substring line i (+ i (string-length cs))) cs)
-           (string-append (substring line 0 i)
-                          (substring line (+ i (string-length cs)) (string-length line))))
-          (else (loop (+ i 1))))))
+         (line (buffer-substring s e)))
+    (if (equal? (string-trim line) "")
+        (let ((cs (comment-string)))
+          (replace-region s e (string-append line cs (comment-closer cs))))
+        (comment-lines s e))))
 
 ;; replace-string / query-replace live in replace.scm; occur (and its
 ;; editable occur-edit mode) in occur.scm.

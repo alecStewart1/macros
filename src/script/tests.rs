@@ -5691,6 +5691,58 @@ mod magit_tests {
         );
     }
 
+    /// M-; (comment-dwim) picks the leader by language (not always "//"),
+    /// comments at the line's indentation, toggles back, and honors the
+    /// buffer-local "comment-string" override.
+    #[test]
+    fn comment_dwim_uses_language_leader() {
+        use EditorCommand as C;
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine.eval(include_str!("../../scheme/edit.scm")).unwrap();
+        let set = |lang: &str, text: &str, point: usize| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                selections: vec![(point, point)],
+                language: lang.into(),
+                major_mode: lang.into(),
+                ..Default::default()
+            });
+        };
+        let replaced = |cmds: &[C]| {
+            cmds.iter()
+                .find_map(|c| match c {
+                    C::ReplaceRegion { start, end, text } => Some((*start, *end, text.clone())),
+                    _ => None,
+                })
+                .expect("a ReplaceRegion")
+        };
+        set("python", "x = 1\n  y = 2\n", 8);
+        let c = engine.eval("(comment-dwim)").unwrap().commands;
+        assert_eq!(replaced(&c), (6, 13, "  # y = 2".to_string()));
+        set("python", "  # y = 2\n", 4);
+        let c = engine.eval("(comment-dwim)").unwrap().commands;
+        assert_eq!(replaced(&c), (0, 9, "  y = 2".to_string()));
+        set("lua", "x = 1", 0);
+        let c = engine.eval("(comment-dwim)").unwrap().commands;
+        assert_eq!(replaced(&c), (0, 5, "-- x = 1".to_string()));
+        // Unknown languages fall back to "// ".
+        set("rust", "x", 0);
+        let c = engine.eval("(comment-dwim)").unwrap().commands;
+        assert_eq!(replaced(&c), (0, 1, "// x".to_string()));
+        // A buffer-local leader wins over the language table.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("x"),
+            language: "python".into(),
+            major_mode: "python".into(),
+            locals: vec![("comment-string".into(), "; ".into())],
+            ..Default::default()
+        });
+        let c = engine.eval("(comment-dwim)").unwrap().commands;
+        assert_eq!(replaced(&c), (0, 1, "; x".to_string()));
+    }
+
     /// Async primitives parse to their commands.
     #[test]
     fn async_primitives_parse() {

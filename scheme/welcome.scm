@@ -87,7 +87,7 @@
 ;; The first `n` of projectile's persisted recent-projects ring, newest-first,
 ;; skipping any root that has since been deleted from disk.
 (define (welcome-recent-projects n)
-  (helm-take (filter (lambda (root) (file-exists? root)) *projectile-recent*) n))
+  (take (filter (lambda (root) (file-exists? root)) *projectile-recent*) n))
 
 ;; --- default-file resolution ------------------------------------------------
 ;; First of `names` that exists under `root`, as an absolute path, or #f.

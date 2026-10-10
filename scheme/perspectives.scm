@@ -21,9 +21,6 @@
 (define (perspective-parts root)
   (filter (lambda (s) (not (equal? s ""))) (split-many root "/")))
 
-(define (take-last lst n)
-  (if (<= (length lst) n) lst (take-last (cdr lst) n)))
-
 ;; The trailing `n` path segments of `root`, joined ("b/proj" for n = 2); the
 ;; whole root when it has fewer than `n` segments.
 (define (perspective-suffix root n)

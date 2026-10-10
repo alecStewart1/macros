@@ -64,7 +64,7 @@
 (define (recentf-load)
   (when (file-exists? (recentf-file))
     (set! *recentf*
-          (helm-take (filter (lambda (p) (file-exists? p))
+          (take (filter (lambda (p) (file-exists? p))
                              (non-empty-lines (read-file (recentf-file))))
                      *recentf-max*))))
 
@@ -72,6 +72,6 @@
 (add-hook "after-save-hook" "persistence-save")
 
 ;; Load persisted state at startup (these files load after helm.scm, so
-;; *recentf* / *recentf-max* / helm-take already exist).
+;; *recentf* / *recentf-max* / take already exist).
 (saveplace-load)
 (recentf-load)

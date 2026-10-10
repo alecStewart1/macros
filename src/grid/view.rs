@@ -732,7 +732,9 @@ impl GridView {
 // being a self-contained module).
 pub use crate::xlsx::{cell_name, col_name, parse_col_name};
 
-/// Parse `C7` / `c7` into `(row, col)`.
+/// Parse `C7` / `c7` / `$C$7` into `(row, col)`. Unlike [`crate::xlsx::parse_ref`]
+/// this is not capped at Excel's limits: a CSV grid can hold far more than
+/// 1,048,576 rows, and goto must reach all of them.
 pub fn parse_cell_name(s: &str) -> Option<(usize, usize)> {
     let s = s.trim().replace('$', "");
     let split = s.find(|c: char| c.is_ascii_digit())?;

@@ -61,9 +61,6 @@
 (define (dap--str o k) (let ((v (dap--get o k))) (if (string? v) v "")))
 (define (dap--int x) (if (number? x) (exact (round x)) 0))
 (define (dap--list x) (if (list? x) x '()))
-(define (dap--take lst n)
-  (cond ((or (null? lst) (= n 0)) '())
-        (else (cons (car lst) (dap--take (cdr lst) (- n 1))))))
 (define (dap--truncate s n)
   (if (> (string-length s) n) (string-append (substring s 0 n) "…") s))
 
@@ -586,7 +583,7 @@
              (> *dap-stopped-line* 0)
              (not (null? *dap-scopes*)))
     (let* ((vars (nth (car *dap-scopes*) 3))
-           (shown (dap--take vars 4))
+           (shown (take vars 4))
            (txt (string-join
                   (map (lambda (v)
                          (string-append (dap--str v 'name) " = "

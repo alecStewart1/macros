@@ -64,8 +64,6 @@ colors over near-black ink, defined as CSS tokens in `app/globals.css`.
   cells; the gallery and feature art are generated text charts
   (`textplot.ts`, rendered by `Art.tsx`) in the bundled `MacrosPlot` font.
   Styles live in `spectrum.module.css`.
-- **Design candidates** — alternate homepage explorations live under
-  `app/designs/<name>/` (served at `/designs/<name>`).
 
 ### Screenshots
 

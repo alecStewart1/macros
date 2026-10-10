@@ -14,6 +14,7 @@ use std::sync::Arc;
 use super::lookup::LookupIndex;
 use super::{Arg, Array, Ctx, RangeRef};
 use crate::formula::value::{ErrorKind, Value, general_format, parse_number};
+use crate::xlsx::{parse_col_name as col_index, parse_ref as cell};
 
 /// A grid of cells on sheet `None` (and optionally `Sheet2`).
 pub struct Mock {
@@ -115,27 +116,6 @@ impl Ctx for Mock {
         self.index_builds += 1;
         Some(Arc::new(LookupIndex::build(self, range)))
     }
-}
-
-fn col_index(letters: &str) -> Option<usize> {
-    if letters.is_empty() || !letters.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut n = 0usize;
-    for b in letters.bytes() {
-        n = n * 26 + (b.to_ascii_uppercase() - b'A' + 1) as usize;
-    }
-    Some(n - 1)
-}
-
-/// `B3` → (2, 1).
-fn cell(s: &str) -> Option<(usize, usize)> {
-    let s = s.replace('$', "");
-    let split = s.find(|c: char| c.is_ascii_digit())?;
-    let (l, d) = s.split_at(split);
-    let c = col_index(l)?;
-    let r: usize = d.parse().ok()?;
-    (r >= 1).then_some((r - 1, c))
 }
 
 fn reference(s: &str) -> Option<RangeRef> {

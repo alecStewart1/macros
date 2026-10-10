@@ -121,8 +121,8 @@
 ;; A ring of project roots, newest-first, written through to
 ;; ~/.config/macros/projects (one root per line) so the welcome/home screen can
 ;; list recently-opened projects on the NEXT launch — unlike *project-known*,
-;; which is session-only. Reuses persistence.scm's config dir and helm.scm's
-;; helm-take; both load before this file.
+;; which is session-only. Reuses persistence.scm's config dir (loads before this
+;; file) and core.scm's mru-push.
 (define *projectile-recent* '())
 (define *projectile-recent-max* 20)
 (define (projectile-recent-file) (string-append (persistence-dir) "/projects"))
@@ -132,9 +132,7 @@
 ;; clean quit required).
 (define (projectile-recent-add root)
   (when (and root (not (equal? root "")))
-    (let ((new (helm-take (cons root (filter (lambda (p) (not (equal? p root)))
-                                             *projectile-recent*))
-                          *projectile-recent-max*)))
+    (let ((new (mru-push root *projectile-recent* *projectile-recent-max*)))
       (when (not (equal? new *projectile-recent*))
         (set! *projectile-recent* new)
         (projectile-recent-save)))))
@@ -163,7 +161,7 @@
 ;; before any file is opened. Re-persist if pruning changed the list.
 (define (projectile-recent-load)
   (when (file-exists? (projectile-recent-file))
-    (let ((loaded (helm-take (filter (lambda (p) (file-exists? p))
+    (let ((loaded (take (filter (lambda (p) (file-exists? p))
                                      (non-empty-lines (read-file (projectile-recent-file))))
                              *projectile-recent-max*)))
       (set! *projectile-recent* (projectile-prune-nested loaded))

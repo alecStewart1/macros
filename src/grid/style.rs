@@ -170,8 +170,8 @@ impl RuleTest {
     /// Test `value`; `derived` is what [`GridStyle::refresh`] computed for a
     /// columnar test.
     fn test_with(&self, value: &str, derived: &Derived) -> bool {
-        let num = || value.trim().parse::<f64>().ok();
-        let eq = |want: &str| match (num(), want.trim().parse::<f64>().ok()) {
+        let num = || super::infer::cell_number(value);
+        let eq = |want: &str| match (num(), super::infer::cell_number(want)) {
             (Some(a), Some(b)) => a == b,
             _ => value == want,
         };
@@ -392,9 +392,7 @@ impl GridStyle {
                 RuleTest::Top(n) | RuleTest::Bottom(n) => {
                     let mut nums = Vec::new();
                     values(col, &mut |v| {
-                        if let Ok(x) = v.trim().parse::<f64>()
-                            && x.is_finite()
-                        {
+                        if let Some(x) = super::infer::cell_number(v) {
                             nums.push(x);
                         }
                     });

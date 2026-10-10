@@ -81,18 +81,22 @@
 (define (non-empty-lines s)
   (filter (lambda (l) (not (equal? l ""))) (split-many s "\n")))
 
-;; Join a list of strings with `sep`.
+;; Join a list of strings with `sep` in one pass (one string-append over the
+;; interleaved pieces — no per-element recursion, so it's linear and safe on a
+;; 50k-line list).
 (define (string-join lst sep)
-  (cond ((null? lst) "")
-        ((null? (cdr lst)) (car lst))
-        (else (string-append (car lst) sep (string-join (cdr lst) sep)))))
+  (if (null? lst)
+      ""
+      (let loop ((rest (cdr lst)) (acc (list (car lst))))
+        (if (null? rest)
+            (apply string-append (reverse acc))
+            (loop (cdr rest) (cons (car rest) (cons sep acc)))))))
 
 ;; Join a list of strings with newlines (inverse of split-many on "\n").
 (define (join-lines lines) (string-join lines "\n"))
 
 ;; Concatenate a list of strings.
-(define (string-concat lst)
-  (if (null? lst) "" (string-append (car lst) (string-concat (cdr lst)))))
+(define (string-concat lst) (apply string-append lst))
 
 ;; `s` repeated `n` times ("ab" 3 → "ababab"; n <= 0 → "").
 (define (string-repeat s n)
@@ -103,6 +107,30 @@
 (define (pad-right s width)
   (let ((len (string-length s)))
     (if (>= len width) s (string-append s (string-repeat " " (- width len))))))
+
+;; Pad `s` with leading spaces to at least `width` CHARS (right-aligned; never
+;; truncated).
+(define (pad-left s width)
+  (let ((len (string-length s)))
+    (if (>= len width) s (string-append (string-repeat " " (- width len)) s))))
+
+;; Distinct elements of `lst`, preserving first-seen order.
+(define (dedup lst)
+  (let loop ((lst lst) (seen '()) (acc '()))
+    (cond ((null? lst) (reverse acc))
+          ((member (car lst) seen) (loop (cdr lst) seen acc))
+          (else (loop (cdr lst) (cons (car lst) seen) (cons (car lst) acc))))))
+
+;; The last `n` elements of `lst` (all of it when shorter). The first `n` is
+;; Steel's builtin `(take lst n)`.
+(define (take-last lst n)
+  (let ((len (length lst)))
+    (if (<= len n) lst (list-tail lst (- len n)))))
+
+;; Most-recently-used ring: `x` moved (or added) to the front of `lst`, any
+;; other copy dropped, capped at `n` entries.
+(define (mru-push x lst n)
+  (take (cons x (filter (lambda (y) (not (equal? y x))) lst)) n))
 
 ;; Trim leading and trailing spaces/tabs.
 (define (string-trim s)
@@ -119,6 +147,79 @@
                  (dn (string-downcase c)))
             (if (equal? c up) dn up)))
         (string->list s))))
+
+;; --- line comments -----------------------------------------------------------
+;; Shared by comment-dwim (M-;, edit.scm) and evil's `gc` operator (evil.scm).
+;; The comment leader is the buffer-local "comment-string" when a mode set one
+;; (e.g. steel-mode in edit.scm), else by language / major mode, else "// ".
+(define *comment-strings*
+  (list (cons "python" "# ") (cons "ruby" "# ") (cons "bash" "# ") (cons "yaml" "# ")
+        (cons "toml" "# ") (cons "r" "# ") (cons "elixir" "# ") (cons "makefile" "# ")
+        (cons "lua" "-- ") (cons "sql" "-- ") (cons "haskell" "-- ")
+        (cons "scheme" ";; ") (cons "racket" ";; ") (cons "clojure" ";; ") (cons "steel" ";; ")
+        (cons "latex" "% ") (cons "erlang" "% ") (cons "typst" "// ")
+        (cons "ocaml" "(* ") (cons "html" "<!-- ") (cons "css" "/* ")
+        (cons "markdown" "<!-- ")))
+(define (comment-string)
+  (let ((local (buffer-local-get "comment-string")))
+    (if (not (equal? local ""))
+        local
+        (let ((by-lang (or (alist-ref *comment-strings* (buffer-language))
+                           (alist-ref *comment-strings* (major-mode)))))
+          (if by-lang by-lang "// ")))))
+;; Block-style leaders close the line too.
+(define (comment-closer cs)
+  (cond ((equal? cs "(* ") " *)") ((equal? cs "<!-- ") " -->") ((equal? cs "/* ") " */") (else "")))
+
+;; #t when `pred` holds for every element of `lst`.
+(define (all? pred lst)
+  (cond ((null? lst) #t) ((pred (car lst)) (all? pred (cdr lst))) (else #f)))
+
+;; Toggle line comments over the lines spanning [s, e): when every non-blank
+;; line is commented, uncomment them all; otherwise comment them all at the
+;; shallowest indent (blank lines are left alone). Returns the start of the
+;; first line.
+(define (comment-lines s e)
+  (let* ((cs (comment-string))
+         (close (comment-closer cs))
+         (bare (string-trim cs))
+         (ls (line-start-pos s))
+         (le (line-end-pos (max s (- e 1))))
+         (lines (split-many (buffer-substring ls le) "\n"))
+         (blank? (lambda (l) (equal? (string-trim l) "")))
+         (indent-of (lambda (l) (let loop ((i 0) (cs (string->list l)))
+                                  (if (and (pair? cs) (or (char=? (car cs) #\space) (char=? (car cs) #\tab)))
+                                      (loop (+ i 1) (cdr cs))
+                                      i))))
+         (commented? (lambda (l) (starts-with? (trim-start l) bare)))
+         (content (filter (lambda (l) (not (blank? l))) lines))
+         (uncomment (and (pair? content) (all? commented? content)))
+         (col (if (null? content) 0 (apply min (map indent-of content))))
+         (new (map (lambda (l)
+                     (cond ((blank? l) l)
+                           (uncomment (comment-strip-line l bare (string-trim close)))
+                           (else (string-append (substring l 0 col) cs
+                                                (substring l col (string-length l)) close))))
+                   lines)))
+    (replace-region ls le (string-join new "\n"))
+    ls))
+
+;; Drop the first `bare` leader (and one following space) and a trailing
+;; `closer`, keeping the indentation.
+(define (comment-strip-line l bare closer)
+  (let* ((n (string-length l))
+         (ind (- n (string-length (trim-start l))))
+         (after (+ ind (string-length bare)))
+         (after (if (and (< after n) (equal? (substring l after (+ after 1)) " ")) (+ after 1) after))
+         (body (substring l after n))
+         (body (if (and (not (equal? closer "")) (ends-with? (trim-end body) closer))
+                   (trim-end (substring body 0 (- (string-length (trim-end body)) (string-length closer))))
+                   body)))
+    (string-append (substring l 0 ind) body)))
+
+;; Remove the comment leader `cs` (and its closer) from a commented `line`.
+(define (uncomment-line line cs)
+  (comment-strip-line line (string-trim cs) (string-trim (comment-closer cs))))
 
 ;; --- fill / word wrap ---------------------------------------------------------
 ;; Column the fill commands wrap at (Emacs `fill-column`, Vim `textwidth`).

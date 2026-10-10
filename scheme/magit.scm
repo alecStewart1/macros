@@ -981,7 +981,7 @@
 ;; Every file path in the sections of `type`, deduped (a partially-staged file
 ;; can list twice within a type otherwise).
 (define (magit-files-of-type type)
-  (magit-dedup
+  (dedup
     (map sec-path (filter (lambda (s) (equal? (sec-type s) type)) *magit-sections*))))
 
 ;; The hunk whose line range contains `line`, or #f.
@@ -1144,12 +1144,6 @@
   (filter (lambda (h) (and (equal? (nth h 4) type)
                            (<= (nth h 0) hi) (> (nth h 1) lo)))
           *magit-hunks*))
-;; Distinct elements, preserving order.
-(define (magit-dedup lst)
-  (let loop ((l lst) (seen '()) (out '()))
-    (cond ((null? l) (reverse out))
-          ((member (car l) seen) (loop (cdr l) seen out))
-          (else (loop (cdr l) (cons (car l) seen) (cons (car l) out))))))
 
 ;; A region selects a SET of things — whole files (when their headings are in the
 ;; region) and/or individual diff lines. Magit applies the op to all of them;
@@ -1179,7 +1173,7 @@
 (define (magit-stage)
   (if (region-active?)
       (let* ((r (magit-region-lines)) (lo (car r)) (hi (cdr r))
-             (files (magit-dedup (append (magit-files-in lo hi "untracked")
+             (files (dedup (append (magit-files-in lo hi "untracked")
                                          (magit-files-in lo hi "unstaged")))))
         (if (not (null? files))
             (magit-do (append (list "add" "--") (map magit-newpath files))
@@ -1208,7 +1202,7 @@
 (define (magit-unstage)
   (if (region-active?)
       (let* ((r (magit-region-lines)) (lo (car r)) (hi (cdr r))
-             (files (magit-dedup (magit-files-in lo hi "staged"))))
+             (files (dedup (magit-files-in lo hi "staged"))))
         (if (not (null? files))
             (magit-do (append (list "reset" "-q" "HEAD" "--")
                               (apply append (map magit-pathspecs files)))
@@ -1265,8 +1259,8 @@
 (define (magit-discard)
   (if (region-active?)
       (let* ((r (magit-region-lines)) (lo (car r)) (hi (cdr r))
-             (untracked (magit-dedup (magit-files-in lo hi "untracked")))
-             (unstaged  (magit-dedup (magit-files-in lo hi "unstaged"))))
+             (untracked (dedup (magit-files-in lo hi "untracked")))
+             (unstaged  (dedup (magit-files-in lo hi "unstaged"))))
         (if (or (not (null? untracked)) (not (null? unstaged)))
             (magit-confirm (string-append "Discard "
                              (int->string (+ (length untracked) (length unstaged))) " file(s)?")

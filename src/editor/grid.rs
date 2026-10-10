@@ -1053,9 +1053,7 @@ impl GridDoc {
                             return;
                         }
                         count += 1;
-                        if let Ok(n) = v.trim().parse::<f64>()
-                            && n.is_finite()
-                        {
+                        if let Some(n) = crate::grid::infer::cell_number(v) {
                             nums += 1;
                             sum += n;
                             lo = lo.min(n);

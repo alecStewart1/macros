@@ -517,7 +517,7 @@ impl Element for GridElement {
                 // aligned by its column) is clipped like any text.
                 let numeric = match result {
                     Some(v) => matches!(v, crate::formula::value::Value::Number(_)),
-                    None => shown.trim().parse::<f64>().is_ok_and(f64::is_finite),
+                    None => crate::grid::infer::cell_number(&shown).is_some(),
                 };
                 if right && numeric && shown.chars().count() as f32 * char_w > avail {
                     let n = (avail / char_w).floor().max(1.0) as usize;
