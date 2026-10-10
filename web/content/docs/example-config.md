@@ -148,7 +148,7 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 ;; local logged-in `claude` via the claude-code-acp adapter (no API key). Prereq:
 ;; `npm install -g @zed-industries/claude-code-acp` then `claude /login`.
 (setenv "MACROS_AGENT" "claude")
-(package-install "https://codeberg.org/macros-app/agent-shell.git")
+(package-install "https://github.com/macros-app/agent-shell.git")
 (evil-leader-set "m a" 'agent-shell)   ; SPC m a — start / focus agent-shell
 
 ;; macros-k8s — a magit-style kubectl dashboard: foldable, color-coded sections
@@ -293,7 +293,7 @@ The last section pulls in two [packages](/docs/packages) with `package-install`,
 
 ```scheme
 (setenv "MACROS_AGENT" "claude")
-(package-install "https://codeberg.org/macros-app/agent-shell.git")
+(package-install "https://github.com/macros-app/agent-shell.git")
 (evil-leader-set "m a" 'agent-shell)   ; SPC m a — start / focus agent-shell
 ```
 
