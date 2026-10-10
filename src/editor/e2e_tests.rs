@@ -1065,3 +1065,192 @@ fn minibuffer_paste_and_yank(cx: &mut TestAppContext) {
         assert_eq!(e.kill_ring.last().map(String::as_str), Some("one\ntwo"));
     });
 }
+
+/// A JSON buffer (Emacs bindings, no evil) with the bundled Scheme loaded, so
+/// `tab-width:json` is the shipped 2.
+fn setup_json(cx: &mut TestAppContext, name: &str, text: &str) -> Entity<Editor> {
+    cx.update(|cx| {
+        cx.set_global(crate::theme::Theme::default());
+        cx.set_global(crate::settings::Settings::default());
+    });
+    let editor = cx.new(Editor::new);
+    editor.update(cx, |e, cx| {
+        for src in crate::runtime::startup_scripts() {
+            e.run_script_blocking(src, cx);
+        }
+        e.mark_config_loaded(cx);
+        let current = e.snapshot_active();
+        e.inactive.push(current);
+        let path = std::path::PathBuf::from(format!("/nonexistent/{name}"));
+        e.install_active(make_document(name.into(), Some(path), text));
+        // Opening a file parses it up front; install_active alone doesn't.
+        e.parse_full();
+        let end = e.active.buffer.len();
+        e.collapse_to(end);
+    });
+    settle(&editor, cx);
+    editor
+}
+
+/// Type `seq` the way a user does: `\n` is RET, every other char self-inserts.
+fn type_json(editor: &Entity<Editor>, cx: &mut TestAppContext, seq: &str) {
+    for ch in seq.chars() {
+        editor.update(cx, |e, cx| {
+            if ch == '\n' {
+                e.apply_command(EditorCommand::Newline, cx);
+            } else {
+                e.type_text(None, &ch.to_string(), cx);
+            }
+        });
+    }
+    settle(editor, cx);
+}
+
+/// Typing a document from scratch (electric-pair off, so every bracket is
+/// unclosed while its body is typed) indents each body one step past its
+/// opener, and a typed `]` / `}` snaps back to its opener's column.
+#[gpui::test]
+fn json_typed_from_scratch_indents(cx: &mut TestAppContext) {
+    let editor = setup_json(cx, "t.json", "");
+    type_json(&editor, cx, "{\n\"a\": [\n1,\n2\n]\n}");
+    assert_eq!(text(&editor, cx), "{\n  \"a\": [\n    1,\n    2\n  ]\n}");
+    // Nested objects behave the same.
+    let editor = setup_json(cx, "u.json", "");
+    type_json(&editor, cx, "{\n\"o\": {\n\"k\": true\n}\n}");
+    assert_eq!(text(&editor, cx), "{\n  \"o\": {\n    \"k\": true\n  }\n}");
+}
+
+/// A closer typed mid-line (after content) is left where it is.
+#[gpui::test]
+fn json_closer_after_content_is_not_reindented(cx: &mut TestAppContext) {
+    let editor = setup_json(cx, "t.json", "{\n  \"a\": [1");
+    type_json(&editor, cx, "]");
+    assert_eq!(text(&editor, cx), "{\n  \"a\": [1]");
+}
+
+/// `json-pretty-print-buffer` (as Scheme / format-on-save calls it) lays out
+/// minified JSON, keeping key order and number spelling.
+#[gpui::test]
+fn json_pretty_print_buffer_formats(cx: &mut TestAppContext) {
+    let editor = setup_json(cx, "t.json", r#"{"b":1.0,"a":[1e3,{}],"c":{"d":null}}"#);
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking("(json-pretty-print-buffer)", cx)
+    });
+    settle(&editor, cx);
+    assert_eq!(
+        text(&editor, cx),
+        "{\n  \"b\": 1.0,\n  \"a\": [\n    1e3,\n    {}\n  ],\n  \"c\": {\n    \"d\": null\n  }\n}\n"
+    );
+}
+
+/// A JSON buffer that doesn't parse is never touched.
+#[gpui::test]
+fn json_pretty_print_refuses_syntax_errors(cx: &mut TestAppContext) {
+    let src = r#"{"a": 1 "b": 2}"#;
+    let editor = setup_json(cx, "t.json", src);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::JsonPrettyPrintBuffer, cx)
+    });
+    settle(&editor, cx);
+    assert_eq!(text(&editor, cx), src);
+    editor.read_with(cx, |e, _| {
+        assert!(e.status.contains("syntax errors"), "{}", e.status)
+    });
+}
+
+/// `json-pretty-print` over a region formats just that value, nested at the
+/// region's line indentation.
+#[gpui::test]
+fn json_pretty_print_region_keeps_base_indent(cx: &mut TestAppContext) {
+    let editor = setup_json(cx, "t.json", "{\n  \"x\": {\"y\":[1,2]}\n}\n");
+    editor.update(cx, |e, cx| {
+        let t = e.active.buffer.full_text();
+        let start = t.find("{\"y\"").unwrap();
+        let end = t.find("]}").unwrap() + 2;
+        e.active.selected_range = start..end;
+        e.active.mark_active = true;
+        e.apply_command(EditorCommand::JsonPrettyPrintRegion, cx);
+    });
+    settle(&editor, cx);
+    assert_eq!(
+        text(&editor, cx),
+        "{\n  \"x\": {\n    \"y\": [\n      1,\n      2\n    ]\n  }\n}\n"
+    );
+}
+
+/// `reindent-region` with no region reindents the whole buffer structurally;
+/// in a buffer with no indent rules it refuses rather than flattening.
+#[gpui::test]
+fn reindent_region_fixes_whole_buffer(cx: &mut TestAppContext) {
+    let editor = setup_json(
+        cx,
+        "t.json",
+        "{\n\"a\": [\n        1\n],\n      \"b\": 2\n    }\n",
+    );
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::ReindentRegion, cx)
+    });
+    settle(&editor, cx);
+    assert_eq!(
+        text(&editor, cx),
+        "{\n  \"a\": [\n    1\n  ],\n  \"b\": 2\n}\n"
+    );
+
+    let plain = "one\n    two\n";
+    let editor = setup_json(cx, "notes.txt", plain);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::ReindentRegion, cx)
+    });
+    settle(&editor, cx);
+    assert_eq!(text(&editor, cx), plain);
+}
+
+/// A new object opened after a member's `},` (the parse is an error until it
+/// gets a key): RET after `{` indents the body, and the `}` typed on that
+/// empty line lines up with the `{`. Same under evil Insert state.
+#[gpui::test]
+fn json_new_object_after_member_aligns(cx: &mut TestAppContext) {
+    let before = "{\n  \"attribution\": {\n    \"commit\": \"\",\n    \"pr\": \"\"\n  },\n}\n";
+    let after =
+        "{\n  \"attribution\": {\n    \"commit\": \"\",\n    \"pr\": \"\"\n  },\n  {\n  }\n}\n";
+    for evil in [false, true] {
+        let editor = setup_json(cx, "settings.json", before);
+        editor.update(cx, |e, cx| {
+            if evil {
+                e.run_script_blocking("(evil-mode)", cx);
+                e.evil = EvilState::Insert;
+            }
+            let at = e.active.buffer.full_text().find("},").unwrap() + 2;
+            e.collapse_to(at);
+        });
+        type_json(&editor, cx, "\n{\n");
+        let body = editor.read_with(cx, |e, _| e.active.buffer.full_text());
+        assert!(
+            body.contains("  {\n    \n}"),
+            "evil={evil}: body line {body:?}"
+        );
+        type_json(&editor, cx, "}");
+        assert_eq!(text(&editor, cx), after, "evil={evil}");
+    }
+}
+
+/// The text fallback isn't fooled by brackets in strings, or by a Rust
+/// lifetime's lone `'`.
+#[gpui::test]
+fn electric_closer_text_match_skips_strings_and_lifetimes(cx: &mut TestAppContext) {
+    // Unclosed outer object (parse error), with a `{` inside a string.
+    let editor = setup_json(cx, "t.json", "{\n  \"a\": {\n    \"s\": \"{\"\n    ");
+    type_json(&editor, cx, "}");
+    assert_eq!(text(&editor, cx), "{\n  \"a\": {\n    \"s\": \"{\"\n  }");
+
+    let editor = setup_json(
+        cx,
+        "t.rs",
+        "fn f<'a>(x: &'a str) {\n    let y = (\n        ",
+    );
+    type_json(&editor, cx, ")");
+    assert_eq!(
+        text(&editor, cx),
+        "fn f<'a>(x: &'a str) {\n    let y = (\n    )"
+    );
+}

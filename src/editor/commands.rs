@@ -167,6 +167,9 @@ impl Editor {
             }
             IndentRegion => self.shift_lines(1, cx),
             OutdentRegion => self.shift_lines(-1, cx),
+            ReindentRegion => self.reindent_region(cx),
+            JsonPrettyPrintBuffer => self.json_pretty_print_buffer(cx),
+            JsonPrettyPrintRegion => self.json_pretty_print_region(cx),
             BeginningOfLine => {
                 let o = self.active.buffer.line_range_at(self.point()).start;
                 self.goto(o, cx);
@@ -1468,6 +1471,9 @@ fn is_interactive_edit(command: &EditorCommand) -> bool {
         Newline
             | OpenLine
             | IndentForTab
+            | ReindentRegion
+            | JsonPrettyPrintBuffer
+            | JsonPrettyPrintRegion
             | DeleteChar
             | DeleteBackwardChar
             | TransposeChars

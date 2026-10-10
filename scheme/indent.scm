@@ -66,3 +66,12 @@
 ;; way, so it lands at the current column too — a save reformats it.)
 (set-option "indent-after:ocaml" "->")
 (set-option "align-after:ocaml" "in with")
+;; --- JSON ------------------------------------------------------------------
+;; C-c C-f pretty-prints the buffer (json-mode's beautify key); `M-x
+;; json-pretty-print` does just the region. Both keep key order, number
+;; spelling and comments, and use `tab-width:json` above. To format on every
+;; save, add to your init.scm:
+;;   (lsp-language "json" 'extensions '("json")
+;;                 'format-on-save "json-pretty-print-buffer")
+;; A buffer whose JSON doesn't parse is left untouched (the save still happens).
+(define-key "json" "ctrl-c ctrl-f" 'json-pretty-print-buffer)
