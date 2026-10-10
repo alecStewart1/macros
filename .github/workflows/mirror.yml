@@ -6,8 +6,8 @@ name: Mirror to Codeberg
 # trigger it, which is the intended behavior for a publish mirror.
 #
 # Requires:
-#   - Secret CODEBERG_TOKEN: a Codeberg access token with write:repository scope.
-#   - `runs-on` label matching a registered runner (ubuntu-latest, per ci.yml).
+#   - GitHub secret CODEBERG_TOKEN: a Codeberg access token with
+#     write:repository scope.
 on:
   push:
     branches: [main]

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Logo } from "./Logo";
 
-const REPO = "https://codeberg.org/macros-app/macros";
+const REPO = "https://github.com/macros-app/macros";
 
 export function Nav() {
   return (
@@ -33,7 +33,7 @@ export function Nav() {
             Get started
           </Link>
           <a className="nav-link nav-hide-sm" href={REPO} target="_blank" rel="noreferrer">
-            Codeberg
+            GitHub
           </a>
           <Link className="nav-pill nav-pill-dark" href="/download">
             Download

@@ -1,7 +1,10 @@
 # Releasing Macros
 
-`.forgejo/workflows/release.yml` builds, signs, and publishes every platform
-artifact for a tagged release. The version always comes from `Cargo.toml`'s
+Day-to-day development (PRs, CI) happens on GitHub
+(`github.com/macros-app/macros`). Releases and web deploys run on the
+self-hosted Forgejo instance, whose runners and secrets do the signing and
+publishing: `.forgejo/workflows/release.yml` builds, signs, and publishes every
+platform artifact for a tagged release. The version always comes from `Cargo.toml`'s
 `[package].version`; every job verifies the tag/input matches it and fails
 fast otherwise.
 
@@ -38,14 +41,23 @@ The desktop app updates itself without a backend database (see `src/update.rs`):
 4. **Windows/Linux** open the downloads page to re-run the signed installer.
 
 So a release reaches users in **two** steps: cut the release (below) to publish
-the artifacts, then deploy the web app (`deploy-web.yml`) to point `latest.json`
-at the new version.
+the artifacts, then deploy the web app (`deploy-web.yml`, run on Forgejo) to
+point `latest.json` at the new version.
 
 ## How to cut a release
 
-1. Bump the version: `cargo set-version <x.y.z>` (or edit `[package].version`).
-2. Commit, then tag and push: `git tag v<x.y.z> && git push origin v<x.y.z>`.
-   (Or run the workflow manually via **workflow_dispatch** and pass `version`.)
+1. Bump the version: `cargo set-version <x.y.z>` (or edit `[package].version`)
+   in a PR on GitHub, and merge it.
+2. Tag the merged `main` and push it to GitHub **and** Forgejo — the tag push to
+   the `forgejo` remote is what starts the release:
+   ```sh
+   git switch main && git pull origin main
+   git tag v<x.y.z>
+   git push origin v<x.y.z>
+   git push forgejo main v<x.y.z>
+   ```
+   (Or push `main` to `forgejo` and run the workflow manually via
+   **workflow_dispatch**, passing `version`.)
 3. The pipeline runs: macOS (notarized), Linux (deb/rpm), Windows (signed msi),
    then publishes everything to R2.
 
@@ -78,6 +90,9 @@ at the new version.
 prefix for the bucket, no trailing slash).
 
 **Checkout:** `ACCESS_TOKEN` (a Forgejo token with repo read access).
+
+All of the above are Forgejo secrets. GitHub only needs `CODEBERG_TOKEN`, for
+the Codeberg mirror (`.github/workflows/mirror.yml`).
 
 ## Runner labels
 

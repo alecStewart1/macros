@@ -139,7 +139,7 @@ fb.setupNameTable({
     "fullName": "Macros Plot Regular",
     "psName": "MacrosPlot-Regular",
     "version": "Version 1.000",
-    "licenseDescription": "MIT — part of Macros (https://codeberg.org/macros-app/macros)",
+    "licenseDescription": "MIT — part of Macros (https://github.com/macros-app/macros)",
 })
 fb.setupOS2(
     sTypoAscender=ASCENT, sTypoDescender=DESCENT, sTypoLineGap=0,

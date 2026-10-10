@@ -1,16 +1,16 @@
-# Forgejo Actions CI for Forge (Forgemacs).
+# GitHub Actions CI for Forge (Forgemacs).
 #
-# Three jobs: rustfmt (formatting), clippy (lints), and the test suite.
-# `fmt` is light (no compile, no system libs). `clippy` and `test` must compile
-# the crate, which links gpui's Linux backend, ~18 tree-sitter C grammars, and
-# git2's vendored OpenSSL — hence the apt build dependencies below.
+# Jobs: rustfmt (formatting), the dependency license gate, clippy (lints), and
+# the test suite. `fmt` is light (no compile, no system libs). `clippy` and
+# `test` must compile the crate, which links gpui's Linux backend, ~18
+# tree-sitter C grammars, and git2's vendored OpenSSL — hence the apt build
+# dependencies below.
 #
-# Assumptions you may need to tweak for your runner:
-#   - `runs-on: ubuntu-latest` must match a label your Forgejo runner registered
-#     with, backed by an image that ships Node.js (for the JS-based actions) and
-#     apt/sudo (e.g. catthehacker/ubuntu:act-latest, the common default).
-#   - If a `*-sys` crate fails to build complaining about a missing library,
-#     add the corresponding `-dev` package to the "Install system deps" step.
+# Release builds and the web deploy stay on the self-hosted Forgejo runners
+# (.forgejo/workflows/), which hold the signing and publishing secrets.
+#
+# If a `*-sys` crate fails to build complaining about a missing library, add
+# the corresponding `-dev` package to the "Install system deps" step.
 
 name: CI
 

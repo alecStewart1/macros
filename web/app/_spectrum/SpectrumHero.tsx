@@ -6,7 +6,7 @@ import { Mark } from "../components/Logo";
 import { RAMP } from "./textplot";
 import s from "./spectrum.module.css";
 
-const REPO = "https://codeberg.org/macros-app/macros";
+const REPO = "https://github.com/macros-app/macros";
 const BG = "#0b0a10";
 const FRAME_MS = 1000 / 30; // the field is smooth; 30 fps is plenty
 const MAX_RIPPLES = 8;
@@ -316,7 +316,7 @@ export function SpectrumHero() {
             Text charts
           </Link>
           <a href={REPO} className={`${s.topLink} ${s.hideSm}`} target="_blank" rel="noreferrer">
-            Codeberg
+            GitHub
           </a>
           <Link href="/download" className={s.topCta}>
             Download
