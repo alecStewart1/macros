@@ -61,6 +61,9 @@ export function Footer() {
           title="Project"
           links={[
             ["Download", "/download"],
+            ["Packages", "/docs/packages"],
+            ["Source code", "https://github.com/macros-app/macros"],
+            ["Report an issue", "https://github.com/macros-app/macros/issues"],
           ]}
         />
       </div>

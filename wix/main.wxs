@@ -53,8 +53,8 @@
     <!-- App icon used in Add/Remove Programs (only — see shortcut note below). -->
     <Icon Id="ProductICO" SourceFile="assets\brand\icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="ProductICO" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/kgwinnup/macros" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/kgwinnup/macros" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/macros-app/macros" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/macros-app/macros" />
     <!-- Note: ARPNOMODIFY is set by the WixUI_InstallDir dialog set, so we do
          not define it here (doing so triggers WIX0091 duplicate-symbol). -->
 

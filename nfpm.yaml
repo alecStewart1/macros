@@ -22,7 +22,7 @@ description: |
   Steel (an embeddable Scheme). Modal editing, LSP, tree-sitter highlighting,
   an embedded terminal, and a fully programmable runtime — at native speed.
 vendor: Likelihood LLC
-homepage: https://github.com/kgwinnup/macros
+homepage: https://github.com/macros-app/macros
 license: MIT
 
 contents:

@@ -14,7 +14,7 @@ This page gets you installed and oriented. When you're ready to make it yours, h
 Download a build for your platform from the [downloads page](/download), or build from source:
 
 ```sh
-git clone https://github.com/kgwinnup/macros
+git clone https://github.com/macros-app/macros
 cd macros
 cargo run --release
 ```

@@ -148,7 +148,8 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 ;; local logged-in `claude` via the claude-code-acp adapter (no API key). Prereq:
 ;; `npm install -g @zed-industries/claude-code-acp` then `claude /login`.
 (setenv "MACROS_AGENT" "claude")
-(package-install "https://github.com/macros-app/agent-shell.git")
+(package-install "https://github.com/macros-app/agent-shell.git"
+  'name "macros-agent-shell")          ; entry file: macros-agent-shell.scm
 (evil-leader-set "m a" 'agent-shell)   ; SPC m a — start / focus agent-shell
 
 ;; macros-k8s — a magit-style kubectl dashboard: foldable, color-coded sections
@@ -156,6 +157,7 @@ It's a working `~/.config/macros/init.scm` — a Doom/Spacemacs-style `evil-mode
 ;; / delete actions. Requires kubectl on PATH. The 'config thunk runs after the
 ;; package loads — here it makes `s` shell into pods with /bin/sh.
 (package-install "https://github.com/macros-app/k8s-dashboard.git"
+  'name "macros-k8s"                  ; entry file: macros-k8s.scm
   'config (lambda () (set-option "k8s-shell" "/bin/sh")))
 ;; Launch with M-x k8s-dashboard.
 ```
@@ -293,7 +295,8 @@ The last section pulls in two [packages](/docs/packages) with `package-install`,
 
 ```scheme
 (setenv "MACROS_AGENT" "claude")
-(package-install "https://github.com/macros-app/agent-shell.git")
+(package-install "https://github.com/macros-app/agent-shell.git"
+  'name "macros-agent-shell")          ; entry file: macros-agent-shell.scm
 (evil-leader-set "m a" 'agent-shell)   ; SPC m a — start / focus agent-shell
 ```
 
@@ -303,10 +306,11 @@ The second package takes a `'config` thunk — a `(lambda () …)` that runs *af
 
 ```scheme
 (package-install "https://github.com/macros-app/k8s-dashboard.git"
+  'name "macros-k8s"                  ; entry file: macros-k8s.scm
   'config (lambda () (set-option "k8s-shell" "/bin/sh")))
 ```
 
-`package-install` derives the package name (and default entry file) from the URL, so this one is `k8s-dashboard`, launched with <kbd>M-x</kbd> `k8s-dashboard`. When you're developing a package locally instead of installing from git, swap `package-install` for `package-install-local` and point it at the working tree — a path (a leading `~/` is expanded), no clone. See [Packages](/docs/packages) for `'ref` pinning, `'depends`, and the local workflow.
+`package-install` derives the package name — and from it the entry file, `<name>.scm` — from the URL, so a repo named `k8s-dashboard` would load `k8s-dashboard.scm`. This package's entry is `macros-k8s.scm`, so `'name "macros-k8s"` says so (agent-shell above does the same). Launch it with <kbd>M-x</kbd> `k8s-dashboard`. When you're developing a package locally instead of installing from git, swap `package-install` for `package-install-local` and point it at the working tree — a path (a leading `~/` is expanded), no clone. See [Packages](/docs/packages) for `'ref` pinning, `'depends`, and the local workflow.
 
 ## Where to go next
 
