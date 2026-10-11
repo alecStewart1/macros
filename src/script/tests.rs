@@ -7080,6 +7080,30 @@ mod gix_stash {
         let show = gix_show(d, "stash@{0}").unwrap();
         assert!(show.starts_with("commit "), "gix-show resolves stash@{{0}}");
 
+        // magit's stash picker gets the bare `stash@{N}` names from gix-stash-list,
+        // matching `git stash list --format=%gd`.
+        let (engine, _rx) = ScriptEngine::new();
+        for src in [
+            include_str!("../../scheme/core.scm"),
+            include_str!("../../scheme/lib-section.scm"),
+            include_str!("../../scheme/lib-transient.scm"),
+            include_str!("../../scheme/lib-async.scm"),
+            include_str!("../../scheme/magit.scm"),
+        ] {
+            engine.eval(src).unwrap();
+        }
+        engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
+        assert_eq!(
+            engine.eval("(magit-stash-refs)").unwrap().value.as_deref(),
+            Some(r#"("stash@{0}" "stash@{1}")"#)
+        );
+        // `--format=%gd` output, for parity with what this replaced.
+        let gd = git(&["stash", "list", "--format=%gd"]);
+        assert_eq!(
+            String::from_utf8_lossy(&gd.stdout),
+            "stash@{0}\nstash@{1}\n"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2079,6 +2079,14 @@ pub(crate) fn build_engine(
         reg.register_fn("gix-blame", |dir: String, file: String| -> Vec<String> {
             gix_blame(&dir, &file).unwrap_or_default()
         });
+        // `(gix-blame-text dir file)` → `git blame --date=short`-format text for
+        // `file` at HEAD, or "" when it differs from HEAD (caller falls back to git).
+        reg.register_fn("gix-blame-text", |dir: String, file: String| -> String {
+            gix_blame_text(&dir, &file).unwrap_or_default()
+        });
+        // `(gix-git-dir dir)` → absolute git dir (`git rev-parse --absolute-git-dir`),
+        // or "" outside a repo. Linked worktrees get their private git dir.
+        reg.register_fn("gix-git-dir", |dir: String| -> String { gix_git_dir(&dir) });
         // `(gix-branches dir)` / `(gix-remote-branches dir)` / `(gix-tags dir)`
         // → sorted short ref names, the native form of `git branch [-r]` / `git tag`.
         reg.register_fn("gix-branches", |dir: String| -> Vec<String> {

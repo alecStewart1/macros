@@ -177,11 +177,12 @@ libloading = "0.9"
 # magit historically shells out to `git`; these give magit native blame (which
 # porcelain `git status` can't express) and log with no subprocess. Curated
 # feature set: `blame` (+ `blob-diff`, which blame's rename detection needs),
-# `revision` for the HEAD rev-walk behind `gix-log`, and `sha1` so gix-hash's
+# `revision` for the HEAD rev-walk behind `gix-log`, `mailmap` so blame shows
+# `.mailmap`-resolved authors like `git blame` does, and `sha1` so gix-hash's
 # `Kind` object-id enum is non-empty (without a sha feature the whole crate
 # fails to compile). `max-performance-safe` pulls the pure-Rust `zlib-rs`
 # inflate — fast, and no system zlib/C toolchain required.
-gix = { version = "0.89.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "max-performance-safe"] }
+gix = { version = "0.89.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "mailmap", "max-performance-safe"] }
 
 # All unix: `libc::kill` for the process-group kill in `kill-process`. On
 # macOS additionally `libc::statfs` to detect a read-only volume (DMG / App

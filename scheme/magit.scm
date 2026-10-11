@@ -84,11 +84,6 @@
   (let ((root (gix-toplevel dir)))
     (if (equal? root "") dir root)))
 
-;; Non-empty lines of a git command's output.
-(define (git-lines args)
-  (filter (lambda (l) (not (equal? l "")))
-          (split-many (git args) "\n")))
-
 ;; Porcelain entry helpers: a line is "XY path" (X = index, Y = worktree).
 ;; A rename/copy entry's path field is "OLD -> NEW"; the helpers below split it
 ;; so git operations get real pathspecs rather than the literal arrow string.
@@ -1352,8 +1347,7 @@
         (message "Aborting: empty commit message")
         ;; Resolve the real git dir: in a linked worktree or submodule `.git` is
         ;; a FILE (`gitdir: …`), so `<repo>/.git/…` can't be written.
-        (let* ((gd (trim-end (call-process "git" (list "-C" *magit-dir* "rev-parse"
-                                                       "--absolute-git-dir"))))
+        (let* ((gd (gix-git-dir *magit-dir*))
                (file (path-join (if (equal? gd "") (path-join *magit-dir* ".git") gd)
                                 "MACROS_EDITMSG")))
           (write-file file msg)
@@ -1496,7 +1490,10 @@
 (define-command (magit-stash-push-msg) (read-string "Stash message: " 'magit-do-stash-msg))
 (define (magit-do-stash-msg m)
   (when (not (equal? (trim-end m) "")) (magit-do (list "stash" "push" "-m" m) "Stashed")))
-(define (magit-stash-refs) (git-lines (list "stash" "list" "--format=%gd")))
+;; "stash@{N}" names, newest first — the tag before the first ": " of each
+;; gix-stash-list line (the `stash@{N}` tag itself never contains one).
+(define (magit-stash-refs)
+  (map (lambda (l) (car (split-many l ": "))) (gix-stash-list *magit-dir*)))
 (define-command (magit-stash-pick)
   (helm (list (list "Pop stash" (magit-stash-refs) 'magit-do-stash-pop-ref))))
 (define (magit-do-stash-pop-ref r) (magit-do (list "stash" "pop" r) (string-append "Popped " r)))
@@ -1571,11 +1568,18 @@
         (lambda () (magit-do (list "revert" "--no-edit" h) (string-append "Reverted " h)))))))
 
 ;; Blame / log the file at point in the status buffer (read-only views).
+;; gix blames the file when it matches HEAD; a modified file falls back to git,
+;; which blames the working tree.
 (define (magit-blame)
   (let ((cur (magit-current)))
     (if cur
-        (render-buffer "*magit-blame*" "magit-log-mode"
-                       (git (list "blame" "--date=short" (magit-newpath (cadr cur)))) '())
+        (let* ((path (magit-newpath (cadr cur)))
+               (text (gix-blame-text *magit-dir* path)))
+          (render-buffer "*magit-blame*" "magit-log-mode"
+                         (if (equal? text "")
+                             (git (list "blame" "--date=short" "--" path))
+                             text)
+                         '()))
         (message "No file at point"))))
 (define (magit-log-file)
   (let ((cur (magit-current)))

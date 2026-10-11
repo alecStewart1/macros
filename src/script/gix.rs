@@ -105,19 +105,19 @@ pub(crate) fn gix_log(dir: &str, max: usize) -> Result<Vec<String>, Box<dyn std:
     Ok(rows)
 }
 
-/// `(gix-blame dir file)` backend: one row per line of `file` (absolute or
-/// relative to `dir`) as committed at HEAD, in file order:
-/// `"<1-based-line>\t<sha>\t<author>\t<author-epoch>\t<summary>"` (full 40-hex
-/// SHA, author time as Unix seconds — the fields magit's blame UI needs).
-///
-/// Alignment guard: gix blames HEAD's committed blob, but the buffer shows the
-/// *working-tree* file. The two only line up row-for-row when they're
-/// byte-identical, so when the on-disk file differs from HEAD (uncommitted
-/// edits) — or isn't tracked at HEAD — we return an empty list. magit treats
-/// that as "gix can't" and falls back to `git blame`, which blames the working
-/// tree (and marks uncommitted lines). This is the "gix where possible, git
-/// otherwise" boundary.
-pub(crate) fn gix_blame(dir: &str, file: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+/// Shared core of [`gix_blame`] / [`gix_blame_text`]: blame `file` (absolute,
+/// or relative to `dir`) at HEAD, returning the repo, the file's bytes, and the
+/// blame entries sorted by line. `None` when the alignment guard trips (file
+/// untracked at HEAD or differing from it) — the caller's cue to fall back to
+/// `git blame`.
+#[allow(clippy::type_complexity)]
+fn blame_head(
+    dir: &str,
+    file: &str,
+) -> Result<
+    Option<(gix::Repository, Vec<u8>, Vec<gix::blame::BlameEntry>)>,
+    Box<dyn std::error::Error>,
+> {
     use gix::bstr::BStr;
     let repo = gix::discover(dir)?;
     // Resolve `file` (absolute, or relative to `dir`) to a repo-root-relative
@@ -141,24 +141,45 @@ pub(crate) fn gix_blame(dir: &str, file: &str) -> Result<Vec<String>, Box<dyn st
     };
 
     // Bail to git unless the working-tree file matches HEAD's blob byte-for-byte.
-    let head_tree = repo.head_tree()?;
-    let Some(entry) = head_tree.lookup_entry_by_path(&rel)? else {
-        return Ok(Vec::new()); // not tracked at HEAD → let git handle it
+    let Some(entry) = repo.head_tree()?.lookup_entry_by_path(&rel)? else {
+        return Ok(None); // not tracked at HEAD → let git handle it
     };
-    if entry.object()?.data != std::fs::read(&abs)? {
-        return Ok(Vec::new()); // working tree differs from HEAD → fall back to git
+    let data = std::fs::read(&abs)?;
+    if entry.object()?.data != data {
+        return Ok(None); // working tree differs from HEAD → fall back to git
     }
+    drop(entry);
 
     let rel = rel.to_string_lossy();
     let head = repo.head_id()?.detach();
     let opts = gix::repository::blame_file::Options::default();
     let outcome = repo.blame_file(BStr::new(rel.as_bytes()), head, opts)?;
+    let mut entries = outcome.entries;
+    entries.sort_by_key(|e| e.start_in_blamed_file);
+    Ok(Some((repo, data, entries)))
+}
+
+/// `(gix-blame dir file)` backend: one row per line of `file` (absolute or
+/// relative to `dir`) as committed at HEAD, in file order:
+/// `"<1-based-line>\t<sha>\t<author>\t<author-epoch>\t<summary>"` (full 40-hex
+/// SHA, author time as Unix seconds — the fields magit's blame UI needs).
+///
+/// Alignment guard: gix blames HEAD's committed blob, but the buffer shows the
+/// *working-tree* file. The two only line up row-for-row when they're
+/// byte-identical, so when the on-disk file differs from HEAD (uncommitted
+/// edits) — or isn't tracked at HEAD — we return an empty list. magit treats
+/// that as "gix can't" and falls back to `git blame`, which blames the working
+/// tree (and marks uncommitted lines). This is the "gix where possible, git
+/// otherwise" boundary.
+pub(crate) fn gix_blame(dir: &str, file: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let Some((repo, _data, entries)) = blame_head(dir, file)? else {
+        return Ok(Vec::new());
+    };
 
     // Resolve each commit's "sha\tauthor\tepoch\tsummary" once — adjacent blame
     // hunks often share one.
     let mut cache: HashMap<gix::ObjectId, String> = HashMap::new();
-    let mut entries = outcome.entries;
-    entries.sort_by_key(|e| e.start_in_blamed_file);
+    let mailmap = repo.open_mailmap(); // git blame maps authors through .mailmap
     let mut rows = Vec::new();
     for entry in entries {
         let meta = match cache.get(&entry.commit_id) {
@@ -169,7 +190,7 @@ pub(crate) fn gix_blame(dir: &str, file: &str) -> Result<Vec<String>, Box<dyn st
                 let m = format!(
                     "{}\t{}\t{}\t{}",
                     entry.commit_id.to_hex(),
-                    author.name,
+                    mailmap.resolve(author).name,
                     author.seconds(),
                     commit.message()?.summary()
                 );
@@ -183,6 +204,85 @@ pub(crate) fn gix_blame(dir: &str, file: &str) -> Result<Vec<String>, Box<dyn st
         }
     }
     Ok(rows)
+}
+
+/// `(gix-blame-text dir file)` backend: `git blame --date=short`-format text
+/// for `file` at HEAD — `<hash> (<author> <YYYY-MM-DD> <line>) <content>`,
+/// author padded to the widest name and the line number right-aligned like
+/// git. Root commits get git's `^` boundary marker. Empty when the alignment
+/// guard trips (see [`blame_head`]); the caller falls back to `git blame`.
+pub(crate) fn gix_blame_text(dir: &str, file: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let Some((repo, data, entries)) = blame_head(dir, file)? else {
+        return Ok(String::new());
+    };
+    // Per commit: (is root, author, date in the author's own UTC offset — what
+    // `--date=short` prints).
+    let mut meta: HashMap<gix::ObjectId, (bool, String, String)> = HashMap::new();
+    // git's hash column: the longest unique abbreviation among the blamed
+    // commits (honouring `core.abbrev` / auto-scaling), plus one so a root
+    // commit's `^` boundary marker fits in the same width.
+    let mut abbrev = 0;
+    let mailmap = repo.open_mailmap(); // git blame maps authors through .mailmap
+    for entry in &entries {
+        if meta.contains_key(&entry.commit_id) {
+            continue;
+        }
+        let commit = repo.find_commit(entry.commit_id)?;
+        let author = commit.author()?;
+        let time = author.time()?;
+        let date = chrono::FixedOffset::east_opt(time.offset)
+            .and_then(|tz| {
+                chrono::DateTime::from_timestamp(time.seconds, 0).map(|dt| dt.with_timezone(&tz))
+            })
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        let is_root = commit.parent_ids().next().is_none();
+        abbrev = abbrev.max(commit.id().shorten_or_id().hex_len() + 1);
+        let name = mailmap.resolve(author).name.to_string();
+        meta.insert(entry.commit_id, (is_root, name, date));
+    }
+    let abbrev = abbrev.min(
+        entries
+            .first()
+            .map_or(40, |e| e.commit_id.kind().len_in_hex()),
+    );
+    let lines = diff_lines(&data);
+    let author_w = meta
+        .values()
+        .map(|m| m.1.chars().count())
+        .max()
+        .unwrap_or(0);
+    let line_w = lines.len().to_string().len();
+    let mut out = String::new();
+    for entry in &entries {
+        let (is_root, author, date) = &meta[&entry.commit_id];
+        let hash = if *is_root {
+            format!("^{}", entry.commit_id.to_hex_with_len(abbrev - 1))
+        } else {
+            entry.commit_id.to_hex_with_len(abbrev).to_string()
+        };
+        for i in 0..entry.len.get() {
+            let n = (entry.start_in_blamed_file + i) as usize;
+            let content = lines.get(n).copied().unwrap_or_default();
+            let content = String::from_utf8_lossy(content.strip_suffix(b"\n").unwrap_or(content));
+            out.push_str(&format!(
+                "{hash} ({author:<author_w$} {date} {:>line_w$}) {content}\n",
+                n + 1
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// `(gix-git-dir dir)` backend: the absolute git dir of the repo enclosing
+/// `dir` (`.git`, or `.git/worktrees/<name>` in a linked worktree), or "" when
+/// `dir` isn't in a repo. The native form of `git rev-parse --absolute-git-dir`.
+pub(crate) fn gix_git_dir(dir: &str) -> String {
+    gix::discover(dir)
+        .ok()
+        .and_then(|repo| std::path::absolute(repo.git_dir()).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Which ref category [`gix_ref_names`] lists — the `git branch` /
@@ -1547,5 +1647,112 @@ mod tests {
         assert_eq!(index_mode_str(Mode::SYMLINK), "120000");
         assert_eq!(index_mode_str(Mode::FILE_EXECUTABLE), "100755");
         assert_eq!(index_mode_str(Mode::FILE), "100644");
+    }
+
+    /// Run git with a hermetic config (no user/system settings like
+    /// `blame.showRoot` or `core.abbrev` leaking in) and return stdout.
+    fn git_out(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(env.iter().copied())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// `gix-blame-text` matches `git blame --date=short` byte-for-byte: root
+    /// boundary marker, author padding, the author's own timezone for the date,
+    /// right-aligned line numbers, `.mailmap`, and a final line with no newline.
+    #[test]
+    fn blame_text_matches_git() {
+        let root =
+            std::env::temp_dir().join(format!("macros-gix-blametext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git_out(&root, &[], &["init", "-q", "-b", "main"]);
+        let commit = |name: &str, date: &str, msg: &str| {
+            let env = [
+                ("GIT_AUTHOR_NAME", name),
+                ("GIT_AUTHOR_EMAIL", "a@a"),
+                ("GIT_AUTHOR_DATE", date),
+                ("GIT_COMMITTER_NAME", name),
+                ("GIT_COMMITTER_EMAIL", "a@a"),
+                ("GIT_COMMITTER_DATE", date),
+            ];
+            git_out(&root, &env, &["add", "-A"]);
+            git_out(&root, &env, &["commit", "-qm", msg]);
+        };
+        let body: String = (1..=11).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(root.join("f.txt"), &body).unwrap();
+        // 23:30 at -05:00 is already the next day in UTC: the date must be the
+        // author's local one.
+        commit("Al", "2024-03-01T23:30:00-05:00", "root");
+        let edited = body.replace("line 5\n", "five\n") + "tail";
+        std::fs::write(root.join("f.txt"), &edited).unwrap();
+        commit("Bartholomew", "2024-06-15T08:00:00+02:00", "edit");
+
+        // A committed .mailmap renames "Al" — git blame shows the mapped name.
+        std::fs::write(root.join(".mailmap"), "Alfred Mapped <a@a> Al <a@a>\n").unwrap();
+        commit("Bartholomew", "2024-06-16T08:00:00+02:00", "mailmap");
+
+        let d = root.to_str().unwrap();
+        let want = git_out(&root, &[], &["blame", "--date=short", "--", "f.txt"]);
+        assert!(want.contains("Alfred Mapped"), "{want}");
+        assert_eq!(gix_blame_text(d, "f.txt").unwrap(), want);
+        assert!(gix_blame(d, "f.txt").unwrap()[0].contains("\tAlfred Mapped\t"));
+
+        // Modified file → "" so magit falls back to git's working-tree blame.
+        std::fs::write(root.join("f.txt"), "dirty\n").unwrap();
+        assert_eq!(gix_blame_text(d, "f.txt").unwrap(), "");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `gix-git-dir` matches `git rev-parse --absolute-git-dir`, including from a
+    /// subdirectory and in a linked worktree (where `.git` is a file).
+    #[test]
+    fn git_dir_matches_rev_parse() {
+        let root = fresh_repo("gitdir");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("f.txt"), "x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let wt = root.with_file_name(format!("macros-gix-gitdir-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        git(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wt"],
+        );
+
+        let canon = |p: &str| std::fs::canonicalize(p.trim_end()).unwrap();
+        for dir in [root.clone(), root.join("sub"), wt.clone()] {
+            let want = git_out(&dir, &[], &["rev-parse", "--absolute-git-dir"]);
+            let got = gix_git_dir(dir.to_str().unwrap());
+            assert!(std::path::Path::new(&got).is_absolute(), "{got}");
+            assert_eq!(canon(&got), canon(&want), "{dir:?}");
+        }
+        assert!(gix_git_dir(wt.to_str().unwrap()).contains("worktrees"));
+        let outside = std::env::temp_dir().join(format!("macros-gix-nogit-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        // temp_dir itself could sit inside a repo on odd setups; only assert
+        // when git agrees there is none.
+        let in_repo = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&outside)
+            .args(["rev-parse", "--git-dir"])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        if !in_repo {
+            assert_eq!(gix_git_dir(outside.to_str().unwrap()), "");
+        }
+        let _ = std::fs::remove_dir_all(&wt);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
