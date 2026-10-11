@@ -23,7 +23,9 @@
 ;;   (secret-forget "db.example.com" "alice" "5432")
 ;;
 ;; which deletes it, and the next `secret-get` prompts again.
-;; A password you choose NOT to save is still remembered for the session.
+;; A password you choose NOT to save (or that fails to save — gpg missing,
+;; passphrase prompt cancelled) is still remembered for the session. If gpg
+;; can't run at all, a miss just prompts and remembers (no save offer).
 ;;
 ;; Config can name a secret instead of writing it out: called WITHOUT a
 ;; callback, `secret-get` returns a reference that `set-option` stores as-is:
@@ -87,6 +89,13 @@
     (lambda (_) (message "secret-get: the callback failed"))
     (thunk)))
 
+;; "authinfo: <what><err>", plus how to fix it when gpg itself couldn't be run.
+(define (secrets--error err . what)
+  (string-append "authinfo: " (if (null? what) "" (car what)) err
+                 (if (starts-with? err "can't run")
+                     " (install gpg, e.g. `brew install gnupg`, or set the gpg-command option)"
+                     "")))
+
 ;; ── request queue ─────────────────────────────────────────────────────────────
 ;; Each job is (lambda (done) …) and calls `done` exactly once when it's over
 ;; (answered or cancelled); the next job starts then.
@@ -108,19 +117,25 @@
 ;; ── unlock / create ───────────────────────────────────────────────────────────
 ;; Call `k` once the store is usable: already unlocked, or no file yet (nothing
 ;; to unlock — it's created on the first save). Else prompt for the passphrase,
-;; with up to `tries` attempts; `cancel` runs if the user gives up.
-(define (secrets--ensure-unlocked k cancel)
+;; with up to `tries` attempts; `cancel` runs if the user gives up. If gpg
+;; can't be run at all there's no point re-asking: `unusable` (default:
+;; `cancel`) runs instead, so a caller can carry on without the store.
+(define (secrets--ensure-unlocked k cancel . unusable)
   (cond ((authinfo-unlocked?) (k))
         ((not (file-exists? (secrets-file))) (k))
-        (else (secrets--prompt-unlock "" k cancel 3))))
+        (else (secrets--prompt-unlock "" k cancel
+                                      (if (null? unusable) cancel (car unusable))
+                                      3))))
 
-(define (secrets--prompt-unlock note k cancel tries)
+(define (secrets--prompt-unlock note k cancel unusable tries)
   (read-passwd (string-append note "authinfo.gpg passphrase: ")
     (lambda (pass)
       (let ((err (authinfo-unlock (secrets-file) (secrets--gpg) pass)))
         (cond ((equal? err "") (k))
-              ((> tries 1) (secrets--prompt-unlock (string-append "(" err ") ") k cancel (- tries 1)))
-              (else (message (string-append "authinfo: " err)) (cancel)))))
+              ((starts-with? err "can't run") (message (secrets--error err)) (unusable))
+              ((> tries 1)
+               (secrets--prompt-unlock (string-append "(" err ") ") k cancel unusable (- tries 1)))
+              (else (message (secrets--error err)) (cancel)))))
     (lambda (_) (cancel))))
 
 ;; Make sure there's a store to save into: unlock an existing file, or create a
@@ -133,7 +148,7 @@
           (let ((err (authinfo-unlock (secrets-file) (secrets--gpg) pass)))
             (if (equal? err "")
                 (k)
-                (begin (message (string-append "authinfo: " err)) (cancel)))))
+                (begin (message (secrets--error err)) (cancel)))))
         cancel
         "New authinfo.gpg passphrase: ")))
 
@@ -150,11 +165,15 @@
     (lambda (_) (cancel))))
 
 ;; ── save ──────────────────────────────────────────────────────────────────────
+;; Save to the store; if that fails, remember it for the session instead, so
+;; the password still works until quit.
 (define (secrets--save host user port pw)
   (let ((err (authinfo-save host user port pw)))
-    (message (if (equal? err "")
-                 (string-append "authinfo: saved " (secrets--label host user port))
-                 (string-append "authinfo: save failed — " err)))))
+    (if (equal? err "")
+        (message (string-append "authinfo: saved " (secrets--label host user port)))
+        (begin
+          (authinfo-remember host user port pw)
+          (message (secrets--error err "save failed, kept for this session only — "))))))
 
 ;; Ask whether to save a freshly typed password, then `k`. Sticky, so the
 ;; answer always arrives (an aborted prompt would never call back).
@@ -166,7 +185,7 @@
         (if (equal? answer "yes")
             (secrets--ensure-store
               (lambda () (secrets--save host user port pw) (k))
-              k)
+              (lambda () (authinfo-remember host user port pw) (k)))
             (begin (authinfo-remember host user port pw) (k)))))))
 
 ;; ── public API ────────────────────────────────────────────────────────────────
@@ -195,19 +214,23 @@
               (deliver (lambda (pw)
                          (secrets--safely (lambda () (callback pw)))
                          (done))))
-          (let ((known (authinfo-lookup host user port)))   ; session memory works locked
+          (let ((known (authinfo-lookup host user port))   ; session memory works locked
+                ;; Prompt for the password; offer to save it only if the store works.
+                (ask (lambda (offer?)
+                       (read-passwd prompt
+                         (lambda (pw)
+                           (if offer?
+                               (secrets--offer-save host user port pw (lambda () (deliver pw)))
+                               (begin (authinfo-remember host user port pw) (deliver pw))))
+                         (lambda (_) (cancel))))))
             (if known
                 (deliver known)
                 (secrets--ensure-unlocked
                   (lambda ()
                     (let ((stored (authinfo-lookup host user port)))
-                      (if stored
-                          (deliver stored)
-                          (read-passwd prompt
-                            (lambda (pw)
-                              (secrets--offer-save host user port pw (lambda () (deliver pw))))
-                            (lambda (_) (cancel))))))
-                  cancel))))))))
+                      (if stored (deliver stored) (ask #t))))
+                  cancel
+                  (lambda () (ask #f))))))))))   ; gpg can't run: session only
 
 ;; (secret-lookup host user [port]) → the password, or #f. Never prompts: only
 ;; the unlocked store and this session's unsaved passwords are consulted.
@@ -220,7 +243,7 @@
 ;; cleared, and the file's copy goes when it next fails while unlocked.
 (define (secret-forget host user . rest)
   (let ((err (authinfo-forget host user (if (null? rest) "" (car rest)))))
-    (unless (equal? err "") (message (string-append "authinfo: " err)))))
+    (unless (equal? err "") (message (secrets--error err)))))
 
 ;; (option-ensure name k ['on-cancel proc]) — run `k` once option `name` can
 ;; be read. A plain option (or an unset one) runs `k` right away; one set to a
@@ -294,7 +317,7 @@
                   (let ((err (authinfo-change-passphrase pass)))
                     (message (if (equal? err "")
                                  "authinfo: passphrase changed"
-                                 (string-append "authinfo: " err))))
+                                 (secrets--error err))))
                   (done))
                 done
                 "New authinfo.gpg passphrase: "))

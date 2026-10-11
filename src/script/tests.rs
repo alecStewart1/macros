@@ -11806,6 +11806,132 @@ mod secret_options {
         assert_eq!(val(&e, "ran"), "10");
     }
 
+    /// Answering "yes" to the save offer when the save can't happen (gpg not
+    /// runnable, or the new-passphrase prompt cancelled) still keeps the value
+    /// for the session and runs the gated thunk — `get-option` then answers.
+    #[test]
+    fn option_ensure_keeps_value_when_save_fails() {
+        let e = engine();
+        // As `with_ref`, plus a gpg that can't be run.
+        let missing = std::env::temp_dir().join(format!("no-authinfo-{}.gpg", std::process::id()));
+        let mut opts = HashMap::new();
+        opts.insert("psql-url".to_string(), secret_ref("psql-url-1", "kyle"));
+        opts.insert(
+            "authinfo-file".to_string(),
+            OptionValue::Str(missing.to_string_lossy().into_owned()),
+        );
+        opts.insert(
+            "gpg-command".to_string(),
+            OptionValue::Str("/nonexistent/gpg".into()),
+        );
+        e.set_options(opts);
+        e.eval("(define ran 0)").unwrap();
+        let ensure = r#"(option-ensure "psql-url" (lambda () (set! ran (+ ran 1))))"#;
+
+        let passwd = |cmds: &[EditorCommand]| -> (String, String, String) {
+            cmds.iter()
+                .find_map(|c| match c {
+                    EditorCommand::ReadPasswd {
+                        prompt,
+                        callback,
+                        on_cancel,
+                    } => Some((
+                        prompt.clone(),
+                        callback.clone(),
+                        on_cancel.clone().unwrap_or_default(),
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected ReadPasswd in {cmds:?}"))
+        };
+        let yes_no = |cmds: &[EditorCommand]| -> String {
+            cmds.iter()
+                .find_map(|c| match c {
+                    EditorCommand::YesOrNo { callback, .. } => Some(callback.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected YesOrNo in {cmds:?}"))
+        };
+        let message = |cmds: &[EditorCommand]| -> String {
+            cmds.iter()
+                .find_map(|c| match c {
+                    EditorCommand::Message(m) => Some(m.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+
+        // 1. Save fails (gpg can't run): kept for the session, hint shown.
+        let (_, cb, _) = passwd(&e.eval(ensure).unwrap().commands);
+        let yes = yes_no(&e.call_action(&cb, Some("postgres://one")));
+        let (prompt, cb, _) = passwd(&e.call_action(&yes, Some("yes")));
+        assert_eq!(prompt, "New authinfo.gpg passphrase: ");
+        let (_, cb2, _) = passwd(&e.call_action(&cb, Some("master")));
+        let done = e.call_action(&cb2, Some("master"));
+        let m = message(&done);
+        assert!(
+            m.contains("save failed")
+                && m.contains("can't run")
+                && m.contains("gpg-command")
+                && !m.contains("postgres://one"),
+            "{m}"
+        );
+        assert_eq!(val(&e, "ran"), "1");
+        assert_eq!(val(&e, r#"(get-option "psql-url")"#), r#""postgres://one""#);
+
+        // 2. Cancelling the new-passphrase prompt: also kept for the session.
+        e.eval(r#"(authinfo-lock) (option-secret-forget "psql-url")"#)
+            .unwrap();
+        assert_eq!(val(&e, r#"(get-option "psql-url")"#), "#false");
+        let (_, cb, _) = passwd(&e.eval(ensure).unwrap().commands);
+        let yes = yes_no(&e.call_action(&cb, Some("postgres://two")));
+        let (_, _, cancel) = passwd(&e.call_action(&yes, Some("yes")));
+        e.call_action(&cancel, Some(""));
+        assert_eq!(val(&e, "ran"), "2");
+        assert_eq!(val(&e, r#"(get-option "psql-url")"#), r#""postgres://two""#);
+
+        // 3. An authinfo.gpg exists but gpg can't run: one passphrase try (no
+        //    re-asking), then the value prompt, kept for the session without
+        //    a save offer.
+        let file = std::env::temp_dir().join(format!(
+            "unreadable-authinfo-{}-{:?}.gpg",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&file, "not really encrypted").unwrap();
+        e.eval("(authinfo-lock)").unwrap();
+        let mut opts = HashMap::new();
+        opts.insert("psql-url".to_string(), secret_ref("psql-url-1", "kyle"));
+        opts.insert(
+            "authinfo-file".to_string(),
+            OptionValue::Str(file.to_string_lossy().into_owned()),
+        );
+        opts.insert(
+            "gpg-command".to_string(),
+            OptionValue::Str("/nonexistent/gpg".into()),
+        );
+        e.set_options(opts);
+        let (prompt, cb, _) = passwd(&e.eval(ensure).unwrap().commands);
+        assert_eq!(prompt, "authinfo.gpg passphrase: ");
+        let after = e.call_action(&cb, Some("master"));
+        assert!(message(&after).contains("gpg-command"), "{after:?}");
+        let (prompt, cb, _) = passwd(&after);
+        assert_eq!(prompt, "psql-url (kyle@psql-url-1): ");
+        let done = e.call_action(&cb, Some("postgres://three"));
+        assert!(
+            !done
+                .iter()
+                .any(|c| matches!(c, EditorCommand::YesOrNo { .. })),
+            "no save offer when gpg can't run: {done:?}"
+        );
+        std::fs::remove_file(&file).ok();
+        assert_eq!(val(&e, "ran"), "3");
+        assert_eq!(
+            val(&e, r#"(get-option "psql-url")"#),
+            r#""postgres://three""#
+        );
+    }
+
     #[test]
     fn url_decode() {
         let e = engine();
