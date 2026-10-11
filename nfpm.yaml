@@ -60,38 +60,33 @@ scripts:
 
 # Debian and Fedora ship the same upstream libraries under different package
 # names. Keep these two lists in sync whenever a new runtime dep is added.
-# These mirror gpui's Linux backend requirements (Wayland/X11 + xkbcommon,
-# fontconfig/freetype for text, and Vulkan for the GPU renderer).
+# Derived from the release binary, not gpui's docs: `objdump -p` shows it
+# links only freetype, xcb and xkbcommon (+x11); it `dlopen`s
+# libwayland-client and libvulkan at startup (`strings | grep '\.so'`).
+# fontconfig isn't loaded, but its package brings /etc/fonts and a base font
+# set for fallback glyphs. A Vulkan driver is required to draw anything; it's
+# a recommend, not a hard dep, so NVIDIA's proprietary ICD can stand in for
+# Mesa's.
 overrides:
   deb:
     depends:
-      - libxkbcommon-x11-0
       - libxkbcommon0
-      - libwayland-client0
-      - libwayland-cursor0
-      - libwayland-egl1
+      - libxkbcommon-x11-0
       - libxcb1
-      - libfontconfig1
+      - libwayland-client0
       - libfreetype6
-      - libasound2
-      - libgl1
-      - libegl1
-      - libgbm1
+      - libfontconfig1
       - libvulkan1
-      - libssl3
+    recommends:
+      - mesa-vulkan-drivers
   rpm:
     depends:
-      - libxkbcommon-x11
       - libxkbcommon
-      - libwayland-client
-      - libwayland-cursor
-      - libwayland-egl
+      - libxkbcommon-x11
       - libxcb
-      - fontconfig
+      - libwayland-client
       - freetype
-      - alsa-lib
-      - mesa-libGL
-      - mesa-libEGL
-      - mesa-libgbm
+      - fontconfig
       - vulkan-loader
-      - openssl-libs
+    recommends:
+      - mesa-vulkan-drivers

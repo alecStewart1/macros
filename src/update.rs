@@ -404,9 +404,11 @@ pub(crate) fn open_url(url: &str) -> Result<(), String> {
         c.arg(url);
         c
     };
-    cmd.spawn()
-        .map(|_| ())
-        .map_err(|e| format!("opening {url}: {e}"))
+    let mut child = cmd.spawn().map_err(|e| format!("opening {url}: {e}"))?;
+    // The opener hands off to the browser and exits; reap it so it doesn't
+    // linger as a zombie for the rest of the session.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 // ── Once-per-day gate ────────────────────────────────────────────────────────

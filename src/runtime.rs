@@ -194,7 +194,17 @@ pub fn theme_script(name: &str) -> Option<&'static str> {
 /// may be reading the environment).
 #[cfg(unix)]
 pub fn import_shell_env() {
-    use std::io::IsTerminal;
+    use std::io::{IsTerminal, Read};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    // Long enough for a heavy rc file; short enough that one which blocks
+    // (waits on a network mount, a prompt, …) can't hang the launch.
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    // Bracket the value so whatever else the rc files print (banners, MOTDs,
+    // "nvm is out of date") can't leak into `PATH`.
+    const START: &str = "__MACROS_PATH_START__";
+    const END: &str = "__MACROS_PATH_END__";
 
     // Launched from a terminal? Then we already inherited a real shell `PATH`;
     // skip the ~50-150ms subshell cost.
@@ -205,26 +215,57 @@ pub fn import_shell_env() {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     // `-l -i` so login + interactive rc files run — nvm/pyenv/asdf typically
     // inject `PATH` from `.zshrc`/`.bashrc` (interactive), not just profile.
-    // `output()` feeds the child a null stdin, so an interactive shell can't
-    // block waiting for input.
-    let Ok(out) = std::process::Command::new(&shell)
+    // A null stdin means an interactive shell can't block waiting for input.
+    let Ok(mut child) = Command::new(&shell)
         .args([
             "-l",
             "-i",
             "-c",
-            "command -v printf >/dev/null && printf %s \"$PATH\"",
+            &format!("command -v printf >/dev/null && printf '{START}%s{END}' \"$PATH\""),
         ])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
     else {
         return;
     };
-    if !out.status.success() {
-        return;
+    // Read on a helper thread so the wait can time out. It only touches the
+    // pipe, never the environment. It stops at the end marker rather than EOF:
+    // a daemon the rc files started (ssh-agent, …) can hold the pipe open
+    // long after the shell exits. On timeout it's abandoned.
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut chunk = [0; 4096];
+        while let Ok(n @ 1..) = stdout.read(&mut chunk) {
+            out.extend_from_slice(&chunk[..n]);
+            if out.windows(END.len()).any(|w| w == END.as_bytes()) {
+                break;
+            }
+        }
+        let _ = tx.send(out);
+    });
+    let out = rx.recv_timeout(TIMEOUT);
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    let path = String::from_utf8_lossy(&out.stdout);
-    let path = path.trim();
+    let Ok(out) = out else {
+        return;
+    };
+    let out = String::from_utf8_lossy(&out);
+    let Some(path) = out
+        .split_once(START)
+        .and_then(|(_, rest)| rest.split_once(END))
+        .map(|(path, _)| path.trim())
+    else {
+        return;
+    };
     if !path.is_empty() {
-        // SAFETY: called before any threads are spawned (top of `main`).
+        // SAFETY: called at the top of `main`, before any thread that could
+        // read the environment exists (the reader above only reads a pipe).
         unsafe { std::env::set_var("PATH", path) };
     }
 }

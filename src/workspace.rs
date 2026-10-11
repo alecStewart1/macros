@@ -61,6 +61,186 @@ fn caption_buttons(window: &Window, fg: gpui::Hsla) -> impl IntoElement {
         ))
 }
 
+/// Room on the title bar's left for the macOS traffic lights; a plain margin
+/// on platforms whose window buttons sit at the right.
+const TITLE_LEFT_INSET: gpui::Pixels = px(if cfg!(target_os = "macos") { 72. } else { 8. });
+
+/// Width of each Linux caption button that `linux_caption_buttons` draws.
+const LINUX_CAPTION_BUTTON_WIDTH: gpui::Pixels = px(36.);
+
+/// Thickness of the invisible border around a client-decorated (Linux)
+/// window that grabs the mouse for resizing. Also the room the drop shadow
+/// paints into, so it's dropped on edges the compositor has tiled.
+const RESIZE_BORDER: gpui::Pixels = px(8.);
+
+/// Minimize / maximize-restore / close for Linux when we draw the window
+/// decorations ourselves (see `main.rs`). Linux has no hit-test hook like
+/// Windows' `WM_NCHITTEST`, so each button acts on a click. Wayland reports
+/// which controls the compositor supports; close is always offered.
+fn linux_caption_buttons(
+    window: &Window,
+    fg: gpui::Hsla,
+    cx: &mut Context<Workspace>,
+) -> (gpui::Pixels, gpui::AnyElement) {
+    let controls = window.window_controls();
+    let max_icon = if window.is_maximized() {
+        "icons/copy.svg"
+    } else {
+        "icons/square.svg"
+    };
+    let button =
+        |id: &'static str, icon: &'static str, hover_bg: gpui::Hsla, hover_fg: gpui::Hsla| {
+            div()
+                .id(id)
+                .w(LINUX_CAPTION_BUTTON_WIDTH)
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .group(id)
+                .hover(move |style| style.bg(hover_bg))
+                .child(
+                    gpui::svg()
+                        .path(icon)
+                        .size(px(14.))
+                        .text_color(fg)
+                        .group_hover(id, move |style| style.text_color(hover_fg)),
+                )
+        };
+    let hover = fg.opacity(0.12);
+    let mut row = div()
+        .occlude()
+        .absolute()
+        .right_0()
+        .top_0()
+        .h_full()
+        .flex()
+        .flex_row();
+    let mut count = 1.;
+    if controls.minimize {
+        count += 1.;
+        row = row.child(
+            button("caption-minimize", "icons/minus.svg", hover, fg)
+                .on_click(|_, window, _| window.minimize_window()),
+        );
+    }
+    if controls.maximize {
+        count += 1.;
+        row = row.child(
+            button("caption-maximize", max_icon, hover, fg)
+                .on_click(|_, window, _| window.zoom_window()),
+        );
+    }
+    row = row.child(
+        button(
+            "caption-close",
+            "icons/x.svg",
+            gpui::rgb(0xc42b1c).into(),
+            gpui::white(),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            if this.should_close_window(cx) {
+                window.remove_window();
+            }
+        })),
+    );
+    (LINUX_CAPTION_BUTTON_WIDTH * count, row.into_any_element())
+}
+
+/// Which resize edge (if any) of a client-decorated window `pos` falls on.
+/// Tiled edges sit flush against the screen or a neighbor, carry no border,
+/// and never resize.
+fn resize_edge(
+    pos: gpui::Point<gpui::Pixels>,
+    size: gpui::Size<gpui::Pixels>,
+    tiling: gpui::Tiling,
+) -> Option<gpui::ResizeEdge> {
+    use gpui::ResizeEdge;
+    let top = !tiling.top && pos.y < RESIZE_BORDER;
+    let bottom = !tiling.bottom && pos.y > size.height - RESIZE_BORDER;
+    let left = !tiling.left && pos.x < RESIZE_BORDER;
+    let right = !tiling.right && pos.x > size.width - RESIZE_BORDER;
+    Some(match (top, bottom, left, right) {
+        (true, _, true, _) => ResizeEdge::TopLeft,
+        (true, _, _, true) => ResizeEdge::TopRight,
+        (_, true, true, _) => ResizeEdge::BottomLeft,
+        (_, true, _, true) => ResizeEdge::BottomRight,
+        (true, ..) => ResizeEdge::Top,
+        (_, true, ..) => ResizeEdge::Bottom,
+        (.., true, _) => ResizeEdge::Left,
+        (.., true) => ResizeEdge::Right,
+        _ => return None,
+    })
+}
+
+/// Wrap the workspace in the invisible resize border and drop shadow a
+/// client-decorated (Linux) window draws for itself. The border is
+/// transparent window surface; `set_client_inset` tells the compositor it
+/// isn't part of the window proper (for snapping and the input region).
+fn client_frame(
+    content: gpui::Div,
+    tiling: gpui::Tiling,
+    edge_color: gpui::Hsla,
+    window: &mut Window,
+) -> gpui::AnyElement {
+    window.set_client_inset(RESIZE_BORDER);
+    // Paint the resize cursor while the mouse is over the border.
+    let cursor = gpui::canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            let Some(edge) = resize_edge(window.mouse_position(), window.viewport_size(), tiling)
+            else {
+                return;
+            };
+            use gpui::{CursorStyle, ResizeEdge};
+            let style = match edge {
+                ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
+                ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
+                ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+                ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+            };
+            window.set_cursor_style(style, &hitbox);
+        },
+    )
+    .absolute()
+    .size_full();
+
+    let content = content
+        .border_color(edge_color)
+        .when(!tiling.top, |d| d.border_t_1())
+        .when(!tiling.bottom, |d| d.border_b_1())
+        .when(!tiling.left, |d| d.border_l_1())
+        .when(!tiling.right, |d| d.border_r_1())
+        .when(!tiling.is_tiled(), |d| {
+            d.shadow(vec![gpui::BoxShadow {
+                color: gpui::black().opacity(0.4),
+                blur_radius: RESIZE_BORDER / 2.,
+                spread_radius: px(0.),
+                offset: gpui::point(px(0.), px(0.)),
+            }])
+        })
+        // Moves over the content needn't repaint the border cursor below.
+        .on_mouse_move(|_, _, cx| cx.stop_propagation());
+
+    div()
+        .id("window-frame")
+        .size_full()
+        .when(!tiling.top, |d| d.pt(RESIZE_BORDER))
+        .when(!tiling.bottom, |d| d.pb(RESIZE_BORDER))
+        .when(!tiling.left, |d| d.pl(RESIZE_BORDER))
+        .when(!tiling.right, |d| d.pr(RESIZE_BORDER))
+        .child(cursor)
+        // Re-run the cursor canvas as the mouse crosses the border.
+        .on_mouse_move(|_, window, _| window.refresh())
+        .on_mouse_down(gpui::MouseButton::Left, move |e, window, _| {
+            if let Some(edge) = resize_edge(e.position, window.viewport_size(), tiling) {
+                window.start_window_resize(edge);
+            }
+        })
+        .child(content)
+        .into_any_element()
+}
+
 /// The echo-area row beneath the minibuffer/mode line: a full-width line that
 /// wraps long messages (LSP diagnostics, completion hints) instead of clipping
 /// them at the window edge, capped at a few lines so it can't swallow the
@@ -262,6 +442,11 @@ pub struct Workspace {
     /// Set by the launch-time update check; rendered as a pill on the right of
     /// the title bar that the user clicks to download, then restart.
     update_status: Option<UpdateStatus>,
+    /// Linux client decorations: the left button went down on the title bar
+    /// and hasn't moved yet. The window move starts on the first drag motion
+    /// rather than the press, since handing the pointer to the compositor
+    /// swallows the release — and with it, double-click-to-maximize.
+    title_drag_pending: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl Workspace {
@@ -272,6 +457,7 @@ impl Workspace {
         Self {
             editor,
             update_status: None,
+            title_drag_pending: Default::default(),
         }
     }
 
@@ -438,7 +624,7 @@ impl Workspace {
 
     /// The OS close button on this window while other windows stay open and
     /// this one has unsaved buffers: prompt, then close only this window.
-    pub fn confirm_close_window(&self, cx: &mut Context<Self>) -> bool {
+    fn confirm_close_window(&self, cx: &mut Context<Self>) -> bool {
         self.editor
             .update(cx, |editor, cx| editor.confirm_close_window(cx))
     }
@@ -448,6 +634,23 @@ impl Workspace {
     /// routing a dirty one through the save prompt.
     pub fn has_unsaved_buffers(&self, cx: &App) -> bool {
         self.editor.read(cx).any_modified()
+    }
+
+    /// A request to close this window — the OS close button, or our own on
+    /// Linux. Returns whether the window may close right now. Unsaved buffers
+    /// get the same save/cancel prompt as C-x C-c. The last window closing
+    /// quits the app (`confirm_quit` — prompting across every window, then
+    /// `cx.quit()`). With another window still open, only this window closes:
+    /// straight away when clean, or after the save/discard prompt when dirty —
+    /// never quitting the app and discarding the other windows' edits.
+    pub fn should_close_window(&self, cx: &mut Context<Self>) -> bool {
+        if workspace_window_count(cx) <= 1 {
+            return self.confirm_quit(cx);
+        }
+        if !self.has_unsaved_buffers(cx) {
+            return true;
+        }
+        self.confirm_close_window(cx)
     }
 
     /// The transient popup (magit-style command menu): a titled grid of
@@ -877,7 +1080,7 @@ impl Workspace {
         div()
             .occlude()
             .absolute()
-            .left(px(80.))
+            .left(TITLE_LEFT_INSET + px(8.))
             .top_0()
             .h_full()
             .flex()
@@ -1093,7 +1296,7 @@ impl Workspace {
             .occlude()
             .absolute()
             .top(px(30.))
-            .left(px(80.))
+            .left(TITLE_LEFT_INSET + px(8.))
             .child(panel)
             .into_any_element();
         (backdrop, menu)
@@ -1136,15 +1339,90 @@ impl Render for Workspace {
             self.render_status_line(colors, cx)
         };
 
+        // Linux only: `Client` means we draw the window decorations (title
+        // bar, caption buttons, resize border); `Server` means the compositor
+        // fell back to drawing its own title bar. Always `Server` elsewhere.
+        let client_tiling = match window.window_decorations() {
+            gpui::Decorations::Client { tiling } => Some(tiling),
+            gpui::Decorations::Server => None,
+        };
+        let system_title_bar =
+            cfg!(any(target_os = "linux", target_os = "freebsd")) && client_tiling.is_none();
+
         // Custom title-bar strip. The system title bar is transparent (see
         // `main.rs`), so we paint this ourselves in the theme's `title-bar-bg`
         // and leave room on the left for the macOS traffic lights. The centered
         // title lives on a draggable layer; the update pill (if any) floats on
         // the right, above and outside that drag area so it stays clickable.
+        // Under a Linux system title bar the strip carries only the pill and
+        // perspectives dropdown, and is dropped when it has neither.
         let theme = cx.global::<Theme>();
         let title_bar_bg = theme.title_bar_bg();
         let title_bar_fg = theme.title_bar_fg();
         let title: SharedString = format!("Macros — {}", self.editor.read(cx).buffer_name()).into();
+        let update_pill = self.render_update_pill(cx);
+        let caption = if cfg!(target_os = "windows") {
+            Some((
+                CAPTION_BUTTONS_WIDTH,
+                caption_buttons(window, title_bar_fg).into_any_element(),
+            ))
+        } else if client_tiling.is_some() {
+            Some(linux_caption_buttons(window, title_bar_fg, cx))
+        } else {
+            None
+        };
+        // Keep the title centered, clear of whatever sits at either edge.
+        let title_inset = px(72.).max(caption.as_ref().map_or(px(0.), |(w, _)| *w));
+        let mut drag_layer = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .pl(title_inset)
+            .pr(title_inset)
+            .window_control_area(gpui::WindowControlArea::Drag);
+        if !system_title_bar {
+            drag_layer = drag_layer.child(title);
+        }
+        if client_tiling.is_some() {
+            // Linux has no hit-testing for `WindowControlArea::Drag`, so drive
+            // the compositor's move / maximize / window menu from mouse events.
+            let pending = self.title_drag_pending.clone();
+            // The motion that starts the move is watched window-wide: a quick
+            // flick can leave the title bar before the first move event lands.
+            let watch_drag = gpui::canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let on_move = pending.clone();
+                    window.on_mouse_event(move |e: &gpui::MouseMoveEvent, phase, window, _| {
+                        if phase == gpui::DispatchPhase::Capture && on_move.get() {
+                            on_move.set(false);
+                            if e.dragging() {
+                                window.start_window_move();
+                            }
+                        }
+                    });
+                    let on_up = pending.clone();
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, _| on_up.set(false));
+                },
+            )
+            .absolute()
+            .size_full();
+            let pending = self.title_drag_pending.clone();
+            drag_layer = drag_layer
+                .child(watch_drag)
+                .on_mouse_down(gpui::MouseButton::Left, move |e, window, _| {
+                    pending.set(e.click_count < 2);
+                    if e.click_count >= 2 {
+                        window.zoom_window();
+                    }
+                })
+                .on_mouse_down(gpui::MouseButton::Right, |e, window, _| {
+                    window.show_window_menu(e.position)
+                });
+        }
         let mut title_bar = div()
             .w_full()
             .h(px(28.))
@@ -1153,26 +1431,13 @@ impl Render for Workspace {
             .bg(title_bar_bg)
             .text_color(title_bar_fg)
             .text_size(px(13.))
-            .child(
-                // The draggable layer: the centered title, with room for the
-                // macOS traffic lights at the top-left.
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .pl(px(72.))
-                    .pr(px(72.))
-                    .window_control_area(gpui::WindowControlArea::Drag)
-                    .child(title),
-            );
-        if let Some(pill) = self.render_update_pill(cx) {
+            .child(drag_layer);
+        let title_bar_has_content = update_pill.is_some() || titlebar_dropdown.is_some();
+        if let Some(pill) = update_pill {
             title_bar = title_bar.child(pill);
         }
-        if cfg!(target_os = "windows") {
-            title_bar = title_bar.child(caption_buttons(window, title_bar_fg));
+        if let Some((_, buttons)) = caption {
+            title_bar = title_bar.child(buttons);
         }
         // The perspectives dropdown trigger floats left of the centered title,
         // just past the traffic lights (the same layering as the update pill).
@@ -1190,7 +1455,9 @@ impl Render for Workspace {
             .relative()
             .bg(background)
             .font_family(font_family)
-            .child(title_bar)
+            .when(!system_title_bar || title_bar_has_content, |root| {
+                root.child(title_bar)
+            })
             .child(editor_area)
             .child(bottom);
         // The unfolded perspectives menu paints above everything: a backdrop
@@ -1201,6 +1468,9 @@ impl Render for Workspace {
             let (backdrop, menu) = self.render_titlebar_dropdown_menu(dropdown, colors, cx);
             root = root.child(backdrop).child(menu);
         }
-        root
+        match client_tiling {
+            Some(tiling) => client_frame(root, tiling, colors.dim.opacity(0.4), window),
+            None => root.into_any_element(),
+        }
     }
 }

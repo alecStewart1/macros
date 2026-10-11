@@ -103,6 +103,17 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
                     appears_transparent: true,
                     ..Default::default()
                 }),
+                // Linux ignores `appears_transparent`; the equivalent is asking
+                // to draw our own decorations. `Workspace::render` then paints
+                // the title bar, caption buttons, and resize border, and falls
+                // back to a bare strip when the compositor insists on drawing
+                // its own (e.g. X11 with no compositing manager).
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                window_decorations: Some(gpui::WindowDecorations::Client),
+                // Matches `StartupWMClass` and the `.desktop` file name, so the
+                // dock shows our icon and groups the window with its launcher
+                // (Wayland `app_id` / X11 `WM_CLASS`). No-op on macOS/Windows.
+                app_id: Some("macros".into()),
                 // Open hidden so the runtime + user config (which set the
                 // theme via `load-theme`) run before the window is ever
                 // presented. Otherwise the first frame paints with the dark
@@ -143,22 +154,10 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
             workspace.focus_editor(window, cx);
 
             // The OS title-bar close button: intercept it so unsaved buffers
-            // get the same save/cancel prompt as C-x C-c. The last window
-            // closing quits the app (`confirm_quit` — prompting across every
-            // window, then `cx.quit()`). With another window still open, only
-            // this window closes: straight away when clean (return true), or
-            // after the save/discard prompt when dirty — never quitting the
-            // app and discarding the other windows' edits.
+            // get the same save/cancel prompt as C-x C-c.
             let ws = cx.entity();
             window.on_window_should_close(cx, move |_window, cx| {
-                let others_open = workspace::workspace_window_count(cx) > 1;
-                if !others_open {
-                    return ws.update(cx, |workspace, cx| workspace.confirm_quit(cx));
-                }
-                if !ws.read(cx).has_unsaved_buffers(cx) {
-                    return true;
-                }
-                ws.update(cx, |workspace, cx| workspace.confirm_close_window(cx))
+                ws.update(cx, |workspace, cx| workspace.should_close_window(cx))
             });
 
             // (b) Backstop: reveal after WATCHDOG regardless of config state.
