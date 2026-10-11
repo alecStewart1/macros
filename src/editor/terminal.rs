@@ -512,37 +512,9 @@ impl Editor {
 
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<ProcMsg>();
         std::thread::spawn(move || {
-            // No read timeout: a model stream can pause between tokens. A connect
-            // timeout still bounds the initial handshake.
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(std::time::Duration::from_secs(15))
-                .build();
-            let mut req = agent.post(&url);
-            for (k, v) in &headers {
-                req = req.set(k, v);
-            }
-            match req.send_string(&body) {
-                Ok(resp) => {
-                    for l in lossy_lines(BufReader::new(resp.into_reader())) {
-                        if cancel.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        if tx.unbounded_send(ProcMsg::Line(l)).is_err() {
-                            break;
-                        }
-                    }
-                }
-                // Non-2xx: ureq returns the response so we can relay the API's own
-                // error JSON (e.g. a 401 from a bad key) into the transcript.
-                Err(ureq::Error::Status(code, resp)) => {
-                    let detail = resp.into_string().unwrap_or_default();
-                    let _ =
-                        tx.unbounded_send(ProcMsg::Line(format!("error: HTTP {code}: {detail}")));
-                }
-                Err(e) => {
-                    let _ = tx.unbounded_send(ProcMsg::Line(format!("error: {e}")));
-                }
-            }
+            http_stream_blocking(&url, &headers, &body, |line| {
+                !cancel.load(Ordering::Relaxed) && tx.unbounded_send(ProcMsg::Line(line)).is_ok()
+            });
             let _ = tx.unbounded_send(ProcMsg::Exit);
         });
 
@@ -605,50 +577,7 @@ impl Editor {
 
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
         std::thread::spawn(move || {
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(std::time::Duration::from_secs(15))
-                .build();
-            let mut req = agent.request(&method, &url);
-            for (k, v) in &headers {
-                req = req.set(k, v);
-            }
-            let result = if body.is_empty() {
-                req.call()
-            } else {
-                req.send_string(&body)
-            };
-            // Render a response (2xx or the error variant) either as the plain
-            // "<status>\n<text>" payload or the rich "<status>\n<headers>\n\n
-            // <hex-body>" one, per `full`.
-            let render = |status: u16, resp: ureq::Response| -> String {
-                if full {
-                    let mut head = String::new();
-                    for name in resp.headers_names() {
-                        if let Some(v) = resp.header(&name) {
-                            head.push_str(&format!("{name}: {v}\n"));
-                        }
-                    }
-                    let mut bytes = Vec::new();
-                    let _ = std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes);
-                    format!("{status}\n{head}\n{}", hex::encode(&bytes))
-                } else {
-                    format!("{status}\n{}", resp.into_string().unwrap_or_default())
-                }
-            };
-            let payload = match result {
-                Ok(resp) => render(resp.status(), resp),
-                // Non-2xx: relay the server's own status + error body to Scheme.
-                Err(ureq::Error::Status(code, resp)) => render(code, resp),
-                // Transport failure (DNS, TLS, connect): status 0, error as body.
-                // In full mode the empty header block still precedes the body.
-                Err(e) => {
-                    if full {
-                        format!("0\n\n{}", hex::encode(e.to_string().as_bytes()))
-                    } else {
-                        format!("0\n{e}")
-                    }
-                }
-            };
+            let payload = http_request_blocking(&method, &url, &headers, body, full);
             let _ = tx.unbounded_send(payload);
         });
 
@@ -1347,7 +1276,7 @@ fn ws_run(
             match cmd_rx.try_recv() {
                 Ok(SockCmd::Send(bytes)) => {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
-                    if ws.send(Message::Text(text)).is_err() {
+                    if ws.send(Message::Text(text.into())).is_err() {
                         break 'outer;
                     }
                 }
@@ -1361,7 +1290,7 @@ fn ws_run(
         // One inbound frame (read timeout surfaces as a WouldBlock/IO error).
         match ws.read() {
             Ok(Message::Text(t)) => {
-                if tx.unbounded_send(ProcMsg::Line(t)).is_err() {
+                if tx.unbounded_send(ProcMsg::Line(t.to_string())).is_err() {
                     break;
                 }
             }
@@ -1385,6 +1314,119 @@ fn ws_run(
         }
     }
     Ok(())
+}
+
+/// The blocking half of [`Editor::http_stream`]: POST `body` and hand each
+/// response line to `emit` until it returns `false` (cancelled, or the receiver
+/// is gone) or the body ends. A 4xx/5xx status becomes one
+/// `error: HTTP <code>: <body>` line — relaying the API's own error JSON (e.g. a
+/// 401 from a bad key) into the transcript — and a transport failure one
+/// `error: <e>` line.
+fn http_stream_blocking(
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    mut emit: impl FnMut(String) -> bool,
+) {
+    let mut req = http_agent().post(url);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    match req.send(body) {
+        // Same threshold as ureq 2's `Error::Status`: only 4xx/5xx are errors.
+        Ok(resp) if resp.status().as_u16() >= 400 => {
+            let code = resp.status().as_u16();
+            let detail = resp.into_body().read_to_string().unwrap_or_default();
+            emit(format!("error: HTTP {code}: {detail}"));
+        }
+        Ok(resp) => {
+            for l in lossy_lines(BufReader::new(resp.into_body().into_reader())) {
+                if !emit(l) {
+                    break;
+                }
+            }
+        }
+        Err(e) => {
+            emit(format!("error: {e}"));
+        }
+    }
+}
+
+/// The blocking half of [`Editor::http_request`]: send one request and render
+/// the response as the `on_response` payload (see [`HttpRequestArgs`]).
+///
+/// [`HttpRequestArgs`]: crate::script::HttpRequestArgs
+fn http_request_blocking(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: String,
+    full: bool,
+) -> String {
+    let agent = http_agent();
+    let mut req = ureq::http::Request::builder().method(method).uri(url);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    let result = if body.is_empty() {
+        req.body(())
+            .map_err(ureq::Error::from)
+            .and_then(|r| agent.run(r))
+    } else {
+        req.body(body)
+            .map_err(ureq::Error::from)
+            .and_then(|r| agent.run(r))
+    };
+    // Render a response (any status — non-2xx relays the server's own
+    // status + error body to Scheme) either as the plain
+    // "<status>\n<text>" payload or the rich "<status>\n<headers>\n\n
+    // <hex-body>" one, per `full`.
+    let render = |resp: ureq::http::Response<ureq::Body>| -> String {
+        let status = resp.status().as_u16();
+        if full {
+            let mut head = String::new();
+            for (name, v) in resp.headers() {
+                head.push_str(&format!(
+                    "{name}: {}\n",
+                    String::from_utf8_lossy(v.as_bytes())
+                ));
+            }
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut resp.into_body().into_reader(), &mut bytes);
+            format!("{status}\n{head}\n{}", hex::encode(&bytes))
+        } else {
+            format!(
+                "{status}\n{}",
+                resp.into_body().read_to_string().unwrap_or_default()
+            )
+        }
+    };
+    match result {
+        Ok(resp) => render(resp),
+        // Transport failure (DNS, TLS, connect): status 0, error as body.
+        // In full mode the empty header block still precedes the body.
+        Err(e) => {
+            if full {
+                format!("0\n\n{}", hex::encode(e.to_string().as_bytes()))
+            } else {
+                format!("0\n{e}")
+            }
+        }
+    }
+}
+
+/// The agent behind `http-request` / `make-http-stream`. No read timeout: a
+/// model stream can pause between tokens; a connect timeout still bounds the
+/// initial handshake. Non-2xx statuses come back as ordinary responses (not
+/// `Err`) so callers can relay the server's own error body, and any verb
+/// (`PROPFIND`, …) is accepted.
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(15)))
+        .http_status_as_error(false)
+        .allow_non_standard_methods(true)
+        .build()
+        .new_agent()
 }
 
 /// The lines of `reader`, like [`BufRead::lines`] (a trailing `\n` or `\r\n`
@@ -1495,5 +1537,169 @@ mod process_tests {
         assert!(wait_until(|| !group_alive(pgid)));
         // Signalling an already-reaped child is a no-op, not a stray kill.
         assert!(!signal_group(&child, SIGKILL));
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::{http_request_blocking, http_stream_blocking};
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    /// What the one-shot server saw: method, request target, body.
+    type Seen = (String, String, String);
+
+    /// Serve exactly one request on a fresh port with the raw `response`, and
+    /// hand back what the client sent. Returns the base URL and a join handle.
+    fn serve_once(response: &'static str) -> (String, std::thread::JoinHandle<Seen>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let handle = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap_or("").to_string();
+            let target = parts.next().unwrap_or("").to_string();
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h.trim().is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':')
+                    && k.eq_ignore_ascii_case("content-length")
+                {
+                    len = v.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body).unwrap();
+            conn.write_all(response.as_bytes()).unwrap();
+            conn.flush().unwrap();
+            (method, target, String::from_utf8(body).unwrap())
+        });
+        (url, handle)
+    }
+
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+
+    #[test]
+    fn non_2xx_relays_status_and_body() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 11\r\nConnection: close\r\n\r\nbad api key",
+        );
+        let got = http_request_blocking("GET", &url, &[], String::new(), false);
+        assert_eq!(got, "401\nbad api key");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn body_is_sent_with_every_verb() {
+        // Verbs ureq 3 treats as body-less by default must still carry a body
+        // when the caller gives one (ureq 2 sent it; APIs rely on DELETE/GET
+        // with a JSON body), and non-standard verbs must be accepted.
+        for verb in [
+            "GET", "DELETE", "OPTIONS", "POST", "PUT", "PATCH", "PROPFIND",
+        ] {
+            let (url, server) = serve_once(OK);
+            let got = http_request_blocking(
+                verb,
+                &format!("{url}/x?y=1"),
+                &[("Content-Type".into(), "application/json".into())],
+                "{\"k\":1}".into(),
+                false,
+            );
+            assert_eq!(got, "200\nok", "{verb}");
+            let (method, target, body) = server.join().unwrap();
+            assert_eq!(method, verb);
+            assert_eq!(target, "/x?y=1", "{verb}");
+            assert_eq!(body, "{\"k\":1}", "{verb} body not sent");
+        }
+    }
+
+    #[test]
+    fn empty_body_sends_none() {
+        let (url, server) = serve_once(OK);
+        assert_eq!(
+            http_request_blocking("DELETE", &url, &[], String::new(), false),
+            "200\nok"
+        );
+        assert_eq!(server.join().unwrap().2, "");
+    }
+
+    #[test]
+    fn full_mode_lists_every_header_and_hex_body() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 201 Created\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+        );
+        let got = http_request_blocking("POST", &url, &[], "x".into(), true);
+        let (head, body) = got.rsplit_once("\n\n").unwrap();
+        assert!(head.starts_with("201\n"), "{got}");
+        assert!(head.contains("set-cookie: a=1"), "{got}");
+        assert!(head.contains("set-cookie: b=2"), "{got}");
+        assert_eq!(body, hex::encode("hi"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn transport_failure_is_status_zero() {
+        // Bind then drop: nothing is listening on the port.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let got = http_request_blocking(
+            "GET",
+            &format!("http://127.0.0.1:{port}/"),
+            &[],
+            String::new(),
+            false,
+        );
+        assert!(got.starts_with("0\n"), "{got}");
+    }
+
+    fn stream(url: &str, stop_after: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        http_stream_blocking(url, &[], "{\"q\":1}", |l| {
+            lines.push(l);
+            lines.len() < stop_after
+        });
+        lines
+    }
+
+    #[test]
+    fn stream_posts_body_and_emits_each_line() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\na\nb\r\nc\n",
+        );
+        assert_eq!(stream(&url, usize::MAX), ["a", "b", "c"]);
+        let (method, _, body) = server.join().unwrap();
+        assert_eq!((method.as_str(), body.as_str()), ("POST", "{\"q\":1}"));
+    }
+
+    #[test]
+    fn stream_stops_when_emit_returns_false() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\na\nb\nc\n",
+        );
+        assert_eq!(stream(&url, 1), ["a"]);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn stream_reports_4xx_5xx_but_not_3xx_as_errors() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nboom",
+        );
+        assert_eq!(stream(&url, usize::MAX), ["error: HTTP 500: boom"]);
+        server.join().unwrap();
+
+        // ureq 2 surfaced only >= 400 as `Error::Status`; a 304 is not an error.
+        let (url, server) = serve_once("HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n");
+        assert_eq!(stream(&url, usize::MAX), Vec::<String>::new());
+        server.join().unwrap();
     }
 }

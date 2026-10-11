@@ -3,7 +3,7 @@
 //! 1. Compile the vendored tree-sitter parsers under `grammars/` from C and link
 //!    them in, so `src/highlight.rs` can bind their `tree_sitter_<name>()` entry
 //!    points as `LanguageFn`s. Every other grammar arrives prebuilt via a crate;
-//!    these have no crate exposing the modern API against tree-sitter 0.26, so we
+//!    these have no crate exposing the modern API against tree-sitter 0.26+, so we
 //!    vendor their C sources and compile them here. Mermaid is a lone `parser.c`;
 //!    Racket additionally has a small external `scanner.c` (here-string bodies).
 //!

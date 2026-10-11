@@ -237,26 +237,32 @@ pub fn relocate() -> Result<(), String> {
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 
 /// A blocking HTTP agent with sane timeouts and a descriptive User-Agent.
+///
+/// ureq 3 has no per-read timeout: `recv_response` bounds the wait for the
+/// response head, and the body is left unbounded (`recv_body` caps the *whole*
+/// body, which would cut off a large artifact on a slow link).
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(60))
-        .user_agent(&format!(
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .user_agent(format!(
             "Macros/{} ({})",
             current_version(),
             std::env::consts::OS
         ))
         .build()
+        .new_agent()
 }
 
 /// GET `url` and return the body as a string (for the small JSON manifest /
-/// sidecar). `ureq` caps `into_string` well above either payload.
+/// sidecar). `ureq` caps `read_to_string` well above either payload.
 fn http_get_string(url: &str) -> Result<String, String> {
     agent()
         .get(url)
         .call()
         .map_err(|e| format!("GET {url}: {e}"))?
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("reading {url}: {e}"))
 }
 
@@ -314,9 +320,7 @@ fn download_verified(
         .call()
         .map_err(|e| format!("GET {url}: {e}"))?;
 
-    let total = resp
-        .header("Content-Length")
-        .and_then(|v| v.parse::<u64>().ok());
+    let total = resp.body().content_length();
     if let Some(len) = total
         && len > MAX_DOWNLOAD_BYTES
     {
@@ -325,7 +329,7 @@ fn download_verified(
         ));
     }
 
-    let mut reader = resp.into_reader();
+    let mut reader = resp.into_body().into_reader();
     let mut file =
         std::fs::File::create(&partial).map_err(|e| format!("creating {partial:?}: {e}"))?;
     let mut hasher = Sha256::new();
@@ -820,6 +824,106 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serve one connection on a fresh port with the raw `response` (read the
+    /// request head first so the client isn't reset mid-send); returns the URL.
+    fn serve_once(response: Vec<u8>) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/a",
+            listener.local_addr().unwrap().port()
+        );
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            let _ = conn.write_all(&response);
+        });
+        url
+    }
+
+    fn ok_response(body: &[u8]) -> Vec<u8> {
+        let mut r = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(body);
+        r
+    }
+
+    fn temp_dest(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("macros-dl-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("artifact.zip")
+    }
+
+    #[test]
+    fn http_get_string_reads_body_and_fails_on_error_status() {
+        assert_eq!(
+            http_get_string(&serve_once(ok_response(b"{\"v\":1}"))).unwrap(),
+            "{\"v\":1}"
+        );
+        let missing = serve_once(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope"
+                .to_vec(),
+        );
+        assert!(http_get_string(&missing).is_err());
+    }
+
+    #[test]
+    fn download_verified_writes_on_match_and_reports_progress() {
+        use sha2::{Digest, Sha256};
+        let body = vec![7u8; 200 * 1024];
+        let sha = hex::encode(Sha256::digest(&body));
+        let dest = temp_dest("ok");
+        let mut pcts = Vec::new();
+        download_verified(&serve_once(ok_response(&body)), &sha, &dest, |p| {
+            pcts.push(p)
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert!(!dest.with_extension("partial").exists());
+        assert_eq!(
+            pcts.last(),
+            Some(&100),
+            "progress from Content-Length: {pcts:?}"
+        );
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    #[test]
+    fn download_verified_rejects_bad_checksum_error_status_and_oversize() {
+        let dest = temp_dest("bad");
+        let url = serve_once(ok_response(b"tampered"));
+        let err = download_verified(&url, &"0".repeat(64), &dest, |_| {}).unwrap_err();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        assert!(!dest.exists() && !dest.with_extension("partial").exists());
+
+        // A 404 page must not be "downloaded" and checksummed as the artifact.
+        let url = serve_once(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope"
+                .to_vec(),
+        );
+        let err = download_verified(&url, &"0".repeat(64), &dest, |_| {}).unwrap_err();
+        assert!(err.starts_with("GET "), "{err}");
+
+        // A declared length over the cap is refused before reading the body.
+        let url = serve_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_DOWNLOAD_BYTES + 1
+            )
+            .into_bytes(),
+        );
+        let err = download_verified(&url, &"0".repeat(64), &dest, |_| {}).unwrap_err();
+        assert!(err.contains("over the"), "{err}");
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
 
     #[test]
     fn manifest_override_only_when_allowed() {

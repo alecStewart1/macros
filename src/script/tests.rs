@@ -296,7 +296,7 @@ mod engine_tests {
             let mut ws = tungstenite::accept(stream).unwrap();
             let msg = ws.read().unwrap();
             if let Message::Text(t) = msg {
-                ws.send(Message::Text(format!("echo:{t}"))).unwrap();
+                ws.send(Message::Text(format!("echo:{t}").into())).unwrap();
             }
         });
         let tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -447,7 +447,8 @@ mod engine_tests {
         ))
         .call()
         .unwrap()
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .unwrap();
         assert_eq!(got, body, "client did not read the fixed response body");
 

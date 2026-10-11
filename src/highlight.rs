@@ -8,7 +8,7 @@ use tree_sitter::{InputEdit, Language, Node, Parser, Point, Query, QueryCursor, 
 use tree_sitter_language::LanguageFn;
 
 /// The vendored Mermaid grammar (`grammars/tree-sitter-mermaid`), compiled from
-/// C by build.rs. No crate exposes Mermaid against tree-sitter 0.26, so we link
+/// C by build.rs. No crate exposes Mermaid against tree-sitter 0.26+, so we link
 /// its generated `tree_sitter_mermaid()` and wrap it as a `LanguageFn`, matching
 /// the `LANGUAGE` const every other grammar crate provides.
 mod mermaid {
@@ -23,7 +23,7 @@ mod mermaid {
 
 /// The vendored Racket grammar (`grammars/tree-sitter-racket`), compiled from C
 /// by build.rs (parser + external scanner). No crate publishes Racket against
-/// tree-sitter 0.26, so we link its generated `tree_sitter_racket()` and wrap it
+/// tree-sitter 0.26+, so we link its generated `tree_sitter_racket()` and wrap it
 /// as a `LanguageFn`, matching the `LANGUAGE` const every grammar crate provides.
 mod racket {
     use tree_sitter_language::LanguageFn;
@@ -742,7 +742,7 @@ impl Highlighter {
         let mut captures: Vec<(usize, usize, usize)> = Vec::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), provider);
         while let Some(m) = matches.next() {
-            for capture in m.captures {
+            for capture in m.captures() {
                 if let Some(face) = self
                     .capture_faces
                     .get(capture.index as usize)
@@ -792,7 +792,7 @@ impl Highlighter {
         while let Some(m) = matches.next() {
             let mut tag: Option<String> = None;
             let mut content: Option<Node> = None;
-            for cap in m.captures {
+            for cap in m.captures() {
                 if cap.index == inj.lang_capture {
                     tag = Some(rope.byte_slice(cap.node.byte_range()).to_string());
                 } else if cap.index == inj.content_capture {
@@ -979,7 +979,7 @@ impl Highlighter {
         let mut outdent_starts: Vec<usize> = Vec::new();
         let mut matches = cursor.matches(&iq.query, scope, provider);
         while let Some(m) = matches.next() {
-            for cap in m.captures {
+            for cap in m.captures() {
                 let Some(kind) = iq.kinds.get(cap.index as usize).copied().flatten() else {
                     continue;
                 };
@@ -1065,7 +1065,7 @@ impl Highlighter {
         while let Some(m) = matches.next() {
             let mut align_node = None;
             let mut anchor_node = None;
-            for cap in m.captures {
+            for cap in m.captures() {
                 if cap.index == align_idx {
                     align_node = Some(cap.node);
                 } else if cap.index == anchor_idx {
@@ -1120,7 +1120,7 @@ impl Highlighter {
         let mut out = Vec::new();
         let mut matches = cursor.matches(&query, tree.root_node(), provider);
         while let Some(m) = matches.next() {
-            for capture in m.captures {
+            for capture in m.captures() {
                 let name = names.get(capture.index as usize).copied().unwrap_or("");
                 let node = capture.node;
                 out.push((

@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://github.com/macros-app/macros"
@@ -40,24 +40,24 @@ ropey = { version = "1.6", default-features = false, features = ["simd"] }
 # Syntax highlighting: tree-sitter + the Scheme grammar (for highlighting Steel).
 # We drive tree-sitter directly (not tree-sitter-highlight) for incremental
 # reparsing. `streaming-iterator` is needed to iterate QueryCursor matches.
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-scheme = "=0.24.7-1"
 streaming-iterator = "0.1"
 # Regex engine for evil-mode `/` search and `:%s` substitute.
 regex = "1"
 # Text diffing for ediff: line-level hunks + inline (word) refinement. Powers
 # the `diff-strings` / `diff-inline` primitives behind scheme/ediff.scm.
-similar = "2"
+similar = "3"
 # ripgrep, as a library: `ignore` is its gitignore-aware parallel directory
 # walker; `grep` is its content searcher. Drives the Scheme-configurable
 # `walk-files` / `grep-files` primitives (no external `rg` binary needed).
 ignore = "0.4"
-grep = "0.3"
+grep = "0.4"
 # Filesystem watching: powers buffer auto-revert and live dired-sidebar/dired refresh.
 # `-mini` coalesces the OS event storm into a debounced batch on its own thread;
 # we forward each batch onto the GPUI foreground (see `Editor::on_fs_events`).
 # It re-exports `notify` as `notify_debouncer_mini::notify`, so no separate dep.
-notify-debouncer-mini = "0.4"
+notify-debouncer-mini = "0.7"
 nucleo-matcher = "0.3.1"
 tree-sitter-language = "0.1.7"
 tree-sitter-rust = "0.24.2"
@@ -79,21 +79,21 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-md = "0.5.3"
 tree-sitter-zig = "1.1.2"
 tree-sitter-r = "1.3.0"
-tree-sitter-ocaml = "0.25.0"
-tree-sitter-haskell = "0.23.1"
+tree-sitter-ocaml = "0.26.0"
+tree-sitter-haskell = "0.24.1"
 tree-sitter-scala = "0.26.0"
 # Clojure: the `-orchard` fork is the maintained one that publishes both
 # `LANGUAGE: LanguageFn` and a `HIGHLIGHTS_QUERY`; the bare `tree-sitter-clojure`
 # crate ships only the parser.
 tree-sitter-clojure-orchard = "0.2.5"
 # SQL: the `-sequel` crate is DerekStride's grammar (the maintained one),
-# publishing `LANGUAGE: LanguageFn` and `HIGHLIGHTS_QUERY` on tree-sitter 0.26.
+# publishing `LANGUAGE: LanguageFn` and `HIGHLIGHTS_QUERY` on tree-sitter 0.26+.
 tree-sitter-sequel = "0.3.11"
 # Elixir: the official grammar crate, publishing `LANGUAGE: LanguageFn` and
-# `HIGHLIGHTS_QUERY` on tree-sitter 0.26.
+# `HIGHLIGHTS_QUERY` on tree-sitter 0.26+.
 tree-sitter-elixir = "0.3.5"
 # LaTeX and Typst grammars. No upstream crate exposes the modern `LanguageFn`
-# API against tree-sitter 0.26, so we use the `codebook-*` forks (from the
+# API against tree-sitter 0.26+, so we use the `codebook-*` forks (from the
 # Codebook spellchecker), which publish a `LANGUAGE: LanguageFn` const built on
 # `tree-sitter-language ^0.1`. These crates bundle only the parser, not a
 # highlights query, so we vendor nvim-treesitter's under `grammars/queries/`.
@@ -118,7 +118,7 @@ chrono = "0.4"
 # download. `semver` compares the manifest version against this build's
 # CARGO_PKG_VERSION; `sha2`/`hex` verify the downloaded artifact's digest
 # (fetched as a `.sha256` sidecar next to the artifact on R2).
-ureq = "2"
+ureq = "3"
 semver = "1"
 sha2 = "0.10"
 hex = "0.4"
@@ -158,7 +158,7 @@ rustls-native-certs = "0.8"
 # NO tls feature: we hand tungstenite an already-connected stream (our own
 # `Sock`, plain or ring-rustls), so it only frames the protocol — no second TLS
 # stack, no crypto-provider clash.
-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # SQLite for the generic `sqlite-*` Scheme primitives (a local search index in
 # macros-email-client; also usable by any package wanting a real database). The
 # `bundled` feature compiles SQLite from source — no system libsqlite3 — and
@@ -166,12 +166,12 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
 # for staging update downloads and compiled user grammars (src/grammar.rs).
-dirs = "5"
+dirs = "7"
 # Runtime tree-sitter grammars (src/grammar.rs): `dlopen` a user grammar's
 # freshly compiled shared library and resolve its `tree_sitter_<lang>` entry
 # point. Loading native code is inherent to the feature — see the module's
 # safety note. The library is leaked so the resolved `LanguageFn` never dangles.
-libloading = "0.8"
+libloading = "0.9"
 # gitoxide: a pure-Rust git implementation, driven as a library for the
 # `gix-blame` / `gix-log` / `gix-toplevel` Scheme primitives (see src/script.rs).
 # magit historically shells out to `git`; these give magit native blame (which
@@ -181,14 +181,19 @@ libloading = "0.8"
 # `Kind` object-id enum is non-empty (without a sha feature the whole crate
 # fails to compile). `max-performance-safe` pulls the pure-Rust `zlib-rs`
 # inflate — fast, and no system zlib/C toolchain required.
-gix = { version = "0.85.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "max-performance-safe"] }
+gix = { version = "0.89.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "max-performance-safe"] }
 
 # All unix: `libc::kill` for the process-group kill in `kill-process`. On
 # macOS additionally `libc::statfs` to detect a read-only volume (DMG / App
 # Translocation) and `renamex_np` for the atomic in-place bundle swap (the
 # self-update path).
+#
+# Capped at 0.2.186 (the last version verified): 0.2.190 drops `libc::ENOATTR`
+# on Linux, which `xattr` 0.2.3 (gpui -> gpui_http_client -> zed-async-tar)
+# still references, so the Linux build fails. Lift the cap once gpui moves off
+# xattr 0.2.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = ">=0.2, <0.2.187"
 
 # macOS-only: NSSpellChecker bindings for the native spellcheck backend
 # (src/spell.rs, driving scheme/spell.scm). All three crates are already in
@@ -202,7 +207,7 @@ block2 = "0.6"
 
 # Compiles the vendored Mermaid tree-sitter parser (grammars/tree-sitter-mermaid)
 # from C at build time. No upstream crate exposes Mermaid against tree-sitter
-# 0.26, so we link `tree_sitter_mermaid()` directly — see build.rs and the
+# 0.26+, so we link `tree_sitter_mermaid()` directly — see build.rs and the
 # `LanguageFn` binding in src/highlight.rs.
 [build-dependencies]
 cc = "1"
