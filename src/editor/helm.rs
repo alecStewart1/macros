@@ -155,6 +155,45 @@ pub(super) fn wrap_index(selected: usize, count: usize, forward: bool) -> usize 
     (selected + step) % count
 }
 
+/// The `[start, end)` slice of `matches` to render so that `selected` is
+/// visible and the rows (candidates plus a header at each source change) fit
+/// in `max_lines`. Scrolls back from the selection as far as fits, then fills
+/// forward, so the list uses the whole panel.
+pub(super) fn helm_window(
+    matches: &[(usize, String)],
+    selected: usize,
+    max_lines: usize,
+) -> (usize, usize) {
+    let total = matches.len();
+    if total == 0 {
+        return (0, 0);
+    }
+    // At least the selection and its header, even in a tiny panel.
+    let max_lines = max_lines.max(2);
+    let selected = selected.min(total - 1);
+    // The selected candidate plus its source header.
+    let mut lines = 2;
+    let mut start = selected;
+    while start > 0 {
+        let extra = 1 + usize::from(matches[start - 1].0 != matches[start].0);
+        if lines + extra > max_lines {
+            break;
+        }
+        lines += extra;
+        start -= 1;
+    }
+    let mut end = selected + 1;
+    while end < total {
+        let extra = 1 + usize::from(matches[end].0 != matches[end - 1].0);
+        if lines + extra > max_lines {
+            break;
+        }
+        lines += extra;
+        end += 1;
+    }
+    (start, end)
+}
+
 /// What running a Helm candidate does.
 #[derive(Clone)]
 pub(super) enum HelmAction {
@@ -681,18 +720,12 @@ impl Editor {
     }
 
     /// A render snapshot of the Helm panel (windowed around the selection, with
-    /// a header whenever the source changes).
-    pub fn helm_view(&self) -> Option<HelmView> {
+    /// a header whenever the source changes). `max_lines` is how many rows the
+    /// panel can show; source headers count against it too.
+    pub fn helm_view(&self, max_lines: usize) -> Option<HelmView> {
         let helm = self.helm.as_ref()?;
         let matches = self.helm_matches();
-        const MAX: usize = 12;
-        let total = matches.len();
-        let start = if helm.selected >= MAX {
-            helm.selected + 1 - MAX
-        } else {
-            0
-        };
-        let end = (start + MAX).min(total);
+        let (start, end) = helm_window(&matches, helm.selected, max_lines);
 
         let mut rows = Vec::new();
         let mut last_source = None;
@@ -731,6 +764,23 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn helm_window_fills_available_lines() {
+        use super::helm_window;
+        let one: Vec<_> = (0..40).map(|i| (0, i.to_string())).collect();
+        // Header + 29 candidates fill a 30-line panel from the top.
+        assert_eq!(helm_window(&one, 0, 30), (0, 29));
+        // Scrolled past the bottom: the selection is the last visible row.
+        assert_eq!(helm_window(&one, 35, 30), (7, 36));
+        // Fewer candidates than lines: show them all.
+        assert_eq!(helm_window(&one[..5], 2, 30), (0, 5));
+        // Each source change costs a header line.
+        let two: Vec<_> = (0..10).map(|i| (i / 5, i.to_string())).collect();
+        assert_eq!(helm_window(&two, 0, 7), (0, 5));
+        assert_eq!(helm_window(&two, 0, 8), (0, 6));
+        assert_eq!(helm_window(&[], 0, 30), (0, 0));
+    }
+
     #[test]
     fn duplicate_candidates_map_to_their_own_index() {
         use super::{HelmAction, HelmSource, helm_candidate_index, helm_filter};

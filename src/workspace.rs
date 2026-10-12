@@ -73,6 +73,11 @@ const LINUX_CAPTION_BUTTON_WIDTH: gpui::Pixels = px(36.);
 /// paints into, so it's dropped on edges the compositor has tiled.
 const RESIZE_BORDER: gpui::Pixels = px(8.);
 
+/// Height of one Helm row (candidate or source header) at the panel's 13px text.
+const HELM_ROW_HEIGHT: f32 = 21.;
+/// Height of the Helm prompt + pattern row above the candidates.
+const HELM_PROMPT_HEIGHT: f32 = 29.;
+
 /// Minimize / maximize-restore / close for Linux when we draw the window
 /// decorations ourselves (see `main.rs`). Linux has no hit-test hook like
 /// Windows' `WM_NCHITTEST`, so each button acts on a click. Wayland reports
@@ -721,6 +726,16 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// How many rows (candidates and source headers) fit in the Helm panel for
+    /// a window of `window_height`, so the list fills the panel.
+    fn helm_max_lines(window_height: f32, settings: &crate::settings::Settings) -> usize {
+        let panel = window_height * settings.helm_height()
+            - settings.helm_bevel_top()
+            - settings.helm_bevel_bottom()
+            - HELM_PROMPT_HEIGHT;
+        (panel / HELM_ROW_HEIGHT).floor().max(0.) as usize
+    }
+
     /// The Helm selection panel: a beveled, fixed-height box with a prompt +
     /// live filter pattern on top, candidate rows beneath, and an optional
     /// preview pane on the right. Rows are clickable and run the default action.
@@ -765,16 +780,19 @@ impl Workspace {
             .flex_1()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(panel_bg)
             .text_color(foreground)
             .text_size(px(13.))
             // Prompt + live filter pattern.
             .child(
                 div()
+                    .h(px(HELM_PROMPT_HEIGHT))
+                    .flex_none()
                     .px_2()
-                    .py_1()
                     .flex()
                     .flex_row()
+                    .items_center()
                     .child(
                         div()
                             .text_color(prompt_color)
@@ -833,7 +851,7 @@ impl Workspace {
                 ),
                 None => line,
             };
-            content = content.child(line);
+            content = content.child(line.h(px(HELM_ROW_HEIGHT)).flex_none());
         }
         // Beveled frame: light top/left edges, dark bottom/right edges, each a
         // configurable-width colored strip. The panel takes `helm-height` of
@@ -1323,7 +1341,11 @@ impl Render for Workspace {
         // Pull the active bottom-region view (owned) before building it, so no
         // `&Editor` borrow is held across the `cx.listener` calls in the helpers.
         let transient = self.editor.read(cx).transient_view();
-        let helm = self.editor.read(cx).helm_view();
+        let helm_lines = Self::helm_max_lines(
+            f32::from(window.viewport_size().height),
+            cx.global::<crate::settings::Settings>(),
+        );
+        let helm = self.editor.read(cx).helm_view(helm_lines);
         let minibuffer = self.editor.read(cx).minibuffer_view();
         let titlebar_dropdown = self.editor.read(cx).titlebar_dropdown_view();
 
