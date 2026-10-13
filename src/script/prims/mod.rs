@@ -26,6 +26,7 @@ pub(super) mod plotting;
 pub(super) mod process;
 pub(super) mod prompts;
 pub(super) mod search;
+pub(super) mod sockets;
 pub(super) mod special_buffers;
 pub(super) mod spell;
 pub(super) mod text;

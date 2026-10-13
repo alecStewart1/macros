@@ -243,6 +243,7 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ("script/prims/process.rs", include_str!("prims/process.rs")),
     ("script/prims/prompts.rs", include_str!("prims/prompts.rs")),
     ("script/prims/search.rs", include_str!("prims/search.rs")),
+    ("script/prims/sockets.rs", include_str!("prims/sockets.rs")),
     (
         "script/prims/special_buffers.rs",
         include_str!("prims/special_buffers.rs"),
