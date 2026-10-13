@@ -92,7 +92,7 @@ pub(crate) struct Job {
 /// ways: **blocking** (startup/config, where command ordering matters, and
 /// tests) and **dispatched** (interactive commands, drained on the foreground).
 pub struct ScriptEngine {
-    jobs: Sender<Job>,
+    handle: ActionHandle,
     command_names: Vec<String>,
     /// Every name registered into the engine, recorded at registration time by
     /// [`Registrar`] on the engine thread (the single source of truth — it can
@@ -155,7 +155,7 @@ impl ScriptEngine {
 
         (
             Self {
-                jobs,
+                handle: ActionHandle { jobs },
                 command_names,
                 global_names: std::sync::OnceLock::new(),
                 global_names_rx: Mutex::new(Some(names_rx)),
@@ -283,28 +283,11 @@ impl ScriptEngine {
         (!out.is_empty()).then_some(out)
     }
 
-    /// Send `task` to the engine thread and block for its raw result. Both
-    /// failure points — the engine thread gone at send or at receive —
-    /// collapse to the same "script engine stopped" error. The blocking
-    /// public entry points ([`Self::eval`], [`Self::eval_collecting`],
-    /// [`Self::call_action`]) are thin wrappers over this.
-    fn run_sync(&self, task: Task) -> Result<RawResult, String> {
-        let (tx, rx) = channel();
-        self.jobs
-            .send(Job {
-                task,
-                interactive: false,
-                reply: Reply::Sync(tx),
-            })
-            .map_err(|_| "script engine stopped".to_string())?;
-        rx.recv().map_err(|_| "script engine stopped".to_string())
-    }
-
     /// Blocking eval — tests and the REPL. Startup config uses
     /// [`Self::eval_collecting`] (which keeps partial commands on error).
     #[allow(dead_code)]
     pub fn eval(&self, source: &str) -> Result<EvalResult, String> {
-        let raw = self.run_sync(Task::Eval(source.to_string()))?;
+        let raw = self.handle.run_sync(Task::Eval(source.to_string()))?;
         match raw.error {
             Some(error) => Err(error),
             None => Ok(EvalResult {
@@ -320,7 +303,7 @@ impl ScriptEngine {
     /// the rest of the file — including the `(evil-mode)` that usually precedes
     /// it (Emacs `init.el` semantics: apply up to the error, then report it).
     pub fn eval_collecting(&self, source: &str) -> (Vec<EditorCommand>, Option<String>) {
-        match self.run_sync(Task::Eval(source.to_string())) {
+        match self.handle.run_sync(Task::Eval(source.to_string())) {
             Ok(raw) => (raw.commands, raw.error),
             Err(stopped) => (Vec::new(), Some(stopped)),
         }
@@ -329,7 +312,8 @@ impl ScriptEngine {
     /// Blocking action call — used by tests; the editor uses `dispatch_action`.
     #[allow(dead_code)]
     pub fn call_action(&self, name: &str, candidate: Option<&str>) -> Vec<EditorCommand> {
-        self.run_sync(Task::Call(name.to_string(), candidate.map(str::to_string)))
+        self.handle
+            .run_sync(Task::Call(name.to_string(), candidate.map(str::to_string)))
             .map(|raw| raw.commands)
             .unwrap_or_default()
     }
@@ -337,29 +321,21 @@ impl ScriptEngine {
     /// Async eval — runs on the engine thread; the outcome is delivered to the
     /// foreground drain task. A slow script never blocks the UI.
     pub fn dispatch(&self, source: &str, interactive: bool) {
-        let _ = self.jobs.send(Job {
-            task: Task::Eval(source.to_string()),
-            interactive,
-            reply: Reply::Async,
-        });
+        self.handle
+            .send_async(Task::Eval(source.to_string()), interactive);
     }
 
     /// Async action call (Helm actions, mode hooks).
     pub fn dispatch_action(&self, name: &str, candidate: Option<&str>) {
-        let _ = self.jobs.send(Job {
-            task: Task::Call(name.to_string(), candidate.map(str::to_string)),
-            interactive: false,
-            reply: Reply::Async,
-        });
+        self.handle.dispatch_action(name, candidate);
     }
 
     /// Async call of `name` with a secret argument (see [`Task::CallSecret`]).
     pub fn dispatch_secret_action(&self, name: &str, secret: &str) {
-        let _ = self.jobs.send(Job {
-            task: Task::CallSecret(name.to_string(), secret.to_string()),
-            interactive: false,
-            reply: Reply::Async,
-        });
+        self.handle.send_async(
+            Task::CallSecret(name.to_string(), secret.to_string()),
+            false,
+        );
     }
 
     /// A cheap `Send + Clone` handle that can deliver `dispatch_action` calls
@@ -367,75 +343,93 @@ impl ScriptEngine {
     /// (the spell-check worker) yet still hand its result to a named Scheme
     /// callback.
     pub fn action_handle(&self) -> ActionHandle {
-        ActionHandle {
-            jobs: self.jobs.clone(),
-        }
+        self.handle.clone()
     }
 
     /// Compute a dynamic Helm source's candidates on the engine thread; the
     /// result arrives as `ScriptOutcome::Candidates` for `query_id`.
     pub fn dispatch_candidates(&self, source: usize, query_id: u64, function: &str, pattern: &str) {
-        let _ = self.jobs.send(Job {
-            task: Task::Candidates {
+        self.handle.send_async(
+            Task::Candidates {
                 source,
                 query_id,
                 function: function.to_string(),
                 pattern: pattern.to_string(),
             },
-            interactive: false,
-            reply: Reply::Async,
-        });
+            false,
+        );
     }
 
     /// Run the registered completion-at-point functions on the engine thread,
     /// over the prefix `buffer[start..end]`. The result arrives as
     /// `ScriptOutcome::Capf`; empty means the editor should fall back to LSP.
     pub fn dispatch_capf(&self, functions: Vec<String>, prefix: &str, start: usize, end: usize) {
-        let _ = self.jobs.send(Job {
-            task: Task::Capf {
+        self.handle.send_async(
+            Task::Capf {
                 functions,
                 prefix: prefix.to_string(),
                 start,
                 end,
             },
-            interactive: false,
-            reply: Reply::Async,
-        });
+            false,
+        );
     }
 }
 
-/// A clone of the engine's job sender: delivers async action calls from any
-/// thread. See [`ScriptEngine::action_handle`].
+/// A clone of the engine's job sender: delivers jobs to the engine thread from
+/// any thread. [`ScriptEngine`] sends through one too; see
+/// [`ScriptEngine::action_handle`].
 #[derive(Clone)]
 pub struct ActionHandle {
     jobs: Sender<Job>,
 }
 
 impl ActionHandle {
+    /// Queue `task` with its outcome going to the foreground drain task. A
+    /// stopped engine drops it silently.
+    fn send_async(&self, task: Task, interactive: bool) {
+        let _ = self.jobs.send(Job {
+            task,
+            interactive,
+            reply: Reply::Async,
+        });
+    }
+
+    /// Send `task` to the engine thread and block for its raw result. Both
+    /// failure points — the engine thread gone at send or at receive —
+    /// collapse to the same "script engine stopped" error. The blocking
+    /// entry points ([`ScriptEngine::eval`], [`ScriptEngine::eval_collecting`],
+    /// [`ScriptEngine::call_action`], [`Self::eval_sync`]) are thin wrappers
+    /// over this.
+    fn run_sync(&self, task: Task) -> Result<RawResult, String> {
+        let (tx, rx) = channel();
+        self.jobs
+            .send(Job {
+                task,
+                interactive: false,
+                reply: Reply::Sync(tx),
+            })
+            .map_err(|_| "script engine stopped".to_string())?;
+        rx.recv().map_err(|_| "script engine stopped".to_string())
+    }
+
     /// Blocking eval from any thread (the MCP server's): returns the editor
     /// commands queued — including those queued before an error — plus the
     /// printed value and the error, if any. The caller applies the commands
     /// on the editor's foreground; nothing here touches editor state.
     pub fn eval_sync(&self, source: &str) -> (Vec<EditorCommand>, Option<String>, Option<String>) {
-        let (tx, rx) = channel();
-        let sent = self.jobs.send(Job {
-            task: Task::Eval(source.to_string()),
-            interactive: false,
-            reply: Reply::Sync(tx),
-        });
-        match sent.ok().and_then(|_| rx.recv().ok()) {
-            Some(raw) => (raw.commands, raw.value, raw.error),
-            None => (Vec::new(), None, Some("script engine stopped".to_string())),
+        match self.run_sync(Task::Eval(source.to_string())) {
+            Ok(raw) => (raw.commands, raw.value, raw.error),
+            Err(stopped) => (Vec::new(), None, Some(stopped)),
         }
     }
 
-    /// Async action call, identical to [`ScriptEngine::dispatch_action`].
+    /// Async action call (Helm actions, mode hooks, worker-thread callbacks).
     pub fn dispatch_action(&self, name: &str, candidate: Option<&str>) {
-        let _ = self.jobs.send(Job {
-            task: Task::Call(name.to_string(), candidate.map(str::to_string)),
-            interactive: false,
-            reply: Reply::Async,
-        });
+        self.send_async(
+            Task::Call(name.to_string(), candidate.map(str::to_string)),
+            false,
+        );
     }
 }
 
