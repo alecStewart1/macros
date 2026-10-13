@@ -246,19 +246,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::grid::register(&mut reg, shared);
     prims::prompts::register(&mut reg, shared);
     prims::keymaps::register(&mut reg, shared);
-    {
-        // `(bundled-languages)` → every language id with a bundled tree-sitter
-        // grammar. language-modes.scm reads this to generate an `<id>-mode` M-x
-        // command per language (so `M-x scala-mode` switches the buffer's mode).
-        let langs: Vec<String> = crate::highlight::BUNDLED_LANGUAGES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        reg.section(Section::Languages);
-        reg.register_fn("bundled-languages", move || -> Vec<String> {
-            langs.clone()
-        });
-    }
+    prims::languages::register(&mut reg, shared);
     reg.section(Section::Faces);
     {
         // `(theme-names)` → every bundled theme name (the stem of each
@@ -267,43 +255,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         reg.register_fn("theme-names", || -> Vec<String> {
             crate::runtime::theme_names()
         });
-    }
-    reg.section(Section::Languages);
-    {
-        // `(installed-languages)` → ids of grammars downloaded + compiled at
-        // runtime (M-x install-language). grammar.scm reads this alongside
-        // `(bundled-languages)` so installed languages also get `<id>-mode`.
-        reg.register_fn("installed-languages", || -> Vec<String> {
-            crate::grammar::installed_ids()
-        });
-    }
-    {
-        // `(grammar-install id repo rev extensions symbol subdir)` → queue an
-        // async download + compile + load of a tree-sitter grammar. `extensions`
-        // is a whitespace-separated string of bare extensions; `symbol` and
-        // `subdir` are "" for the defaults (parser symbol = id, grammar at repo
-        // root). The Scheme `install-language` wrapper builds these from nicer
-        // args. Returns immediately; progress/result echoes to the minibuffer
-        // (see Editor::install_grammar).
-        let q = queue.clone();
-        reg.register_fn(
-            "grammar-install",
-            move |id: String,
-                  repo: String,
-                  rev: String,
-                  extensions: String,
-                  symbol: String,
-                  subdir: String| {
-                q.push(EditorCommand::InstallGrammar(Box::new(GrammarInstall {
-                    id,
-                    repo,
-                    rev,
-                    extensions,
-                    symbol,
-                    subdir,
-                })));
-            },
-        );
     }
     prims::help::register(&mut reg, shared, &api_cell);
     reg.section(Section::Text);
@@ -674,19 +625,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     }
     reg.section(Section::Lsp);
     register_binary(&mut reg, queue, "set-lsp", EditorCommand::SetLsp);
-    reg.section(Section::Languages);
-    register_binary(
-        &mut reg,
-        queue,
-        "set-extension",
-        EditorCommand::SetExtension,
-    );
-    register_binary(
-        &mut reg,
-        queue,
-        "set-language-id",
-        EditorCommand::SetLanguageId,
-    );
     reg.section(Section::Options);
     {
         // `set-option` accepts a number, boolean, or string; the value is coerced
