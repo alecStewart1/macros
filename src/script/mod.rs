@@ -29,6 +29,8 @@ pub use commands::*;
 pub(crate) use convert::*;
 pub use engine::*;
 pub(crate) use gix::*;
+#[cfg(test)]
+use prims::re_search_forward_in;
 pub(crate) use registry::*;
 pub(crate) use search::*;
 pub(crate) use session::*;

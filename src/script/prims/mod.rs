@@ -3,6 +3,10 @@
 //! `build_engine` (registry.rs) calls them in turn.
 
 use super::*;
+// `motions` shares the regex cache.
+#[cfg(test)]
+pub(super) use regexp::re_search_forward_in;
+use regexp::regex;
 
 pub(super) mod anvil;
 pub(super) mod buffer_reads;
@@ -29,6 +33,7 @@ pub(super) mod overlays;
 pub(super) mod plotting;
 pub(super) mod process;
 pub(super) mod prompts;
+pub(super) mod regexp;
 pub(super) mod search;
 pub(super) mod sockets;
 pub(super) mod special_buffers;
