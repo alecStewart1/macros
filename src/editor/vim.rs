@@ -455,7 +455,7 @@ impl Editor {
 
     /// The register the next kill/paste targets (consumed), under evil only.
     pub(super) fn take_kill_register(&mut self) -> Option<char> {
-        if self.evil == EvilState::Disabled || self.modal_helix {
+        if !self.vim_active() {
             return None;
         }
         self.vim.register_armed = false;
@@ -469,7 +469,7 @@ impl Editor {
         reg: Option<char>,
         text: &str,
     ) {
-        if self.evil == EvilState::Disabled || self.modal_helix {
+        if !self.vim_active() {
             return;
         }
         if self.kill_append {
@@ -710,7 +710,7 @@ impl Editor {
 
     /// Set an automatic mark in the active buffer (no-op unless evil is on).
     pub(super) fn set_auto_mark(&mut self, c: char, pos: usize) {
-        if self.evil == EvilState::Disabled || self.modal_helix {
+        if !self.vim_active() {
             return;
         }
         // Runs on every edit: avoid cloning the buffer name once its map exists.

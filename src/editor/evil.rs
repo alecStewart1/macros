@@ -22,6 +22,24 @@ impl BlockRect {
 }
 
 impl Editor {
+    /// Whether Vim (evil) modal editing is on — not plain Emacs keys and not
+    /// Helix, which reuses the state machine but has no Vim registers or marks.
+    pub(super) fn vim_active(&self) -> bool {
+        self.evil != EvilState::Disabled && !self.modal_helix
+    }
+
+    /// Leave Helix behind when switching modal styles: `modal_helix` steers
+    /// EVERY keymap lookup (see `evil_keymap`), and Helix's extra selections
+    /// don't survive the switch.
+    fn leave_helix(&mut self, cx: &mut Context<Self>) {
+        if self.modal_helix {
+            self.modal_helix = false;
+            if self.has_extra_cursors() {
+                self.mc_clear(cx);
+            }
+        }
+    }
+
     /// True in Normal/Visual, where plain keys are commands (not self-insert).
     pub(super) fn evil_intercepts(&self) -> bool {
         matches!(
@@ -99,15 +117,9 @@ impl Editor {
     }
 
     pub(super) fn evil_enable(&mut self, cx: &mut Context<Self>) {
-        // Leaving Helix behind: `modal_helix` steers EVERY keymap lookup (see
-        // `evil_keymap`), so switching styles must clear it or `(evil-mode)`
-        // from Helix silently keeps the Helix keymaps (and the Helix banner).
-        if self.modal_helix {
-            self.modal_helix = false;
-            if self.has_extra_cursors() {
-                self.mc_clear(cx);
-            }
-        }
+        // Or `(evil-mode)` from Helix silently keeps the Helix keymaps (and
+        // the Helix banner).
+        self.leave_helix(cx);
         self.evil = EvilState::Normal;
         self.active.mark_active = false;
         cx.notify();
@@ -492,12 +504,7 @@ impl Editor {
         // `(helix-enabled?)` keeps reporting Helix with no modal mode on at all
         // (which is how `C-h t` ended up opening the Helix tutorial in Emacs
         // mode).
-        if self.modal_helix {
-            self.modal_helix = false;
-            if self.has_extra_cursors() {
-                self.mc_clear(cx);
-            }
-        }
+        self.leave_helix(cx);
         self.evil = EvilState::Disabled;
         cx.notify();
     }
@@ -511,7 +518,8 @@ impl Editor {
         // `"ap` / `"+p` / `"0p`: paste a register instead of the kill ring.
         // Peeked, not taken, so `"a3p` pastes it three times; the register
         // prefix expires at the next command boundary.
-        let reg = (self.evil != EvilState::Disabled && !self.modal_helix)
+        let reg = self
+            .vim_active()
             .then_some(self.vim.pending_register)
             .flatten();
         if let Some(r) = reg {
