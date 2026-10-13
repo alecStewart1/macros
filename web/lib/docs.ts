@@ -164,10 +164,10 @@ export function getDoc(slug: string): Doc | null {
   const renderer = new marked.Renderer();
   renderer.heading = function ({ text, tokens, depth }) {
     const inner = this.parser.parseInline(tokens);
-    // Slug from the SAME source the TOC pass uses (the raw token text), so the
-    // anchor ids and the TOC hrefs always line up.
-    const id = renderSlugger(plainText(text));
     if (depth === 2 || depth === 3) {
+      // Slug from the SAME source and the SAME heading subset (h2/h3 only) the
+      // TOC pass uses, so the dedup counters, anchor ids and TOC hrefs line up.
+      const id = renderSlugger(plainText(text));
       return `<h${depth} id="${id}" class="section-anchor">${inner}` +
         `<a href="#${id}" class="section-anchor-hash" aria-hidden="true" ` +
         `style="margin-left:8px;color:var(--accent);text-decoration:none;">#</a></h${depth}>`;

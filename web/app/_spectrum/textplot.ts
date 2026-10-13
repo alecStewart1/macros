@@ -276,14 +276,19 @@ export function lines(
     }
   }
   const out = yFrame(g.rows(), lo, hi, width);
-  const legend: Row = [];
-  push(legend, " ".repeat(5));
-  for (const s of series) {
-    push(legend, "■ ", s.color);
-    push(legend, s.name + "   ", LABEL);
-  }
-  out.push(legend);
+  out.push(legend(series));
   return out;
+}
+
+/** One legend row: a colored swatch + name per series, under the y-axis gutter. */
+function legend(series: { name: string; color: string }[]): Row {
+  const row: Row = [];
+  push(row, " ".repeat(5));
+  for (const s of series) {
+    push(row, "■ ", s.color);
+    push(row, s.name + "   ", LABEL);
+  }
+  return row;
 }
 
 /** Braille scatter of (x, y) points per series. */
@@ -305,13 +310,7 @@ export function scatter(
         s.color,
       );
   const out = yFrame(g.rows(), lo, hi, width);
-  const legend: Row = [];
-  push(legend, " ".repeat(5));
-  for (const s of series) {
-    push(legend, "■ ", s.color);
-    push(legend, s.name + "   ", LABEL);
-  }
-  out.push(legend);
+  out.push(legend(series));
   return out;
 }
 
