@@ -1203,6 +1203,21 @@ enum EvilState {
     VisualBlock,
 }
 
+impl EvilState {
+    /// The state's name as Scheme's `(evil-state)` reports it (`""` when
+    /// modal editing is off).
+    fn as_str(self) -> &'static str {
+        match self {
+            EvilState::Disabled => "",
+            EvilState::Normal => "normal",
+            EvilState::Insert => "insert",
+            EvilState::Visual => "visual",
+            EvilState::VisualLine => "visual-line",
+            EvilState::VisualBlock => "visual-block",
+        }
+    }
+}
+
 /// A single running language server and the per-server state we track for it.
 struct LspServer {
     client: LspBackend,
@@ -3526,12 +3541,7 @@ impl Editor {
             .into_iter()
             .map(|d| {
                 let (line, col) = self.active.buffer.byte_to_position(d.range.start);
-                let sev = match d.severity {
-                    lsp::Severity::Error => "error",
-                    lsp::Severity::Warning => "warning",
-                    lsp::Severity::Info => "info",
-                    lsp::Severity::Hint => "hint",
-                };
+                let sev = d.severity.as_str();
                 let msg = d.message.replace(['\t', '\n'], " ");
                 format!("{line}\t{col}\t{sev}\t{msg}")
             })
@@ -3581,15 +3591,7 @@ impl Editor {
             helix_enabled: self.modal_helix,
             kbd_macro_recording: self.macro_recording.is_some(),
             prefix_count: self.prefix_count,
-            evil_state: match self.evil {
-                EvilState::Disabled => "",
-                EvilState::Normal => "normal",
-                EvilState::Insert => "insert",
-                EvilState::Visual => "visual",
-                EvilState::VisualLine => "visual-line",
-                EvilState::VisualBlock => "visual-block",
-            }
-            .to_string(),
+            evil_state: self.evil.as_str().to_string(),
             search_query: self.search_query.clone().unwrap_or_default(),
             search_forward: self.evil_search_forward,
             marks: self.active_marks(),

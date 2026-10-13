@@ -35,6 +35,16 @@ impl Severity {
             _ => Severity::Error,
         }
     }
+
+    /// The lowercase name Scheme sees (`error`, `warning`, `info`, `hint`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+            Severity::Hint => "hint",
+        }
+    }
 }
 
 /// A diagnostic from the language server, already mapped to buffer byte offsets.
