@@ -482,13 +482,13 @@ impl Editor {
             )),
             // One sheet of a workbook written over the workbook would drop
             // its other sheets.
-            Some(g) if g.xlsx_source.as_deref().is_some_and(same) => Err(std::io::Error::other(
+            Some(g) if g.xlsx.source.as_deref().is_some_and(same) => Err(std::io::Error::other(
                 "this is one sheet of that workbook — writing it there would drop the others; \
                  save it under another name",
             )),
             // A protected .xlsx is never written over itself (save_bytes says
             // why).
-            Some(g) if own_file && !g.xlsx_lossy.is_empty() => self.active.save_bytes(),
+            Some(g) if own_file && !g.xlsx.lossy.is_empty() => self.active.save_bytes(),
             Some(g) => g.bytes_for(Path::new(&target)),
             None => self.active.save_bytes(),
         };

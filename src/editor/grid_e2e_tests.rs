@@ -871,7 +871,7 @@ fn org_table_to_grid_and_mode_hooks(cx: &mut TestAppContext) {
         e.install_active(doc);
         e.move_to(10, cx);
         e.apply_command(
-            EditorCommand::Grid(crate::grid::cmd::GridCmd::OrgTableToGrid),
+            EditorCommand::Grid(crate::grid::cmd::GridCmd::OrgTableToGrid.into()),
             cx,
         );
     });
@@ -1253,14 +1253,15 @@ fn show_formulas_and_trace(cx: &mut TestAppContext) {
     keys(&ed, cx, "g [");
     ed.read_with(cx, |e, _| {
         let g = e.active.grid.as_ref().unwrap();
-        assert_eq!(g.view.trace, vec![(1, 1, 1, 1), (2, 1, 2, 1)]);
+        let cell = crate::grid::view::CellRange::cell;
+        assert_eq!(g.view.trace, vec![cell((1, 1)), cell((2, 1))]);
     });
     ed.update(cx, |e, cx| e.grid_goto_address("B3", cx));
     keys(&ed, cx, "g ]");
     ed.read_with(cx, |e, _| {
         assert_eq!(
             e.active.grid.as_ref().unwrap().view.trace,
-            vec![(1, 3, 1, 3)]
+            vec![crate::grid::view::CellRange::cell((1, 3))]
         );
     });
 }
@@ -1701,7 +1702,7 @@ fn same_named_workbooks_get_their_own_sheet_buffers(cx: &mut TestAppContext) {
         scheme(&ed, cx, "(grid-open-sheet \"Second\")");
     }
     let src = ed.read_with(cx, |e, _| {
-        e.active.grid.as_ref().unwrap().xlsx_source.clone()
+        e.active.grid.as_ref().unwrap().xlsx.source.clone()
     });
     assert_eq!(
         src.as_deref(),
@@ -1819,7 +1820,7 @@ fn regression_sheet_buffer_write_over_its_workbook(cx: &mut TestAppContext) {
     settle(&ed, cx);
     scheme(&ed, cx, "(grid-open-sheet \"Second\")");
     let lossy = ed.read_with(cx, |e, _| {
-        e.active.grid.as_ref().unwrap().xlsx_lossy.clone()
+        e.active.grid.as_ref().unwrap().xlsx.lossy.clone()
     });
     eprintln!("lossy: {lossy:?}");
     let target = book.to_string_lossy().to_string();
@@ -1907,7 +1908,7 @@ fn editing_waits_for_the_background_load(cx: &mut TestAppContext) {
         // RET / F2 is refused like typing: the prefix is replaced when the
         // load lands, and an edit made to it would be lost.
         e.grid_goto_address("B2", cx);
-        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, 0, cx);
+        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, cx);
         assert!(e.active.grid.as_ref().unwrap().view.edit.is_none());
         assert!(e.status.contains("Still loading"), "{}", e.status);
         assert!(!e.active.modified);
@@ -1920,7 +1921,7 @@ fn regression_quit_save_after_edit_during_load_truncates(cx: &mut TestAppContext
     let (big, s) = regression_big(&path);
     ed.update(cx, |e, cx| {
         e.open_grid("big.csv".into(), big.clone(), s.clone().into_bytes(), cx);
-        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, 0, cx);
+        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, cx);
         e.grid_edit_input("X", cx);
         e.grid_commit_edit(0, 0, cx);
         // C-x C-c → "yes" (and `:wqa`).

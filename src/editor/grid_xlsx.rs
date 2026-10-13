@@ -210,7 +210,7 @@ fn number_text(n: f64) -> String {
 /// `12345678901234567890` stay the text that was typed; `TRUE`/`FALSE` as
 /// booleans; an error's text (`#N/A`) as that error; everything else as
 /// text. (A cell the file stored as text keeps that type; see
-/// `GridDoc::xlsx_text`.)
+/// `XlsxState::text`.)
 fn plain_value(text: &str) -> XValue {
     match Value::from_cell_text(text) {
         Value::Number(n) if number_text(n) == text => XValue::Number(n),
@@ -252,26 +252,27 @@ impl Editor {
             self.echo("grid-open-sheet: the current buffer is not a grid", cx);
             return;
         };
-        let Some(path) = self.active.path.clone().or_else(|| g.xlsx_source.clone()) else {
+        let Some(path) = self.active.path.clone().or_else(|| g.xlsx.source.clone()) else {
             self.echo("grid-open-sheet: this grid isn't from an .xlsx file", cx);
             return;
         };
-        if g.xlsx_sheets.is_empty() {
+        if g.xlsx.sheets.is_empty() {
             self.echo("grid-open-sheet: only .xlsx workbooks have sheets", cx);
             return;
         }
         let name = name.trim();
-        let Some(index) = g.xlsx_sheets.iter().position(|s| s == name).or_else(|| {
-            g.xlsx_sheets
+        let Some(index) = g.xlsx.sheets.iter().position(|s| s == name).or_else(|| {
+            g.xlsx
+                .sheets
                 .iter()
                 .position(|s| s.eq_ignore_ascii_case(name))
         }) else {
-            let all = g.xlsx_sheets.join(", ");
+            let all = g.xlsx.sheets.join(", ");
             self.echo(format!("No sheet named {name:?} (sheets: {all})"), cx);
             return;
         };
-        let sheet = g.xlsx_sheets[index].clone();
-        if index == g.xlsx_sheet {
+        let sheet = g.xlsx.sheets[index].clone();
+        if index == g.xlsx.sheet {
             self.echo(format!("Already showing sheet {sheet}"), cx);
             return;
         }
@@ -290,8 +291,9 @@ impl Editor {
         let book = super::buffers::file_identity(&path);
         let open = self.inactive.iter().find(|d| {
             d.grid.as_deref().is_some_and(|g| {
-                g.xlsx_sheet == index
-                    && g.xlsx_source
+                g.xlsx.sheet == index
+                    && g.xlsx
+                        .source
                         .as_deref()
                         .is_some_and(|p| super::buffers::file_identity(p) == book)
             })
@@ -313,13 +315,13 @@ impl Editor {
             }
         };
         let count = l.sheets.len();
-        let mut grid = GridDoc::new(l.wb, Some("xlsx".into()), hash, &self.grid_opts);
-        grid.xlsx_lossy = l.lossy;
-        grid.xlsx_sheets = l.sheets;
-        grid.xlsx_sheet = index;
-        grid.xlsx_source = Some(path);
-        grid.other_sheets = l.others;
-        grid.xlsx_text = l.text_cells;
+        let mut grid = GridDoc::new(l.wb, Some("xlsx".into()), hash, &self.grid_ui.opts);
+        grid.xlsx.lossy = l.lossy;
+        grid.xlsx.sheets = l.sheets;
+        grid.xlsx.sheet = index;
+        grid.xlsx.source = Some(path);
+        grid.xlsx.other_sheets = l.others;
+        grid.xlsx.text = l.text_cells;
         for ((r, c), f) in l.formats {
             grid.formats.set(r, c, f);
         }
@@ -343,7 +345,7 @@ impl Editor {
                 && workbook_of(d) == book
                 && let Some(g) = d.grid.as_deref_mut()
             {
-                g.sheet_published = None;
+                g.xlsx.sheet_published = None;
             }
         }
         let open: Vec<Option<usize>> = (0..self.inactive.len()).map(Some).collect();
@@ -376,13 +378,13 @@ impl Editor {
                     continue;
                 };
                 let key = (g.wb.generation(), g.formulas.evaluations());
-                if g.sheet_published == Some(key) || g.formulas.busy() {
+                if g.xlsx.sheet_published == Some(key) || g.formulas.busy() {
                     continue;
                 }
-                g.sheet_published = Some(key);
+                g.xlsx.sheet_published = Some(key);
                 (
-                    g.xlsx_sheet,
-                    g.xlsx_sheets[g.xlsx_sheet].clone(),
+                    g.xlsx.sheet,
+                    g.xlsx.sheets[g.xlsx.sheet].clone(),
                     g.sheet_values(),
                 )
             };
@@ -398,10 +400,10 @@ impl Editor {
                 let Some(g) = self.doc_at_mut(to).grid.as_deref_mut() else {
                     continue;
                 };
-                if g.xlsx_sheet == index || g.other_sheets.get(&lower) == Some(&values) {
+                if g.xlsx.sheet == index || g.xlsx.other_sheets.get(&lower) == Some(&values) {
                     continue;
                 }
-                g.other_sheets.insert(lower.clone(), values.clone());
+                g.xlsx.other_sheets.insert(lower.clone(), values.clone());
                 g.formulas.sheet_changed(&name);
                 while g.recalc_slice() {}
                 changed_any = true;
@@ -432,10 +434,10 @@ impl Editor {
 /// several sheets (as a file identity, so two paths to it agree).
 fn workbook_of(doc: &super::Document) -> Option<PathBuf> {
     let g = doc.grid.as_deref()?;
-    if g.xlsx_sheets.len() < 2 {
+    if g.xlsx.sheets.len() < 2 {
         return None;
     }
-    let path = doc.path.as_ref().or(g.xlsx_source.as_ref())?;
+    let path = doc.path.as_ref().or(g.xlsx.source.as_ref())?;
     Some(super::buffers::file_identity(path))
 }
 
@@ -478,7 +480,7 @@ impl GridDoc {
                         .map_or(XValue::Empty, result_value);
                     let f = display_text(raw).trim_start_matches('=').to_string();
                     owned.push((r, c, value, Some(f)));
-                } else if self.xlsx_text.get(&(r, c)).is_some_and(|t| t == raw) {
+                } else if self.xlsx.text.get(&(r, c)).is_some_and(|t| t == raw) {
                     owned.push((r, c, XValue::Text(raw.to_string()), None));
                 } else {
                     owned.push((r, c, plain_value(raw), None));
@@ -586,7 +588,7 @@ mod tests {
         assert!(l.lossy.is_empty(), "{:?}", l.lossy);
         let opts = super::super::grid::GridOptions::default();
         let mut g = GridDoc::new(l.wb, Some("xlsx".into()), 0, &opts);
-        g.xlsx_text = l.text_cells;
+        g.xlsx.text = l.text_cells;
         xlsx::read(&g.xlsx_bytes()).unwrap()
     }
 
@@ -661,7 +663,7 @@ mod tests {
         let l = load(&bytes, 0).unwrap();
         let opts = super::super::grid::GridOptions::default();
         let mut g = GridDoc::new(l.wb, Some("xlsx".into()), 0, &opts);
-        g.xlsx_text = l.text_cells;
+        g.xlsx.text = l.text_cells;
         g.model_op(|wb| wb.set_cells(SHEET, &[(0usize, 0usize, "x".to_string())]));
         while g.absorb_changes() {}
         // `u`: a Model { steps: 1, layout: None } entry replays wb.undo().

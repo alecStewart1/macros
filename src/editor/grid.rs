@@ -12,9 +12,9 @@
 //! `scheme/grid.scm`; cell insert is a small native line editor (see
 //! [`Editor::key_grid`] and [`Editor::grid_action_key`]).
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -23,13 +23,15 @@ use gpui::{Context, Keystroke, MouseButton, Pixels, Point, SharedString};
 
 use super::input::Handled;
 use super::*;
+use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt, CellFormats, NumCode};
-use crate::grid::cmd::{GridCmd, GridOp};
+use crate::grid::cmd::{Dir, GridCmd, GridInvocation, GridOp};
 use crate::grid::infer::ColType;
-use crate::grid::model::{CellsSnapshot, Workbook};
+use crate::grid::model::{CellsSnapshot, Change, Workbook};
+use crate::grid::sidecar::Sidecar;
 use crate::grid::style::RuleTest;
 use crate::grid::view::{
-    self, CellEdit, CellRange, GridView, SelKind, cell_name, parse_address, range_name,
+    self, CellEdit, CellRange, GridView, Pos, SelKind, cell_name, parse_address, range_name,
 };
 
 /// The grid has a single sheet until `.xlsx` support lands.
@@ -81,6 +83,58 @@ impl Default for GridOptions {
     }
 }
 
+/// Editor-wide grid state (one per editor, not per grid buffer).
+pub(super) struct GridUi {
+    /// File extensions that open as a grid (`grid-extensions`, lower case).
+    pub extensions: Vec<String>,
+    /// Painted geometry per grid pane (set by `GridElement` each frame).
+    pub geom: HashMap<usize, GridGeom>,
+    /// A mouse drag (selection or header resize) on a grid pane.
+    pub drag: Option<GridDrag>,
+    /// The echo the grid last showed (formula-bar fallback), so it only
+    /// replaces its own text, never someone else's message.
+    pub echo: Option<SharedString>,
+    /// Editor-wide grid settings (`grid-default-column-width`, …).
+    pub opts: GridOptions,
+    /// An open `ge` popup.
+    pub cell_popup: Option<CellPopup>,
+    /// A background slice loop is finishing a large recalculation.
+    pub recalc_scheduled: bool,
+    /// The formulas of the last grid copy (see `FormulaClip`).
+    pub formula_clip: Option<super::grid_formula::FormulaClip>,
+    /// Where the grid's function-name dropdown was painted (for clicks).
+    pub completion_hit: Option<PopupHit>,
+}
+
+impl Default for GridUi {
+    fn default() -> Self {
+        Self {
+            extensions: ["csv", "tsv", "tab", "psv", "xlsx"]
+                .map(String::from)
+                .to_vec(),
+            geom: HashMap::new(),
+            drag: None,
+            echo: None,
+            opts: GridOptions::default(),
+            cell_popup: None,
+            recalc_scheduled: false,
+            formula_clip: None,
+            completion_hit: None,
+        }
+    }
+}
+
+/// An open `ge` popup: a text buffer editing one grid cell.
+#[derive(Debug, Clone)]
+pub(super) struct CellPopup {
+    /// The popup buffer (`*cell C7*`).
+    pub buffer: String,
+    /// The grid buffer the cell belongs to.
+    pub grid: String,
+    pub row: usize,
+    pub col: usize,
+}
+
 /// One stage of a row filter. Filters stack: each keeps only rows the ones
 /// before it kept.
 #[derive(Debug, Clone)]
@@ -106,7 +160,7 @@ impl RowFilter {
 
 /// Cursor, anchor and selection kind: what `grid-selection-changed-hook`
 /// compares to decide whether to fire.
-type SelState = ((usize, usize), Option<(usize, usize)>, SelKind);
+type SelState = (Pos, Option<Pos>, SelKind);
 /// A cached cell copy and the `(epoch, generation)` it was made at.
 type PublishedCells = Option<((u64, u64), Arc<CellsSnapshot>)>;
 
@@ -118,8 +172,8 @@ pub(super) struct YankState {
     /// Grid history depth right after the paste.
     pub depth: usize,
     /// Cursor and anchor before the paste.
-    pub cursor: (usize, usize),
-    pub anchor: Option<(usize, usize)>,
+    pub cursor: Pos,
+    pub anchor: Option<Pos>,
 }
 
 /// One changed cell: `(row, col, old, new)`.
@@ -136,10 +190,11 @@ enum Hist {
         steps: usize,
         layout: Option<Box<(Layout, Layout)>>,
     },
-    /// Formatting set by hand: `(row, col, before, after)` per cell.
-    Format(Vec<(usize, usize, CellFmt, CellFmt)>),
+    /// Formatting set by hand: `(cell, before, after)` per cell.
+    Format(Vec<(Pos, CellFmt, CellFmt)>),
+    /// A column's width or a row's height set.
     Resize {
-        cols: bool,
+        axis: Axis,
         idx: usize,
         old: f64,
         new: f64,
@@ -149,6 +204,134 @@ enum Hist {
     /// Everything one Scheme command (or one native command made of
     /// several edits) did: undone last-first, as one step.
     Group(Vec<Hist>),
+}
+
+/// A grid's undo history. Data edits are delegated to the workbook's own
+/// undo stack (see [`Hist::Model`]); this orders them with the grid-only
+/// steps and groups the edits of one command into one step.
+#[derive(Debug)]
+struct History {
+    undo: Vec<Hist>,
+    redo: Vec<Hist>,
+    /// The Scheme command batch now applying, if any: model edits made under
+    /// the same batch merge into one undo step.
+    batch: Option<u64>,
+    /// The batch the last history entry belongs to.
+    last_batch: Option<u64>,
+    /// Source of local undo batches (grouping several model edits made by
+    /// one native command, e.g. deleting the visible rows of a filter).
+    local_batch: u64,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            batch: None,
+            last_batch: None,
+            // Far from the Scheme batches' sequence numbers.
+            local_batch: u64::MAX / 2,
+        }
+    }
+}
+
+impl History {
+    /// Push an entry; within one batch (a Scheme command, or a
+    /// [`GridDoc::grouped`] native one) it joins the batch's single step.
+    fn record(&mut self, entry: Hist) {
+        match (self.batch, self.undo.last_mut()) {
+            (Some(b), Some(last)) if self.last_batch == Some(b) => match last {
+                Hist::Group(entries) => entries.push(entry),
+                _ => {
+                    let prev = std::mem::replace(last, Hist::Group(Vec::new()));
+                    *last = Hist::Group(vec![prev, entry]);
+                }
+            },
+            _ => self.undo.push(entry),
+        }
+        self.last_batch = self.batch;
+        self.redo.clear();
+    }
+
+    /// The entry an undo (`undo`) or redo replays next, taken off its stack.
+    fn take(&mut self, undo: bool) -> Option<Hist> {
+        if undo {
+            self.undo.pop()
+        } else {
+            self.redo.pop()
+        }
+    }
+
+    /// File `entry`, just replayed, on the other stack. The next edit starts
+    /// a step of its own.
+    fn replayed(&mut self, entry: Hist, undo: bool) {
+        self.last_batch = None;
+        if undo {
+            self.redo.push(entry);
+        } else {
+            self.undo.push(entry);
+        }
+    }
+
+    /// Open a local batch; returns the batch to restore when it ends.
+    fn begin_local(&mut self) -> Option<u64> {
+        self.local_batch += 1;
+        self.batch.replace(self.local_batch)
+    }
+
+    /// How many steps undo can take.
+    fn len(&self) -> usize {
+        self.undo.len()
+    }
+
+    fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+}
+
+/// What an `.xlsx` grid carries besides its cells (all empty for CSV).
+#[derive(Debug, Default)]
+pub(super) struct XlsxState {
+    /// What the file holds that a rewrite would drop (charts, styles, more
+    /// sheets, …), and so saving over the file is refused.
+    pub lossy: Vec<String>,
+    /// The sheet names, in workbook order.
+    pub sheets: Vec<String>,
+    /// Which of them this buffer shows.
+    pub sheet: usize,
+    /// The workbook a sheet buffer (`report.xlsx<Costs>`) was opened from;
+    /// such a buffer visits no file itself.
+    pub source: Option<PathBuf>,
+    /// The workbook's other sheets' values, by lower-case name, for
+    /// `Costs!B2` references: from the file, then live from open sheet
+    /// buffers ([`Editor::grid_sync_sheets_of`]).
+    pub other_sheets: HashMap<String, crate::formula::engine::SheetValues>,
+    /// Cells the file stored as text that would otherwise be saved as
+    /// another type (`"12"` as a number), with that text: saved as text while
+    /// they still hold it (an edit, then undo, included).
+    pub text: HashMap<(usize, usize), String>,
+    /// `(data generation, formula evaluations)` when this sheet's values
+    /// were last handed to the other open sheets.
+    pub sheet_published: Option<(u64, u64)>,
+}
+
+/// A grid's state against the file on disk.
+#[derive(Debug, Default)]
+struct SaveState {
+    /// Hash of the bytes last read from / written to disk, so auto-revert can
+    /// tell our own save apart from an outside change.
+    disk_hash: u64,
+    /// The last save failed: stay modified even if undo returns to the
+    /// workbook's saved point.
+    failed: bool,
+    /// `formats` as last saved (or loaded): formatting differing from it
+    /// makes the buffer modified, since an `.xlsx` saves it.
+    formats: CellFormats,
+    /// String-pool size after the last load/compaction: edits leave orphaned
+    /// strings in the append-only pool, reclaimed on save once they pile up.
+    pool_baseline: usize,
 }
 
 /// What of a grid follows its cells through structural edits: formatting
@@ -190,8 +373,8 @@ pub(super) struct GridLoading {
 pub(super) struct GridDoc {
     pub wb: Workbook,
     pub view: GridView,
-    hist: Vec<Hist>,
-    redo: Vec<Hist>,
+    /// Undo and redo, and the batches edits group into.
+    history: History,
     pub loading: Option<GridLoading>,
     /// A `v`/`V`/`C-v`/`C-SPC` selection: motions extend it until Escape.
     /// (Shift-arrow selections aren't sticky — the next plain motion drops
@@ -199,32 +382,17 @@ pub(super) struct GridDoc {
     sticky_sel: bool,
     last_repeat: Option<RepeatOp>,
     search: Option<String>,
-    /// Hash of the bytes last read from / written to disk, so auto-revert can
-    /// tell our own save apart from an outside change.
-    disk_hash: u64,
-    /// The last save failed: stay modified even if undo returns to the
-    /// workbook's saved point.
-    save_failed: bool,
+    /// What was last read from or written to disk.
+    save: SaveState,
     /// Lower-cased file extension, the dialect hint for re-parses.
     pub(super) ext: Option<String>,
     /// The mode line's range summary, recomputed after each command (not
     /// per frame — a whole-column selection can span a million cells).
     pub summary: String,
-    /// String-pool size after the last load/compaction: edits leave orphaned
-    /// strings in the append-only pool, reclaimed on save once they pile up.
-    pool_baseline: usize,
     /// Declarative styling set from Scheme (faces, number formats, rules).
     pub style: crate::grid::style::GridStyle,
     /// Bold and colors set by hand (`grid-toggle-bold`, …); session only.
     pub formats: CellFormats,
-    /// `formats` as last saved (or loaded): formatting differing from it
-    /// makes the buffer modified, since an `.xlsx` saves it.
-    saved_formats: CellFormats,
-    /// The Scheme command batch now applying, if any: model edits made under
-    /// the same batch merge into one undo step.
-    batch: Option<u64>,
-    /// The batch the last `Model` history entry belongs to.
-    last_batch: Option<u64>,
     /// See [`next_epoch`].
     pub(super) epoch: u64,
     /// Values `grid-complete-cell` offers per column (`grid-column-choices`).
@@ -240,39 +408,21 @@ pub(super) struct GridDoc {
     hook_sel: Option<SelState>,
     /// The cell copy published for Scheme, keyed by `(epoch, generation)`.
     published: RefCell<PublishedCells>,
-    /// Source of local undo batches (grouping several model edits made by
-    /// one native command, e.g. deleting the visible rows of a filter).
-    local_batch: u64,
     /// The formula engine: which cells are formulas, their results, and
     /// recalculation (see `grid_formula.rs`).
     pub(super) formulas: crate::formula::engine::Engine,
     /// A formula has existed in this buffer, so structural edits must
     /// re-index (a plain CSV never pays for the scan).
     pub(super) had_formulas: bool,
-    /// For an `.xlsx` holding things a rewrite would drop (charts, styles,
-    /// more sheets, …): what, and so saving over the file is refused.
-    pub(super) xlsx_lossy: Vec<String>,
-    /// An `.xlsx`'s sheet names, in workbook order (empty for CSV).
-    pub(super) xlsx_sheets: Vec<String>,
-    /// Which of them this buffer shows.
-    pub(super) xlsx_sheet: usize,
-    /// The workbook a sheet buffer (`report.xlsx<Costs>`) was opened from;
-    /// such a buffer visits no file itself.
-    pub(super) xlsx_source: Option<PathBuf>,
-    /// The workbook's other sheets' values, by lower-case name, for
-    /// `Costs!B2` references: from the file, then live from open sheet
-    /// buffers ([`Editor::grid_sync_sheets_of`]).
-    pub(super) other_sheets: HashMap<String, crate::formula::engine::SheetValues>,
-    /// Cells an `.xlsx` stored as text that would otherwise be saved as
-    /// another type (`"12"` as a number), with that text: saved as text while
-    /// they still hold it (an edit, then undo, included).
-    pub(super) xlsx_text: HashMap<(usize, usize), String>,
+    /// What an `.xlsx` brought along: its sheets, what a rewrite would
+    /// drop, and cells stored as text.
+    pub(super) xlsx: XlsxState,
     /// A structural edit moved column widths, hidden columns or row heights
     /// (to persist with the file's layout).
     pub(super) layout_moved: bool,
-    /// `(data generation, formula evaluations)` when this sheet's values
-    /// were last handed to the other open sheets.
-    pub(super) sheet_published: Option<(u64, u64)>,
+    /// Cells the user changed in the current command, for
+    /// `grid-cell-changed-hook` (drained by `grid_fire_changes`).
+    changed: Vec<CellChange>,
 }
 
 impl Drop for GridDoc {
@@ -304,22 +454,20 @@ impl GridDoc {
         Self {
             wb,
             view,
-            hist: Vec::new(),
-            redo: Vec::new(),
+            history: History::default(),
             loading: None,
             sticky_sel: false,
             last_repeat: None,
             search: None,
-            disk_hash,
-            save_failed: false,
+            save: SaveState {
+                disk_hash,
+                pool_baseline,
+                ..SaveState::default()
+            },
             ext,
             summary: String::new(),
-            pool_baseline,
             style: Default::default(),
             formats: CellFormats::default(),
-            saved_formats: CellFormats::default(),
-            batch: None,
-            last_batch: None,
             epoch: next_epoch(),
             choices: HashMap::new(),
             filters: Vec::new(),
@@ -328,17 +476,11 @@ impl GridDoc {
             recenter_phase: 0,
             hook_sel: None,
             published: RefCell::new(None),
-            local_batch: u64::MAX / 2,
             formulas: crate::formula::engine::Engine::new(),
             had_formulas: false,
-            xlsx_lossy: Vec::new(),
-            xlsx_sheets: Vec::new(),
-            xlsx_sheet: 0,
-            xlsx_source: None,
-            other_sheets: HashMap::new(),
-            xlsx_text: Default::default(),
+            xlsx: XlsxState::default(),
             layout_moved: false,
-            sheet_published: None,
+            changed: Vec::new(),
         }
     }
 
@@ -354,7 +496,7 @@ impl GridDoc {
         // Positions mean nothing in the new data: drop hand formatting and
         // positional narrowing (`C-x n n`); filters by value re-apply.
         self.formats.clear();
-        self.saved_formats.clear();
+        self.save.formats.clear();
         self.filters.retain(|f| matches!(f, RowFilter::Test { .. }));
         self.rebuild_formulas();
         self.refresh_derived();
@@ -362,11 +504,9 @@ impl GridDoc {
 
     /// Run `f`, merging the model edits it makes into one undo step.
     pub(super) fn grouped(&mut self, f: impl FnOnce(&mut Self)) {
-        let saved = self.batch;
-        self.local_batch += 1;
-        self.batch = Some(self.local_batch);
+        let saved = self.history.begin_local();
         f(self);
-        self.batch = saved;
+        self.history.batch = saved;
     }
 
     /// Whether row `r` is shown (not filtered out).
@@ -483,24 +623,24 @@ impl GridDoc {
         Some(cells)
     }
 
-    /// One shown row up or down from `r` (staying put at the edge).
-    pub(super) fn row_step(&self, r: usize, down: bool) -> usize {
-        if down {
-            self.view.rows.next_visible(r + 1)
-        } else {
-            r.checked_sub(1)
-                .and_then(|p| self.view.rows.prev_visible(p))
-                .unwrap_or(r)
-        }
+    /// The cursor moved one shown cell `d`-ward (staying put at the edge).
+    fn stepped(&self, d: Dir) -> Pos {
+        let mut p = self.view.cursor;
+        let i = view::coord_mut(&mut p, d.axis());
+        *i = self.step(d.axis(), *i, d.forward());
+        p
     }
 
-    pub(super) fn col_step(&self, c: usize, right: bool) -> usize {
-        if right {
-            self.view.cols.next_visible(c + 1)
+    /// One shown row (column) on from `i` — down (right) when `forward`,
+    /// else up (left) — staying put at the edge.
+    pub(super) fn step(&self, axis: Axis, i: usize, forward: bool) -> usize {
+        let a = self.view.axis(axis);
+        if forward {
+            a.next_visible(i + 1)
         } else {
-            c.checked_sub(1)
-                .and_then(|p| self.view.cols.prev_visible(p))
-                .unwrap_or(c)
+            i.checked_sub(1)
+                .and_then(|p| a.prev_visible(p))
+                .unwrap_or(i)
         }
     }
 
@@ -518,20 +658,13 @@ impl GridDoc {
     }
 
     /// The cells of `sel` inside the data, skipping filtered-out rows.
-    pub(super) fn visible_cells(&self, sel: &CellRange) -> Vec<(usize, usize)> {
+    pub(super) fn visible_cells(&self, sel: &CellRange) -> Vec<Pos> {
         let (rows, cols) = self.used();
-        let mut out = Vec::new();
-        for r in sel.r0..=sel.r1.min(rows.saturating_sub(1)) {
-            if r >= rows || !self.row_shown(r) {
-                continue;
-            }
-            for c in sel.c0..=sel.c1.min(cols.saturating_sub(1)) {
-                if c < cols {
-                    out.push((r, c));
-                }
-            }
-        }
-        out
+        let cols = sel.c0..sel.c1.saturating_add(1).min(cols);
+        (sel.r0..sel.r1.saturating_add(1).min(rows))
+            .filter(|&r| self.row_shown(r))
+            .flat_map(|r| cols.clone().map(move |c| (r, c)))
+            .collect()
     }
 
     /// The selection's shown rows as a block of text (empty past the data).
@@ -554,13 +687,13 @@ impl GridDoc {
     }
 
     pub fn modified(&self) -> bool {
-        self.wb.is_modified() || self.save_failed || self.formats != self.saved_formats
+        self.wb.is_modified() || self.save.failed || self.formats != self.save.formats
     }
 
     /// Record the data and the formatting as saved.
     pub fn mark_saved(&mut self) {
         self.wb.mark_saved();
-        self.saved_formats = self.formats.clone();
+        self.save.formats = self.formats.clone();
     }
 
     pub fn used(&self) -> (usize, usize) {
@@ -625,8 +758,8 @@ impl GridDoc {
     /// wrote [`Self::bytes`]: record the saved point.
     pub fn saved_externally(&mut self) {
         self.mark_saved();
-        self.save_failed = false;
-        self.disk_hash = bytes_hash(&self.bytes());
+        self.save.failed = false;
+        self.save.disk_hash = bytes_hash(&self.bytes());
     }
 
     /// The file's bytes as they should be written now (CSV, or `.xlsx` for
@@ -645,24 +778,32 @@ impl GridDoc {
     pub(super) fn model_op<R>(&mut self, f: impl FnOnce(&mut Workbook) -> R) -> R {
         let before = self.wb.undo_depth();
         // Formulas and layout as they were, in case this edit moves cells
-        // around.
+        // around. The formula snapshot is the engine's, which hasn't seen
+        // the log yet (`absorb_changes` takes it after the command).
         let snap = self.formula_snapshot();
+        let mark = self.wb.change_mark();
         let out = f(&mut self.wb);
         let mut layout = None;
         if snap.is_some() || self.has_layout() {
             // Peek at what the edit did; a structural one rewrites the
             // references it moved (one more model step, same undo entry)
-            // and carries the layout along with its cells.
-            let changes = self.wb.take_changes();
-            if changes
-                .iter()
-                .any(|c| !matches!(c, crate::grid::model::Change::Cells(_)))
-            {
+            // and carries the layout along with its cells. Cell changes
+            // move nothing, so only the structural ones are kept.
+            let structural = |changes: &[Change]| -> Vec<Change> {
+                changes
+                    .iter()
+                    .filter(|c| !matches!(c, Change::Cells(_)))
+                    .cloned()
+                    .collect()
+            };
+            let moved = structural(self.wb.changes_since(mark));
+            if !moved.is_empty() {
                 if self.has_layout() {
                     // `f` only touched the workbook: this is still the
-                    // layout from before the edit.
+                    // layout from before the edit (earlier edits in this
+                    // command already carried it along theirs).
                     let before = self.layout();
-                    self.remap_layout(&changes);
+                    self.remap_layout(&moved);
                     let after = self.layout();
                     if before != after {
                         layout = Some(Box::new((before, after)));
@@ -670,13 +811,12 @@ impl GridDoc {
                     }
                 }
                 if let Some(snap) = snap {
-                    self.rewrite_after(&changes, snap);
+                    // The snapshot predates every change in the log, so
+                    // all of them apply to it.
+                    let all = structural(self.wb.changes_since(0));
+                    self.rewrite_after(&all, snap);
                 }
             }
-            // Put the log back in order for `absorb_changes`.
-            let rest = self.wb.take_changes();
-            self.wb
-                .restore_changes(changes.into_iter().chain(rest).collect());
         }
         let steps = self.wb.undo_depth().saturating_sub(before);
         if steps > 0 {
@@ -685,26 +825,14 @@ impl GridDoc {
         out
     }
 
-    /// Push a history entry; within one batch (a Scheme command, or a
-    /// [`Self::grouped`] native one) it joins the batch's single step.
+    /// Push a history entry (see [`History::record`]).
     fn record(&mut self, entry: Hist) {
-        match (self.batch, self.hist.last_mut()) {
-            (Some(b), Some(last)) if self.last_batch == Some(b) => match last {
-                Hist::Group(entries) => entries.push(entry),
-                _ => {
-                    let prev = std::mem::replace(last, Hist::Group(Vec::new()));
-                    *last = Hist::Group(vec![prev, entry]);
-                }
-            },
-            _ => self.hist.push(entry),
-        }
-        self.last_batch = self.batch;
-        self.redo.clear();
+        self.history.record(entry);
     }
 
     /// Undo (`undo`) or redo one history entry. Returns the cell to put the
     /// cursor on, and whether column/row layout changed (to persist it).
-    fn replay(&mut self, entry: &Hist, undo: bool) -> (Option<(usize, usize)>, bool) {
+    fn replay(&mut self, entry: &Hist, undo: bool) -> (Option<Pos>, bool) {
         match entry {
             Hist::Model { steps, layout } => {
                 let mut pos = None;
@@ -718,28 +846,25 @@ impl GridDoc {
             }
             Hist::Format(cells) => {
                 if undo {
-                    for &(r, c, before, _) in cells.iter().rev() {
+                    for &((r, c), before, _) in cells.iter().rev() {
                         self.formats.set(r, c, before);
                     }
                 } else {
-                    for &(r, c, _, after) in cells {
+                    for &((r, c), _, after) in cells {
                         self.formats.set(r, c, after);
                     }
                 }
-                (cells.first().map(|&(r, c, ..)| (r, c)), false)
+                (cells.first().map(|&(pos, ..)| pos), false)
             }
             Hist::Resize {
-                cols,
+                axis,
                 idx,
                 old,
                 new,
             } => {
-                let axis = if *cols {
-                    &mut self.view.cols
-                } else {
-                    &mut self.view.rows
-                };
-                axis.set(*idx, if undo { *old } else { *new });
+                self.view
+                    .axis_mut(*axis)
+                    .set(*idx, if undo { *old } else { *new });
                 (None, true)
             }
             Hist::Hide { cols, hidden } => {
@@ -770,7 +895,7 @@ impl GridDoc {
             formats: self.formats.clone(),
             cols: self.view.cols.sizing(),
             rows: self.view.rows.sizing(),
-            xlsx_text: self.xlsx_text.clone(),
+            xlsx_text: self.xlsx.text.clone(),
         }
     }
 
@@ -778,13 +903,13 @@ impl GridDoc {
         self.formats = layout.formats;
         self.view.cols.set_sizing(layout.cols);
         self.view.rows.set_sizing(layout.rows);
-        self.xlsx_text = layout.xlsx_text;
+        self.xlsx.text = layout.xlsx_text;
     }
 
     /// Whether anything would need to follow cells through an edit.
     fn has_layout(&self) -> bool {
         !self.formats.is_empty()
-            || !self.xlsx_text.is_empty()
+            || !self.xlsx.text.is_empty()
             || self.view.cols.has_sizing()
             || self.view.rows.has_sizing()
     }
@@ -794,7 +919,7 @@ impl GridDoc {
     /// changed.
     pub(super) fn format_cells(
         &mut self,
-        cells: impl IntoIterator<Item = (usize, usize)>,
+        cells: impl IntoIterator<Item = Pos>,
         f: impl Fn(CellFmt) -> CellFmt,
     ) -> usize {
         let mut changed = Vec::new();
@@ -803,7 +928,7 @@ impl GridDoc {
             let after = f(before);
             if after != before {
                 self.formats.set(r, c, after);
-                changed.push((r, c, before, after));
+                changed.push(((r, c), before, after));
             }
         }
         let n = changed.len();
@@ -815,21 +940,18 @@ impl GridDoc {
 
     /// Depth of the grid's undo history.
     pub(super) fn hist_len(&self) -> usize {
-        self.hist.len()
+        self.history.len()
     }
 
-    fn resize(&mut self, cols: bool, idx: usize, size: f64) {
-        let axis = if cols {
-            &mut self.view.cols
-        } else {
-            &mut self.view.rows
-        };
-        let old = axis.size(idx);
-        axis.set(idx, size);
-        let new = axis.size(idx);
+    /// Set column (or row) `idx`'s size, as an undo step.
+    fn resize(&mut self, axis: Axis, idx: usize, size: f64) {
+        let sizes = self.view.axis_mut(axis);
+        let old = sizes.size(idx);
+        sizes.set(idx, size);
+        let new = sizes.size(idx);
         if (old - new).abs() > f64::EPSILON {
             self.record(Hist::Resize {
-                cols,
+                axis,
                 idx,
                 old,
                 new,
@@ -887,8 +1009,8 @@ impl GridDoc {
     /// where it was. True when it did.
     fn leave_line_at_edge(&mut self, kind: SelKind) -> bool {
         let at_edge = match kind {
-            SelKind::Cols => self.row_step(self.view.cursor.0, false) == self.view.cursor.0,
-            _ => self.col_step(self.view.cursor.1, false) == self.view.cursor.1,
+            SelKind::Cols => self.step(Axis::Rows, self.view.cursor.0, false) == self.view.cursor.0,
+            _ => self.step(Axis::Cols, self.view.cursor.1, false) == self.view.cursor.1,
         };
         let line = !self.sticky_sel && self.line_selected(kind);
         if at_edge && line {
@@ -1011,7 +1133,7 @@ impl GridDoc {
             return (self.name_box_for(e.row, e.col), e.text.clone());
         }
         let sel = self.selection();
-        if sel.rows() > 1 || sel.cols() > 1 {
+        if !sel.is_single() {
             return (range_name(&sel), String::new());
         }
         let (r, c) = self.view.cursor;
@@ -1032,7 +1154,7 @@ impl GridDoc {
     /// `24 cells · Sum 1,204 · Avg 50.2` for a multi-cell selection.
     pub fn range_summary(&self) -> String {
         let sel = self.selection();
-        if sel.rows() == 1 && sel.cols() == 1 {
+        if sel.is_single() {
             return String::new();
         }
         let (rows, cols) = self.used();
@@ -1075,12 +1197,10 @@ impl GridDoc {
         out
     }
 
-    /// Set cells as one edit, returning `(row, col, old, new)` for each cell
-    /// that actually changed — what `grid-cell-changed-hook` receives.
-    pub(super) fn set_cells_tracked(
-        &mut self,
-        edits: &[(usize, usize, String)],
-    ) -> Vec<CellChange> {
+    /// Set cells as one edit made by the user, queueing `(row, col, old,
+    /// new)` for each cell that actually changed — what
+    /// `grid-cell-changed-hook` receives (see [`Self::changed`]).
+    pub(super) fn set_cells_tracked(&mut self, edits: &[(usize, usize, String)]) {
         // What the user typed becomes what's stored (`=…` → a formula).
         let edits: Vec<(usize, usize, String)> = edits
             .iter()
@@ -1105,7 +1225,7 @@ impl GridDoc {
                 self.model_op(|wb| wb.set_cells(SHEET, edits));
             }
         }
-        changes
+        self.changed.extend(changes);
     }
 
     /// What Scheme's `grid-*` reads see (published with every snapshot).
@@ -1146,15 +1266,15 @@ impl GridDoc {
             cells: self.published_cells(),
             filter: self.view.rows.only().cloned(),
             visible_rows: self.view.rows.only().map_or(rows, |o| o.shown.len()),
-            sheets: self.xlsx_sheets.clone(),
-            sheet: self.xlsx_sheets.get(self.xlsx_sheet).cloned(),
+            sheets: self.xlsx.sheets.clone(),
+            sheet: self.xlsx.sheets.get(self.xlsx.sheet).cloned(),
         }
     }
 
     /// `C7 · int` (or `B2:D9`) for the mode line.
     pub fn cell_status(&self) -> String {
         let sel = self.selection();
-        if sel.rows() > 1 || sel.cols() > 1 {
+        if !sel.is_single() {
             return range_name(&sel);
         }
         let (r, c) = self.view.cursor;
@@ -1167,6 +1287,443 @@ impl GridDoc {
         match self.style.align(c) {
             Some(a) => a == crate::grid::style::Align::Right,
             None => matches!(self.wb.col_type(SHEET, c), ColType::Int | ColType::Float),
+        }
+    }
+}
+
+/// What a grid command did, for the editor to report.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct Outcome {
+    /// For the echo area.
+    pub msg: Option<Cow<'static, str>>,
+    /// Column/row layout changed: save the view sidecar.
+    pub persist_view: bool,
+}
+
+impl Outcome {
+    fn msg(msg: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            msg: Some(msg.into()),
+            persist_view: false,
+        }
+    }
+
+    fn persist() -> Self {
+        Self {
+            msg: None,
+            persist_view: true,
+        }
+    }
+
+    fn and_persist(self) -> Self {
+        Self {
+            persist_view: true,
+            ..self
+        }
+    }
+}
+
+/// What a grid command reads from the editor besides the grid.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CmdEnv {
+    /// The typed count (0 = none).
+    pub count: usize,
+    /// A `C-u` flag (see [`GridCmd::prefix_is_flag`]).
+    pub flag: bool,
+    /// One monospace advance at 100% zoom, for column widths.
+    pub char_w: f64,
+    /// `grid-max-autofit-width`.
+    pub max_fit: f64,
+}
+
+impl Default for CmdEnv {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            flag: false,
+            char_w: 7.0,
+            max_fit: GridOptions::default().max_autofit_width,
+        }
+    }
+}
+
+impl GridDoc {
+    /// Apply a grid command that only touches this grid (motion, selection,
+    /// structure, sizes, view toggles, undo). `Err` is a refusal to report,
+    /// with nothing changed. Commands that need the editor (the clipboard,
+    /// prompts, Scheme) are [`Editor::grid_command`]'s; here they do nothing.
+    pub(super) fn apply(
+        &mut self,
+        cmd: GridCmd,
+        env: &CmdEnv,
+    ) -> Result<Outcome, Cow<'static, str>> {
+        use GridCmd::*;
+        let (r, c) = self.view.cursor;
+        let (rows, cols) = self.used();
+        match cmd {
+            // Across a whole-line selection, step it to take in the next line.
+            Move(d) if self.line_selected(line_kind(d.axis())) => {
+                let (nr, nc) = self.stepped(d);
+                self.move_to(nr, nc, true);
+            }
+            Move(Dir::Left) if self.stepped(Dir::Left) == (r, c) => {
+                self.select_line_at_edge(SelKind::Rows)
+            }
+            Move(Dir::Right) if self.leave_line_at_edge(SelKind::Rows) => {}
+            Move(Dir::Up) if self.stepped(Dir::Up) == (r, c) => {
+                self.select_line_at_edge(SelKind::Cols)
+            }
+            Move(Dir::Down) if self.leave_line_at_edge(SelKind::Cols) => {}
+            Move(d) | Extend(d) => {
+                let (nr, nc) = self.stepped(d);
+                self.move_to(nr, nc, matches!(cmd, Extend(_)));
+            }
+            NextCell => {
+                if cols > 0 && c + 1 >= cols && r + 1 < rows.max(r + 2) {
+                    self.move_to(self.step(Axis::Rows, r, true), 0, false);
+                } else {
+                    self.move_to(r, self.step(Axis::Cols, c, true), false);
+                }
+            }
+            PreviousCell => {
+                if c == 0 && r > 0 {
+                    let last = cols.saturating_sub(1);
+                    self.move_to(self.step(Axis::Rows, r, false), last, false);
+                } else {
+                    self.move_to(r, self.step(Axis::Cols, c, false), false);
+                }
+            }
+            Edge(d) => {
+                let (dr, dc) = d.delta();
+                let (nr, nc) = self.edge(dr, dc);
+                self.move_to(nr, nc, false);
+            }
+            RowStart => self.move_to(r, 0, false),
+            RowFirstNonEmpty => {
+                let first = (0..cols)
+                    .find(|&k| !self.cell(r, k).is_empty())
+                    .unwrap_or(0);
+                self.move_to(r, first, false);
+            }
+            RowEnd => {
+                let last = self.last_filled_col(r);
+                self.move_to(r, last, false);
+            }
+            GotoFirstRow => self.move_to(0, c, false),
+            GotoLastRow => {
+                let target = if env.count > 0 {
+                    env.count - 1
+                } else {
+                    rows.saturating_sub(1)
+                };
+                self.move_to(target, c, false);
+            }
+            GotoColumn => self.move_to(r, env.count.saturating_sub(1), false),
+            GotoFirstCell => self.move_to(0, 0, false),
+            GotoLastCell => self.move_to(rows.saturating_sub(1), cols.saturating_sub(1), false),
+            PageDown | PageUp | HalfPageDown | HalfPageUp => self.page(cmd),
+            SelectCells | SelectRows | SelectColumns => self.toggle_select(match cmd {
+                SelectCells => SelKind::Cells,
+                SelectRows => SelKind::Rows,
+                _ => SelKind::Cols,
+            }),
+            SelectAll => {
+                self.view.anchor = Some((0, 0));
+                self.view.cursor = (rows.saturating_sub(1), cols.saturating_sub(1));
+                self.view.sel_kind = SelKind::Cells;
+                self.sticky_sel = true;
+            }
+            SelectCancel => self.deselect(),
+            EditStart | EditEnd => {
+                let text = self.source(r, c).to_string();
+                self.view.edit = Some(CellEdit::new(r, c, &text, text.clone(), cmd == EditEnd));
+                self.view.reveal_cursor();
+            }
+            EditReplace => {
+                let text = self.source(r, c).to_string();
+                self.view.edit = Some(CellEdit::new(r, c, &text, String::new(), true));
+                self.view.reveal_cursor();
+            }
+            Clear => self.clear_selection(env.flag),
+            DeleteRow => self.delete_selected_rows(),
+            DeleteColumn => self.delete_selected_cols(),
+            InsertRowBelow | InsertRowAbove => {
+                let at = if cmd == InsertRowBelow { r + 1 } else { r };
+                if at <= rows {
+                    self.model_op(|wb| wb.insert_rows(SHEET, at, 1));
+                }
+                self.move_to(at, c, false);
+            }
+            InsertColumnRight | InsertColumnLeft => {
+                let at = if cmd == InsertColumnRight { c + 1 } else { c };
+                if at <= cols {
+                    self.model_op(|wb| wb.insert_cols(SHEET, at, 1));
+                }
+                self.move_to(r, at, false);
+            }
+            SortAscending | SortDescending => return Ok(self.sort(cmd == SortDescending)),
+            Undo | Redo => return self.undo_redo(cmd == Undo),
+            Repeat => {
+                // (Repeating a command is the editor's: it may need it.)
+                if let Some(RepeatOp::SetText(text)) = self.last_repeat.clone() {
+                    self.set_cells_tracked(&[(r, c, text)]);
+                }
+            }
+            WidenColumn | NarrowColumn => {
+                let w = self.view.cols.size(c);
+                let step = env.char_w.max(1.0);
+                let nw = if cmd == WidenColumn {
+                    w + step
+                } else {
+                    (w - step).max(view::MIN_SIZE)
+                };
+                self.resize(Axis::Cols, c, nw);
+                return Ok(Outcome::persist());
+            }
+            AutofitColumn | AutofitColumnFull => {
+                self.autofit(c, cmd == AutofitColumnFull, env);
+                return Ok(Outcome::persist());
+            }
+            TallerRow | ShorterRow => {
+                let h = self.view.rows.size(r);
+                let nh = if cmd == TallerRow {
+                    h + 5.0
+                } else {
+                    (h - 5.0).max(view::MIN_SIZE)
+                };
+                self.resize(Axis::Rows, r, nh);
+                return Ok(Outcome::persist());
+            }
+            ZoomIn | ZoomOut | ZoomReset => {
+                match cmd {
+                    ZoomIn => self.view.step_zoom(1),
+                    ZoomOut => self.view.step_zoom(-1),
+                    _ => self.view.zoom = 1.0,
+                }
+                self.view.reveal_cursor();
+                let pct = (self.view.zoom * 100.0).round();
+                return Ok(Outcome::msg(format!("Zoom {pct}%")).and_persist());
+            }
+            ToggleHeader => {
+                let h = !self.wb.header(SHEET);
+                self.wb.set_header(SHEET, h);
+                let msg = if h {
+                    "Row 1 is a header"
+                } else {
+                    "Row 1 is data"
+                };
+                return Ok(Outcome::msg(msg).and_persist());
+            }
+            ToggleFreeze => return Ok(self.toggle_freeze().and_persist()),
+            FormulaBar => self.view.bar_visible = !self.view.bar_visible,
+            NextProblem => return Ok(self.next_problem()),
+            ShowFormulas => {
+                self.view.show_formulas = !self.view.show_formulas;
+                return Ok(Outcome::msg(if self.view.show_formulas {
+                    "Showing formulas"
+                } else {
+                    "Showing results"
+                }));
+            }
+            // The editor's (see `Editor::grid_command`).
+            EditPopup | Cut | Yank | Paste | YankPop | Goto | SearchForward | SearchBackward
+            | SearchNext | SearchPrevious | ViewAsText | ExchangeAnchor | Recenter
+            | JumpToColumn | KillToRowEnd | Upcase | Downcase | Capitalize | CopyDown
+            | CompleteCell | MoveLine(_) | HideColumn | ShowColumns | NarrowToSelection
+            | Filter | FilterByValue | Widen | CopyAsOrg | CopyAsMarkdown | CopyAsJson
+            | ToggleBold | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral
+            | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
+            | IncreaseDecimals | DecreaseDecimals | TracePrecedents | TraceDependents
+            | GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
+            | Recalculate => {}
+        }
+        Ok(Outcome::default())
+    }
+
+    /// A page (or half a page) up or down: the view scrolls with the cursor.
+    fn page(&mut self, cmd: GridCmd) {
+        use GridCmd::*;
+        let (r, c) = self.view.cursor;
+        let page = self.view.page_rows();
+        let n = if matches!(cmd, PageDown | PageUp) {
+            page
+        } else {
+            (page / 2).max(1)
+        };
+        let down = matches!(cmd, PageDown | HalfPageDown);
+        let mut nr = r;
+        for _ in 0..n {
+            nr = self.step(Axis::Rows, nr, down);
+        }
+        let dy = self.view.rows.start(nr) - self.view.rows.start(r);
+        self.view.scroll_y += dy;
+        self.view.clamp_scroll();
+        self.move_to(nr, c, false);
+    }
+
+    /// `v` / `V` / `C-v`: start a sticky selection of `kind`, or end one.
+    fn toggle_select(&mut self, kind: SelKind) {
+        if self.sticky_sel && self.view.sel_kind == kind {
+            self.deselect();
+        } else {
+            self.view.anchor.get_or_insert(self.view.cursor);
+            self.view.sel_kind = kind;
+            self.sticky_sel = true;
+        }
+    }
+
+    /// Empty the selection's shown cells; with `whole_rows` (`C-u C-d`),
+    /// the selection's whole rows.
+    fn clear_selection(&mut self, whole_rows: bool) {
+        let mut sel = self.selection();
+        if whole_rows {
+            sel.c0 = 0;
+            sel.c1 = self.used().1.saturating_sub(1);
+        }
+        let edits: Vec<(usize, usize, String)> = self
+            .visible_cells(&sel)
+            .into_iter()
+            .map(|(r, c)| (r, c, String::new()))
+            .collect();
+        if !edits.is_empty() {
+            self.set_cells_tracked(&edits);
+        }
+    }
+
+    /// Delete the selected rows (or the cursor's).
+    fn delete_selected_rows(&mut self) {
+        let (r, c) = self.view.cursor;
+        let rows = self.used().0;
+        let sel = self.selection();
+        let (r0, n) = if self.view.anchor.is_some() {
+            (sel.r0, sel.rows())
+        } else {
+            (r, 1)
+        };
+        if r0 < rows {
+            let n = n.min(rows - r0);
+            if self.view.rows.only().is_some() {
+                // Under a filter, only the rows on screen go (as in a
+                // spreadsheet): delete them bottom-up, one step.
+                let doomed: Vec<usize> = (r0..r0 + n).filter(|&k| self.row_shown(k)).collect();
+                self.grouped(|g| {
+                    for &k in doomed.iter().rev() {
+                        g.model_op(|wb| wb.delete_rows(SHEET, k, 1));
+                    }
+                });
+            } else {
+                self.model_op(|wb| wb.delete_rows(SHEET, r0, n));
+            }
+        }
+        self.deselect();
+        self.move_to(r0, c, false);
+    }
+
+    /// Delete the selected columns (or the cursor's).
+    fn delete_selected_cols(&mut self) {
+        let (r, c) = self.view.cursor;
+        let cols = self.used().1;
+        let sel = self.selection();
+        let (c0, n) = if self.view.anchor.is_some() {
+            (sel.c0, sel.cols())
+        } else {
+            (c, 1)
+        };
+        if c0 < cols {
+            let n = n.min(cols - c0);
+            self.model_op(|wb| wb.delete_cols(SHEET, c0, n));
+        }
+        self.deselect();
+        self.move_to(r, c0, false);
+    }
+
+    /// Sort the rows by the cursor's column.
+    fn sort(&mut self, descending: bool) -> Outcome {
+        let c = self.view.cursor.1;
+        if c >= self.used().1 {
+            return Outcome::default();
+        }
+        let header = self.wb.header(SHEET);
+        self.model_op(|wb| wb.sort_by_column(SHEET, c, descending, header));
+        let dir = if descending {
+            "descending"
+        } else {
+            "ascending"
+        };
+        Outcome::msg(format!("Sorted by column {} ({dir})", view::col_name(c)))
+    }
+
+    /// Undo (or redo) one history entry, putting the cursor where it
+    /// happened.
+    fn undo_redo(&mut self, undo: bool) -> Result<Outcome, Cow<'static, str>> {
+        let entry = self.history.take(undo);
+        let Some(entry) = entry else {
+            let what = if undo { "undo" } else { "redo" };
+            return Err(format!("No further {what} information").into());
+        };
+        let (pos, layout) = self.replay(&entry, undo);
+        if let Some((pr, pc)) = pos {
+            self.deselect();
+            self.move_to(pr, pc, false);
+        }
+        self.history.replayed(entry, undo);
+        Ok(Outcome {
+            msg: None,
+            persist_view: layout,
+        })
+    }
+
+    /// Fit column `c` to its text: every row (`full`), or a sample plus the
+    /// rows on screen.
+    fn autofit(&mut self, c: usize, full: bool, env: &CmdEnv) {
+        let rows = self.used().0;
+        let w = if full {
+            self.fit_width(c, 0..rows, env.char_w, env.max_fit)
+        } else {
+            let top = self.view.top_row();
+            let visible = top..top + self.view.page_rows() + 1;
+            let sample = 0..rows.min(AUTOFIT_SAMPLE);
+            let rows_iter = sample.chain(visible.filter(|&x| x < rows));
+            self.fit_width(c, rows_iter, env.char_w, env.max_fit)
+        };
+        self.resize(Axis::Cols, c, w);
+    }
+
+    /// Freeze panes, by rows: the rows above the cursor, or just row 1 when
+    /// the cursor is on it. Again unfreezes.
+    fn toggle_freeze(&mut self) -> Outcome {
+        if self.view.frozen_rows > 0 {
+            self.view.frozen_rows = 0;
+            return Outcome::msg("Unfrozen");
+        }
+        // The rows above the cursor, within the data.
+        let n = self.view.cursor.0.max(1).min(self.used().0.max(1));
+        self.view.frozen_rows = n;
+        self.view.scroll_y = 0.0;
+        self.view.reveal_cursor();
+        Outcome::msg(if n == 1 {
+            "Froze row 1".to_string()
+        } else {
+            format!("Froze rows 1–{n}")
+        })
+    }
+
+    /// Go to the next malformed row (wrapping).
+    fn next_problem(&mut self) -> Outcome {
+        let r = self.view.cursor.0;
+        let problems = self.wb.problems(SHEET);
+        let next = problems
+            .iter()
+            .copied()
+            .find(|&p| p > r)
+            .or_else(|| problems.first().copied());
+        match next {
+            Some(p) => {
+                let n = problems.len();
+                self.move_to(p, 0, false);
+                Outcome::msg(format!("Malformed row {} ({n} total)", p + 1))
+            }
+            None => Outcome::msg("No malformed rows"),
         }
     }
 }
@@ -1184,26 +1741,13 @@ fn fmt_num(n: f64) -> String {
     }
 }
 
+/// `n` rounded to a whole number, grouped: `-1234567.0` → `-1,234,567`.
 fn group_thousands(n: f64) -> String {
-    let neg = n < 0.0;
-    let digits = format!("{:.0}", n.abs());
-    let mut out = String::new();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    if neg { format!("-{out}") } else { out }
+    let out = cellfmt::group_digits(&format!("{:.0}", n.abs()));
+    if n < 0.0 { format!("-{out}") } else { out }
 }
 
-/// A fast content fingerprint for auto-revert (not a security hash).
-pub(super) fn bytes_hash(bytes: &[u8]) -> u64 {
-    let mut h = rustc_hash::FxHasher::default();
-    h.write(bytes);
-    h.write_usize(bytes.len());
-    h.finish()
-}
+pub(super) use crate::grid::bytes_hash;
 
 /// Painted geometry of one grid pane, reported by the element every frame so
 /// mouse events can be hit-tested against what's actually on screen.
@@ -1241,11 +1785,11 @@ impl GridGeom {
 pub(super) enum GridDrag {
     /// Extending a cell/row/column selection.
     Select { pane: usize },
-    /// Resizing a column (`cols`) or row: index, its start (screen px), and
-    /// the live size (unzoomed) shown by the guide line.
+    /// Resizing a column or row: index, its start (screen px), and the live
+    /// size (unzoomed) shown by the guide line.
     Resize {
         pane: usize,
-        cols: bool,
+        axis: Axis,
         idx: usize,
         start: f32,
         size: f64,
@@ -1265,72 +1809,49 @@ enum GridHit {
     Cell(usize, usize),
 }
 
-/// Persisted per-file view settings (column widths, row heights, zoom,
-/// header choice), kept beside the config so they never touch the CSV.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct Sidecar {
-    cols: Vec<(usize, f64)>,
-    rows: Vec<(usize, f64)>,
-    zoom: Option<f32>,
-    header: Option<bool>,
-    /// Frozen rows, when the user froze some (`grid-toggle-freeze`).
-    #[serde(default)]
-    freeze: Option<usize>,
-    /// Columns hidden with `grid-hide-column`.
-    #[serde(default)]
-    hidden_cols: Vec<usize>,
-}
-
-fn sidecar_path(path: &Path) -> PathBuf {
-    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let key = bytes_hash(canon.to_string_lossy().as_bytes());
-    crate::runtime::config_directory()
-        .join("grid-layouts")
-        .join(format!("{key:016x}.json"))
-}
-
 fn load_sidecar(path: &Path, doc: &mut GridDoc) {
-    let Ok(text) = std::fs::read_to_string(sidecar_path(path)) else {
-        return;
-    };
-    let Ok(sc) = serde_json::from_str::<Sidecar>(&text) else {
-        return;
-    };
-    for (i, w) in sc.cols {
-        doc.view.cols.set(i, w);
-    }
-    for (i, h) in sc.rows {
-        doc.view.rows.set(i, h);
-    }
-    if let Some(z) = sc.zoom {
-        doc.view.zoom = z.clamp(0.1, 4.0);
-    }
-    if let Some(h) = sc.header
-        && h != doc.wb.header(SHEET)
-    {
-        doc.wb.set_header(SHEET, h);
-    }
-    doc.view.frozen_rows = sc.freeze.unwrap_or(0);
-    for c in sc.hidden_cols {
-        doc.view.cols.set_hidden(c, true);
+    if let Some(sc) = Sidecar::load(path) {
+        doc.apply_sidecar(sc);
     }
 }
 
 fn store_sidecar(path: &Path, doc: &GridDoc) {
-    let sc = Sidecar {
-        cols: doc.view.cols.overrides().collect(),
-        rows: doc.view.rows.overrides().collect(),
-        zoom: ((doc.view.zoom - 1.0).abs() > 1e-3).then_some(doc.view.zoom),
-        header: Some(doc.wb.header(SHEET)),
-        freeze: (doc.view.frozen_rows > 0).then_some(doc.view.frozen_rows),
-        hidden_cols: doc.view.cols.hidden().collect(),
-    };
-    let file = sidecar_path(path);
-    if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    doc.sidecar().store(path);
+}
+
+impl GridDoc {
+    /// Apply view settings saved for this grid's file.
+    fn apply_sidecar(&mut self, sc: Sidecar) {
+        for (i, w) in sc.cols {
+            self.view.cols.set(i, w);
+        }
+        for (i, h) in sc.rows {
+            self.view.rows.set(i, h);
+        }
+        if let Some(z) = sc.zoom {
+            self.view.zoom = z.clamp(0.1, 4.0);
+        }
+        if let Some(h) = sc.header
+            && h != self.wb.header(SHEET)
+        {
+            self.wb.set_header(SHEET, h);
+        }
+        self.view.frozen_rows = sc.freeze.unwrap_or(0);
+        for c in sc.hidden_cols {
+            self.view.cols.set_hidden(c, true);
+        }
     }
-    if let Ok(text) = serde_json::to_string(&sc) {
-        let _ = std::fs::write(file, text);
+
+    /// The view settings to save for this grid's file.
+    fn sidecar(&self) -> Sidecar {
+        Sidecar {
+            cols: self.view.cols.overrides().collect(),
+            rows: self.view.rows.overrides().collect(),
+            zoom: ((self.view.zoom - 1.0).abs() > 1e-3).then_some(self.view.zoom),
+            header: Some(self.wb.header(SHEET)),
+            freeze: (self.view.frozen_rows > 0).then_some(self.view.frozen_rows),
+            hidden_cols: self.view.cols.hidden().collect(),
+        }
     }
 }
 
@@ -1345,7 +1866,7 @@ impl Editor {
 
     /// Whether `path` should open as a grid (by `grid-extensions`).
     pub(super) fn is_grid_path(&self, path: &Path) -> bool {
-        ext_of(path).is_some_and(|e| self.grid_extensions.contains(&e))
+        ext_of(path).is_some_and(|e| self.grid_ui.extensions.contains(&e))
     }
 
     /// Ask before opening a huge file as a grid (it all goes into memory).
@@ -1415,15 +1936,15 @@ impl Editor {
             let prefix = crate::grid::parse::parse_prefix(&bytes, ext.as_deref(), PREFIX_ROWS);
             (prefix, Some(bytes))
         };
-        let mut grid = GridDoc::new(wb, ext.clone(), hash, &self.grid_opts);
-        grid.xlsx_lossy = xlsx_lossy;
-        grid.xlsx_sheets = xlsx_sheets;
-        grid.other_sheets = other_sheets;
-        grid.xlsx_text = xlsx_text;
+        let mut grid = GridDoc::new(wb, ext.clone(), hash, &self.grid_ui.opts);
+        grid.xlsx.lossy = xlsx_lossy;
+        grid.xlsx.sheets = xlsx_sheets;
+        grid.xlsx.other_sheets = other_sheets;
+        grid.xlsx.text = xlsx_text;
         for ((r, c), f) in xlsx_formats {
             grid.formats.set(r, c, f);
         }
-        grid.saved_formats = grid.formats.clone();
+        grid.save.formats = grid.formats.clone();
         if grid.is_xlsx() {
             grid.rebuild_formulas();
         }
@@ -1496,8 +2017,8 @@ impl Editor {
         wb: Workbook,
         cx: &mut Context<Self>,
     ) {
-        let mut grid = GridDoc::new(wb, Some("csv".into()), 0, &self.grid_opts);
-        grid.save_failed = true;
+        let mut grid = GridDoc::new(wb, Some("csv".into()), 0, &self.grid_ui.opts);
+        grid.save.failed = true;
         self.install_grid_doc(name, None, grid, true, cx);
         self.grid_after(cx);
         self.grid_fire_load();
@@ -1562,7 +2083,7 @@ impl Editor {
         result: Result<Workbook, crate::grid::parse::ParseError>,
         cx: &mut Context<Self>,
     ) {
-        let opts = self.grid_opts.clone();
+        let opts = self.grid_ui.opts.clone();
         let Some(grid) = self.grid_doc_named_mut(name) else {
             return; // killed meanwhile
         };
@@ -1623,8 +2144,8 @@ impl Editor {
                     .as_deref()
                     .and_then(|p| std::fs::read(p).ok())
                     .map_or(0, |b| bytes_hash(&b));
-                let mut grid = GridDoc::new(wb, ext, disk, &self.grid_opts);
-                grid.save_failed = modified; // carry the unsaved state over
+                let mut grid = GridDoc::new(wb, ext, disk, &self.grid_ui.opts);
+                grid.save.failed = modified; // carry the unsaved state over
                 if let Some(path) = &self.active.path {
                     load_sidecar(path, &mut grid);
                 }
@@ -1687,7 +2208,7 @@ impl Editor {
 
     /// Report a grid pane's painted geometry (called by its element).
     pub(super) fn set_grid_geometry(&mut self, pane: usize, geom: GridGeom) {
-        self.grid_geom.insert(pane, geom);
+        self.grid_ui.geom.insert(pane, geom);
         let (vw, vh) = (
             (geom.width - geom.header_w).max(1.0) as f64,
             (geom.height - geom.bar_h - geom.header_h).max(1.0) as f64,
@@ -1744,23 +2265,19 @@ impl Editor {
         self.active.modified = modified;
         if !bar_visible {
             let content = content.replace('\n', "↵");
-            let line: SharedString = if content.is_empty() {
+            self.grid_set_echo(if content.is_empty() {
                 name.into()
             } else {
                 format!("{name}  │  {content}").into()
-            };
-            // Only replace an echo the grid itself put there (or none), so an
-            // error or other message isn't wiped by the next cursor move. Not
-            // logged to *Messages* — cursor moves would flood it.
-            let ours = self.status.is_empty()
-                || self.grid_echo.as_ref().is_some_and(|e| *e == self.status);
-            if ours {
-                self.status = line.clone();
-                self.grid_echo = Some(line);
-            }
-        } else if self.grid_echo.as_ref().is_some_and(|e| *e == self.status) {
+            });
+        } else if self
+            .grid_ui
+            .echo
+            .as_ref()
+            .is_some_and(|e| *e == self.status)
+        {
             self.status = SharedString::default();
-            self.grid_echo = None;
+            self.grid_ui.echo = None;
         }
         if let Some(msg) = dropped {
             self.echo(msg, cx);
@@ -1768,18 +2285,29 @@ impl Editor {
         // Typing a formula: the name dropdown, and the argument being typed.
         self.grid_refresh_completion();
         if let Some(hint) = self.grid_formula_hint() {
-            let ours = self.status.is_empty()
-                || self.grid_echo.as_ref().is_some_and(|e| *e == self.status);
-            if ours {
-                let line: SharedString = hint.into();
-                self.status = line.clone();
-                self.grid_echo = Some(line);
-            }
+            self.grid_set_echo(hint.into());
         }
         if sel_changed {
             self.grid_fire_selection_changed();
         }
         cx.notify();
+    }
+
+    /// Show `line` in the echo area as the grid's own. Only an echo the grid
+    /// itself put there (or none) is replaced, so an error or other message
+    /// isn't wiped by the next cursor move. Not logged to *Messages* —
+    /// cursor moves would flood it.
+    fn grid_set_echo(&mut self, line: SharedString) {
+        let ours = self.status.is_empty()
+            || self
+                .grid_ui
+                .echo
+                .as_ref()
+                .is_some_and(|e| *e == self.status);
+        if ours {
+            self.status = line.clone();
+            self.grid_ui.echo = Some(line);
+        }
     }
 
     /// Call `grid-selection-changed-hook` functions (no arguments; they read
@@ -1804,10 +2332,15 @@ impl Editor {
     /// by Scheme itself (`grid-set-cell`, …) don't fire it, so a hook that
     /// writes cells can't loop.
     fn grid_fire_changes(&mut self) {
-        if self.grid_changes.is_empty() {
+        let Some(changes) = self
+            .active
+            .grid
+            .as_deref_mut()
+            .map(|g| std::mem::take(&mut g.changed))
+            .filter(|c| !c.is_empty())
+        else {
             return;
-        }
-        let changes = std::mem::take(&mut self.grid_changes);
+        };
         let Some(functions) = self
             .hooks
             .get("grid-cell-changed-hook")
@@ -1952,11 +2485,11 @@ impl Editor {
                 error = Some("grid-set-zoom: zoom must be a percentage".into());
             }
             ColumnWidth { col: Some(c), px } => {
-                g.resize(true, c, px.max(0.0));
+                g.resize(Axis::Cols, c, px.max(0.0));
                 persist = true;
             }
             RowHeight { row: Some(r), px } => {
-                g.resize(false, r, px.max(0.0));
+                g.resize(Axis::Rows, r, px.max(0.0));
                 persist = true;
             }
             ColumnWidth { .. } | RowHeight { .. } => {
@@ -2178,11 +2711,11 @@ impl Editor {
         // in a cell) must not join the batch's step.
         let batch = self.undo_grouping.batch();
         if let Some(g) = self.active.grid.as_deref_mut() {
-            g.batch = batch;
+            g.history.batch = batch;
         }
         let result = self.cmd_grid_inner(command, cx);
         if let Some(g) = self.active.grid.as_deref_mut() {
-            g.batch = None;
+            g.history.batch = None;
         }
         result
     }
@@ -2195,20 +2728,7 @@ impl Editor {
         use EditorCommand as E;
         match command {
             E::GridOp(op) => self.grid_op(op, cx),
-            E::Grid(GridCmd::GridMode) => self.grid_mode_from_text(cx),
-            E::Grid(GridCmd::ToggleView) => {
-                if self.active.grid.is_some() {
-                    self.grid_view_as_text(cx);
-                } else {
-                    self.grid_mode_from_text(cx);
-                }
-            }
-            E::Grid(GridCmd::CellPopupCommit) => self.grid_cell_popup_finish(true, cx),
-            E::Grid(GridCmd::CellPopupAbort) => self.grid_cell_popup_finish(false, cx),
-            E::Grid(GridCmd::OrgTableToGrid) => self.org_table_to_grid(cx),
-            E::Grid(GridCmd::Recalculate) if self.active.grid.is_some() => {
-                self.grid_recalculate(cx)
-            }
+            E::Grid(inv) => self.grid_invoked(inv, cx),
             E::GridRegisterFunction {
                 name,
                 source,
@@ -2218,68 +2738,60 @@ impl Editor {
                 use crate::grid::cmd::GridOption as O;
                 match opt {
                     O::DefaultColumnWidth(px) if px.is_finite() && px > 0.0 => {
-                        self.grid_opts.default_col_width = px
+                        self.grid_ui.opts.default_col_width = px
                     }
                     O::MaxAutofitWidth(px) if px.is_finite() && px > 0.0 => {
-                        self.grid_opts.max_autofit_width = px
+                        self.grid_ui.opts.max_autofit_width = px
                     }
                     O::DefaultColumnWidth(_) | O::MaxAutofitWidth(_) => {
                         self.echo("grid: a width must be a positive number of pixels", cx)
                     }
-                    O::AutoHeader(h) => self.grid_opts.auto_header = h,
+                    O::AutoHeader(h) => self.grid_ui.opts.auto_header = h,
                     O::FunctionTimeout(secs) if secs.is_finite() && secs >= 1.0 => {
                         self.grid_set_function_timeout(secs as u64)
                     }
                     O::FunctionTimeout(_) => {
                         self.echo("grid-function-timeout: give a number of seconds (≥ 1)", cx)
                     }
-                    O::TruncateIndicator(s) => self.grid_opts.truncate_indicator = s,
+                    O::TruncateIndicator(s) => self.grid_ui.opts.truncate_indicator = s,
                 }
                 cx.notify();
             }
-            E::Grid(cmd) => {
-                if self.active.grid.is_none() {
-                    self.echo("Not a grid buffer", cx);
-                } else {
-                    let count = std::mem::take(&mut self.grid_count);
-                    self.grid_command(cmd, count, cx);
-                }
-            }
             E::GridExtensions(exts) => {
-                self.grid_extensions = exts
+                self.grid_ui.extensions = exts
                     .into_iter()
                     .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
                     .collect();
             }
             E::GridGotoAddress(addr) => self.grid_goto_address(&addr, cx),
             other if self.active.grid.is_some() => match other {
-                E::Undo => self.grid_command(GridCmd::Undo, 0, cx),
-                E::Redo => self.grid_command(GridCmd::Redo, 0, cx),
+                E::Undo => self.grid_command(GridCmd::Undo, cx),
+                E::Redo => self.grid_command(GridCmd::Redo, cx),
                 E::SaveBuffer => self.grid_save(cx),
                 E::RevertBuffer => self.grid_revert(cx),
-                E::ClipboardCopy | E::KillRingSave => self.grid_command(GridCmd::Yank, 0, cx),
-                E::YankPop => self.grid_command(GridCmd::YankPop, 0, cx),
-                E::Recenter => self.grid_command(GridCmd::Recenter, 0, cx),
-                E::ExchangePointAndMark => self.grid_command(GridCmd::ExchangeAnchor, 0, cx),
-                E::KillLine => self.grid_command(GridCmd::KillToRowEnd, 0, cx),
-                E::IsearchForward => self.grid_command(GridCmd::SearchForward, 0, cx),
-                E::IsearchBackward => self.grid_command(GridCmd::SearchBackward, 0, cx),
-                E::ClipboardCut | E::KillRegion => self.grid_command(GridCmd::Cut, 0, cx),
+                E::ClipboardCopy | E::KillRingSave => self.grid_command(GridCmd::Yank, cx),
+                E::YankPop => self.grid_command(GridCmd::YankPop, cx),
+                E::Recenter => self.grid_command(GridCmd::Recenter, cx),
+                E::ExchangePointAndMark => self.grid_command(GridCmd::ExchangeAnchor, cx),
+                E::KillLine => self.grid_command(GridCmd::KillToRowEnd, cx),
+                E::IsearchForward => self.grid_command(GridCmd::SearchForward, cx),
+                E::IsearchBackward => self.grid_command(GridCmd::SearchBackward, cx),
+                E::ClipboardCut | E::KillRegion => self.grid_command(GridCmd::Cut, cx),
                 E::ClipboardPaste | E::Yank => {
                     if self.grid_editing() {
                         if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
                             self.grid_edit_input(&text, cx);
                         }
                     } else {
-                        self.grid_command(GridCmd::Paste, 0, cx);
+                        self.grid_command(GridCmd::Paste, cx);
                     }
                 }
-                E::MarkWholeBuffer => self.grid_command(GridCmd::SelectAll, 0, cx),
+                E::MarkWholeBuffer => self.grid_command(GridCmd::SelectAll, cx),
                 E::KeyboardQuit => {
                     if self.grid_editing() {
                         self.grid_cancel_edit(cx);
                     } else {
-                        self.grid_command(GridCmd::SelectCancel, 0, cx);
+                        self.grid_command(GridCmd::SelectCancel, cx);
                     }
                     self.pending_keys.clear();
                     self.status = SharedString::default();
@@ -2291,11 +2803,32 @@ impl Editor {
         Ok(())
     }
 
-    /// Apply one grid command to the active grid. `count` is the typed count
-    /// (0 = none): count-aware commands read it, others repeat.
-    pub(super) fn grid_command(&mut self, cmd: GridCmd, count: usize, cx: &mut Context<Self>) {
+    /// A grid command from the command router: the few that mean something
+    /// outside a grid (or switch into one) here, the rest on the active grid.
+    fn grid_invoked(&mut self, inv: GridInvocation, cx: &mut Context<Self>) {
+        match inv.cmd {
+            GridCmd::GridMode => self.grid_mode_from_text(cx),
+            GridCmd::ToggleView => {
+                if self.active.grid.is_some() {
+                    self.grid_view_as_text(cx);
+                } else {
+                    self.grid_mode_from_text(cx);
+                }
+            }
+            GridCmd::CellPopupCommit => self.grid_cell_popup_finish(true, cx),
+            GridCmd::CellPopupAbort => self.grid_cell_popup_finish(false, cx),
+            GridCmd::OrgTableToGrid => self.org_table_to_grid(cx),
+            _ if self.active.grid.is_none() => self.echo("Not a grid buffer", cx),
+            GridCmd::Recalculate => self.grid_recalculate(cx),
+            _ => self.grid_command(inv, cx),
+        }
+    }
+
+    /// Apply one grid command to the active grid. The invocation's count
+    /// (0 = none) is read by count-aware commands; others repeat.
+    pub(super) fn grid_command(&mut self, inv: impl Into<GridInvocation>, cx: &mut Context<Self>) {
         use GridCmd::*;
-        let flag = std::mem::take(&mut self.grid_flag);
+        let GridInvocation { cmd, count, flag } = inv.into();
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
@@ -2316,338 +2849,50 @@ impl Editor {
         // Count-aware: run once with the count as an argument.
         if !matches!(cmd, GotoLastRow | GotoColumn) && count > 1 {
             for _ in 0..count.min(10_000) {
-                self.grid_command(cmd, 0, cx);
+                self.grid_command(cmd, cx);
             }
             return;
         }
         if cmd.edits() {
             g.last_repeat = Some(RepeatOp::Cmd(cmd));
         }
-        let (r, c) = g.view.cursor;
-        let (rows, cols) = g.used();
-        let page = g.view.page_rows();
-        let char_w = self.grid_geom.get(&self.selected_pane).map_or(7.0, |geo| {
-            geo.char_w as f64 / f64::from(g.view.zoom).max(0.1)
-        });
-        let max_fit = self.grid_opts.max_autofit_width;
+        // Commands that need the editor: the clipboard and kill ring,
+        // prompts, Scheme, other buffers.
+        if cmd == Repeat
+            && let Some(RepeatOp::Cmd(repeat)) = g.last_repeat
+        {
+            return self.grid_command(repeat, cx);
+        }
         match cmd {
-            // Across a whole-line selection, step it to take in the next line.
-            Left | Right if g.line_selected(SelKind::Cols) => {
-                g.move_to(r, g.col_step(c, cmd == Right), true)
-            }
-            Up | Down if g.line_selected(SelKind::Rows) => {
-                g.move_to(g.row_step(r, cmd == Down), c, true)
-            }
-            Left if g.col_step(c, false) == c => g.select_line_at_edge(SelKind::Rows),
-            Right if g.leave_line_at_edge(SelKind::Rows) => {}
-            Up if g.row_step(r, false) == r => g.select_line_at_edge(SelKind::Cols),
-            Down if g.leave_line_at_edge(SelKind::Cols) => {}
-            Left => g.move_to(r, g.col_step(c, false), false),
-            Right => g.move_to(r, g.col_step(c, true), false),
-            Up => g.move_to(g.row_step(r, false), c, false),
-            Down => g.move_to(g.row_step(r, true), c, false),
-            ExtendLeft => g.move_to(r, g.col_step(c, false), true),
-            ExtendRight => g.move_to(r, g.col_step(c, true), true),
-            ExtendUp => g.move_to(g.row_step(r, false), c, true),
-            ExtendDown => g.move_to(g.row_step(r, true), c, true),
-            NextCell => {
-                if cols > 0 && c + 1 >= cols && r + 1 < rows.max(r + 2) {
-                    g.move_to(g.row_step(r, true), 0, false);
-                } else {
-                    g.move_to(r, g.col_step(c, true), false);
-                }
-            }
-            PreviousCell => {
-                if c == 0 && r > 0 {
-                    let last = cols.saturating_sub(1);
-                    g.move_to(g.row_step(r, false), last, false);
-                } else {
-                    g.move_to(r, g.col_step(c, false), false);
-                }
-            }
-            EdgeLeft | EdgeRight | EdgeUp | EdgeDown => {
-                let (dr, dc) = match cmd {
-                    EdgeLeft => (0, -1),
-                    EdgeRight => (0, 1),
-                    EdgeUp => (-1, 0),
-                    _ => (1, 0),
-                };
-                let (nr, nc) = g.edge(dr, dc);
-                g.move_to(nr, nc, false);
-            }
-            RowStart => g.move_to(r, 0, false),
-            RowFirstNonEmpty => {
-                let first = (0..cols).find(|&k| !g.cell(r, k).is_empty()).unwrap_or(0);
-                g.move_to(r, first, false);
-            }
-            RowEnd => {
-                let last = g.last_filled_col(r);
-                g.move_to(r, last, false);
-            }
-            GotoFirstRow => g.move_to(0, c, false),
-            GotoLastRow => {
-                let target = if count > 0 {
-                    count - 1
-                } else {
-                    rows.saturating_sub(1)
-                };
-                g.move_to(target, c, false);
-            }
-            GotoColumn => g.move_to(r, count.saturating_sub(1), false),
-            GotoFirstCell => g.move_to(0, 0, false),
-            GotoLastCell => g.move_to(rows.saturating_sub(1), cols.saturating_sub(1), false),
-            PageDown | PageUp | HalfPageDown | HalfPageUp => {
-                let n = if matches!(cmd, PageDown | PageUp) {
-                    page
-                } else {
-                    (page / 2).max(1)
-                };
-                let down = matches!(cmd, PageDown | HalfPageDown);
-                let mut nr = r;
-                for _ in 0..n {
-                    nr = g.row_step(nr, down);
-                }
-                let dy = g.view.rows.start(nr) - g.view.rows.start(r);
-                g.view.scroll_y += dy;
-                g.view.clamp_scroll();
-                g.move_to(nr, c, false);
-            }
-            SelectCells | SelectRows | SelectColumns => {
-                let kind = match cmd {
-                    SelectCells => SelKind::Cells,
-                    SelectRows => SelKind::Rows,
-                    _ => SelKind::Cols,
-                };
-                if g.sticky_sel && g.view.sel_kind == kind {
-                    g.deselect();
-                } else {
-                    g.view.anchor.get_or_insert(g.view.cursor);
-                    g.view.sel_kind = kind;
-                    g.sticky_sel = true;
-                }
-            }
-            SelectAll => {
-                g.view.anchor = Some((0, 0));
-                g.view.cursor = (rows.saturating_sub(1), cols.saturating_sub(1));
-                g.view.sel_kind = SelKind::Cells;
-                g.sticky_sel = true;
-            }
-            SelectCancel => {
-                g.deselect();
-            }
-            EditStart | EditEnd => {
-                let text = g.source(r, c).to_string();
-                g.view.edit = Some(CellEdit::new(r, c, &text, text.clone(), cmd == EditEnd));
-                g.view.reveal_cursor();
-            }
-            EditReplace => {
-                let text = g.source(r, c).to_string();
-                g.view.edit = Some(CellEdit::new(r, c, &text, String::new(), true));
-                g.view.reveal_cursor();
-            }
-            EditPopup => {
-                self.grid_cell_popup_open(cx);
-                return;
-            }
-            Clear => {
-                let mut sel = g.selection();
-                if flag {
-                    // `C-u C-d`: the selection's whole rows.
-                    sel.c0 = 0;
-                    sel.c1 = cols.saturating_sub(1);
-                }
-                let edits: Vec<(usize, usize, String)> = g
-                    .visible_cells(&sel)
-                    .into_iter()
-                    .map(|(r, c)| (r, c, String::new()))
-                    .collect();
-                if !edits.is_empty() {
-                    let changes = g.set_cells_tracked(&edits);
-                    self.grid_changes.extend(changes);
-                }
-            }
+            EditPopup => return self.grid_cell_popup_open(cx),
             Cut => {
                 self.grid_copy_selection(cx);
-                self.grid_command(Clear, 0, cx);
+                self.grid_command(Clear, cx);
                 if let Some(g) = self.active.grid.as_deref_mut() {
                     g.deselect();
                 }
-                self.grid_after(cx);
-                return;
+                return self.grid_after(cx);
             }
             Yank => {
                 self.grid_copy_selection(cx);
                 if let Some(g) = self.active.grid.as_deref_mut() {
                     g.deselect();
                 }
-                self.grid_after(cx);
-                return;
+                return self.grid_after(cx);
             }
-            Paste => {
-                self.grid_paste(cx);
-                return;
-            }
-            YankPop => {
-                self.grid_yank_pop(cx);
-                return;
-            }
-            DeleteRow => {
-                let sel = g.selection();
-                let (r0, n) = if g.view.anchor.is_some() {
-                    (sel.r0, sel.rows())
-                } else {
-                    (r, 1)
-                };
-                if r0 < rows {
-                    let n = n.min(rows - r0);
-                    if g.view.rows.only().is_some() {
-                        // Under a filter, only the rows on screen go (as in
-                        // a spreadsheet): delete them bottom-up, one step.
-                        let doomed: Vec<usize> = (r0..r0 + n).filter(|&k| g.row_shown(k)).collect();
-                        g.grouped(|g| {
-                            for &k in doomed.iter().rev() {
-                                g.model_op(|wb| wb.delete_rows(SHEET, k, 1));
-                            }
-                        });
-                    } else {
-                        g.model_op(|wb| wb.delete_rows(SHEET, r0, n));
-                    }
-                }
-                g.deselect();
-                g.move_to(r0, c, false);
-            }
-            DeleteColumn => {
-                let sel = g.selection();
-                let (c0, n) = if g.view.anchor.is_some() {
-                    (sel.c0, sel.cols())
-                } else {
-                    (c, 1)
-                };
-                if c0 < cols {
-                    let n = n.min(cols - c0);
-                    g.model_op(|wb| wb.delete_cols(SHEET, c0, n));
-                }
-                g.deselect();
-                g.move_to(r, c0, false);
-            }
-            InsertRowBelow | InsertRowAbove => {
-                let at = if cmd == InsertRowBelow { r + 1 } else { r };
-                if at <= rows {
-                    g.model_op(|wb| wb.insert_rows(SHEET, at, 1));
-                }
-                g.move_to(at, c, false);
-            }
-            InsertColumnRight | InsertColumnLeft => {
-                let at = if cmd == InsertColumnRight { c + 1 } else { c };
-                if at <= cols {
-                    g.model_op(|wb| wb.insert_cols(SHEET, at, 1));
-                }
-                g.move_to(r, at, false);
-            }
+            Paste => return self.grid_paste(cx),
+            YankPop => return self.grid_yank_pop(cx),
             SortAscending | SortDescending if flag => {
                 // `C-u C-c C-s`: ask how to compare (org-table's `C-c ^`).
                 self.publish_point();
                 self.script.dispatch("(grid-sort-prompt)", false);
                 return;
             }
-            SortAscending | SortDescending => {
-                if c < cols {
-                    let header = g.wb.header(SHEET);
-                    let desc = cmd == SortDescending;
-                    g.model_op(|wb| wb.sort_by_column(SHEET, c, desc, header));
-                    let dir = if desc { "descending" } else { "ascending" };
-                    let col = view::col_name(c);
-                    self.echo(format!("Sorted by column {col} ({dir})"), cx);
-                }
-            }
-            Undo | Redo => {
-                let undo = cmd == Undo;
-                let entry = if undo { g.hist.pop() } else { g.redo.pop() };
-                match entry {
-                    None => {
-                        let what = if undo { "undo" } else { "redo" };
-                        self.echo(format!("No further {what} information"), cx);
-                        return;
-                    }
-                    Some(entry) => {
-                        let (pos, layout) = g.replay(&entry, undo);
-                        if let Some((pr, pc)) = pos {
-                            g.deselect();
-                            g.move_to(pr, pc, false);
-                        }
-                        g.last_batch = None;
-                        if undo {
-                            g.redo.push(entry);
-                        } else {
-                            g.hist.push(entry);
-                        }
-                        if layout {
-                            self.grid_persist_view();
-                        }
-                    }
-                }
-            }
-            Repeat => match g.last_repeat.clone() {
-                Some(RepeatOp::Cmd(cmd)) => {
-                    self.grid_command(cmd, 0, cx);
-                    return;
-                }
-                Some(RepeatOp::SetText(text)) => {
-                    let changes = g.set_cells_tracked(&[(r, c, text)]);
-                    self.grid_changes.extend(changes);
-                }
-                None => {}
-            },
-            WidenColumn | NarrowColumn => {
-                let w = g.view.cols.size(c);
-                let step = char_w.max(1.0);
-                let nw = if cmd == WidenColumn {
-                    w + step
-                } else {
-                    (w - step).max(view::MIN_SIZE)
-                };
-                g.resize(true, c, nw);
-                self.grid_persist_view();
-            }
-            AutofitColumn | AutofitColumnFull => {
-                let top = g.view.top_row();
-                let visible = top..top + page + 1;
-                let w = if cmd == AutofitColumnFull {
-                    g.fit_width(c, 0..rows, char_w, max_fit)
-                } else {
-                    let sample = 0..rows.min(AUTOFIT_SAMPLE);
-                    let rows_iter = sample.chain(visible.filter(|&x| x < rows));
-                    g.fit_width(c, rows_iter, char_w, max_fit)
-                };
-                g.resize(true, c, w);
-                self.grid_persist_view();
-            }
-            TallerRow | ShorterRow => {
-                let h = g.view.rows.size(r);
-                let nh = if cmd == TallerRow {
-                    h + 5.0
-                } else {
-                    (h - 5.0).max(view::MIN_SIZE)
-                };
-                g.resize(false, r, nh);
-                self.grid_persist_view();
-            }
-            ZoomIn | ZoomOut | ZoomReset => {
-                match cmd {
-                    ZoomIn => g.view.step_zoom(1),
-                    ZoomOut => g.view.step_zoom(-1),
-                    _ => g.view.zoom = 1.0,
-                }
-                g.view.reveal_cursor();
-                let pct = (g.view.zoom * 100.0).round();
-                self.echo(format!("Zoom {pct}%"), cx);
-                self.grid_persist_view();
-            }
             Goto => {
+                let (r, c) = g.view.cursor;
                 let here = cell_name(r, c);
                 self.open_minibuffer("Go to cell: ", MinibufferPurpose::GridGoto, &here, cx);
-                self.grid_after(cx);
-                return;
+                return self.grid_after(cx);
             }
             SearchForward => {
                 self.open_minibuffer(
@@ -2669,69 +2914,11 @@ impl Editor {
             }
             SearchNext | SearchPrevious => {
                 let Some(pat) = g.search.clone() else {
-                    self.echo("No previous search", cx);
-                    return;
+                    return self.echo("No previous search", cx);
                 };
-                self.grid_search(&pat, cmd == SearchNext, cx);
-                return;
+                return self.grid_search(&pat, cmd == SearchNext, cx);
             }
-            ToggleHeader => {
-                let h = !g.wb.header(SHEET);
-                g.wb.set_header(SHEET, h);
-                self.echo(
-                    if h {
-                        "Row 1 is a header"
-                    } else {
-                        "Row 1 is data"
-                    },
-                    cx,
-                );
-                self.grid_persist_view();
-            }
-            ToggleFreeze => {
-                // Freeze panes, by rows: the rows above the cursor, or just
-                // row 1 when the cursor is on it. Again unfreezes.
-                if g.view.frozen_rows > 0 {
-                    g.view.frozen_rows = 0;
-                    self.echo("Unfrozen", cx);
-                } else {
-                    // The rows above the cursor, within the data.
-                    let n = r.max(1).min(g.used().0.max(1));
-                    g.view.frozen_rows = n;
-                    g.view.scroll_y = 0.0;
-                    g.view.reveal_cursor();
-                    let what = if n == 1 {
-                        "row 1".to_string()
-                    } else {
-                        format!("rows 1–{n}")
-                    };
-                    self.echo(format!("Froze {what}"), cx);
-                }
-                self.grid_persist_view();
-            }
-            FormulaBar => {
-                g.view.bar_visible = !g.view.bar_visible;
-            }
-            ViewAsText => {
-                self.grid_view_as_text(cx);
-                return;
-            }
-            NextProblem => {
-                let problems = g.wb.problems(SHEET);
-                let next = problems
-                    .iter()
-                    .copied()
-                    .find(|&p| p > r)
-                    .or_else(|| problems.first().copied());
-                match next {
-                    Some(p) => {
-                        let n = problems.len();
-                        g.move_to(p, 0, false);
-                        self.echo(format!("Malformed row {} ({n} total)", p + 1), cx);
-                    }
-                    None => self.echo("No malformed rows", cx),
-                }
-            }
+            ViewAsText => return self.grid_view_as_text(cx),
             ExchangeAnchor => return self.grid_exchange_anchor(cx),
             Recenter => return self.grid_recenter(cx),
             JumpToColumn => return self.grid_jump_to_column(cx),
@@ -2743,10 +2930,12 @@ impl Editor {
             }
             CopyDown => return self.grid_copy_down(flag, cx),
             CompleteCell => return self.grid_complete_cell(cx),
-            MoveRowUp => return self.grid_move_rows(false, cx),
-            MoveRowDown => return self.grid_move_rows(true, cx),
-            MoveColumnLeft => return self.grid_move_columns(false, cx),
-            MoveColumnRight => return self.grid_move_columns(true, cx),
+            MoveLine(d) => {
+                return match d.axis() {
+                    Axis::Rows => self.grid_move_rows(d.forward(), cx),
+                    Axis::Cols => self.grid_move_columns(d.forward(), cx),
+                };
+            }
             HideColumn => return self.grid_hide_columns(cx),
             ToggleBold | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral
             | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
@@ -2759,24 +2948,38 @@ impl Editor {
             FilterByValue => return self.grid_filter_by_value(cx),
             Widen => return self.grid_widen(cx),
             CopyAsOrg | CopyAsMarkdown | CopyAsJson => return self.grid_copy_as(cmd, cx),
-            ShowFormulas => {
-                g.view.show_formulas = !g.view.show_formulas;
-                let on = g.view.show_formulas;
-                self.echo(
-                    if on {
-                        "Showing formulas"
-                    } else {
-                        "Showing results"
-                    },
-                    cx,
-                );
-            }
             TracePrecedents | TraceDependents => {
-                self.grid_trace(cmd == TracePrecedents, cx);
-                return;
+                return self.grid_trace(cmd == TracePrecedents, cx);
             }
-            GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
-            | Recalculate => {}
+            _ => {}
+        }
+        // The rest only touch the grid.
+        let char_w = self
+            .grid_ui
+            .geom
+            .get(&self.selected_pane)
+            .map_or(7.0, |geo| {
+                geo.char_w as f64 / f64::from(g.view.zoom).max(0.1)
+            });
+        let env = CmdEnv {
+            count,
+            flag,
+            char_w,
+            max_fit: self.grid_ui.opts.max_autofit_width,
+        };
+        let Some(g) = self.active.grid.as_deref_mut() else {
+            return;
+        };
+        match g.apply(cmd, &env) {
+            Ok(out) => {
+                if let Some(msg) = out.msg {
+                    self.echo(msg, cx);
+                }
+                if out.persist_view {
+                    self.grid_persist_view();
+                }
+            }
+            Err(refused) => return self.echo(refused, cx),
         }
         self.grid_after(cx);
     }
@@ -2933,8 +3136,7 @@ impl Editor {
             return;
         };
         if edit.text != edit.original {
-            let changes = g.set_cells_tracked(&[(edit.row, edit.col, edit.text.clone())]);
-            self.grid_changes.extend(changes);
+            g.set_cells_tracked(&[(edit.row, edit.col, edit.text.clone())]);
             g.last_repeat = Some(RepeatOp::SetText(edit.text));
         }
         let r = edit.row.saturating_add_signed(dr);
@@ -3031,7 +3233,7 @@ impl Editor {
         // The clipboard gets values (what other apps expect); remember the
         // formulas so a paste back into a grid pastes those instead.
         let cells = g.copied_formulas(&sel);
-        self.grid_formula_clip = (!cells.is_empty()).then(|| super::grid_formula::FormulaClip {
+        self.grid_ui.formula_clip = (!cells.is_empty()).then(|| super::grid_formula::FormulaClip {
             text: text.clone(),
             cells,
         });
@@ -3054,7 +3256,8 @@ impl Editor {
         };
         // (A copied formula whose result is "" copies as empty text.)
         let ours = self
-            .grid_formula_clip
+            .grid_ui
+            .formula_clip
             .as_ref()
             .is_some_and(|c| c.text == text);
         if text.is_empty() && !ours {
@@ -3070,7 +3273,7 @@ impl Editor {
         let sel = g.selection();
         let single = block.len() == 1 && block[0].len() == 1;
         let mut edits = Vec::new();
-        if single && (sel.rows() > 1 || sel.cols() > 1) {
+        if single && !sel.is_single() {
             // One value pasted over a range fills the range (Excel) — the
             // cells shown, not the rows a filter hides.
             let v = block[0][0].clone();
@@ -3092,7 +3295,12 @@ impl Editor {
         }
         // A grid copy of formulas pastes the formulas, references moved by
         // the paste offset (Excel's paste); other text pastes as typed.
-        if let Some(clip) = self.grid_formula_clip.as_ref().filter(|c| c.text == text) {
+        if let Some(clip) = self
+            .grid_ui
+            .formula_clip
+            .as_ref()
+            .filter(|c| c.text == text)
+        {
             if single && let Some((_, _, sr, sc, f)) = clip.cells.first() {
                 for e in &mut edits {
                     e.2 = super::grid_formula::translated(
@@ -3115,8 +3323,7 @@ impl Editor {
             }
         }
         let n = edits.len();
-        let changes = g.set_cells_tracked(&edits);
-        self.grid_changes.extend(changes);
+        g.set_cells_tracked(&edits);
         if !single {
             let h = block.len();
             let w = block.iter().map(Vec::len).max().unwrap_or(1);
@@ -3147,8 +3354,8 @@ impl Editor {
             self.echo("Saving after load completes…", cx);
             return;
         }
-        if !g.xlsx_lossy.is_empty() {
-            let what = g.xlsx_lossy.join(", ");
+        if !g.xlsx.lossy.is_empty() {
+            let what = g.xlsx.lossy.join(", ");
             self.echo(
                 format!("Not saving over this file: it has {what}, which would be lost — :w copy.xlsx saves a copy"),
                 cx,
@@ -3196,15 +3403,15 @@ impl Editor {
             return;
         }
         let pool = g.wb.pool().len();
-        if pool > g.pool_baseline.saturating_mul(2) + 10_000 {
+        if pool > g.save.pool_baseline.saturating_mul(2) + 10_000 {
             g.wb.compact();
-            g.pool_baseline = g.wb.pool().len();
+            g.save.pool_baseline = g.wb.pool().len();
         }
         let bytes = g.bytes();
         let rows = g.wb.used_rows(SHEET);
-        g.disk_hash = bytes_hash(&bytes);
+        g.save.disk_hash = bytes_hash(&bytes);
         g.mark_saved();
-        g.save_failed = false;
+        g.save.failed = false;
         self.active.modified = false;
         let name = self.active.name.clone();
         let ticket = crate::save::ticket(&path);
@@ -3228,7 +3435,7 @@ impl Editor {
                     if let Some(d) = editor.doc_mut(&name) {
                         d.modified = true;
                         if let Some(g) = d.grid.as_deref_mut() {
-                            g.save_failed = true;
+                            g.save.failed = true;
                         }
                     }
                     editor.echo(format!("Save of {name} failed: {err}"), cx);
@@ -3246,7 +3453,7 @@ impl Editor {
             .active
             .grid
             .as_deref()
-            .and_then(|g| g.xlsx_source.clone());
+            .and_then(|g| g.xlsx.source.clone());
         let Some(path) = self.active.path.clone().or(source) else {
             return;
         };
@@ -3277,7 +3484,7 @@ impl Editor {
         }
         let hash = bytes_hash(&bytes);
         let total = bytes.len();
-        let opts = self.grid_opts.clone();
+        let opts = self.grid_ui.opts.clone();
         let doc = match inactive {
             None => &self.active,
             Some(i) => &self.inactive[i],
@@ -3288,7 +3495,7 @@ impl Editor {
         };
         let ext = g.ext.clone();
         let parsed = if ext.as_deref() == Some("xlsx") {
-            Parsed::Xlsx(Box::new(super::grid_xlsx::load(&bytes, g.xlsx_sheet)?))
+            Parsed::Xlsx(Box::new(super::grid_xlsx::load(&bytes, g.xlsx.sheet)?))
         } else if total <= SYNC_PARSE_LIMIT {
             Parsed::Csv(Box::new(
                 crate::grid::parse::parse_now(bytes.clone(), ext.as_deref())
@@ -3305,20 +3512,19 @@ impl Editor {
             return Ok(());
         };
         g.view.edit = None;
-        g.hist.clear();
-        g.redo.clear();
-        g.disk_hash = hash;
-        g.save_failed = false;
+        g.history.clear();
+        g.save.disk_hash = hash;
+        g.save.failed = false;
         let mut background = None;
         let mut formats = Vec::new();
         match parsed {
             Parsed::Xlsx(l) => {
                 g.wb = l.wb;
-                g.xlsx_lossy = l.lossy;
-                g.xlsx_sheets = l.sheets;
-                g.other_sheets = l.others;
-                g.xlsx_text = l.text_cells;
-                g.sheet_published = None;
+                g.xlsx.lossy = l.lossy;
+                g.xlsx.sheets = l.sheets;
+                g.xlsx.other_sheets = l.others;
+                g.xlsx.text = l.text_cells;
+                g.xlsx.sheet_published = None;
                 formats = l.formats;
                 if let Some(old) = g.loading.take() {
                     old.cancel.store(true, Ordering::Relaxed);
@@ -3350,7 +3556,7 @@ impl Editor {
         for ((r, c), f) in formats {
             g.formats.set(r, c, f);
         }
-        g.saved_formats = g.formats.clone();
+        g.save.formats = g.formats.clone();
         g.apply_filters();
         doc.modified = false;
         if let Some((cancel, progress)) = background {
@@ -3369,7 +3575,7 @@ impl Editor {
             d.grid.as_deref().is_some_and(|g| {
                 d.path
                     .as_deref()
-                    .or(g.xlsx_source.as_deref())
+                    .or(g.xlsx.source.as_deref())
                     .is_some_and(|p| p == path || super::buffers::file_identity(p) == id)
             })
         };
@@ -3402,7 +3608,7 @@ impl Editor {
             let name = doc.name.clone();
             // A sheet buffer has no disk hash of its own: it reloads
             // whenever the workbook really changed.
-            if g.disk_hash == hash {
+            if g.save.disk_hash == hash {
                 continue; // our own save, or no real change
             }
             if g.modified() || g.view.edit.is_some() {
@@ -3500,7 +3706,12 @@ impl Editor {
         self.inactive.retain(|d| d.name != name);
         self.inactive.push(current);
         self.install_active(doc);
-        self.grid_cell_popup = Some((name, grid_name, r, c));
+        self.grid_ui.cell_popup = Some(CellPopup {
+            buffer: name,
+            grid: grid_name,
+            row: r,
+            col: c,
+        });
         self.move_to(self.active.buffer.len(), cx);
         self.echo(
             "Edit the cell; C-c C-c to save it back, C-c C-k to cancel",
@@ -3509,7 +3720,13 @@ impl Editor {
     }
 
     fn grid_cell_popup_finish(&mut self, commit: bool, cx: &mut Context<Self>) {
-        let Some((popup, grid_name, r, c)) = self.grid_cell_popup.clone() else {
+        let Some(CellPopup {
+            buffer: popup,
+            grid: grid_name,
+            row: r,
+            col: c,
+        }) = self.grid_ui.cell_popup.clone()
+        else {
             self.echo("Not editing a cell", cx);
             return;
         };
@@ -3517,7 +3734,7 @@ impl Editor {
             self.switch_to_buffer(&popup, cx);
         }
         let text = self.active.buffer.full_text();
-        self.grid_cell_popup = None;
+        self.grid_ui.cell_popup = None;
         self.switch_to_buffer(&grid_name, cx);
         self.kill_buffer_named(&popup, cx);
         if commit && self.active.name != grid_name {
@@ -3525,8 +3742,7 @@ impl Editor {
             return;
         }
         if commit && let Some(g) = self.active.grid.as_deref_mut() {
-            let changes = g.set_cells_tracked(&[(r, c, text)]);
-            self.grid_changes.extend(changes);
+            g.set_cells_tracked(&[(r, c, text)]);
             g.move_to(r, c, false);
         }
         self.grid_after(cx);
@@ -3579,7 +3795,7 @@ impl Editor {
         match self.grid_resolve(&sequence) {
             GridKey::Bound(expr) => {
                 self.pending_keys.clear();
-                if self.grid_echo.as_ref() != Some(&self.status) {
+                if self.grid_ui.echo.as_ref() != Some(&self.status) {
                     self.status = SharedString::default();
                 }
                 self.grid_run(&expr, cx);
@@ -3674,10 +3890,7 @@ impl Editor {
             .next()
             .unwrap_or("")
             .to_string();
-        let grid_cmd = crate::grid::cmd::GRID_COMMANDS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|&(_, c)| c);
+        let grid_cmd = GridCmd::from_name(&name);
         self.record_event(MacroEvent::Command(expr.to_string()));
         // An Emacs `C-u N` prefix: a flag for some commands, else a count.
         let prefix = self.uarg.pending.take();
@@ -3685,14 +3898,16 @@ impl Editor {
             // Through the command router, so commands it handles itself
             // (`grid-toggle-view`, popup commit) work from keys too.
             Some(cmd) => {
-                let mut count = count;
+                let mut inv = GridInvocation {
+                    count,
+                    ..cmd.into()
+                };
                 match prefix {
-                    Some(_) if cmd.prefix_is_flag() => self.grid_flag = true,
-                    Some(n) if count == 0 && n > 1 => count = n as usize,
+                    Some(_) if cmd.prefix_is_flag() => inv.flag = true,
+                    Some(n) if count == 0 && n > 1 => inv.count = n as usize,
                     _ => {}
                 }
-                self.grid_count = count;
-                self.apply_command(EditorCommand::Grid(cmd), cx);
+                self.apply_command(EditorCommand::Grid(inv), cx);
             }
             None => {
                 let count = match prefix {
@@ -3853,7 +4068,7 @@ impl Editor {
     // --- Mouse ---------------------------------------------------------------------
 
     fn grid_hit(&self, pane: usize, pos: Point<Pixels>) -> Option<GridHit> {
-        let geo = self.grid_geom.get(&pane)?;
+        let geo = self.grid_ui.geom.get(&pane)?;
         let g = self.pane_grid(pane)?;
         let x = f32::from(pos.x) - f32::from(geo.origin.x);
         let y = f32::from(pos.y) - f32::from(geo.origin.y);
@@ -3921,7 +4136,7 @@ impl Editor {
         }
         // A click on the function-name dropdown picks that name.
         if self.grid_completion_open()
-            && let Some(hit) = self.grid_completion_hit
+            && let Some(hit) = self.grid_ui.completion_hit
             && hit.bounds.contains(&pos)
         {
             let row = ((pos.y - hit.bounds.origin.y) / hit.row_height) as usize;
@@ -3970,14 +4185,14 @@ impl Editor {
         if !keep_edit {
             self.grid_commit_pending(cx);
         }
-        let geo = self.grid_geom.get(&pane).copied();
+        let geo = self.grid_ui.geom.get(&pane).copied();
         let Some(g) = self.active.grid.as_deref_mut() else {
             return true;
         };
         let (rows, cols) = g.used();
         match hit {
             GridHit::NameBox => {
-                self.grid_command(GridCmd::Goto, 0, cx);
+                self.grid_command(GridCmd::Goto, cx);
                 return true;
             }
             GridHit::Bar { x } => {
@@ -4007,11 +4222,11 @@ impl Editor {
                     });
                     let top = g.view.top_row();
                     let page = g.view.page_rows();
-                    for c in selected_or(g, col, true) {
+                    for c in selected_or(g, col, Axis::Cols) {
                         let sample = (0..rows.min(AUTOFIT_SAMPLE))
                             .chain((top..top + page + 1).filter(|&x| x < rows));
-                        let w = g.fit_width(c, sample, char_w, self.grid_opts.max_autofit_width);
-                        g.resize(true, c, w);
+                        let w = g.fit_width(c, sample, char_w, self.grid_ui.opts.max_autofit_width);
+                        g.resize(Axis::Cols, c, w);
                     }
                     self.grid_persist_view();
                 } else {
@@ -4020,9 +4235,9 @@ impl Editor {
                     } else {
                         (g.view.row_y(col) as f32, g.view.rows.size(col))
                     };
-                    self.grid_drag = Some(GridDrag::Resize {
+                    self.grid_ui.drag = Some(GridDrag::Resize {
                         pane,
-                        cols: is_col,
+                        axis: if is_col { Axis::Cols } else { Axis::Rows },
                         idx: col,
                         start,
                         size,
@@ -4038,7 +4253,7 @@ impl Editor {
                     g.view.sel_kind = SelKind::Cols;
                 }
                 g.sticky_sel = false;
-                self.grid_drag = Some(GridDrag::Select { pane });
+                self.grid_ui.drag = Some(GridDrag::Select { pane });
             }
             GridHit::RowHeader(row) => {
                 if shift && g.view.anchor.is_some() && g.view.sel_kind == SelKind::Rows {
@@ -4049,7 +4264,7 @@ impl Editor {
                     g.view.sel_kind = SelKind::Rows;
                 }
                 g.sticky_sel = false;
-                self.grid_drag = Some(GridDrag::Select { pane });
+                self.grid_ui.drag = Some(GridDrag::Select { pane });
             }
             GridHit::Cell(r, c) => {
                 if keep_edit {
@@ -4075,7 +4290,7 @@ impl Editor {
                     }
                     g.view.cursor = (r, c);
                     g.sticky_sel = false;
-                    self.grid_drag = Some(GridDrag::Select { pane });
+                    self.grid_ui.drag = Some(GridDrag::Select { pane });
                 }
             }
         }
@@ -4085,7 +4300,7 @@ impl Editor {
 
     /// Mouse motion while a grid drag is in progress.
     pub(super) fn grid_mouse_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-        let Some(drag) = self.grid_drag else {
+        let Some(drag) = self.grid_ui.drag else {
             return false;
         };
         match drag {
@@ -4110,12 +4325,13 @@ impl Editor {
             }
             GridDrag::Resize {
                 pane,
-                cols,
+                axis,
                 idx,
                 start,
                 ..
             } => {
-                let Some(geo) = self.grid_geom.get(&pane).copied() else {
+                let cols = axis == Axis::Cols;
+                let Some(geo) = self.grid_ui.geom.get(&pane).copied() else {
                     return true;
                 };
                 let zoom = self.pane_grid(pane).map_or(1.0, |g| g.view.zoom).max(0.1);
@@ -4126,9 +4342,9 @@ impl Editor {
                     f32::from(pos.y) - cy0
                 };
                 let size = (((edge - start) / zoom) as f64).max(0.0);
-                self.grid_drag = Some(GridDrag::Resize {
+                self.grid_ui.drag = Some(GridDrag::Resize {
                     pane,
-                    cols,
+                    axis,
                     idx,
                     start,
                     size,
@@ -4149,20 +4365,20 @@ impl Editor {
 
     /// Mouse release: finish a resize (applied now, as one undo step).
     pub(super) fn grid_mouse_up(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.grid_drag.take() else {
+        let Some(drag) = self.grid_ui.drag.take() else {
             return;
         };
         if let GridDrag::Resize {
             pane,
-            cols,
+            axis,
             idx,
             size,
             ..
         } = drag
         {
             if let Some(g) = self.pane_grid_mut(pane) {
-                for i in selected_or(g, idx, cols) {
-                    g.resize(cols, i, size);
+                for i in selected_or(g, idx, axis) {
+                    g.resize(axis, i, size);
                 }
             }
             self.status = SharedString::default();
@@ -4217,17 +4433,19 @@ enum GridKey {
     Miss,
 }
 
+/// Whole rows or whole columns: the selection kind of a line along `axis`.
+fn line_kind(axis: Axis) -> SelKind {
+    match axis {
+        Axis::Cols => SelKind::Cols,
+        Axis::Rows => SelKind::Rows,
+    }
+}
+
 /// The columns (or rows) a header-border action applies to: every selected
 /// one when `idx` is part of a whole-column (row) selection, else just `idx`.
-fn selected_or(g: &GridDoc, idx: usize, cols: bool) -> Vec<usize> {
-    let kind = if cols { SelKind::Cols } else { SelKind::Rows };
-    if g.view.anchor.is_some() && g.view.sel_kind == kind {
-        let sel = g.view.selection((usize::MAX, usize::MAX));
-        let (a, b) = if cols {
-            (sel.c0, sel.c1)
-        } else {
-            (sel.r0, sel.r1)
-        };
+fn selected_or(g: &GridDoc, idx: usize, axis: Axis) -> Vec<usize> {
+    if g.view.anchor.is_some() && g.view.sel_kind == line_kind(axis) {
+        let (a, b) = g.view.selection((usize::MAX, usize::MAX)).span(axis);
         if (a..=b).contains(&idx) {
             return (a..=b).collect();
         }
@@ -4246,5 +4464,104 @@ mod tests {
         assert_eq!(fmt_num(50.25), "50.25");
         assert_eq!(fmt_num(1234.5), "1,234.50");
         assert_eq!(fmt_num(12.0), "12");
+        assert_eq!(fmt_num(-0.4), "-0.40");
+        assert_eq!(fmt_num(-1234.5), "-1,234.50");
+        assert_eq!(group_thousands(0.0), "0");
+        assert_eq!(group_thousands(999.0), "999");
+    }
+
+    /// Several structural edits in one command carry the formatting along
+    /// each edit once (the change log still holds the earlier ones).
+    #[test]
+    fn grouped_deletes_move_formats_once() {
+        use super::*;
+        let csv: String = (1..=7).map(|i| format!("{i}\n")).collect();
+        let wb = crate::grid::parse::parse_now(csv.into_bytes(), Some("csv")).unwrap();
+        let mut g = GridDoc::new(wb, Some("csv".into()), 0, &Default::default());
+        let bold = CellFmt {
+            bold: true,
+            ..CellFmt::default()
+        };
+        g.formats.set(5, 0, bold);
+        g.grouped(|g| {
+            for k in [4usize, 2] {
+                g.model_op(|wb| wb.delete_rows(SHEET, k, 1));
+            }
+        });
+        let at: Vec<_> = g.formats.positions().collect();
+        assert_eq!(at, vec![(3, 0)]);
+    }
+
+    /// A grid over `csv`, with no editor around it.
+    fn doc(csv: &str) -> super::GridDoc {
+        let wb = crate::grid::parse::parse_now(csv.as_bytes().to_vec(), Some("csv")).unwrap();
+        super::GridDoc::new(wb, Some("csv".into()), 0, &Default::default())
+    }
+
+    fn column(g: &super::GridDoc, c: usize) -> Vec<String> {
+        (0..g.used().0).map(|r| g.cell(r, c).to_string()).collect()
+    }
+
+    #[test]
+    fn apply_sorts_and_undoes_without_an_editor() {
+        use super::{CmdEnv, GridCmd, Outcome};
+        let mut g = doc("n\n3\n1\n2\n");
+        let env = CmdEnv::default();
+        assert!(g.apply(GridCmd::Undo, &env).is_err(), "nothing to undo yet");
+        let out = g.apply(GridCmd::SortAscending, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Sorted by column A (ascending)"));
+        assert_eq!(column(&g, 0), ["n", "1", "2", "3"]);
+        assert_eq!(g.apply(GridCmd::Undo, &env), Ok(Outcome::default()));
+        assert_eq!(column(&g, 0), ["n", "3", "1", "2"]);
+        g.apply(GridCmd::Redo, &env).unwrap();
+        assert_eq!(column(&g, 0), ["n", "1", "2", "3"]);
+    }
+
+    #[test]
+    fn apply_resizes_persist_the_view_and_undo_as_layout() {
+        use super::{CmdEnv, GridCmd};
+        let mut g = doc("a,b\n1,2\n");
+        let env = CmdEnv::default();
+        let before = g.view.cols.size(0);
+        let out = g.apply(GridCmd::WidenColumn, &env).unwrap();
+        assert!(out.persist_view);
+        assert_eq!(g.view.cols.size(0), before + env.char_w);
+        let undone = g.apply(GridCmd::Undo, &env).unwrap();
+        assert!(undone.persist_view, "a size change undoes as layout");
+        assert_eq!(g.view.cols.size(0), before);
+    }
+
+    #[test]
+    fn apply_deletes_only_shown_rows_under_a_filter() {
+        use super::{CmdEnv, GridCmd, RowFilter};
+        let mut g = doc("k\na\nb\na\nb\n");
+        g.filters.push(RowFilter::Rows {
+            rows: vec![1, 3],
+            label: "rows".into(),
+        });
+        g.apply_filters();
+        // Select rows 2–5 (all the data), then delete: the hidden b's stay.
+        g.move_to(1, 0, false);
+        g.move_to(4, 0, true);
+        g.apply(GridCmd::DeleteRow, &CmdEnv::default()).unwrap();
+        assert_eq!(column(&g, 0), ["k", "b", "b"]);
+        // …as one undo step.
+        g.apply(GridCmd::Undo, &CmdEnv::default()).unwrap();
+        assert_eq!(column(&g, 0), ["k", "a", "b", "a", "b"]);
+    }
+
+    #[test]
+    fn apply_freeze_toggles_with_a_message() {
+        use super::{CmdEnv, GridCmd};
+        let mut g = doc("h\n1\n2\n3\n");
+        let env = CmdEnv::default();
+        g.move_to(2, 0, false);
+        let out = g.apply(GridCmd::ToggleFreeze, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Froze rows 1–2"));
+        assert!(out.persist_view);
+        assert_eq!(g.view.frozen_rows, 2);
+        let out = g.apply(GridCmd::ToggleFreeze, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Unfrozen"));
+        assert_eq!(g.view.frozen_rows, 0);
     }
 }

@@ -375,21 +375,26 @@ impl Workbook {
         std::mem::take(&mut self.changes)
     }
 
-    /// Put back a change log taken with [`Self::take_changes`] (a caller
-    /// that only wanted to look at it).
-    pub fn restore_changes(&mut self, changes: Vec<Change>) {
-        self.changes = changes;
+    /// How long the change log is now: a mark for [`Self::changes_since`].
+    pub fn change_mark(&self) -> usize {
+        self.changes.len()
     }
 
-    /// A one-sheet workbook holding `cells` (`(row, col, stored text)`),
-    /// as loaded from a format other than CSV (`.xlsx`). It saves through
-    /// its own writer, so the CSV dialect is just the default.
+    /// The changes logged since `mark` (from [`Self::change_mark`]; 0 for
+    /// everything since the last [`Self::take_changes`]), left in the log.
+    pub fn changes_since(&self, mark: usize) -> &[Change] {
+        &self.changes[mark.min(self.changes.len())..]
+    }
+
     /// Whether the last edit was refused for stretching the sheet past
     /// [`MAX_CELLS`] (and forget it).
     pub fn take_refused_growth(&mut self) -> bool {
         std::mem::take(&mut self.refused_growth)
     }
 
+    /// A one-sheet workbook holding `cells` (`(row, col, stored text)`),
+    /// as loaded from a format other than CSV (`.xlsx`). It saves through
+    /// its own writer, so the CSV dialect is just the default.
     pub fn from_cells(name: &str, cells: Vec<(usize, usize, String)>) -> Workbook {
         let mut wb = Workbook::from_parts(
             Format::Csv(Dialect::default()),

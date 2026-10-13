@@ -268,10 +268,10 @@ impl Document {
                 self.name,
                 g.csv_would_lose().unwrap_or("formulas")
             ))),
-            Some(g) if !g.xlsx_lossy.is_empty() => Err(std::io::Error::other(format!(
+            Some(g) if !g.xlsx.lossy.is_empty() => Err(std::io::Error::other(format!(
                 "{} has {}, which saving over it would lose — save a copy with :w",
                 self.name,
-                g.xlsx_lossy.join(", ")
+                g.xlsx.lossy.join(", ")
             ))),
             Some(g) => match g.encoding_error() {
                 Some(e) => Err(std::io::Error::other(e)),
@@ -778,45 +778,12 @@ pub struct Editor {
     terminal_geom: HashMap<u64, TermGeom>,
     /// The terminal id whose selection a drag is currently extending, if any.
     terminal_drag: Option<u64>,
-    /// File extensions that open as a grid (`grid-extensions`, lower case).
-    grid_extensions: Vec<String>,
-    /// Painted geometry per grid pane (set by `GridElement` each frame).
-    grid_geom: HashMap<usize, grid::GridGeom>,
-    /// A mouse drag (selection or header resize) on a grid pane.
-    grid_drag: Option<grid::GridDrag>,
-    /// The echo the grid last showed (formula-bar fallback), so it only
-    /// replaces its own text, never someone else's message.
-    grid_echo: Option<SharedString>,
-    /// Count handed to a grid command dispatched through the command path.
-    grid_count: usize,
-    /// A `C-u` typed before a grid command whose prefix is a flag (see
-    /// `GridCmd::prefix_is_flag`).
-    grid_flag: bool,
-    /// Editor-wide grid settings (`grid-default-column-width`, …).
-    grid_opts: grid::GridOptions,
-    /// An open `ge` popup: (popup buffer, grid buffer, row, col).
-    grid_cell_popup: Option<(String, String, usize, usize)>,
-    /// Cells the user changed in the current command, for
-    /// `grid-cell-changed-hook` (fired from `grid_after`).
-    grid_changes: Vec<(usize, usize, String, String)>,
-    /// A background slice loop is finishing a large recalculation.
-    grid_recalc_scheduled: bool,
-    /// The formulas of the last grid copy (see `FormulaClip`).
-    grid_formula_clip: Option<grid_formula::FormulaClip>,
-    /// The interpreter for Scheme functions called from formulas (started
-    /// the first time one is defined), and its outcome drain.
-    grid_fns: Option<crate::grid_fn::GridFnEngine>,
-    grid_fn_task: Option<Task<()>>,
-    /// Formula name (upper case) → the Scheme function's own name.
-    grid_fn_names: HashMap<String, String>,
-    /// Calls in flight: id → (grid buffer, the call).
-    /// In-flight Scheme formula calls: id → (the grid's epoch, the call).
-    grid_fn_calls: HashMap<u64, (u64, crate::formula::engine::ExternalCall)>,
-    grid_fn_next_id: u64,
-    /// `grid-function-timeout`, in seconds.
-    grid_fn_timeout: u64,
-    /// Where the grid's function-name dropdown was painted (for clicks).
-    grid_completion_hit: Option<PopupHit>,
+    /// Editor-wide grid state: settings, mouse and echo bookkeeping, the
+    /// `ge` popup (see [`grid::GridUi`]).
+    grid_ui: grid::GridUi,
+    /// The interpreter for Scheme functions called from formulas, and its
+    /// calls in flight (see [`grid_formula::GridFnState`]).
+    grid_fns: grid_formula::GridFnState,
     /// The keyboard macro being recorded (`C-x (`), if any.
     macro_recording: Option<Vec<MacroEvent>>,
     /// The last completed keyboard macro, for replay (`C-x e`).
@@ -1461,27 +1428,8 @@ impl Editor {
             terminal_task: None,
             terminal_geom: HashMap::new(),
             terminal_drag: None,
-            grid_extensions: ["csv", "tsv", "tab", "psv", "xlsx"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            grid_geom: HashMap::new(),
-            grid_drag: None,
-            grid_echo: None,
-            grid_count: 0,
-            grid_flag: false,
-            grid_opts: Default::default(),
-            grid_cell_popup: None,
-            grid_changes: Vec::new(),
-            grid_recalc_scheduled: false,
-            grid_formula_clip: None,
-            grid_fns: None,
-            grid_fn_task: None,
-            grid_fn_names: HashMap::new(),
-            grid_fn_calls: HashMap::new(),
-            grid_fn_next_id: 0,
-            grid_fn_timeout: crate::grid_fn::DEFAULT_TIMEOUT_SECS,
-            grid_completion_hit: None,
+            grid_ui: Default::default(),
+            grid_fns: Default::default(),
             macro_recording: None,
             last_macro: Vec::new(),
             blink: BlinkState {

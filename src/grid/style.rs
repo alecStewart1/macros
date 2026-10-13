@@ -66,7 +66,11 @@ impl NumFormat {
         } else {
             ""
         };
-        let int = if self.thousands { group(&int) } else { int };
+        let int = if self.thousands {
+            super::cellfmt::group_digits(&int)
+        } else {
+            int
+        };
         let num = if frac.is_empty() {
             int
         } else {
@@ -74,17 +78,6 @@ impl NumFormat {
         };
         Some(format!("{sign}{}{num}{}", self.prefix, self.suffix))
     }
-}
-
-fn group(digits: &str) -> String {
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// What a highlight rule tests a cell's value against.

@@ -23,6 +23,21 @@ pub const ARGB: &[u32] = &[
     0xFFFF0000, 0xFFFFC000, 0xFFFFFF00, 0xFF00B050, 0xFF0070C0, 0xFF7030A0,
 ];
 
+/// A run of ASCII digits with a `,` between each group of three from the
+/// right: `1234567` → `1,234,567`. No sign or decimals: callers add those
+/// (the grid's summaries, number formats, and the formula `FIXED`
+/// function all share this).
+pub fn group_digits(digits: &str) -> String {
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// The palette index of an `.xlsx` ARGB color, if it is one of [`ARGB`].
 pub fn argb_index(argb: u32) -> Option<u8> {
     ARGB.iter().position(|&a| a == argb).map(|i| i as u8)
@@ -308,6 +323,16 @@ impl CellFormats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digit_grouping() {
+        assert_eq!(group_digits(""), "");
+        assert_eq!(group_digits("0"), "0");
+        assert_eq!(group_digits("123"), "123");
+        assert_eq!(group_digits("1234"), "1,234");
+        assert_eq!(group_digits("123456"), "123,456");
+        assert_eq!(group_digits("1234567"), "1,234,567");
+    }
 
     #[test]
     fn colors_cycle_through_the_palette_and_back_to_none() {

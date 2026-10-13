@@ -17,8 +17,9 @@ use gpui::{
 
 use super::Editor;
 use super::grid::{BAR_HEIGHT, GridDoc, GridDrag, GridGeom, NAME_BOX_WIDTH, SHEET};
+use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt};
-use crate::grid::view::{self, col_name};
+use crate::grid::view::{self, CellEdit, CellRange, VisibleLine, col_name};
 use crate::theme::Theme;
 
 /// Horizontal padding inside a cell, unzoomed px.
@@ -233,737 +234,61 @@ impl Element for GridElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let theme = cx.global::<Theme>();
-        let pal = Palette::new(theme);
         let settings = cx.global::<crate::settings::Settings>();
-        let base_size = settings.font_size();
-        let family = settings.font_family().to_string();
-        let popup_rows = settings.completion_max_rows();
-        let popup_detail = settings.completion_show_detail();
-        let popup_kind = settings.completion_show_kind();
-
+        let popup = PopupSettings {
+            rows: settings.completion_max_rows(),
+            detail: settings.completion_show_detail(),
+            kind: settings.completion_show_kind(),
+        };
         let editor = self.editor.read(cx);
         let g = editor.pane_grid(self.pane)?;
-        let drag = editor.grid_drag;
-        let zoom = g.view.zoom.max(0.1);
-        let font_size = px((base_size * zoom).max(3.0));
-        let chrome_size = px(base_size.min(14.0) * 0.92);
-        let regular = font(family.clone());
-        let bold = Font {
-            weight: FontWeight::BOLD,
-            ..regular.clone()
-        };
-        // Without a bold face installed (the bundled Lilex is regular only),
-        // bold resolves to the regular face: hand-set bold is then drawn
-        // twice, a fraction of a pixel apart.
-        let fake_bold = {
-            let ts = window.text_system();
-            ts.resolve_font(&bold) == ts.resolve_font(&regular)
-        };
-        let char_w = f32::from(
-            window
-                .text_system()
-                .shape_line("0".into(), font_size, &[run(1, &regular, pal.fg)], None)
-                .x_for_index(1),
-        )
-        .max(1.0);
-        let chrome_char_w = f32::from(
-            window
-                .text_system()
-                .shape_line("0".into(), chrome_size, &[run(1, &regular, pal.fg)], None)
-                .x_for_index(1),
-        )
-        .max(1.0);
+        let truncate = editor.grid_ui.opts.truncate_indicator.as_str();
+        let f = Frame::new(g, theme, settings, truncate, bounds, window);
 
-        let v = &g.view;
-        let (used_rows, used_cols) = g.used();
-        let bar_h = if v.bar_visible { BAR_HEIGHT } else { 0.0 };
-        let header_h = (view::DEFAULT_ROW_HEIGHT as f32 * zoom).max(12.0);
-        // Row header: wide enough for the largest row number on screen.
-        let approx_last_row = v.top_row() + v.page_rows() + 2;
-        let digits = approx_last_row.to_string().len().max(2) as f32;
-        let header_w = (digits * char_w + 12.0).max(40.0 * zoom);
-
-        let left = f32::from(bounds.left());
-        let top = f32::from(bounds.top());
-        let width = f32::from(bounds.size.width);
-        let height = f32::from(bounds.size.height);
-        let ox = left + header_w;
-        let oy = top + bar_h + header_h;
-        let cw = (width - header_w).max(0.0);
-        let ch = (height - bar_h - header_h).max(0.0);
-        let cells_bounds = Bounds::new(point(px(ox), px(oy)), size(px(cw), px(ch)));
-        let frozen_h = (v.frozen_height() * zoom as f64) as f32;
-        let scroll_bounds = Bounds::new(
-            point(px(ox), px(oy + frozen_h.min(ch))),
-            size(px(cw), px((ch - frozen_h).max(0.0))),
-        );
-
-        // Visible columns: (index, x, width) in screen px.
-        let mut cols: Vec<(usize, f32, f32)> = Vec::new();
-        let mut c = v.col_at(0.0);
-        loop {
-            let x = v.col_x(c) as f32;
-            if x >= cw || c >= view::MAX_INDEX {
-                break;
-            }
-            let w = v.col_px(c) as f32;
-            if w > 0.0 {
-                cols.push((c, ox + x, w));
-            }
-            c = v.cols.next_visible(c + 1);
-        }
-        // Visible rows: frozen first, then the scrolled ones.
-        let mut rows: Vec<(usize, f32, f32, bool)> = Vec::new();
-        for r in 0..v.frozen_rows {
-            let y = v.row_y(r) as f32;
-            if y >= ch {
-                break; // the rest of the frozen band is off screen
-            }
-            let h = v.row_px(r) as f32;
-            if h > 0.0 {
-                rows.push((r, oy + y, h, true));
-            }
-        }
-        let mut r = v.top_row();
-        loop {
-            let y = v.row_y(r) as f32;
-            if y >= ch || r >= view::MAX_INDEX {
-                break;
-            }
-            let h = v.row_px(r) as f32;
-            if h > 0.0 {
-                rows.push((r, oy + y, h, false));
-            }
-            // Skips a filter's hidden rows in one jump, however many.
-            r = v.rows.next_visible(r + 1);
-        }
-
-        let mut p = GridPrepaint {
-            under: Vec::new(),
-            lines: Vec::new(),
-            cells: Vec::new(),
-            frozen_under: Vec::new(),
-            frozen_cells: Vec::new(),
-            over: Vec::new(),
-            over_text: Vec::new(),
-            outlines: Vec::new(),
-            outline_bounds: Bounds::new(
-                point(px(ox - CURSOR_BORDER), px(oy - CURSOR_BORDER)),
-                size(px(cw + CURSOR_BORDER), px(ch + CURSOR_BORDER)),
-            ),
-            cells_bounds,
-            scroll_bounds,
-            hitboxes: Vec::new(),
-            popup: None,
-            background: fill(bounds, pal.bg),
-        };
-
-        let sel = g.selection();
-        let has_range = sel.rows() > 1 || sel.cols() > 1;
-        let editing = v.edit.as_ref();
-        let blocks = zoom < view::BLOCK_ZOOM;
-        let cell_lh = px(header_h.max(1.0));
-        let truncate = editor.grid_opts.truncate_indicator.as_str();
-        let truncate_len = truncate.chars().count();
-        // Zebra stripes: the face's background, or a faint wash of the text
-        // color when the theme gives the face none.
-        let stripe = g.style.stripe.as_deref().map(|f| {
-            theme
-                .background_of(f)
-                .unwrap_or(Hsla { a: 0.035, ..pal.fg })
-        });
-        let header_face = g.style.header_face.as_deref();
-
-        // --- cells ---------------------------------------------------------
-        for &(r, y, h, frozen) in &rows {
-            let (under, texts) = if frozen {
-                (&mut p.frozen_under, &mut p.frozen_cells)
-            } else {
-                (&mut p.under, &mut p.cells)
-            };
-            if frozen {
-                under.push(fill(
-                    Bounds::new(point(px(ox), px(y)), size(px(cw), px(h))),
-                    pal.bg,
-                ));
-            }
-            // The header row reads as a header.
-            let header_row = r == 0 && g.wb.header(SHEET);
-            let row_font = if header_row { &bold } else { &regular };
-            if let Some(bg) = stripe
-                && !header_row
-                && v.rows.rank(r) % 2 == 1
-            {
-                under.push(fill(
-                    Bounds::new(point(px(ox), px(y)), size(px(cw), px(h - 1.0))),
-                    bg,
-                ));
-            }
-            let mut skip_until = 0usize; // columns already covered by overflow
-            for (i, &(c, x, w)) in cols.iter().enumerate() {
-                // Bold and colors set by hand; a fill shows on any cell,
-                // empty or not, and under the selection's tint.
-                let fmt = if g.formats.touches_col(c) {
-                    g.formats.get(r, c)
-                } else {
-                    CellFmt::default()
-                };
-                if let Some(i) = fmt.fill {
-                    under.push(fill(
-                        Bounds::new(point(px(x), px(y)), size(px(w - 1.0), px(h - 1.0))),
-                        palette_fill(theme, i),
-                    ));
-                }
-                if has_range && sel.contains(r, c) {
-                    under.push(fill(
-                        Bounds::new(point(px(x), px(y)), size(px(w), px(h))),
-                        pal.selection,
-                    ));
-                }
-                if i < skip_until || r >= used_rows || c >= used_cols {
-                    continue;
-                }
-                if editing.is_some_and(|e| e.row == r && e.col == c) {
-                    continue; // the editor draws this cell
-                }
-                let value = g.shown_text(r, c);
-                // Scheme-set styling (faces, rules, number formats); the
-                // header row is left plain.
-                let styled = !header_row && g.style.touches(c);
-                let face = if styled {
-                    g.style.face(r, c, value, |k| g.cell(r, k))
-                } else if header_row {
-                    header_face
-                } else {
-                    None
-                };
-                if let Some(bg) = face.and_then(|f| theme.background_of(f)) {
-                    under.push(fill(
-                        Bounds::new(point(px(x), px(y)), size(px(w - 1.0), px(h - 1.0))),
-                        bg,
-                    ));
-                }
-                if value.is_empty() {
-                    continue;
-                }
-                // A number format set on the cell wins over a column's.
-                let by_cell = fmt.num.and_then(|code| g.number_formatted(r, c, code));
-                let formatted = match &by_cell {
-                    Some((text, _)) => Some(text.clone()),
-                    None if styled => g.style.display(c, value),
-                    None => None,
-                };
-                let value = formatted.as_deref().unwrap_or(value);
-                if blocks {
-                    under.push(fill(
-                        Bounds::new(
-                            point(px(x + 1.0), px(y + 1.0)),
-                            size(px(w - 2.0), px(h - 2.0)),
-                        ),
-                        pal.block,
-                    ));
-                    continue;
-                }
-                let pad = CELL_PAD * zoom;
-                // A formula aligns by its result: numbers right, as Excel
-                // does, even in a text column.
-                let result = g.formula_value(r, c);
-                let right = match (&by_cell, result) {
-                    (Some((_, numeric)), _) => *numeric,
-                    (None, Some(v)) => matches!(v, crate::formula::value::Value::Number(_)),
-                    (None, None) => g.right_aligned(c),
-                } && !header_row;
-                let center =
-                    !header_row && g.style.align(c) == Some(crate::grid::style::Align::Center);
-                // Left-aligned text spills into empty cells to its right, as
-                // in Excel; right-aligned numbers and centered text never do.
-                let mut avail = w - 2.0 * pad;
-                let mut clip_w = w;
-                if !right && !center {
-                    let mut j = i + 1;
-                    while (avail / char_w) < value.chars().count() as f32
-                        && j < cols.len()
-                        // Into empty cells only — a formula cell isn't empty
-                        // even when its result is "".
-                        && (cols[j].0 >= used_cols
-                            || (g.cell(r, cols[j].0).is_empty() && !g.is_formula_at(r, cols[j].0)))
-                        && !editing.is_some_and(|e| e.row == r && e.col == cols[j].0)
-                        && !(has_range && sel.contains(r, cols[j].0))
-                    {
-                        avail += cols[j].2;
-                        clip_w += cols[j].2;
-                        j += 1;
-                    }
-                    skip_until = j;
-                }
-                let max_chars = ((avail / char_w).ceil().max(1.0) as usize).saturating_add(1);
-                let mut shown = display_text(value, max_chars);
-                let fits = (avail / char_w).floor().max(1.0) as usize;
-                if !right && truncate_len > 0 && shown.chars().count() > fits {
-                    // Cut off: end with the indicator, inside the cell.
-                    let keep = fits.saturating_sub(truncate_len);
-                    shown = shown.chars().take(keep).collect::<String>() + truncate;
-                }
-                let mut color = face.map_or(pal.fg, |f| theme.color(f, pal.fg));
-                if face.is_none() && matches!(result, Some(crate::formula::value::Value::Error(_)))
-                {
-                    color = theme.color("error", pal.warn);
-                }
-                if let Some(i) = fmt.text {
-                    color = palette_color(theme, i);
-                }
-                let cell_font = if fmt.bold { &bold } else { row_font };
-                // A number too wide shrinks or turns to ###; text (right-
-                // aligned by its column) is clipped like any text.
-                let numeric = match result {
-                    Some(v) => matches!(v, crate::formula::value::Value::Number(_)),
-                    None => crate::grid::infer::cell_number(&shown).is_some(),
-                };
-                if right && numeric && shown.chars().count() as f32 * char_w > avail {
-                    let n = (avail / char_w).floor().max(1.0) as usize;
-                    // Like Excel's General format: drop decimal places until
-                    // it fits; only a number whose whole part can't fit shows
-                    // as ###, never cut off.
-                    match fit_number(&shown, n) {
-                        Some(fitted) => shown = fitted,
-                        None => {
-                            shown = "#".repeat(n);
-                            color = pal.dim;
-                        }
-                    }
-                }
-                let line = window.text_system().shape_line(
-                    SharedString::from(shown.clone()),
-                    font_size,
-                    &[run(shown.len(), cell_font, color)],
-                    None,
-                );
-                let tw = f32::from(line.width);
-                let tx = if right {
-                    x + w - pad - tw
-                } else if center {
-                    x + ((w - tw) / 2.0).max(pad)
-                } else {
-                    x + pad
-                };
-                let ty = y + (h - header_h) / 2.0;
-                let clip = Bounds::new(point(px(x), px(y)), size(px(clip_w), px(h)));
-                if fmt.bold && fake_bold {
-                    texts.push(Text {
-                        line: line.clone(),
-                        origin: point(px(tx + (0.6 * zoom).max(0.4)), px(ty)),
-                        clip,
-                        line_height: cell_lh,
-                    });
-                }
-                texts.push(Text {
-                    line,
-                    origin: point(px(tx), px(ty)),
-                    clip,
-                    line_height: cell_lh,
-                });
-            }
-        }
-
-        // --- gridlines -----------------------------------------------------
-        if zoom >= 0.25 {
-            for &(_, x, w) in &cols {
-                p.lines.push(fill(
-                    Bounds::new(point(px(x + w - 1.0), px(oy)), size(px(1.0), px(ch))),
-                    pal.line,
-                ));
-            }
-            for &(_, y, h, _) in &rows {
-                p.lines.push(fill(
-                    Bounds::new(point(px(ox), px(y + h - 1.0)), size(px(cw), px(1.0))),
-                    pal.line,
-                ));
-            }
-        }
-        if frozen_h > 0.0 && frozen_h < ch {
-            // A stronger line under the frozen band.
-            p.over.push(fill(
-                Bounds::new(
-                    point(px(ox), px(oy + frozen_h - 1.0)),
-                    size(px(cw), px(2.0)),
-                ),
-                Hsla { a: 0.35, ..pal.fg },
-            ));
-        }
-
-        // --- cursor cell & inline editor -----------------------------------
-        let (cr, cc) = v.cursor;
-        let cell_rect = |r: usize, c: usize| -> Option<(f32, f32, f32, f32)> {
-            let x = ox + v.col_x(c) as f32;
-            let y = oy + v.row_y(r) as f32;
-            let w = v.col_px(c) as f32;
-            let h = v.row_px(r) as f32;
-            let visible_y = if r < v.frozen_rows {
-                true
-            } else {
-                y + h > oy + frozen_h
-            };
-            (x + w > ox && x < ox + cw && y + h > oy && y < oy + ch && visible_y)
-                .then_some((x, y, w, h))
-        };
+        let mut p = f.empty_prepaint();
+        f.cells(&mut p, window);
+        f.gridlines(&mut p);
         // A formula being edited: each reference gets a colour, and the
         // cells it covers an outline in that colour.
-        let ref_spans = editing.map_or_else(Vec::new, |e| formula_refs(&e.text, &pal));
-        for (_, area, color) in &ref_spans {
-            let (r0, c0, r1, c1) = *area;
-            let (rows, cols) = (used_rows.max(r0 + 1), used_cols.max(c0 + 1));
-            let (r1, c1) = (r1.min(rows - 1), c1.min(cols - 1));
-            let x0 = ox + v.col_x(c0) as f32;
-            let y0 = oy + v.row_y(r0) as f32;
-            let x1 = ox + (v.col_x(c1) + v.col_px(c1)) as f32;
-            let y1 = oy + (v.row_y(r1) + v.row_px(r1)) as f32;
-            if x1 > x0 && y1 > y0 {
-                push_border(
-                    &mut p.outlines,
-                    x0 - 1.0,
-                    y0 - 1.0,
-                    x1 - x0 + 1.0,
-                    y1 - y0 + 1.0,
-                    1.5,
-                    *color,
-                );
-            }
+        let ref_spans = f
+            .editing()
+            .map_or_else(Vec::new, |e| formula_refs(&e.text, &f.pal));
+        f.ref_outlines(&ref_spans, &mut p);
+        match f.editing() {
+            Some(e) => f.cell_editor(e, &ref_spans, &popup, &mut p, window),
+            None => f.cursor_outline(&mut p),
         }
-        for &(r0, c0, r1, c1) in &v.trace {
-            let x0 = ox + v.col_x(c0) as f32;
-            let y0 = oy + v.row_y(r0) as f32;
-            let x1 = ox + (v.col_x(c1) + v.col_px(c1)) as f32;
-            let y1 = oy + (v.row_y(r1) + v.row_px(r1)) as f32;
-            if x1 > x0 && y1 > y0 {
-                push_border(
-                    &mut p.outlines,
-                    x0 - 1.0,
-                    y0 - 1.0,
-                    x1 - x0 + 1.0,
-                    y1 - y0 + 1.0,
-                    1.5,
-                    pal.trace,
-                );
-            }
-        }
-        if let Some(e) = editing {
-            if let Some((x, y, w, h)) = cell_rect(e.row, e.col) {
-                let shown = e.text.replace('\n', "↵");
-                let caret_disp = e.caret + 2 * e.text[..e.caret].matches('\n').count();
-                let runs = coloured_runs(&shown, &ref_spans, &regular, pal.fg);
-                let line = window.text_system().shape_line(
-                    SharedString::from(shown.clone()),
-                    font_size,
-                    &runs,
-                    None,
-                );
-                let pad = CELL_PAD * zoom;
-                // The editor grows to the right to fit its text, like Excel.
-                let ew = (f32::from(line.width) + 2.0 * pad + char_w)
-                    .max(w)
-                    .min(ox + cw - x);
-                p.over.push(fill(
-                    Bounds::new(point(px(x), px(y)), size(px(ew), px(h))),
-                    pal.bg,
-                ));
-                push_border(
-                    &mut p.outlines,
-                    x - 1.0,
-                    y - 1.0,
-                    ew + 1.0,
-                    h + 1.0,
-                    CURSOR_BORDER,
-                    pal.cursor,
-                );
-                let caret_x = x + pad + f32::from(line.x_for_index(caret_disp));
-                if !e.in_bar {
-                    p.over.push(fill(
-                        Bounds::new(point(px(caret_x), px(y + 2.0)), size(px(1.5), px(h - 4.0))),
-                        pal.cursor,
-                    ));
-                }
-                // The function-name dropdown hangs below the caret.
-                if let Some(view) = Editor::grid_completion_view(g) {
-                    // Rows at the base font's height whatever the zoom (its
-                    // text isn't zoomed), the list starting under the cell.
-                    let row_h = (base_size * 1.4).round().max(4.0);
-                    p.popup = Some(crate::element::build_popup(
-                        point(px(caret_x), px(y + h - row_h)),
-                        view,
-                        popup_rows,
-                        popup_detail,
-                        popup_kind,
-                        &regular,
-                        px((base_size).max(3.0)),
-                        px(row_h),
-                        bounds,
-                        theme,
-                        window,
-                    ));
-                }
-                p.over_text.push(Text {
-                    line,
-                    origin: point(px(x + pad), px(y + (h - header_h) / 2.0)),
-                    clip: Bounds::new(point(px(x), px(y)), size(px(ew), px(h))),
-                    line_height: cell_lh,
-                });
-            }
-        } else if !has_range && let Some((x, y, w, h)) = cell_rect(cr, cc) {
-            // A multi-cell selection shows only its range outline; the
-            // cursor cell gets its own frame only when it's the selection.
-            push_border(
-                &mut p.outlines,
-                x - 1.0,
-                y - 1.0,
-                w + 1.0,
-                h + 1.0,
-                CURSOR_BORDER,
-                pal.cursor,
-            );
-        }
-        if has_range {
-            // Outline the whole selected range (clamped to the view).
-            let x0 = (ox + v.col_x(sel.c0) as f32).max(ox - 2.0);
-            // A range below the frozen rows, scrolled up under them, stops
-            // at the frozen band's edge rather than drawing across it.
-            let top_limit = if sel.r0 >= v.frozen_rows {
-                oy + frozen_h + 1.0
-            } else {
-                oy - 2.0
-            };
-            let y0 = (oy + v.row_y(sel.r0) as f32).max(top_limit);
-            let x1 = (ox + (v.col_x(sel.c1) + v.col_px(sel.c1)) as f32).min(ox + cw + 2.0);
-            let y1 = (oy + (v.row_y(sel.r1) + v.row_px(sel.r1)) as f32).min(oy + ch + 2.0);
-            if x1 > x0 && y1 > y0 {
-                push_border(
-                    &mut p.outlines,
-                    x0 - 1.0,
-                    y0 - 1.0,
-                    x1 - x0 + 1.0,
-                    y1 - y0 + 1.0,
-                    CURSOR_BORDER,
-                    pal.cursor,
-                );
-            }
-        }
-
-        // --- headers -------------------------------------------------------
-        let hy = top + bar_h;
-        p.over.push(fill(
-            Bounds::new(point(px(left), px(hy)), size(px(width), px(header_h))),
-            pal.bg,
-        ));
-        p.over.push(fill(
-            Bounds::new(point(px(left), px(hy)), size(px(width), px(header_h))),
-            pal.header_bg,
-        ));
-        p.over.push(fill(
-            Bounds::new(point(px(left), px(oy)), size(px(header_w), px(ch))),
-            pal.bg,
-        ));
-        p.over.push(fill(
-            Bounds::new(point(px(left), px(oy)), size(px(header_w), px(ch))),
-            pal.header_bg,
-        ));
-        let header_font_size = px((base_size * zoom * 0.8).max(3.0));
-        let active_cols = if has_range {
-            (sel.c0, sel.c1)
-        } else {
-            (cc, cc)
-        };
-        let active_rows = if has_range {
-            (sel.r0, sel.r1)
-        } else {
-            (cr, cr)
-        };
-        for &(c, x, w) in &cols {
-            if (active_cols.0..=active_cols.1).contains(&c) {
-                p.over.push(fill(
-                    Bounds::new(point(px(x), px(hy)), size(px(w), px(header_h))),
-                    pal.header_active,
-                ));
-            }
-            if !blocks || c % 5 == 0 {
-                let name = col_name(c);
-                let color = if (active_cols.0..=active_cols.1).contains(&c) {
-                    pal.header_label_active
-                } else {
-                    pal.header_label
-                };
-                let line = window.text_system().shape_line(
-                    SharedString::from(name.clone()),
-                    header_font_size,
-                    &[run(name.len(), &regular, color)],
-                    None,
-                );
-                let tx = x + (w - f32::from(line.width)) / 2.0;
-                p.over_text.push(Text {
-                    line,
-                    origin: point(px(tx), px(hy)),
-                    clip: Bounds::new(point(px(x), px(hy)), size(px(w), px(header_h))),
-                    line_height: px(header_h),
-                });
-            }
-            // A grab band on the border: resize cursor.
-            let hb = window.insert_hitbox(
-                Bounds::new(point(px(x + w - 3.0), px(hy)), size(px(6.0), px(header_h))),
-                HitboxBehavior::Normal,
-            );
-            p.hitboxes.push((hb, CursorStyle::ResizeLeftRight));
-        }
-        for &(r, y, h, _) in &rows {
-            if (active_rows.0..=active_rows.1).contains(&r) {
-                p.over.push(fill(
-                    Bounds::new(point(px(left), px(y)), size(px(header_w), px(h))),
-                    pal.header_active,
-                ));
-            }
-            if !blocks || r % 10 == 0 {
-                let label = (r + 1).to_string();
-                let problem = g.wb.problems(SHEET).binary_search(&r).is_ok();
-                let line = window.text_system().shape_line(
-                    SharedString::from(label.clone()),
-                    header_font_size,
-                    &[run(
-                        label.len(),
-                        &regular,
-                        if problem {
-                            pal.warn
-                        } else if (active_rows.0..=active_rows.1).contains(&r) {
-                            pal.header_label_active
-                        } else {
-                            pal.header_label
-                        },
-                    )],
-                    None,
-                );
-                let tx = left + header_w - 6.0 - f32::from(line.width);
-                p.over_text.push(Text {
-                    line,
-                    origin: point(px(tx), px(y + (h - header_h) / 2.0)),
-                    clip: Bounds::new(point(px(left), px(y)), size(px(header_w), px(h))),
-                    line_height: px(header_h),
-                });
-            }
-            let hb = window.insert_hitbox(
-                Bounds::new(
-                    point(px(left), px(y + h - 3.0)),
-                    size(px(header_w), px(6.0)),
-                ),
-                HitboxBehavior::Normal,
-            );
-            p.hitboxes.push((hb, CursorStyle::ResizeUpDown));
-        }
-        // Header separators: the same hairline as the gridlines.
-        p.over.push(fill(
-            Bounds::new(point(px(left), px(oy - 1.0)), size(px(width), px(1.0))),
-            pal.line,
-        ));
-        p.over.push(fill(
-            Bounds::new(
-                point(px(ox - 1.0), px(hy)),
-                size(px(1.0), px(height - bar_h)),
-            ),
-            pal.line,
-        ));
-
-        // --- scroll position indicators ----------------------------------------
-        let content_h = (v.rows.start(used_rows.max(v.cursor.0 + 1)) - v.frozen_height())
-            .max(v.scroll_y + (ch - frozen_h) as f64 / zoom as f64)
-            * zoom as f64;
-        if content_h > (ch - frozen_h) as f64 + 1.0 {
-            let view_h = (ch - frozen_h) as f64;
-            let thumb = (view_h / content_h * view_h).max(18.0) as f32;
-            let pos = (v.scroll_y * zoom as f64 / content_h * view_h) as f32;
-            p.over.push(fill(
-                Bounds::new(
-                    point(
-                        px(ox + cw - 6.0),
-                        px(oy + frozen_h + pos.min((view_h as f32 - thumb).max(0.0))),
-                    ),
-                    size(px(4.0), px(thumb)),
-                ),
-                Hsla { a: 0.25, ..pal.fg },
-            ));
-        }
-        let content_w = v
-            .cols
-            .start(used_cols.max(v.cursor.1 + 1))
-            .max(v.scroll_x + cw as f64 / zoom as f64)
-            * zoom as f64;
-        if content_w > cw as f64 + 1.0 {
-            let thumb = (cw as f64 / content_w * cw as f64).max(18.0) as f32;
-            let pos = (v.scroll_x * zoom as f64 / content_w * cw as f64) as f32;
-            p.over.push(fill(
-                Bounds::new(
-                    point(px(ox + pos.min((cw - thumb).max(0.0))), px(oy + ch - 6.0)),
-                    size(px(thumb), px(4.0)),
-                ),
-                Hsla { a: 0.25, ..pal.fg },
-            ));
-        }
-
-        // --- resize guide ------------------------------------------------------
+        f.range_outline(&mut p);
+        f.headers(&mut p, window);
+        f.scroll_indicators(&mut p);
         if let Some(GridDrag::Resize {
             pane,
-            cols: is_col,
+            axis,
             start,
             size: sz,
             ..
-        }) = drag
+        }) = editor.grid_ui.drag
             && pane == self.pane
         {
-            let at = start + (sz as f32) * zoom;
-            let guide = if is_col {
-                Bounds::new(
-                    point(px(ox + at - 1.0), px(hy)),
-                    size(px(2.0), px(height - bar_h)),
-                )
-            } else {
-                Bounds::new(point(px(left), px(oy + at - 1.0)), size(px(width), px(2.0)))
-            };
-            p.over.push(fill(guide, pal.cursor));
-            let whole = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-            let style = if is_col {
-                CursorStyle::ResizeLeftRight
-            } else {
-                CursorStyle::ResizeUpDown
-            };
-            p.hitboxes.push((whole, style));
-        }
-
-        // --- formula bar ---------------------------------------------------------
-        let mut bar_text = (0.0, 0.0);
-        if bar_h > 0.0 {
-            bar_text = self.formula_bar(
-                g,
-                &pal,
-                &regular,
-                chrome_size,
-                chrome_char_w,
-                bounds,
+            f.resize_guide(
+                axis == Axis::Cols,
+                start + (sz as f32) * f.zoom,
                 &mut p,
                 window,
             );
         }
-
-        let geom = GridGeom {
-            origin: bounds.origin,
-            width,
-            height,
-            bar_h,
-            header_w,
-            header_h,
-            char_w,
-            bar_text_x: bar_text.0,
-            bar_shift: bar_text.1,
-            bar_char_w: chrome_char_w,
+        let bar_text = if f.bar_h > 0.0 {
+            f.formula_bar(&mut p, window)
+        } else {
+            (0.0, 0.0)
         };
+
+        let geom = f.geom(bar_text);
         let pane = self.pane;
         let hit = p.popup.as_ref().map(|pp| pp.hit);
         self.editor.update(cx, |editor, _| {
             editor.set_grid_geometry(pane, geom);
-            editor.grid_completion_hit = hit;
+            editor.grid_ui.completion_hit = hit;
         });
         Some(p)
     }
@@ -1058,36 +383,864 @@ impl Element for GridElement {
     }
 }
 
-impl GridElement {
-    #[allow(clippy::too_many_arguments)]
-    fn formula_bar(
-        &self,
-        g: &GridDoc,
-        pal: &Palette,
-        regular: &Font,
-        font_size: Pixels,
-        char_w: f32,
+/// How the function-name dropdown is laid out (from the settings).
+struct PopupSettings {
+    rows: usize,
+    detail: bool,
+    kind: bool,
+}
+
+/// Everything one frame's layout shares: the grid, the theme, fonts, and
+/// the pane's geometry (screen px), worked out once in [`Frame::new`].
+struct Frame<'a> {
+    g: &'a GridDoc,
+    v: &'a view::GridView,
+    theme: &'a Theme,
+    pal: Palette,
+    regular: Font,
+    bold: Font,
+    /// No bold face is installed: bold is drawn twice, offset.
+    fake_bold: bool,
+    /// The editor font size, unzoomed.
+    base_size: f32,
+    zoom: f32,
+    /// Cell text size (zoomed).
+    font_size: Pixels,
+    /// One monospace advance at `font_size`.
+    char_w: f32,
+    /// The formula bar's (unzoomed chrome) font size and advance.
+    chrome_size: Pixels,
+    chrome_char_w: f32,
+    /// Drawn at the end of text cut off by its cell.
+    truncate: &'a str,
+    used_rows: usize,
+    used_cols: usize,
+    bounds: Bounds<Pixels>,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    bar_h: f32,
+    header_h: f32,
+    header_w: f32,
+    /// Top-left and size of the cells area (past bar and headers).
+    ox: f32,
+    oy: f32,
+    cw: f32,
+    ch: f32,
+    /// Height of the frozen rows band.
+    frozen_h: f32,
+    /// The columns and rows on screen, at screen positions.
+    cols: Vec<VisibleLine>,
+    rows: Vec<VisibleLine>,
+    sel: CellRange,
+    /// More than one cell is selected.
+    has_range: bool,
+    /// Zoomed out past reading: cells draw as tinted blocks.
+    blocks: bool,
+}
+
+/// One row being laid out.
+#[derive(Clone, Copy)]
+struct RowAt {
+    r: usize,
+    y: f32,
+    h: f32,
+    /// The sheet's header row (drawn bold, never formatted).
+    header_row: bool,
+}
+
+/// Where a row's fills and text go: the scrolled layer or the frozen one.
+struct Layer<'p> {
+    under: &'p mut Vec<PaintQuad>,
+    texts: &'p mut Vec<Text>,
+}
+
+impl<'a> Frame<'a> {
+    fn new(
+        g: &'a GridDoc,
+        theme: &'a Theme,
+        settings: &crate::settings::Settings,
+        truncate: &'a str,
         bounds: Bounds<Pixels>,
-        p: &mut GridPrepaint,
         window: &mut Window,
-    ) -> (f32, f32) {
+    ) -> Self {
+        let pal = Palette::new(theme);
+        let base_size = settings.font_size();
+        let v = &g.view;
+        let zoom = v.zoom.max(0.1);
+        let font_size = px((base_size * zoom).max(3.0));
+        let chrome_size = px(base_size.min(14.0) * 0.92);
+        let regular = font(settings.font_family().to_string());
+        let bold = Font {
+            weight: FontWeight::BOLD,
+            ..regular.clone()
+        };
+        // Without a bold face installed (the bundled Lilex is regular only),
+        // bold resolves to the regular face: hand-set bold is then drawn
+        // twice, a fraction of a pixel apart.
+        let fake_bold = {
+            let ts = window.text_system();
+            ts.resolve_font(&bold) == ts.resolve_font(&regular)
+        };
+        let advance = |window: &mut Window, size: Pixels| {
+            let zero = window.text_system().shape_line(
+                "0".into(),
+                size,
+                &[run(1, &regular, pal.fg)],
+                None,
+            );
+            f32::from(zero.x_for_index(1)).max(1.0)
+        };
+        let char_w = advance(window, font_size);
+        let chrome_char_w = advance(window, chrome_size);
+
+        let (used_rows, used_cols) = g.used();
+        let bar_h = if v.bar_visible { BAR_HEIGHT } else { 0.0 };
+        let header_h = (view::DEFAULT_ROW_HEIGHT as f32 * zoom).max(12.0);
+        // Row header: wide enough for the largest row number on screen.
+        let approx_last_row = v.top_row() + v.page_rows() + 2;
+        let digits = approx_last_row.to_string().len().max(2) as f32;
+        let header_w = (digits * char_w + 12.0).max(40.0 * zoom);
+
         let left = f32::from(bounds.left());
         let top = f32::from(bounds.top());
         let width = f32::from(bounds.size.width);
-        let h = BAR_HEIGHT;
+        let height = f32::from(bounds.size.height);
+        let ox = left + header_w;
+        let oy = top + bar_h + header_h;
+        let cw = (width - header_w).max(0.0);
+        let ch = (height - bar_h - header_h).max(0.0);
+        let frozen_h = (v.frozen_height() * zoom as f64) as f32;
+        let mut cols = v.visible_cols(cw);
+        cols.iter_mut().for_each(|l| l.pos += ox);
+        let mut rows = v.visible_rows(ch);
+        rows.iter_mut().for_each(|l| l.pos += oy);
+        let sel = g.selection();
+        Self {
+            g,
+            v,
+            theme,
+            pal,
+            regular,
+            bold,
+            fake_bold,
+            base_size,
+            zoom,
+            font_size,
+            char_w,
+            chrome_size,
+            chrome_char_w,
+            truncate,
+            used_rows,
+            used_cols,
+            bounds,
+            left,
+            top,
+            width,
+            height,
+            bar_h,
+            header_h,
+            header_w,
+            ox,
+            oy,
+            cw,
+            ch,
+            frozen_h,
+            cols,
+            rows,
+            sel,
+            has_range: !sel.is_single(),
+            blocks: zoom < view::BLOCK_ZOOM,
+        }
+    }
+
+    fn editing(&self) -> Option<&'a CellEdit> {
+        self.v.edit.as_ref()
+    }
+
+    fn empty_prepaint(&self) -> GridPrepaint {
+        let (ox, oy, cw, ch) = (self.ox, self.oy, self.cw, self.ch);
+        GridPrepaint {
+            under: Vec::new(),
+            lines: Vec::new(),
+            cells: Vec::new(),
+            frozen_under: Vec::new(),
+            frozen_cells: Vec::new(),
+            over: Vec::new(),
+            over_text: Vec::new(),
+            outlines: Vec::new(),
+            outline_bounds: rect(
+                ox - CURSOR_BORDER,
+                oy - CURSOR_BORDER,
+                cw + CURSOR_BORDER,
+                ch + CURSOR_BORDER,
+            ),
+            cells_bounds: rect(ox, oy, cw, ch),
+            scroll_bounds: rect(
+                ox,
+                oy + self.frozen_h.min(ch),
+                cw,
+                (ch - self.frozen_h).max(0.0),
+            ),
+            hitboxes: Vec::new(),
+            popup: None,
+            background: fill(self.bounds, self.pal.bg),
+        }
+    }
+
+    /// What the element reports for hit-testing.
+    fn geom(&self, (bar_text_x, bar_shift): (f32, f32)) -> GridGeom {
+        GridGeom {
+            origin: self.bounds.origin,
+            width: self.width,
+            height: self.height,
+            bar_h: self.bar_h,
+            header_w: self.header_w,
+            header_h: self.header_h,
+            char_w: self.char_w,
+            bar_text_x,
+            bar_shift,
+            bar_char_w: self.chrome_char_w,
+        }
+    }
+
+    // --- cells -------------------------------------------------------------
+
+    /// Every visible row's fills and cell text.
+    fn cells(&self, p: &mut GridPrepaint, window: &mut Window) {
+        // Zebra stripes: the face's background, or a faint wash of the text
+        // color when the theme gives the face none.
+        let stripe = self.g.style.stripe.as_deref().map(|f| {
+            self.theme.background_of(f).unwrap_or(Hsla {
+                a: 0.035,
+                ..self.pal.fg
+            })
+        });
+        for line in &self.rows {
+            let (r, y, h) = (line.idx, line.pos, line.size);
+            let mut layer = if line.frozen {
+                Layer {
+                    under: &mut p.frozen_under,
+                    texts: &mut p.frozen_cells,
+                }
+            } else {
+                Layer {
+                    under: &mut p.under,
+                    texts: &mut p.cells,
+                }
+            };
+            if line.frozen {
+                layer
+                    .under
+                    .push(fill(rect(self.ox, y, self.cw, h), self.pal.bg));
+            }
+            // The header row reads as a header.
+            let header_row = r == 0 && self.g.wb.header(SHEET);
+            if let Some(bg) = stripe
+                && !header_row
+                && self.v.rows.rank(r) % 2 == 1
+            {
+                layer
+                    .under
+                    .push(fill(rect(self.ox, y, self.cw, h - 1.0), bg));
+            }
+            let row = RowAt {
+                r,
+                y,
+                h,
+                header_row,
+            };
+            let mut skip_until = 0usize; // columns already covered by overflow
+            for (i, col) in self.cols.iter().enumerate() {
+                let (c, x, w) = (col.idx, col.pos, col.size);
+                // Bold and colors set by hand; a fill shows on any cell,
+                // empty or not, and under the selection's tint.
+                let fmt = if self.g.formats.touches_col(c) {
+                    self.g.formats.get(r, c)
+                } else {
+                    CellFmt::default()
+                };
+                if let Some(i) = fmt.fill {
+                    layer.under.push(fill(
+                        rect(x, y, w - 1.0, h - 1.0),
+                        palette_fill(self.theme, i),
+                    ));
+                }
+                if self.has_range && self.sel.contains(r, c) {
+                    layer.under.push(fill(rect(x, y, w, h), self.pal.selection));
+                }
+                if i < skip_until || r >= self.used_rows || c >= self.used_cols {
+                    continue;
+                }
+                if self.editing().is_some_and(|e| e.row == r && e.col == c) {
+                    continue; // the editor draws this cell
+                }
+                if let Some(end) = self.cell_content(row, i, fmt, &mut layer, window) {
+                    skip_until = end;
+                }
+            }
+        }
+    }
+
+    /// One cell's face fill and text (column `i` of [`Self::cols`]). Returns
+    /// the column index its text overflows up to, when it spills into empty
+    /// cells to its right.
+    fn cell_content(
+        &self,
+        row: RowAt,
+        i: usize,
+        fmt: CellFmt,
+        layer: &mut Layer,
+        window: &mut Window,
+    ) -> Option<usize> {
+        let (g, theme, pal) = (self.g, self.theme, &self.pal);
+        let (zoom, char_w) = (self.zoom, self.char_w);
+        let RowAt {
+            r,
+            y,
+            h,
+            header_row,
+        } = row;
+        let VisibleLine {
+            idx: c,
+            pos: x,
+            size: w,
+            ..
+        } = self.cols[i];
+        let value = g.shown_text(r, c);
+        // Scheme-set styling (faces, rules, number formats); the header row
+        // is left plain.
+        let styled = !header_row && g.style.touches(c);
+        let face = if styled {
+            g.style.face(r, c, value, |k| g.cell(r, k))
+        } else if header_row {
+            g.style.header_face.as_deref()
+        } else {
+            None
+        };
+        if let Some(bg) = face.and_then(|f| theme.background_of(f)) {
+            layer.under.push(fill(rect(x, y, w - 1.0, h - 1.0), bg));
+        }
+        if value.is_empty() {
+            return None;
+        }
+        // A number format set on the cell wins over a column's.
+        let by_cell = fmt.num.and_then(|code| g.number_formatted(r, c, code));
+        let formatted = match &by_cell {
+            Some((text, _)) => Some(text.clone()),
+            None if styled => g.style.display(c, value),
+            None => None,
+        };
+        let value = formatted.as_deref().unwrap_or(value);
+        if self.blocks {
+            layer
+                .under
+                .push(fill(rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0), pal.block));
+            return None;
+        }
+        let pad = CELL_PAD * zoom;
+        // A formula aligns by its result: numbers right, as Excel does, even
+        // in a text column.
+        let result = g.formula_value(r, c);
+        let right = match (&by_cell, result) {
+            (Some((_, numeric)), _) => *numeric,
+            (None, Some(v)) => matches!(v, crate::formula::value::Value::Number(_)),
+            (None, None) => g.right_aligned(c),
+        } && !header_row;
+        let center = !header_row && g.style.align(c) == Some(crate::grid::style::Align::Center);
+        // Left-aligned text spills into empty cells to its right, as in
+        // Excel; right-aligned numbers and centered text never do.
+        let mut avail = w - 2.0 * pad;
+        let mut clip_w = w;
+        let mut overflow = None;
+        if !right && !center {
+            let cols = &self.cols;
+            let mut j = i + 1;
+            while (avail / char_w) < value.chars().count() as f32
+                && j < cols.len()
+                // Into empty cells only — a formula cell isn't empty even
+                // when its result is "".
+                && (cols[j].idx >= self.used_cols
+                    || (g.cell(r, cols[j].idx).is_empty() && !g.is_formula_at(r, cols[j].idx)))
+                && !self
+                    .editing()
+                    .is_some_and(|e| e.row == r && e.col == cols[j].idx)
+                && !(self.has_range && self.sel.contains(r, cols[j].idx))
+            {
+                avail += cols[j].size;
+                clip_w += cols[j].size;
+                j += 1;
+            }
+            overflow = Some(j);
+        }
+        let max_chars = ((avail / char_w).ceil().max(1.0) as usize).saturating_add(1);
+        let mut shown = display_text(value, max_chars);
+        let fits = (avail / char_w).floor().max(1.0) as usize;
+        let truncate_len = self.truncate.chars().count();
+        if !right && truncate_len > 0 && shown.chars().count() > fits {
+            // Cut off: end with the indicator, inside the cell.
+            let keep = fits.saturating_sub(truncate_len);
+            shown = shown.chars().take(keep).collect::<String>() + self.truncate;
+        }
+        let mut color = face.map_or(pal.fg, |f| theme.color(f, pal.fg));
+        if face.is_none() && matches!(result, Some(crate::formula::value::Value::Error(_))) {
+            color = theme.color("error", pal.warn);
+        }
+        if let Some(i) = fmt.text {
+            color = palette_color(theme, i);
+        }
+        let row_font = if header_row {
+            &self.bold
+        } else {
+            &self.regular
+        };
+        let cell_font = if fmt.bold { &self.bold } else { row_font };
+        // A number too wide shrinks or turns to ###; text (right-aligned by
+        // its column) is clipped like any text.
+        let numeric = match result {
+            Some(v) => matches!(v, crate::formula::value::Value::Number(_)),
+            None => crate::grid::infer::cell_number(&shown).is_some(),
+        };
+        if right && numeric && shown.chars().count() as f32 * char_w > avail {
+            let n = (avail / char_w).floor().max(1.0) as usize;
+            // Like Excel's General format: drop decimal places until it
+            // fits; only a number whose whole part can't fit shows as ###,
+            // never cut off.
+            match fit_number(&shown, n) {
+                Some(fitted) => shown = fitted,
+                None => {
+                    shown = "#".repeat(n);
+                    color = pal.dim;
+                }
+            }
+        }
+        let line = window.text_system().shape_line(
+            SharedString::from(shown.clone()),
+            self.font_size,
+            &[run(shown.len(), cell_font, color)],
+            None,
+        );
+        let tw = f32::from(line.width);
+        let tx = if right {
+            x + w - pad - tw
+        } else if center {
+            x + ((w - tw) / 2.0).max(pad)
+        } else {
+            x + pad
+        };
+        let ty = y + (h - self.header_h) / 2.0;
+        let clip = rect(x, y, clip_w, h);
+        let cell_lh = px(self.header_h.max(1.0));
+        if fmt.bold && self.fake_bold {
+            layer.texts.push(Text {
+                line: line.clone(),
+                origin: point(px(tx + (0.6 * zoom).max(0.4)), px(ty)),
+                clip,
+                line_height: cell_lh,
+            });
+        }
+        layer.texts.push(Text {
+            line,
+            origin: point(px(tx), px(ty)),
+            clip,
+            line_height: cell_lh,
+        });
+        overflow
+    }
+
+    /// Gridlines, and the stronger line under the frozen band.
+    fn gridlines(&self, p: &mut GridPrepaint) {
+        let (ox, oy, cw, ch) = (self.ox, self.oy, self.cw, self.ch);
+        if self.zoom >= 0.25 {
+            for l in &self.cols {
+                p.lines
+                    .push(fill(rect(l.pos + l.size - 1.0, oy, 1.0, ch), self.pal.line));
+            }
+            for l in &self.rows {
+                p.lines
+                    .push(fill(rect(ox, l.pos + l.size - 1.0, cw, 1.0), self.pal.line));
+            }
+        }
+        if self.frozen_h > 0.0 && self.frozen_h < ch {
+            p.over.push(fill(
+                rect(ox, oy + self.frozen_h - 1.0, cw, 2.0),
+                Hsla {
+                    a: 0.35,
+                    ..self.pal.fg
+                },
+            ));
+        }
+    }
+
+    // --- cursor cell, inline editor, outlines -----------------------------
+
+    /// Cell `(r, c)`'s rectangle `(x, y, w, h)`, when any of it is on
+    /// screen (and not scrolled under the frozen rows).
+    fn cell_rect(&self, r: usize, c: usize) -> Option<(f32, f32, f32, f32)> {
+        let (ox, oy, cw, ch, v) = (self.ox, self.oy, self.cw, self.ch, self.v);
+        let x = ox + v.col_x(c) as f32;
+        let y = oy + v.row_y(r) as f32;
+        let w = v.col_px(c) as f32;
+        let h = v.row_px(r) as f32;
+        let visible_y = if r < v.frozen_rows {
+            true
+        } else {
+            y + h > oy + self.frozen_h
+        };
+        (x + w > ox && x < ox + cw && y + h > oy && y < oy + ch && visible_y)
+            .then_some((x, y, w, h))
+    }
+
+    /// Outlines around each reference of the formula being edited, and
+    /// around the cells `grid-trace-*` found.
+    fn ref_outlines(&self, ref_spans: &[RefSpan], p: &mut GridPrepaint) {
+        let v = self.v;
+        let mut outline = |a: CellRange, color: Hsla| {
+            let x0 = self.ox + v.col_x(a.c0) as f32;
+            let y0 = self.oy + v.row_y(a.r0) as f32;
+            let x1 = self.ox + (v.col_x(a.c1) + v.col_px(a.c1)) as f32;
+            let y1 = self.oy + (v.row_y(a.r1) + v.row_px(a.r1)) as f32;
+            if x1 > x0 && y1 > y0 {
+                push_border(
+                    &mut p.outlines,
+                    x0 - 1.0,
+                    y0 - 1.0,
+                    x1 - x0 + 1.0,
+                    y1 - y0 + 1.0,
+                    1.5,
+                    color,
+                );
+            }
+        };
+        for rs in ref_spans {
+            // Whole rows/columns stop at the data.
+            let mut a = rs.area;
+            a.r1 = a.r1.min(self.used_rows.max(a.r0 + 1) - 1);
+            a.c1 = a.c1.min(self.used_cols.max(a.c0 + 1) - 1);
+            outline(a, rs.color);
+        }
+        for &a in &v.trace {
+            outline(a, self.pal.trace);
+        }
+    }
+
+    /// The inline cell editor over the cell being edited: its text, caret,
+    /// frame, and the function-name dropdown.
+    fn cell_editor(
+        &self,
+        e: &CellEdit,
+        ref_spans: &[RefSpan],
+        popup: &PopupSettings,
+        p: &mut GridPrepaint,
+        window: &mut Window,
+    ) {
+        let Some((x, y, w, h)) = self.cell_rect(e.row, e.col) else {
+            return;
+        };
+        let pal = &self.pal;
+        let shown = e.text.replace('\n', "↵");
+        let caret_disp = e.caret + 2 * e.text[..e.caret].matches('\n').count();
+        let runs = coloured_runs(&shown, ref_spans, &self.regular, pal.fg);
+        let line = window.text_system().shape_line(
+            SharedString::from(shown.clone()),
+            self.font_size,
+            &runs,
+            None,
+        );
+        let pad = CELL_PAD * self.zoom;
+        // The editor grows to the right to fit its text, like Excel.
+        let ew = (f32::from(line.width) + 2.0 * pad + self.char_w)
+            .max(w)
+            .min(self.ox + self.cw - x);
+        p.over.push(fill(rect(x, y, ew, h), pal.bg));
+        push_border(
+            &mut p.outlines,
+            x - 1.0,
+            y - 1.0,
+            ew + 1.0,
+            h + 1.0,
+            CURSOR_BORDER,
+            pal.cursor,
+        );
+        let caret_x = x + pad + f32::from(line.x_for_index(caret_disp));
+        if !e.in_bar {
+            p.over
+                .push(fill(rect(caret_x, y + 2.0, 1.5, h - 4.0), pal.cursor));
+        }
+        // The function-name dropdown hangs below the caret.
+        if let Some(view) = Editor::grid_completion_view(self.g) {
+            // Rows at the base font's height whatever the zoom (its text
+            // isn't zoomed), the list starting under the cell.
+            let row_h = (self.base_size * 1.4).round().max(4.0);
+            p.popup = Some(crate::element::build_popup(
+                point(px(caret_x), px(y + h - row_h)),
+                view,
+                popup.rows,
+                popup.detail,
+                popup.kind,
+                &self.regular,
+                px((self.base_size).max(3.0)),
+                px(row_h),
+                self.bounds,
+                self.theme,
+                window,
+            ));
+        }
+        p.over_text.push(Text {
+            line,
+            origin: point(px(x + pad), px(y + (h - self.header_h) / 2.0)),
+            clip: rect(x, y, ew, h),
+            line_height: px(self.header_h.max(1.0)),
+        });
+    }
+
+    /// The cursor cell's frame. A multi-cell selection shows only its range
+    /// outline; the cursor cell gets its own frame only when it's the
+    /// selection.
+    fn cursor_outline(&self, p: &mut GridPrepaint) {
+        let (cr, cc) = self.v.cursor;
+        if !self.has_range
+            && let Some((x, y, w, h)) = self.cell_rect(cr, cc)
+        {
+            push_border(
+                &mut p.outlines,
+                x - 1.0,
+                y - 1.0,
+                w + 1.0,
+                h + 1.0,
+                CURSOR_BORDER,
+                self.pal.cursor,
+            );
+        }
+    }
+
+    /// Outline the whole selected range (clamped to the view).
+    fn range_outline(&self, p: &mut GridPrepaint) {
+        if !self.has_range {
+            return;
+        }
+        let (ox, oy, cw, ch, v, sel) = (self.ox, self.oy, self.cw, self.ch, self.v, self.sel);
+        let x0 = (ox + v.col_x(sel.c0) as f32).max(ox - 2.0);
+        // A range below the frozen rows, scrolled up under them, stops at
+        // the frozen band's edge rather than drawing across it.
+        let top_limit = if sel.r0 >= v.frozen_rows {
+            oy + self.frozen_h + 1.0
+        } else {
+            oy - 2.0
+        };
+        let y0 = (oy + v.row_y(sel.r0) as f32).max(top_limit);
+        let x1 = (ox + (v.col_x(sel.c1) + v.col_px(sel.c1)) as f32).min(ox + cw + 2.0);
+        let y1 = (oy + (v.row_y(sel.r1) + v.row_px(sel.r1)) as f32).min(oy + ch + 2.0);
+        if x1 > x0 && y1 > y0 {
+            push_border(
+                &mut p.outlines,
+                x0 - 1.0,
+                y0 - 1.0,
+                x1 - x0 + 1.0,
+                y1 - y0 + 1.0,
+                CURSOR_BORDER,
+                self.pal.cursor,
+            );
+        }
+    }
+
+    // --- headers, scroll indicators, resize guide --------------------------
+
+    /// Column letters and row numbers, with their resize grab bands.
+    fn headers(&self, p: &mut GridPrepaint, window: &mut Window) {
+        let (left, oy, width, header_w, header_h) =
+            (self.left, self.oy, self.width, self.header_w, self.header_h);
+        let (pal, ch, ox) = (&self.pal, self.ch, self.ox);
+        let hy = self.top + self.bar_h;
+        p.over.push(fill(rect(left, hy, width, header_h), pal.bg));
+        p.over
+            .push(fill(rect(left, hy, width, header_h), pal.header_bg));
+        p.over.push(fill(rect(left, oy, header_w, ch), pal.bg));
+        p.over
+            .push(fill(rect(left, oy, header_w, ch), pal.header_bg));
+        let header_font_size = px((self.base_size * self.zoom * 0.8).max(3.0));
+        let (cr, cc) = self.v.cursor;
+        let sel = self.sel;
+        let active_cols = if self.has_range {
+            (sel.c0, sel.c1)
+        } else {
+            (cc, cc)
+        };
+        let active_rows = if self.has_range {
+            (sel.r0, sel.r1)
+        } else {
+            (cr, cr)
+        };
+        let label = |window: &mut Window, text: &str, color: Hsla| {
+            window.text_system().shape_line(
+                SharedString::from(text.to_string()),
+                header_font_size,
+                &[run(text.len(), &self.regular, color)],
+                None,
+            )
+        };
+        for &VisibleLine {
+            idx: c,
+            pos: x,
+            size: w,
+            ..
+        } in &self.cols
+        {
+            let active = (active_cols.0..=active_cols.1).contains(&c);
+            if active {
+                p.over
+                    .push(fill(rect(x, hy, w, header_h), pal.header_active));
+            }
+            if !self.blocks || c % 5 == 0 {
+                let color = if active {
+                    pal.header_label_active
+                } else {
+                    pal.header_label
+                };
+                let line = label(window, &col_name(c), color);
+                let tx = x + (w - f32::from(line.width)) / 2.0;
+                p.over_text.push(Text {
+                    line,
+                    origin: point(px(tx), px(hy)),
+                    clip: rect(x, hy, w, header_h),
+                    line_height: px(header_h),
+                });
+            }
+            // A grab band on the border: resize cursor.
+            let hb =
+                window.insert_hitbox(rect(x + w - 3.0, hy, 6.0, header_h), HitboxBehavior::Normal);
+            p.hitboxes.push((hb, CursorStyle::ResizeLeftRight));
+        }
+        for &VisibleLine {
+            idx: r,
+            pos: y,
+            size: h,
+            ..
+        } in &self.rows
+        {
+            let active = (active_rows.0..=active_rows.1).contains(&r);
+            if active {
+                p.over
+                    .push(fill(rect(left, y, header_w, h), pal.header_active));
+            }
+            if !self.blocks || r % 10 == 0 {
+                let problem = self.g.wb.problems(SHEET).binary_search(&r).is_ok();
+                let color = if problem {
+                    pal.warn
+                } else if active {
+                    pal.header_label_active
+                } else {
+                    pal.header_label
+                };
+                let line = label(window, &(r + 1).to_string(), color);
+                let tx = left + header_w - 6.0 - f32::from(line.width);
+                p.over_text.push(Text {
+                    line,
+                    origin: point(px(tx), px(y + (h - header_h) / 2.0)),
+                    clip: rect(left, y, header_w, h),
+                    line_height: px(header_h),
+                });
+            }
+            let hb = window.insert_hitbox(
+                rect(left, y + h - 3.0, header_w, 6.0),
+                HitboxBehavior::Normal,
+            );
+            p.hitboxes.push((hb, CursorStyle::ResizeUpDown));
+        }
+        // Header separators: the same hairline as the gridlines.
+        p.over
+            .push(fill(rect(left, oy - 1.0, width, 1.0), pal.line));
         p.over.push(fill(
-            Bounds::new(point(px(left), px(top)), size(px(width), px(h))),
-            pal.bg,
-        ));
-        p.over.push(fill(
-            Bounds::new(point(px(left), px(top + h - 1.0)), size(px(width), px(1.0))),
+            rect(ox - 1.0, hy, 1.0, self.height - self.bar_h),
             pal.line,
         ));
+    }
+
+    /// Scroll position indicators along the right and bottom edges.
+    fn scroll_indicators(&self, p: &mut GridPrepaint) {
+        let (ox, oy, cw, ch, v) = (self.ox, self.oy, self.cw, self.ch, self.v);
+        let (zoom, frozen_h) = (self.zoom as f64, self.frozen_h);
+        let thumb_color = Hsla {
+            a: 0.25,
+            ..self.pal.fg
+        };
+        let content_h = (v.rows.start(self.used_rows.max(v.cursor.0 + 1)) - v.frozen_height())
+            .max(v.scroll_y + (ch - frozen_h) as f64 / zoom)
+            * zoom;
+        if content_h > (ch - frozen_h) as f64 + 1.0 {
+            let view_h = (ch - frozen_h) as f64;
+            let thumb = (view_h / content_h * view_h).max(18.0) as f32;
+            let pos = (v.scroll_y * zoom / content_h * view_h) as f32;
+            p.over.push(fill(
+                rect(
+                    ox + cw - 6.0,
+                    oy + frozen_h + pos.min((view_h as f32 - thumb).max(0.0)),
+                    4.0,
+                    thumb,
+                ),
+                thumb_color,
+            ));
+        }
+        let content_w = v
+            .cols
+            .start(self.used_cols.max(v.cursor.1 + 1))
+            .max(v.scroll_x + cw as f64 / zoom)
+            * zoom;
+        if content_w > cw as f64 + 1.0 {
+            let thumb = (cw as f64 / content_w * cw as f64).max(18.0) as f32;
+            let pos = (v.scroll_x * zoom / content_w * cw as f64) as f32;
+            p.over.push(fill(
+                rect(
+                    ox + pos.min((cw - thumb).max(0.0)),
+                    oy + ch - 6.0,
+                    thumb,
+                    4.0,
+                ),
+                thumb_color,
+            ));
+        }
+    }
+
+    /// The guide line of a header-border drag, `at` px into the cells area
+    /// (a column border when `is_col`), and a resize cursor over the pane.
+    fn resize_guide(&self, is_col: bool, at: f32, p: &mut GridPrepaint, window: &mut Window) {
+        let guide = if is_col {
+            rect(
+                self.ox + at - 1.0,
+                self.top + self.bar_h,
+                2.0,
+                self.height - self.bar_h,
+            )
+        } else {
+            rect(self.left, self.oy + at - 1.0, self.width, 2.0)
+        };
+        p.over.push(fill(guide, self.pal.cursor));
+        let whole = window.insert_hitbox(self.bounds, HitboxBehavior::Normal);
+        let style = if is_col {
+            CursorStyle::ResizeLeftRight
+        } else {
+            CursorStyle::ResizeUpDown
+        };
+        p.hitboxes.push((whole, style));
+    }
+
+    // --- formula bar ---------------------------------------------------------
+
+    /// The formula bar: name box, `fx`, and the cursor cell's contents (or
+    /// the edit, with its caret). Returns where its text starts (from the
+    /// pane's left) and how far long text is scrolled, so a click lands on
+    /// the character under it.
+    fn formula_bar(&self, p: &mut GridPrepaint, window: &mut Window) -> (f32, f32) {
+        let (g, pal, regular) = (self.g, &self.pal, &self.regular);
+        let (font_size, char_w) = (self.chrome_size, self.chrome_char_w);
+        let (left, top, width) = (self.left, self.top, self.width);
+        let h = BAR_HEIGHT;
+        p.over.push(fill(rect(left, top, width, h), pal.bg));
+        p.over
+            .push(fill(rect(left, top + h - 1.0, width, 1.0), pal.line));
         p.over.push(fill(
-            Bounds::new(
-                point(px(left + NAME_BOX_WIDTH), px(top + 4.0)),
-                size(px(1.0), px(h - 8.0)),
-            ),
+            rect(left + NAME_BOX_WIDTH, top + 4.0, 1.0, h - 8.0),
             pal.line,
         ));
         let (name, content) = g.bar_text();
@@ -1104,10 +1257,7 @@ impl GridElement {
         p.over_text.push(Text {
             line: name_line,
             origin: point(px(left + 8.0), px(top)),
-            clip: Bounds::new(
-                point(px(left), px(top)),
-                size(px(NAME_BOX_WIDTH - 4.0), px(h)),
-            ),
+            clip: rect(left, top, NAME_BOX_WIDTH - 4.0, h),
             line_height: lh,
         });
         let fx_x = left + NAME_BOX_WIDTH + 8.0;
@@ -1115,7 +1265,7 @@ impl GridElement {
         p.over_text.push(Text {
             line: fx,
             origin: point(px(fx_x), px(top)),
-            clip: Bounds::new(point(px(fx_x), px(top)), size(px(24.0), px(h))),
+            clip: rect(fx_x, top, 24.0, h),
             line_height: lh,
         });
         let text_x = left + NAME_BOX_WIDTH + 34.0;
@@ -1135,7 +1285,7 @@ impl GridElement {
             p.over_text.push(Text {
                 line,
                 origin: point(px(lx), px(top)),
-                clip: Bounds::new(point(px(lx), px(top)), size(px(lw + 4.0), px(h))),
+                clip: rect(lx, top, lw + 4.0, h),
                 line_height: lh,
             });
         }
@@ -1175,10 +1325,7 @@ impl GridElement {
             && e.in_bar
         {
             p.over.push(fill(
-                Bounds::new(
-                    point(px(text_x + x - shift), px(top + 4.0)),
-                    size(px(1.5), px(h - 8.0)),
-                ),
+                rect(text_x + x - shift, top + 4.0, 1.5, h - 8.0),
                 pal.cursor,
             ));
         }
@@ -1187,23 +1334,23 @@ impl GridElement {
         {
             // A subtle marker that the cell is being edited.
             p.over.push(fill(
-                Bounds::new(
-                    point(px(text_x - 6.0), px(top + 6.0)),
-                    size(px(2.0), px(h - 12.0)),
-                ),
+                rect(text_x - 6.0, top + 6.0, 2.0, h - 12.0),
                 pal.cursor,
             ));
         }
         p.over_text.push(Text {
             line,
             origin: point(px(text_x - shift), px(top)),
-            clip: Bounds::new(point(px(text_x), px(top)), size(px(avail_text), px(h))),
+            clip: rect(text_x, top, avail_text, h),
             line_height: lh,
         });
-        // Where its text starts (from the pane's left) and how far long text
-        // is scrolled, so a click lands on the character under it.
         (text_x - left, shift)
     }
+}
+
+/// The rectangle at `(x, y)` of size `w × h`, in screen px.
+fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+    Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
 }
 
 /// `text` (a number as shown) rounded to fewer decimal places so it fits in
@@ -1225,9 +1372,14 @@ fn fit_number(text: &str, width: usize) -> Option<String> {
     })
 }
 
-/// A coloured reference: its byte span in the text, the rectangle it
-/// covers, and its colour.
-type RefSpan = (std::ops::Range<usize>, (usize, usize, usize, usize), Hsla);
+/// A reference in a formula being edited.
+struct RefSpan {
+    /// Its byte span in the text.
+    span: std::ops::Range<usize>,
+    /// The cells it covers.
+    area: CellRange,
+    color: Hsla,
+}
 
 /// The references in edited formula `text`, each with its byte span, the
 /// rectangle it covers, and its colour. Empty for anything but a formula
@@ -1240,7 +1392,11 @@ fn formula_refs(text: &str, pal: &Palette) -> Vec<RefSpan> {
         .into_iter()
         .filter(|(_, r)| r.sheet.is_none())
         .enumerate()
-        .map(|(i, (span, r))| (span, r.area.bounds(), pal.refs[i % pal.refs.len()]))
+        .map(|(i, (span, r))| RefSpan {
+            span,
+            area: CellRange::from_bounds(r.area.bounds()),
+            color: pal.refs[i % pal.refs.len()],
+        })
         .collect()
 }
 
@@ -1248,7 +1404,7 @@ fn formula_refs(text: &str, pal: &Palette) -> Vec<RefSpan> {
 fn coloured_runs(text: &str, spans: &[RefSpan], font: &Font, default: Hsla) -> Vec<TextRun> {
     let mut runs = Vec::new();
     let mut at = 0;
-    for (span, _, color) in spans {
+    for RefSpan { span, color, .. } in spans {
         if span.start < at || span.end > text.len() {
             continue;
         }
@@ -1266,22 +1422,10 @@ fn coloured_runs(text: &str, spans: &[RefSpan], font: &Font, default: Hsla) -> V
 
 /// Four quads forming a rectangle outline `t` px thick.
 fn push_border(out: &mut Vec<PaintQuad>, x: f32, y: f32, w: f32, h: f32, t: f32, color: Hsla) {
-    out.push(fill(
-        Bounds::new(point(px(x), px(y)), size(px(w), px(t))),
-        color,
-    ));
-    out.push(fill(
-        Bounds::new(point(px(x), px(y + h - t)), size(px(w), px(t))),
-        color,
-    ));
-    out.push(fill(
-        Bounds::new(point(px(x), px(y)), size(px(t), px(h))),
-        color,
-    ));
-    out.push(fill(
-        Bounds::new(point(px(x + w - t), px(y)), size(px(t), px(h))),
-        color,
-    ));
+    out.push(fill(rect(x, y, w, t), color));
+    out.push(fill(rect(x, y + h - t, w, t), color));
+    out.push(fill(rect(x, y, t, h), color));
+    out.push(fill(rect(x + w - t, y, t, h), color));
 }
 
 fn paint_text(t: Text, window: &mut Window, cx: &mut App) {
