@@ -620,3 +620,48 @@ mod tests {
         assert_eq!(noop, vec![1..4]);
     }
 }
+
+/// Line-keyed decorations that live on the [`Document`] rather than in
+/// [`Overlays`] follow edits too.
+#[cfg(test)]
+mod editor_tests {
+    use gpui::{SharedString, TestAppContext};
+
+    use super::*;
+
+    #[gpui::test]
+    fn gutter_dots_and_line_images_follow_line_edits(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let editor = cx.new(Editor::new);
+        editor.update(cx, |e, _| {
+            e.switch_to_doc(make_document("t".into(), None, "a\nb\nc\n"));
+            e.active
+                .gutter_dots
+                .insert(1, SharedString::from("dap-breakpoint"));
+            e.active
+                .line_images
+                .insert(2, (PathBuf::from("/tmp/x.png"), 0));
+            // A line added above both: they move down with their text.
+            e.edit(0..0, "new\n");
+            assert_eq!(
+                e.active.gutter_dots.keys().copied().collect::<Vec<_>>(),
+                [2]
+            );
+            assert_eq!(
+                e.active.line_images.keys().copied().collect::<Vec<_>>(),
+                [3]
+            );
+            // Deleting that line moves them back up.
+            e.edit(0..4, "");
+            assert!(e.active.gutter_dots.contains_key(&1));
+            assert!(e.active.line_images.contains_key(&2));
+            // An edit within a line leaves them put.
+            e.edit(0..1, "xyz");
+            assert!(e.active.gutter_dots.contains_key(&1));
+            assert!(e.active.line_images.contains_key(&2));
+        });
+    }
+}

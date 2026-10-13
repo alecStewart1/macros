@@ -71,7 +71,7 @@ use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
 use minibuffer::MinibufferHistory;
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
-use overlays::Overlays;
+use overlays::{Overlays, shift_line_map};
 use panes::{Child, SplitAxis, WindowLayout, union_bounds};
 use terminal::{ProcessHandle, keystroke_to_bytes};
 
@@ -2101,9 +2101,13 @@ impl Editor {
 
     // --- Editing primitives (all edits funnel through `edit` for undo) -----
 
-    /// Shift the active buffer's [`Overlays`] to track an edit that replaced
+    /// Shift the active buffer's decorations to track an edit that replaced
     /// `[start, old_end)` with `new_len` bytes (`line_delta` net newlines, the
-    /// edit beginning on `start_line`) — see [`Overlays::adjust_for_edit`].
+    /// edit beginning on `start_line`): its [`Overlays`] (see
+    /// [`Overlays::adjust_for_edit`]) plus the line-keyed gutter dots and
+    /// inline images, which otherwise stay on stale line numbers — a
+    /// breakpoint dot or an Org inline image would sit beside the wrong line
+    /// after a line is added above it, and nothing repaints them on edit.
     fn adjust_overlays(
         &mut self,
         start: usize,
@@ -2113,14 +2117,17 @@ impl Editor {
         start_line: usize,
     ) {
         // Newlines inserted at column 0 push `start_line`'s own text down, so
-        // its line overlays go with it — else Enter at the start of a heading
-        // leaves the heading's scale/chevron on the now-empty line above.
+        // its line decorations go with it — else Enter at the start of a
+        // heading leaves the heading's scale/chevron on the now-empty line
+        // above.
         let carry = line_delta != 0
             && old_end == start
             && self.active.buffer.line_range(start_line).start == start;
-        self.active
-            .overlays
+        let doc = &mut self.active;
+        doc.overlays
             .adjust_for_edit(start, old_end, new_len, line_delta, start_line, carry);
+        shift_line_map(&mut doc.gutter_dots, start_line, line_delta, carry);
+        shift_line_map(&mut doc.line_images, start_line, line_delta, carry);
     }
 
     /// Whether replacing bytes `[a, b)` would touch a `read-only` text property
