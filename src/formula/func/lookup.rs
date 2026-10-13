@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use super::args::{
-    Area, SHEET_COLS, SHEET_ROWS, area, def, given, int, opt_bool, opt_int, positive,
+    Area, SHEET_COLS, SHEET_ROWS, area, def, given, int, opt_bool, opt_int, opt_num, positive,
 };
 use super::{Arg, Ctx, FuncDef, RangeRef, scalar};
 use crate::formula::criteria::{Pattern, fold, has_wildcards};
@@ -258,23 +258,99 @@ fn table_lookup(args: &[Arg], ctx: &mut dyn Ctx, horizontal: bool) -> Result<Val
     })
 }
 
-/// `MATCH(value, vector, [type])`: type 1 (default) the last value ≤ in
-/// ascending data, 0 exact (with wildcards), -1 the last value ≥ in
-/// descending data. A 2-D lookup array is `#N/A`.
+/// MATCH's `match_type`: its sign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchType {
+    /// Positive (the default 1): the last value ≤ in ascending data.
+    LessOrEqual,
+    /// 0: an exact match, with wildcards.
+    Exact,
+    /// Negative: the last value ≥ in descending data.
+    GreaterOrEqual,
+}
+
+impl From<f64> for MatchType {
+    fn from(t: f64) -> MatchType {
+        if t == 0.0 {
+            MatchType::Exact
+        } else if t < 0.0 {
+            MatchType::GreaterOrEqual
+        } else {
+            MatchType::LessOrEqual
+        }
+    }
+}
+
+/// `MATCH(value, vector, [type])` (see [`MatchType`]). A 2-D lookup array
+/// is `#N/A`.
 fn match_(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
     let needle = needle(&args[0], ctx)?;
     let vec = area(&args[1], ctx)?;
-    let t = super::args::opt_num(args.get(2), ctx, 1.0)?;
+    let t = MatchType::from(opt_num(args.get(2), ctx, 1.0)?);
     if !vec.is_vector() {
         return Err(ErrorKind::NA);
     }
-    let i = if t == 0.0 {
-        find_exact(ctx, &vec, &needle, true, false)
-    } else {
-        find_sorted(&*ctx, &vec, &needle, t < 0.0)
+    let i = match t {
+        MatchType::Exact => find_exact(ctx, &vec, &needle, true, false),
+        MatchType::LessOrEqual => find_sorted(&*ctx, &vec, &needle, false),
+        MatchType::GreaterOrEqual => find_sorted(&*ctx, &vec, &needle, true),
     };
     i.map(|i| Value::Number((i + 1) as f64))
         .ok_or(ErrorKind::NA)
+}
+
+/// XLOOKUP's `match_mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchMode {
+    /// 0 (the default): exact only.
+    Exact,
+    /// -1: exact, else the next smaller value.
+    NextSmaller,
+    /// 1: exact, else the next larger value.
+    NextLarger,
+    /// 2: `*`/`?`/`~` wildcards.
+    Wildcard,
+}
+
+impl TryFrom<i64> for MatchMode {
+    type Error = ErrorKind;
+
+    fn try_from(n: i64) -> Result<MatchMode, ErrorKind> {
+        match n {
+            0 => Ok(MatchMode::Exact),
+            -1 => Ok(MatchMode::NextSmaller),
+            1 => Ok(MatchMode::NextLarger),
+            2 => Ok(MatchMode::Wildcard),
+            _ => Err(ErrorKind::Value),
+        }
+    }
+}
+
+/// XLOOKUP's `search_mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchMode {
+    /// 1 (the default): first to last.
+    First,
+    /// -1: last to first.
+    Last,
+    /// 2: binary search over ascending data.
+    Ascending,
+    /// -2: binary search over descending data.
+    Descending,
+}
+
+impl TryFrom<i64> for SearchMode {
+    type Error = ErrorKind;
+
+    fn try_from(n: i64) -> Result<SearchMode, ErrorKind> {
+        match n {
+            1 => Ok(SearchMode::First),
+            -1 => Ok(SearchMode::Last),
+            2 => Ok(SearchMode::Ascending),
+            -2 => Ok(SearchMode::Descending),
+            _ => Err(ErrorKind::Value),
+        }
+    }
 }
 
 /// `XLOOKUP(value, lookup, return, [if_not_found], [match_mode],
@@ -286,18 +362,21 @@ fn xlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
     let ret = area(&args[2], ctx)?;
     let match_mode = opt_int(args.get(4), ctx, 0)?;
     let search_mode = opt_int(args.get(5), ctx, 1)?;
-    if !look.is_vector() || !matches!(match_mode, -1..=2) || !matches!(search_mode, -2 | -1 | 1 | 2)
-    {
+    if !look.is_vector() {
         return Err(ErrorKind::Value);
     }
+    let match_mode = MatchMode::try_from(match_mode)?;
+    let search_mode = SearchMode::try_from(search_mode)?;
     let vertical = look.cols() == 1;
     let n = look.len();
     if (vertical && ret.rows() != n) || (!vertical && ret.cols() != n) {
         return Err(ErrorKind::Value);
     }
     let found = match search_mode {
-        1 | -1 => xlinear(ctx, &look, &needle, match_mode, search_mode == -1),
-        _ => xbinary(&*ctx, &look, &needle, match_mode, search_mode == -2),
+        SearchMode::First => xlinear(ctx, &look, &needle, match_mode, false),
+        SearchMode::Last => xlinear(ctx, &look, &needle, match_mode, true),
+        SearchMode::Ascending => xbinary(&*ctx, &look, &needle, match_mode, false),
+        SearchMode::Descending => xbinary(&*ctx, &look, &needle, match_mode, true),
     };
     match found {
         Some(i) => Ok(if vertical {
@@ -316,17 +395,20 @@ fn xlinear(
     ctx: &mut dyn Ctx,
     look: &Area,
     needle: &Value,
-    mode: i64,
+    mode: MatchMode,
     reverse: bool,
 ) -> Option<usize> {
-    if let Some(i) = find_exact(ctx, look, needle, mode == 2, reverse) {
+    let wildcards = mode == MatchMode::Wildcard;
+    if let Some(i) = find_exact(ctx, look, needle, wildcards, reverse) {
         return Some(i);
     }
-    if mode == 0 || mode == 2 {
-        return None;
-    }
-    // Next smaller (-1) or next larger (1): the closest same-typed value,
-    // the first one met in search order on ties.
+    let smaller = match mode {
+        MatchMode::Exact | MatchMode::Wildcard => return None,
+        MatchMode::NextSmaller => true,
+        MatchMode::NextLarger => false,
+    };
+    // Next smaller or next larger: the closest same-typed value, the first
+    // one met in search order on ties.
     let (r, c) = look.data_dims(&*ctx);
     let vals = if look.cols() == 1 {
         look.window(&*ctx, r, 1)
@@ -345,7 +427,7 @@ fn xlinear(
             continue;
         }
         let o = cmp_same(v, needle);
-        let side_ok = if mode < 0 {
+        let side_ok = if smaller {
             o == Ordering::Less
         } else {
             o == Ordering::Greater
@@ -357,7 +439,7 @@ fn xlinear(
             None => true,
             Some(b) => {
                 let ob = cmp_same(v, &vals[b]);
-                if mode < 0 {
+                if smaller {
                     ob == Ordering::Greater
                 } else {
                     ob == Ordering::Less
@@ -375,7 +457,7 @@ fn xbinary(
     ctx: &dyn Ctx,
     look: &Area,
     needle: &Value,
-    mode: i64,
+    mode: MatchMode,
     descending: bool,
 ) -> Option<usize> {
     let j = find_sorted(ctx, look, needle, descending);
@@ -383,7 +465,7 @@ fn xbinary(
     if exact.is_some() {
         return exact;
     }
-    if mode == 2 {
+    if mode == MatchMode::Wildcard {
         // Wildcards aren't valid with binary search: fall back to a scan.
         return if let Value::Text(t) = needle {
             let pat = Pattern::new(t);
@@ -401,9 +483,13 @@ fn xbinary(
         |from: usize| (from..look.len()).find(|&i| same_type(&look.vget(ctx, i), needle));
     // Ascending: j is the last ≤ (next smaller); the next larger follows it.
     // Descending: j is the last ≥ (next larger); the next smaller follows it.
-    let toward_j = if descending { mode == 1 } else { mode == -1 };
+    let toward_j = if descending {
+        mode == MatchMode::NextLarger
+    } else {
+        mode == MatchMode::NextSmaller
+    };
     match (toward_j, j) {
-        (_, _) if mode == 0 => None,
+        (_, _) if mode == MatchMode::Exact => None,
         (true, j) => j,
         (false, Some(j)) => next_typed(j + 1),
         (false, None) => next_typed(0),

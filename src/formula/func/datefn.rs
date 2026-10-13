@@ -107,27 +107,60 @@ fn weekday0_arg(arg: &Arg, ctx: &mut dyn Ctx) -> Result<(f64, u32), ErrorKind> {
     Ok((s, date::weekday0(s, ctx.date1904())))
 }
 
-/// WEEKDAY return types: 1 Sun=1…Sat=7, 2 Mon=1…Sun=7, 3 Mon=0…Sun=6,
-/// 11–17 = 1 on Mon…Sun.
+/// The day a week starts on, from a WEEKDAY or WEEKNUM return type: 1 or
+/// 17 Sunday, 2 or 11 Monday, 12–16 Tuesday–Saturday. (WEEKDAY's 3 and
+/// WEEKNUM's 21 are handled by each.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WeekStart {
+    Sunday,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+}
+
+impl WeekStart {
+    /// 0 = Sunday … 6 = Saturday, as [`date::weekday0`].
+    fn day(self) -> i64 {
+        self as i64
+    }
+}
+
+impl TryFrom<i64> for WeekStart {
+    type Error = ErrorKind;
+
+    fn try_from(t: i64) -> Result<WeekStart, ErrorKind> {
+        Ok(match t {
+            1 | 17 => WeekStart::Sunday,
+            2 | 11 => WeekStart::Monday,
+            12 => WeekStart::Tuesday,
+            13 => WeekStart::Wednesday,
+            14 => WeekStart::Thursday,
+            15 => WeekStart::Friday,
+            16 => WeekStart::Saturday,
+            _ => return Err(ErrorKind::Num),
+        })
+    }
+}
+
+/// WEEKDAY: 1 on the [`WeekStart`] of the return type, … 7; return type 3
+/// is Mon=0…Sun=6.
 fn weekday(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     let (_, w) = weekday0_arg(&args[0], ctx)?;
     let t = opt_int(args.get(1), ctx, 1)?;
     let w = w as i64;
-    let r = match t {
-        1 | 17 => w + 1,
-        2 | 11 => (w + 6) % 7 + 1,
-        3 => (w + 6) % 7,
-        12..=16 => {
-            let start = t - 10; // 2 = Tuesday … 6 = Saturday
-            (w - start).rem_euclid(7) + 1
-        }
-        _ => return Err(ErrorKind::Num),
+    let r = if t == 3 {
+        (w + 6) % 7
+    } else {
+        (w - WeekStart::try_from(t)?.day()).rem_euclid(7) + 1
     };
     Ok(r as f64)
 }
 
 /// WEEKNUM: system 1 (the week holding 1 January is week 1, weeks start on
-/// the given day: 1/17 Sun, 2/11 Mon, 12–16 Tue–Sat) or 21 (ISO 8601).
+/// the return type's [`WeekStart`]) or 21 (ISO 8601).
 fn weeknum(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     let s = date_arg(&args[0], ctx)?.floor();
     let t = opt_int(args.get(1), ctx, 1)?;
@@ -138,12 +171,7 @@ fn weeknum(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     if t == 21 {
         return Ok(iso_week(y, m, d.max(1)) as f64);
     }
-    let start: i64 = match t {
-        1 | 17 => 0,
-        2 | 11 => 1,
-        12..=16 => t - 10,
-        _ => return Err(ErrorKind::Num),
-    };
+    let start = WeekStart::try_from(t)?.day();
     // Weekday of 1 January in the real calendar (Excel's fake 1900 leap
     // day only shifts January/February 1900).
     let jan1 = (days_from_civil(y, 1, 1) + 4).rem_euclid(7); // 0 = Sunday
