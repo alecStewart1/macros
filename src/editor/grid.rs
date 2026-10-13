@@ -26,7 +26,7 @@ use super::*;
 use crate::grid::cellfmt::{self, CellFmt, CellFormats, NumCode};
 use crate::grid::cmd::{GridCmd, GridOp};
 use crate::grid::infer::ColType;
-use crate::grid::model::{CellsSnapshot, Workbook};
+use crate::grid::model::{CellsSnapshot, Change, Workbook};
 use crate::grid::style::RuleTest;
 use crate::grid::view::{
     self, CellEdit, CellRange, GridView, SelKind, cell_name, parse_address, range_name,
@@ -645,24 +645,32 @@ impl GridDoc {
     pub(super) fn model_op<R>(&mut self, f: impl FnOnce(&mut Workbook) -> R) -> R {
         let before = self.wb.undo_depth();
         // Formulas and layout as they were, in case this edit moves cells
-        // around.
+        // around. The formula snapshot is the engine's, which hasn't seen
+        // the log yet (`absorb_changes` takes it after the command).
         let snap = self.formula_snapshot();
+        let mark = self.wb.change_mark();
         let out = f(&mut self.wb);
         let mut layout = None;
         if snap.is_some() || self.has_layout() {
             // Peek at what the edit did; a structural one rewrites the
             // references it moved (one more model step, same undo entry)
-            // and carries the layout along with its cells.
-            let changes = self.wb.take_changes();
-            if changes
-                .iter()
-                .any(|c| !matches!(c, crate::grid::model::Change::Cells(_)))
-            {
+            // and carries the layout along with its cells. Cell changes
+            // move nothing, so only the structural ones are kept.
+            let structural = |changes: &[Change]| -> Vec<Change> {
+                changes
+                    .iter()
+                    .filter(|c| !matches!(c, Change::Cells(_)))
+                    .cloned()
+                    .collect()
+            };
+            let moved = structural(self.wb.changes_since(mark));
+            if !moved.is_empty() {
                 if self.has_layout() {
                     // `f` only touched the workbook: this is still the
-                    // layout from before the edit.
+                    // layout from before the edit (earlier edits in this
+                    // command already carried it along theirs).
                     let before = self.layout();
-                    self.remap_layout(&changes);
+                    self.remap_layout(&moved);
                     let after = self.layout();
                     if before != after {
                         layout = Some(Box::new((before, after)));
@@ -670,13 +678,12 @@ impl GridDoc {
                     }
                 }
                 if let Some(snap) = snap {
-                    self.rewrite_after(&changes, snap);
+                    // The snapshot predates every change in the log, so
+                    // all of them apply to it.
+                    let all = structural(self.wb.changes_since(0));
+                    self.rewrite_after(&all, snap);
                 }
             }
-            // Put the log back in order for `absorb_changes`.
-            let rest = self.wb.take_changes();
-            self.wb
-                .restore_changes(changes.into_iter().chain(rest).collect());
         }
         let steps = self.wb.undo_depth().saturating_sub(before);
         if steps > 0 {
@@ -4238,5 +4245,27 @@ mod tests {
         assert_eq!(fmt_num(-1234.5), "-1,234.50");
         assert_eq!(group_thousands(0.0), "0");
         assert_eq!(group_thousands(999.0), "999");
+    }
+
+    /// Several structural edits in one command carry the formatting along
+    /// each edit once (the change log still holds the earlier ones).
+    #[test]
+    fn grouped_deletes_move_formats_once() {
+        use super::*;
+        let csv: String = (1..=7).map(|i| format!("{i}\n")).collect();
+        let wb = crate::grid::parse::parse_now(csv.into_bytes(), Some("csv")).unwrap();
+        let mut g = GridDoc::new(wb, Some("csv".into()), 0, &Default::default());
+        let bold = CellFmt {
+            bold: true,
+            ..CellFmt::default()
+        };
+        g.formats.set(5, 0, bold);
+        g.grouped(|g| {
+            for k in [4usize, 2] {
+                g.model_op(|wb| wb.delete_rows(SHEET, k, 1));
+            }
+        });
+        let at: Vec<_> = g.formats.positions().collect();
+        assert_eq!(at, vec![(3, 0)]);
     }
 }
