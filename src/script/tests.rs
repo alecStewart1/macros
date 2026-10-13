@@ -952,7 +952,7 @@ mod engine_tests {
         for src in crate::runtime::startup_scripts() {
             let out = engine.eval(src).expect("a startup script failed to load");
             for c in out.commands {
-                if let EditorCommand::SetLsp(lang, _) = c {
+                if let EditorCommand::SetLsp(lang, ..) = c {
                     configured.push(lang);
                 }
             }
@@ -4007,6 +4007,7 @@ mod magit_tests {
                     mode,
                     text,
                     line_faces,
+                    quiet: false,
                 },
             ] => {
                 assert_eq!(name, "*magit*");
@@ -6958,7 +6959,7 @@ mod magit_quiet_refresh {
             .commands;
         assert!(
             cmds.iter().any(
-                |c| matches!(c, EditorCommand::RenderBuffer { name, .. } if name == "*magit*")
+                |c| matches!(c, EditorCommand::RenderBuffer { name, quiet: false, .. } if name == "*magit*")
             ),
             "interactive refresh uses render-buffer"
         );
@@ -6977,7 +6978,7 @@ mod magit_quiet_refresh {
             .commands;
         assert!(
             cmds.iter().any(
-                |c| matches!(c, EditorCommand::RenderBufferQuiet { name, .. } if name == "*magit*")
+                |c| matches!(c, EditorCommand::RenderBuffer { name, quiet: true, .. } if name == "*magit*")
             ),
             "background refresh uses render-buffer-quiet"
         );
@@ -7019,7 +7020,7 @@ mod magit_quiet_refresh {
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
-                EditorCommand::RenderBuffer { text, .. } if text.contains("+CHANGED")
+                EditorCommand::RenderBuffer { text, quiet: false, .. } if text.contains("+CHANGED")
             )),
             "expanding a lazy section re-renders with its diff body"
         );
@@ -7699,7 +7700,14 @@ mod diagnostics_lib {
             .commands
             .as_slice()
         {
-            [EditorCommand::RenderBuffer { name, text, .. }] => {
+            [
+                EditorCommand::RenderBuffer {
+                    name,
+                    text,
+                    quiet: false,
+                    ..
+                },
+            ] => {
                 assert_eq!(name, "*diagnostics*");
                 assert!(
                     text.contains("6:3  error: unbound x"),
@@ -7890,6 +7898,7 @@ mod compile_lib {
                     name,
                     text,
                     line_faces,
+                    quiet: false,
                     ..
                 },
                 EditorCommand::Message(m),
@@ -8279,7 +8288,7 @@ mod fs_watch_lib {
             .commands;
         assert!(matches!(
             cmds.as_slice(),
-            [EditorCommand::RenderBufferQuiet { name, .. }] if name == "*x*"
+            [EditorCommand::RenderBuffer { name, quiet: true, .. }] if name == "*x*"
         ));
 
         // A dired-sidebar auto-refresh renders quietly and re-declares its watch
@@ -8296,7 +8305,7 @@ mod fs_watch_lib {
             .commands;
         assert!(
             cmds.iter()
-                .any(|c| matches!(c, EditorCommand::RenderBufferQuiet { name, .. } if name == "*dired-sidebar*")),
+                .any(|c| matches!(c, EditorCommand::RenderBuffer { name, quiet: true, .. } if name == "*dired-sidebar*")),
             "quiet dired-sidebar refresh must use render-buffer-quiet"
         );
         assert!(
@@ -11380,7 +11389,8 @@ mod secrets_primitives {
                      (lambda ()
                        (make-process-env "psql" (list) "on-line" "" (list "B=explicit"))
                        (make-terminal "*t*" "" (list) "")
-                       (dap-start "dlv" (list) "" "on-msg" "")))"#,
+                       (dap-start "dlv" (list) "" "on-msg" "")
+                       (set-lsp "go" "gopls")))"#,
             )
             .unwrap()
             .commands;
@@ -11406,10 +11416,16 @@ mod secrets_primitives {
                     assert_eq!(pairs(&a.env), dyn_then);
                     seen += 1;
                 }
+                // The language server is spawned much later (on first visit
+                // of a Go file), but with the env of the configuring extent.
+                EditorCommand::SetLsp(_, _, env) => {
+                    assert_eq!(pairs(env), dyn_then);
+                    seen += 1;
+                }
                 _ => {}
             }
         }
-        assert_eq!(seen, 3, "{cmds:?}");
+        assert_eq!(seen, 4, "{cmds:?}");
         // Debug never shows the values.
         assert!(!format!("{cmds:?}").contains("explicit"));
     }

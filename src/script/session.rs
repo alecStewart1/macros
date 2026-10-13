@@ -142,7 +142,8 @@ fn command_line_files() -> Vec<String> {
 /// Register the session primitives. Reads go through `session` (published by
 /// the editor on `session-refresh` / before `kill-emacs-hook`); writes queue
 /// [`EditorCommand`]s.
-pub(crate) fn register_session(reg: &mut Registrar, queue: &Queue, session: &SharedSession) {
+pub(crate) fn register_session(reg: &mut Registrar, ctx: &EngineShared) {
+    let EngineShared { queue, session, .. } = ctx;
     // (session-refresh 'callback): publish the rings/buffers/layout, then call
     // `callback` (no args) — the only way to read them fresh from a timer.
     register_unary(reg, queue, "session-refresh", |cb: Callback| {
@@ -168,10 +169,10 @@ pub(crate) fn register_session(reg: &mut Registrar, queue: &Queue, session: &Sha
         let q = queue.clone();
         reg.register_fn(
             "set-session-ring!",
-            move |ring: SteelVal, items: SteelVal| {
-                q.lock().unwrap().push(EditorCommand::SetSessionRing {
+            move |ring: SteelVal, StringList(items): StringList| {
+                q.push(EditorCommand::SetSessionRing {
                     ring: steel_string(&ring).unwrap_or_default(),
-                    items: steel_string_list(&items),
+                    items,
                 });
             },
         );
@@ -209,7 +210,7 @@ pub(crate) fn register_session(reg: &mut Registrar, queue: &Queue, session: &Sha
         reg.register_fn("set-window-layout", move |tree: SteelVal| -> bool {
             match steel_to_layout(&tree) {
                 Some(spec) => {
-                    q.lock().unwrap().push(EditorCommand::SetWindowLayout(spec));
+                    q.push(EditorCommand::SetWindowLayout(spec));
                     true
                 }
                 None => false,
@@ -221,11 +222,9 @@ pub(crate) fn register_session(reg: &mut Registrar, queue: &Queue, session: &Sha
         // background without switching; missing files are skipped.
         let q = queue.clone();
         reg.register_fn("restore-file-buffers", move |entries: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::RestoreFileBuffers(steel_path_points(
-                    &entries,
-                )));
+            q.push(EditorCommand::RestoreFileBuffers(steel_path_points(
+                &entries,
+            )));
         });
     }
     // (command-line-files) → files passed on the command line (desktop restore

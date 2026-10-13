@@ -310,12 +310,8 @@
 
 (define (spell--maybe-auto-enable)
   (when (and (not (null? *spell-auto-exts*)) (not (spell--on?)))
-    (let ((b (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f))))
-      (when (let loop ((es *spell-auto-exts*))
-              (cond ((null? es) #f)
-                    ((ends-with? b (car es)) #t)
-                    (else (loop (cdr es)))))
-        (spell-mode)))))
+    (when (ends-with-any? (buffer-path-or-name) *spell-auto-exts*)
+      (spell-mode))))
 
 ;; --- navigation -----------------------------------------------------------------
 (define (spell--error-after pos)

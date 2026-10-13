@@ -19,8 +19,7 @@
 ;; Define or replace the snippet bound to `key`.
 (define (yas-define-snippet key template)
   (set! *yas-snippets*
-        (cons (cons key template)
-              (filter (lambda (kv) (not (equal? (car kv) key))) *yas-snippets*))))
+        (alist-set *yas-snippets* key template)))
 
 (define (yas--word-char? s)
   (>= (string-match "[A-Za-z0-9_]" s) 0))

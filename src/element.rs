@@ -12,7 +12,13 @@ use gpui::{
 use crate::editor::{CompletionView, Editor};
 use crate::highlight::{HlSpan, face_name};
 use crate::lsp::Severity;
-use crate::theme::Theme;
+use crate::theme::{Theme, Underline};
+
+mod popup;
+mod terminal;
+
+pub(crate) use popup::{PopupLayout, build_popup};
+pub use terminal::TerminalElement;
 
 /// Horizontal padding on each side of the line-number gutter.
 const GUTTER_PAD: Pixels = px(8.);
@@ -24,12 +30,6 @@ const SCROLLBAR_MIN_THUMB: f32 = 24.0;
 const BLOCK_CURSOR_ALPHA: f32 = 0.5;
 /// File-tree icon size as a fraction of the line height.
 const ICON_SCALE: f32 = 0.82;
-/// Inner padding of the completion popup (and its doc side-panel).
-const POPUP_PAD: Pixels = px(8.);
-/// Column (in characters) at which the completion doc side-panel word-wraps.
-const DOC_WRAP_COLS: usize = 64;
-/// Maximum rows shown in the completion doc side-panel.
-const DOC_MAX_ROWS: usize = 16;
 /// Diameter of a diagnostic gutter dot.
 const DIAG_DOT: f32 = 7.0;
 
@@ -335,14 +335,6 @@ pub struct PrepaintState {
     cursor_rel_y: Option<Pixels>,
 }
 
-/// A laid-out completion popup: background/border/selection quads plus the
-/// shaped candidate lines and where to paint each.
-pub(crate) struct PopupLayout {
-    pub(crate) quads: Vec<PaintQuad>,
-    pub(crate) labels: Vec<(ShapedLine, Point<Pixels>)>,
-    pub(crate) hit: crate::editor::PopupHit,
-}
-
 /// Per-line geometry shared by the prepaint helpers: which buffer line it is,
 /// where it sits, its byte range, and the display-text mapping (`holes`)
 /// needed to position anything within it.
@@ -433,6 +425,434 @@ struct Accum {
     fold_hitboxes: Vec<crate::editor::FoldHitbox>,
     fold_cursors: Vec<Hitbox>,
     virtual_text: Vec<(ShapedLine, Point<Pixels>)>,
+    lines: Vec<LineLayout>,
+    /// The primary cursor's quad (`None` when blinked off or not laid out).
+    cursor: Option<PaintQuad>,
+    hl_line: Option<PaintQuad>,
+    /// The primary cursor's origin (also the completion-popup anchor, tracked
+    /// even when blinked off).
+    cursor_px: Option<Point<Pixels>>,
+    images: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+}
+
+/// The theme colors a frame paints with, resolved once per prepaint (like
+/// [`DiagnosticColors`]), each with a fixed fallback for themes that don't
+/// define its face.
+#[derive(Clone, Copy)]
+struct FrameColors {
+    cursor: Hsla,
+    region: Hsla,
+    /// Helix multiple selections: each secondary selection paints a dimmer
+    /// span, and its caret a dimmer cursor, so the primary stays distinct.
+    secondary_region: Hsla,
+    secondary_cursor: Hsla,
+    search: Hsla,
+    paren: Hsla,
+    hl_line: Hsla,
+    line_number: Hsla,
+    git_added: Hsla,
+    git_modified: Hsla,
+    git_removed: Hsla,
+}
+
+impl FrameColors {
+    /// `text` is the frame's foreground, the line numbers' last fallback.
+    fn resolve(theme: &Theme, text: Hsla) -> Self {
+        let cursor = theme.color("cursor", rgb(0x528bff).into());
+        let region = theme.color("region", rgba(0x3a5fcd55).into());
+        // Themes can set the secondary colors explicitly; otherwise derive
+        // them from the primary region/cursor by knocking the alpha down.
+        let dimmed = |mut c: Hsla, by: f32| {
+            c.a *= by;
+            c
+        };
+        FrameColors {
+            cursor,
+            region,
+            secondary_region: theme.color("secondary-region", dimmed(region, 0.6)),
+            secondary_cursor: theme.color("secondary-cursor", dimmed(cursor, 0.7)),
+            search: theme.color("search", rgba(0xffc83d66).into()),
+            paren: theme.color("show-paren", rgba(0x5fafef66).into()),
+            hl_line: theme.color("hl-line", rgba(0xffffff10).into()),
+            line_number: theme.color("line-number", theme.color("dim", text)),
+            git_added: theme.color("magit-gutter-added", rgb(0x6cae3e).into()),
+            git_modified: theme.color("magit-gutter-modified", rgb(0xc7a23a).into()),
+            git_removed: theme.color("magit-gutter-removed", rgb(0xc1574b).into()),
+        }
+    }
+}
+
+/// Everything [`FrameCtx::layout_line`] needs about the frame being laid out,
+/// resolved once per prepaint: the editor state for this pane, fonts and
+/// geometry, colors, and the visible-range highlight data.
+struct FrameCtx<'a> {
+    editor: &'a Editor,
+    pane: usize,
+    selected: bool,
+    buffer: &'a crate::buffer::Buffer,
+    theme: &'a Theme,
+    colors: FrameColors,
+    text_color: Hsla,
+    font: Font,
+    font_size: Pixels,
+    /// One monospace character's advance.
+    em: Pixels,
+    line_height: Pixels,
+    bounds: Bounds<Pixels>,
+    text_left: Pixels,
+    /// `text_left` shifted by the horizontal scroll.
+    text_x: Pixels,
+    wrap_width: Option<Pixels>,
+    scales: bool,
+    images: bool,
+    line_numbers: bool,
+    hl_line: bool,
+    cursor: usize,
+    selection: Range<usize>,
+    block_sel: Option<(usize, usize, usize, usize)>,
+    extra_selections: Vec<(usize, usize)>,
+    extra_cursor_positions: Vec<usize>,
+    search: Vec<Range<usize>>,
+    paren: Vec<Range<usize>>,
+    highlights: Vec<HlSpan>,
+    overlay_faces: &'a [(Range<usize>, SharedString)],
+    ghost: Option<(usize, &'a str)>,
+    ghost_first: &'a str,
+    ghost_tail: Vec<&'a str>,
+    ghost_color: Hsla,
+    diagnostics: Vec<crate::lsp::Diagnostic>,
+    diff_marks: &'a std::collections::HashMap<usize, crate::editor::DiffMark>,
+    gutter_dots: &'a std::collections::HashMap<usize, SharedString>,
+    diag_colors: DiagnosticColors,
+    gutter: GutterCfg,
+    cursor_cfg: CursorCfg,
+}
+
+impl FrameCtx<'_> {
+    /// Lay out buffer line `i` with its top at `y` (advanced past the line,
+    /// its ghost continuation rows and its inline image): shape it and collect
+    /// its gutter, cursor, highlight and decoration output into `acc`.
+    fn layout_line(&self, i: usize, y: &mut Pixels, acc: &mut Accum, window: &mut Window) {
+        let lh = f32::from(self.line_height);
+        let (range, text) = self.buffer.line(i);
+        let top = *y;
+
+        // `overlay-hide` ranges intersecting this line, made line-relative and
+        // restricted to char boundaries; spliced out before shaping so the
+        // stars (etc.) collapse. Empty for almost every line. The line the
+        // cursor sits on is revealed in full (Emacs-style) so hidden markup —
+        // e.g. Org's leading stars — is visible and editable while point is
+        // there; moving off the line re-hides it on the next frame.
+        //
+        // Selected pane only: `overlay-hide` ranges live on the *active*
+        // buffer (`line_holes` reads `self.buffer`/`self.overlays`), so a
+        // non-selected pane must not consult them — its rows index a different,
+        // possibly longer buffer (e.g. a tall dired-sidebar tree beside a short
+        // file), which would index the active buffer past its end. Matches the
+        // `selected` gating on `overlay_faces` and the cursor-line reveal below.
+        let mut holes = if self.selected {
+            self.editor.line_holes(i)
+        } else {
+            Vec::new()
+        };
+        holes.retain(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e));
+        // The cursor's own line is revealed in full so hidden markup — e.g.
+        // Org's leading stars — is visible and editable while point is there.
+        // The width those stars reclaim is taken back out of the indent below,
+        // so the visible title stays put instead of jumping right as the
+        // cursor arrives. Moving off the line re-hides it next frame.
+        let revealed = self.selected && self.cursor >= range.start && self.cursor <= range.end;
+        let reveal_cols: usize = if revealed {
+            holes.iter().map(|&(s, e)| e - s).sum()
+        } else {
+            0
+        };
+        if revealed {
+            holes.clear();
+        }
+
+        // Virtual left indent (Org `org-indent-mode`): shift this line's text
+        // right by N columns. Display-only — the buffer text is untouched, so
+        // there is no real whitespace to navigate (matches Emacs).
+        let indent_px =
+            px(self.editor.line_indent(i).saturating_sub(reveal_cols) as f32 * f32::from(self.em));
+        let lx = self.text_x + indent_px;
+        // Whole-line scale (markdown/org headings rendered larger). A scaled
+        // line is shaped at `scale`× the base font and doesn't wrap; it
+        // reserves `1 + scale_rows_at` display rows (claimed above), so the
+        // bigger text sits in that taller block and the row math stays exact.
+        let scale = if self.scales {
+            self.editor.line_scale(i)
+        } else {
+            1.0
+        };
+        let line_font_size = self.font_size * scale;
+        // Narrow the wrap width by the indent so wrapped rows stay in the pane.
+        // Scaled heading lines never wrap (keeps them a single, taller block).
+        let line_wrap_width = if scale > 1.0 {
+            None
+        } else {
+            self.wrap_width
+                .map(|w| px((f32::from(w) - f32::from(indent_px)).max(1.0)))
+        };
+
+        // Compute the styled runs, then shape once (the branches only
+        // differ in which spans and base color tile the line).
+        let runs = if text.is_empty() {
+            Vec::new()
+        } else if let Some(face) = self.editor.pane_line_face(self.pane, i) {
+            // Special buffers (magit-style) paint whole lines by face name —
+            // but sub-line overlay accents (magit's status labels, diff +/-
+            // markers) still override their byte range, layered on top of the
+            // whole-line color as the base (no syntax spans here). The face's
+            // bold attribute rides along as the line's base weight.
+            let color = self.theme.color(face, self.text_color);
+            line_runs(
+                &[],
+                self.overlay_faces,
+                range.clone(),
+                &self.font,
+                color,
+                self.theme.is_bold(face),
+                self.theme,
+                Some(text.as_str()),
+            )
+        } else {
+            line_runs(
+                &self.highlights,
+                self.overlay_faces,
+                range.clone(),
+                &self.font,
+                self.text_color,
+                false,
+                self.theme,
+                Some(text.as_str()),
+            )
+        };
+        // Ghost anchored on this line (point's line): splice the
+        // suggestion's first line into the display text at point — the
+        // inverse of the `holes` splice-out — so the rest of the real line
+        // is pushed right and soft-wrap measures the suggestion like real
+        // text. Point's line is `revealed` above, so `holes` is empty here
+        // and display indices equal line-relative buffer offsets.
+        let ghost_here = self
+            .ghost
+            .filter(|(at, _)| *at >= range.start && *at <= range.end);
+        let line_ghost = ghost_here
+            .filter(|_| !self.ghost_first.is_empty())
+            .map(|(at, _)| (to_display(at - range.start, &holes), self.ghost_first.len()));
+        let mut display_text = remove_holes(&text, &holes);
+        let mut display_runs = punch_runs(runs, &holes);
+        if let Some((at, len)) = line_ghost {
+            display_text.insert_str(at, self.ghost_first);
+            display_runs = inject_ghost_run(
+                display_runs,
+                at,
+                ghost_run(len, &self.font, self.ghost_color),
+            );
+        }
+        let wrapped = window.text_system().shape_text(
+            SharedString::from(display_text),
+            line_font_size,
+            &display_runs,
+            line_wrap_width,
+            None,
+        );
+        let wrapped = wrapped.ok().and_then(|mut v| v.pop()).unwrap_or_default();
+        // A scaled line occupies the whole reserved block (its claimed rows ×
+        // line height) so `y` advances by the rows it reserved above; an
+        // unscaled line is just its shaped (possibly wrapped) height.
+        let line_h = if scale > 1.0 {
+            px((1 + self.editor.scale_rows_at(i)) as f32 * lh)
+        } else {
+            wrapped.size(self.line_height).height
+        };
+
+        // A scaled (heading) line reserves whole rows (`ceil(scale)`), taller
+        // than the one base row a line normally occupies. `WrappedLine::paint`
+        // vertically centers the glyph run within the `line_height` it's given
+        // (here the base `lh`), so the glyphs' center sits one half-row below
+        // `content_top`. To center them in the reserved block, offset the whole
+        // line's content (glyphs, cursor, selection, inlays — and the line
+        // number) down by half the slack: `(block − one base row) / 2`. Zero for
+        // ordinary lines, which keeps wrapped multi-row lines top-aligned.
+        let content_dy = if scale > 1.0 {
+            (line_h - px(lh)) / 2.0
+        } else {
+            px(0.)
+        };
+        let content_top = self.bounds.top() + top + content_dy;
+        let line_origin = point(lx, content_top);
+        let lc = LineCtx {
+            i,
+            range: range.clone(),
+            wrapped: &wrapped,
+            holes: &holes,
+            top,
+            line_h,
+            line_origin,
+            line_height: self.line_height,
+            ghost: line_ghost,
+        };
+
+        // Gutter: line number, fold chevron, diagnostic dot, git bar.
+        if self.line_numbers {
+            layout_gutter(
+                &lc,
+                &self.gutter,
+                self.editor,
+                self.theme,
+                &self.diagnostics,
+                self.diff_marks,
+                self.gutter_dots,
+                window,
+                acc,
+            );
+        }
+
+        if self.hl_line
+            && self.cursor >= range.start
+            && self.cursor <= range.end
+            && acc.hl_line.is_none()
+        {
+            // Span the full pane width (gutter included), one line tall.
+            let origin = point(self.bounds.left(), self.bounds.top() + top);
+            acc.hl_line = Some(fill(
+                Bounds::new(origin, size(self.bounds.size.width, line_h)),
+                self.colors.hl_line,
+            ));
+        }
+
+        // Cursors: the primary caret (also the completion-popup anchor,
+        // tracked even when blinked off) and any secondary carets.
+        if self.selected {
+            if let Some((origin, quad)) =
+                layout_cursor(&lc, self.buffer, self.cursor, &self.cursor_cfg)
+            {
+                acc.cursor_px = Some(origin);
+                acc.cursor = quad;
+            }
+            layout_extra_cursors(
+                &lc,
+                &self.extra_cursor_positions,
+                &self.cursor_cfg,
+                &mut acc.extra_cursors,
+            );
+        }
+
+        // Range highlights, all through the same per-row quad helper.
+        if let Some((top_row, bottom_row, left_col, right_col)) = self.block_sel {
+            // Block-wise Visual: highlight only the `[left_col, right_col]`
+            // column strip on each row within the rectangle (rows shorter
+            // than the strip contribute nothing).
+            if i >= top_row && i <= bottom_row {
+                let s = char_col_byte_in(&text, left_col);
+                let e = char_col_byte_in(&text, right_col + 1);
+                if e > s {
+                    lc.push_range(
+                        &mut acc.selections,
+                        range.start + s,
+                        range.start + e,
+                        self.colors.region,
+                        px(0.),
+                    );
+                }
+            }
+        } else if !self.selection.is_empty() {
+            lc.push_range(
+                &mut acc.selections,
+                self.selection.start,
+                self.selection.end,
+                self.colors.region,
+                px(0.),
+            );
+        }
+        // Secondary selections (Helix multiple selections): one dimmer span
+        // per selection that overlaps this line. Each carries its own color,
+        // so they coexist with the primary highlight in the same quad list.
+        for &(ss, se) in &self.extra_selections {
+            if se > ss {
+                lc.push_range(
+                    &mut acc.selections,
+                    ss,
+                    se,
+                    self.colors.secondary_region,
+                    px(0.),
+                );
+            }
+        }
+        // Search matches: a translucent background highlight per match.
+        for m in &self.search {
+            lc.push_range(&mut acc.search, m.start, m.end, self.colors.search, px(0.));
+        }
+        // Matching-delimiter highlight: the bracket pair (each one char).
+        for m in &self.paren {
+            lc.push_range(&mut acc.paren, m.start, m.end, self.colors.paren, px(0.));
+        }
+
+        // Decorations: file-tree icon, diagnostic underlines, virtual
+        // suffix text, avy hints.
+        layout_decorations(
+            &lc,
+            self.editor,
+            self.pane,
+            self.selected,
+            self.theme,
+            self.text_color,
+            &self.font,
+            self.font_size,
+            self.em,
+            &self.diagnostics,
+            self.diag_colors,
+            window,
+            acc,
+        );
+
+        acc.lines.push(LineLayout {
+            wrapped,
+            top,
+            range,
+            holes,
+            indent: indent_px,
+            height: line_h,
+            content_dy,
+            ghost: line_ghost,
+        });
+        *y += line_h;
+
+        // Ghost continuation lines: painted on the display rows reserved
+        // below point's line (the inline-image pattern), one per `\n` in
+        // the suggestion. Not hit-testable — a click below the anchor line
+        // maps to the following buffer line, and moving point dismisses
+        // the ghost anyway.
+        if ghost_here.is_some() {
+            for t in &self.ghost_tail {
+                if !t.is_empty() {
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(t.to_string()),
+                        self.font_size,
+                        &[ghost_run(t.len(), &self.font, self.ghost_color)],
+                        None,
+                    );
+                    acc.virtual_text
+                        .push((shaped, point(lx, self.bounds.top() + *y)));
+                }
+                *y += px(lh);
+            }
+        }
+
+        // Inline image: paint it in the rows reserved below this line, and
+        // advance past them. `image_rows_at` and the displayed size agree on
+        // the fixed max width, so the reserved height matches the bitmap.
+        if self.images
+            && let Some((data, disp_w, disp_h)) = self.editor.line_image_at(i)
+        {
+            let img_origin = point(self.text_left + indent_px, self.bounds.top() + *y);
+            acc.images
+                .push((Bounds::new(img_origin, size(px(disp_w), px(disp_h))), data));
+            *y += px(self.editor.image_rows_at(i) as f32 * lh);
+        }
+    }
 }
 
 /// Gutter configuration resolved once per frame: geometry, colors, and which
@@ -842,25 +1262,6 @@ impl Element for EditorElement {
         let selected = editor.pane_is_selected(pane);
         let buffer = editor.pane_buffer(pane);
         let theme = cx.global::<Theme>();
-        let cursor_color = theme.color("cursor", rgb(0x528bff).into());
-        let region_color = theme.color("region", rgba(0x3a5fcd55).into());
-        // Helix multiple selections: each secondary selection paints a dimmer
-        // span, and its caret a dimmer cursor, so the primary stays distinct.
-        // Themes can set these explicitly; otherwise derive them from the primary
-        // region/cursor by knocking the alpha down.
-        let secondary_region_color = theme.color("secondary-region", {
-            let mut c = region_color;
-            c.a *= 0.6;
-            c
-        });
-        let secondary_cursor_color = theme.color("secondary-cursor", {
-            let mut c = cursor_color;
-            c.a *= 0.7;
-            c
-        });
-        let search_color = theme.color("search", rgba(0xffc83d66).into());
-        let paren_color = theme.color("show-paren", rgba(0x5fafef66).into());
-        let hl_line_color = theme.color("hl-line", rgba(0xffffff10).into());
         let settings = cx.global::<crate::settings::Settings>();
         let popup_max_rows = settings.completion_max_rows();
         let popup_show_detail = settings.completion_show_detail();
@@ -868,9 +1269,9 @@ impl Element for EditorElement {
         // Cursor shape: "bar" (cursor-width px), "block" (char width), or "auto"
         // (block in evil Normal/Visual, otherwise a bar).
         let block_cursor = match settings.cursor_style() {
-            "block" => true,
-            "bar" => false,
-            _ => editor.wants_block_cursor(),
+            crate::settings::CursorStyle::Block => true,
+            crate::settings::CursorStyle::Bar => false,
+            crate::settings::CursorStyle::Auto => editor.wants_block_cursor(),
         };
         let cursor_width = px(settings.cursor_width());
         // When blinking is on, only paint the cursor in the "shown" half of the
@@ -881,6 +1282,7 @@ impl Element for EditorElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
         let text_color = style.color;
+        let colors = FrameColors::resolve(theme, text_color);
         // The custom element doesn't inherit the div's font_family, so resolve the
         // configured `font-family` ourselves (defaults to the bundled "Lilex"). A
         // family GPUI can't resolve falls back to the platform default at shape
@@ -940,7 +1342,6 @@ impl Element for EditorElement {
             px(0.)
         };
         let text_left = bounds.left() + gutter_width;
-        let line_number_color = theme.color("line-number", theme.color("dim", text_color));
         // Diagnostic gutter dots ride alongside the line numbers, so they need the
         // gutter to exist; gate on both the option and line numbers being shown.
         let diag_gutter = line_numbers && settings.diagnostics_gutter();
@@ -949,9 +1350,6 @@ impl Element for EditorElement {
         let git_gutter_on = line_numbers && settings.magit_gutter();
         let git_gutter_w = px(settings.magit_gutter_width());
         let git_gutter_del = settings.magit_gutter_deleted();
-        let gg_added = theme.color("magit-gutter-added", rgb(0x6cae3e).into());
-        let gg_modified = theme.color("magit-gutter-modified", rgb(0xc7a23a).into());
-        let gg_removed = theme.color("magit-gutter-removed", rgb(0xc1574b).into());
         // Diagnostic colors (gutter dots + underlines), resolved once per frame.
         let diag_colors = DiagnosticColors::resolve(theme);
 
@@ -1102,22 +1500,16 @@ impl Element for EditorElement {
         };
         let text_x = text_left - h_scroll;
 
-        let mut lines = Vec::new();
-        let mut cursor_quad = None;
-        let mut hl_line_quad: Option<PaintQuad> = None;
-        let mut cursor_px: Option<Point<Pixels>> = None;
         let mut acc = Accum::default();
         let extra_cursor_positions = editor.extra_cursor_positions();
         // Secondary selection spans (Helix multiple selections); selected pane
-        // only, like the carets. Each is highlighted with `secondary_region_color`.
+        // only, like the carets. Each is highlighted with `colors.secondary_region`.
         let extra_selections = if selected {
             editor.extra_selections()
         } else {
             Vec::new()
         };
-        let mut image_quads: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
-
-        let gutter_cfg = GutterCfg {
+        let gutter = GutterCfg {
             bounds,
             gutter_width,
             gutter_pad,
@@ -1128,10 +1520,10 @@ impl Element for EditorElement {
             git_gutter: git_gutter_on,
             git_gutter_w,
             git_gutter_del,
-            gg_added,
-            gg_modified,
-            gg_removed,
-            number_color: line_number_color,
+            gg_added: colors.git_added,
+            gg_modified: colors.git_modified,
+            gg_removed: colors.git_removed,
+            number_color: colors.line_number,
             font: editor_font.clone(),
             font_size,
             diag_colors,
@@ -1141,8 +1533,48 @@ impl Element for EditorElement {
             width: cursor_width,
             shown: cursor_shown,
             char_advance,
-            color: cursor_color,
-            secondary_color: secondary_cursor_color,
+            color: colors.cursor,
+            secondary_color: colors.secondary_cursor,
+        };
+        let frame = FrameCtx {
+            editor,
+            pane,
+            selected,
+            buffer,
+            theme,
+            colors,
+            text_color,
+            font: editor_font.clone(),
+            font_size,
+            em,
+            line_height,
+            bounds,
+            text_left,
+            text_x,
+            wrap_width,
+            scales,
+            images,
+            line_numbers,
+            hl_line,
+            cursor,
+            selection,
+            block_sel,
+            extra_selections,
+            extra_cursor_positions,
+            search,
+            paren,
+            highlights,
+            overlay_faces,
+            ghost,
+            ghost_first,
+            ghost_tail,
+            ghost_color,
+            diagnostics,
+            diff_marks,
+            gutter_dots,
+            diag_colors,
+            gutter,
+            cursor_cfg,
         };
 
         // Lines have variable height under wrapping (and under inline images), so
@@ -1152,7 +1584,6 @@ impl Element for EditorElement {
         let mut y = px(first_top_row as f32 * lh - scroll);
         let viewport_bottom = px(viewport_h);
         for &i in &rows {
-            let (range, text) = buffer.line(i);
             // Stop laying out once below the viewport — but keep going until the
             // cursor's own line has been laid out, so `reconcile_cursor_scroll`
             // learns its real (wrapped) pixel position and can follow it. Under
@@ -1163,304 +1594,15 @@ impl Element for EditorElement {
             // the cursor has been located — or in a non-selected pane, which has
             // no cursor to follow — the early-out stands. Off-screen lines laid
             // out in the interim are clipped to `bounds` anyway.
-            if y >= viewport_bottom && (!selected || cursor_px.is_some()) {
+            if y >= viewport_bottom && (!selected || acc.cursor_px.is_some()) {
                 break;
             }
-            let top = y;
-
-            // `overlay-hide` ranges intersecting this line, made line-relative and
-            // restricted to char boundaries; spliced out before shaping so the
-            // stars (etc.) collapse. Empty for almost every line. The line the
-            // cursor sits on is revealed in full (Emacs-style) so hidden markup —
-            // e.g. Org's leading stars — is visible and editable while point is
-            // there; moving off the line re-hides it on the next frame.
-            //
-            // Selected pane only: `overlay-hide` ranges live on the *active*
-            // buffer (`line_holes` reads `self.buffer`/`self.overlays`), so a
-            // non-selected pane must not consult them — its rows index a different,
-            // possibly longer buffer (e.g. a tall dired-sidebar tree beside a short
-            // file), which would index the active buffer past its end. Matches the
-            // `selected` gating on `overlay_faces` and the cursor-line reveal below.
-            let mut holes = if selected {
-                editor.line_holes(i)
-            } else {
-                Vec::new()
-            };
-            holes.retain(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e));
-            // The cursor's own line is revealed in full so hidden markup — e.g.
-            // Org's leading stars — is visible and editable while point is there.
-            // The width those stars reclaim is taken back out of the indent below,
-            // so the visible title stays put instead of jumping right as the
-            // cursor arrives. Moving off the line re-hides it next frame.
-            let revealed = selected && cursor >= range.start && cursor <= range.end;
-            let reveal_cols: usize = if revealed {
-                holes.iter().map(|&(s, e)| e - s).sum()
-            } else {
-                0
-            };
-            if revealed {
-                holes.clear();
-            }
-
-            // Virtual left indent (Org `org-indent-mode`): shift this line's text
-            // right by N columns. Display-only — the buffer text is untouched, so
-            // there is no real whitespace to navigate (matches Emacs).
-            let indent_px =
-                px(editor.line_indent(i).saturating_sub(reveal_cols) as f32 * f32::from(em));
-            let lx = text_x + indent_px;
-            // Whole-line scale (markdown/org headings rendered larger). A scaled
-            // line is shaped at `scale`× the base font and doesn't wrap; it
-            // reserves `1 + scale_rows_at` display rows (claimed above), so the
-            // bigger text sits in that taller block and the row math stays exact.
-            let scale = if scales { editor.line_scale(i) } else { 1.0 };
-            let line_font_size = font_size * scale;
-            // Narrow the wrap width by the indent so wrapped rows stay in the pane.
-            // Scaled heading lines never wrap (keeps them a single, taller block).
-            let line_wrap_width = if scale > 1.0 {
-                None
-            } else {
-                wrap_width.map(|w| px((f32::from(w) - f32::from(indent_px)).max(1.0)))
-            };
-
-            // Compute the styled runs, then shape once (the branches only
-            // differ in which spans and base color tile the line).
-            let runs = if text.is_empty() {
-                Vec::new()
-            } else if let Some(face) = editor.pane_line_face(pane, i) {
-                // Special buffers (magit-style) paint whole lines by face name —
-                // but sub-line overlay accents (magit's status labels, diff +/-
-                // markers) still override their byte range, layered on top of the
-                // whole-line color as the base (no syntax spans here). The face's
-                // bold attribute rides along as the line's base weight.
-                let color = theme.color(face, text_color);
-                line_runs(
-                    &[],
-                    overlay_faces,
-                    range.clone(),
-                    &editor_font,
-                    color,
-                    theme.is_bold(face),
-                    theme,
-                    Some(text.as_str()),
-                )
-            } else {
-                line_runs(
-                    &highlights,
-                    overlay_faces,
-                    range.clone(),
-                    &editor_font,
-                    text_color,
-                    false,
-                    theme,
-                    Some(text.as_str()),
-                )
-            };
-            // Ghost anchored on this line (point's line): splice the
-            // suggestion's first line into the display text at point — the
-            // inverse of the `holes` splice-out — so the rest of the real line
-            // is pushed right and soft-wrap measures the suggestion like real
-            // text. Point's line is `revealed` above, so `holes` is empty here
-            // and display indices equal line-relative buffer offsets.
-            let ghost_here = ghost.filter(|(at, _)| *at >= range.start && *at <= range.end);
-            let line_ghost = ghost_here
-                .filter(|_| !ghost_first.is_empty())
-                .map(|(at, _)| (to_display(at - range.start, &holes), ghost_first.len()));
-            let mut display_text = remove_holes(&text, &holes);
-            let mut display_runs = punch_runs(runs, &holes);
-            if let Some((at, len)) = line_ghost {
-                display_text.insert_str(at, ghost_first);
-                display_runs =
-                    inject_ghost_run(display_runs, at, ghost_run(len, &editor_font, ghost_color));
-            }
-            let wrapped = window.text_system().shape_text(
-                SharedString::from(display_text),
-                line_font_size,
-                &display_runs,
-                line_wrap_width,
-                None,
-            );
-            let wrapped = wrapped.ok().and_then(|mut v| v.pop()).unwrap_or_default();
-            // A scaled line occupies the whole reserved block (its claimed rows ×
-            // line height) so `y` advances by the rows it reserved above; an
-            // unscaled line is just its shaped (possibly wrapped) height.
-            let line_h = if scale > 1.0 {
-                px((1 + editor.scale_rows_at(i)) as f32 * lh)
-            } else {
-                wrapped.size(line_height).height
-            };
-
-            // A scaled (heading) line reserves whole rows (`ceil(scale)`), taller
-            // than the one base row a line normally occupies. `WrappedLine::paint`
-            // vertically centers the glyph run within the `line_height` it's given
-            // (here the base `lh`), so the glyphs' center sits one half-row below
-            // `content_top`. To center them in the reserved block, offset the whole
-            // line's content (glyphs, cursor, selection, inlays — and the line
-            // number) down by half the slack: `(block − one base row) / 2`. Zero for
-            // ordinary lines, which keeps wrapped multi-row lines top-aligned.
-            let content_dy = if scale > 1.0 {
-                (line_h - px(lh)) / 2.0
-            } else {
-                px(0.)
-            };
-            let content_top = bounds.top() + top + content_dy;
-            let line_origin = point(lx, content_top);
-            let lc = LineCtx {
-                i,
-                range: range.clone(),
-                wrapped: &wrapped,
-                holes: &holes,
-                top,
-                line_h,
-                line_origin,
-                line_height,
-                ghost: line_ghost,
-            };
-
-            // Gutter: line number, fold chevron, diagnostic dot, git bar.
-            if line_numbers {
-                layout_gutter(
-                    &lc,
-                    &gutter_cfg,
-                    editor,
-                    theme,
-                    &diagnostics,
-                    diff_marks,
-                    gutter_dots,
-                    window,
-                    &mut acc,
-                );
-            }
-
-            if hl_line && cursor >= range.start && cursor <= range.end && hl_line_quad.is_none() {
-                // Span the full pane width (gutter included), one line tall.
-                let origin = point(bounds.left(), bounds.top() + top);
-                hl_line_quad = Some(fill(
-                    Bounds::new(origin, size(bounds.size.width, line_h)),
-                    hl_line_color,
-                ));
-            }
-
-            // Cursors: the primary caret (also the completion-popup anchor,
-            // tracked even when blinked off) and any secondary carets.
-            if selected {
-                if let Some((origin, quad)) = layout_cursor(&lc, buffer, cursor, &cursor_cfg) {
-                    cursor_px = Some(origin);
-                    cursor_quad = quad;
-                }
-                layout_extra_cursors(
-                    &lc,
-                    &extra_cursor_positions,
-                    &cursor_cfg,
-                    &mut acc.extra_cursors,
-                );
-            }
-
-            // Range highlights, all through the same per-row quad helper.
-            if let Some((top_row, bottom_row, left_col, right_col)) = block_sel {
-                // Block-wise Visual: highlight only the `[left_col, right_col]`
-                // column strip on each row within the rectangle (rows shorter
-                // than the strip contribute nothing).
-                if i >= top_row && i <= bottom_row {
-                    let s = char_col_byte_in(&text, left_col);
-                    let e = char_col_byte_in(&text, right_col + 1);
-                    if e > s {
-                        lc.push_range(
-                            &mut acc.selections,
-                            range.start + s,
-                            range.start + e,
-                            region_color,
-                            px(0.),
-                        );
-                    }
-                }
-            } else if !selection.is_empty() {
-                lc.push_range(
-                    &mut acc.selections,
-                    selection.start,
-                    selection.end,
-                    region_color,
-                    px(0.),
-                );
-            }
-            // Secondary selections (Helix multiple selections): one dimmer span
-            // per selection that overlaps this line. Each carries its own color,
-            // so they coexist with the primary highlight in the same quad list.
-            for &(ss, se) in &extra_selections {
-                if se > ss {
-                    lc.push_range(&mut acc.selections, ss, se, secondary_region_color, px(0.));
-                }
-            }
-            // Search matches: a translucent background highlight per match.
-            for m in &search {
-                lc.push_range(&mut acc.search, m.start, m.end, search_color, px(0.));
-            }
-            // Matching-delimiter highlight: the bracket pair (each one char).
-            for m in &paren {
-                lc.push_range(&mut acc.paren, m.start, m.end, paren_color, px(0.));
-            }
-
-            // Decorations: file-tree icon, diagnostic underlines, virtual
-            // suffix text, avy hints.
-            layout_decorations(
-                &lc,
-                editor,
-                pane,
-                selected,
-                theme,
-                text_color,
-                &editor_font,
-                font_size,
-                em,
-                &diagnostics,
-                diag_colors,
-                window,
-                &mut acc,
-            );
-
-            lines.push(LineLayout {
-                wrapped,
-                top,
-                range,
-                holes,
-                indent: indent_px,
-                height: line_h,
-                content_dy,
-                ghost: line_ghost,
-            });
-            y += line_h;
-
-            // Ghost continuation lines: painted on the display rows reserved
-            // below point's line (the inline-image pattern), one per `\n` in
-            // the suggestion. Not hit-testable — a click below the anchor line
-            // maps to the following buffer line, and moving point dismisses
-            // the ghost anyway.
-            if ghost_here.is_some() {
-                for t in &ghost_tail {
-                    if !t.is_empty() {
-                        let shaped = window.text_system().shape_line(
-                            SharedString::from(t.to_string()),
-                            font_size,
-                            &[ghost_run(t.len(), &editor_font, ghost_color)],
-                            None,
-                        );
-                        acc.virtual_text.push((shaped, point(lx, bounds.top() + y)));
-                    }
-                    y += px(lh);
-                }
-            }
-
-            // Inline image: paint it in the rows reserved below this line, and
-            // advance past them. `image_rows_at` and the displayed size agree on
-            // the fixed max width, so the reserved height matches the bitmap.
-            if images && let Some((data, disp_w, disp_h)) = editor.line_image_at(i) {
-                let img_origin = point(text_left + indent_px, bounds.top() + y);
-                image_quads.push((Bounds::new(img_origin, size(px(disp_w), px(disp_h))), data));
-                y += px(editor.image_rows_at(i) as f32 * lh);
-            }
+            frame.layout_line(i, &mut y, &mut acc, window);
         }
 
         // The completion popup, anchored just below the cursor.
-        let popup = cursor_px
+        let popup = acc
+            .cursor_px
             .zip(editor.completion_view())
             .map(|(anchor, view)| {
                 build_popup(
@@ -1511,15 +1653,15 @@ impl Element for EditorElement {
         }
 
         PrepaintState {
-            lines,
-            cursor: cursor_quad,
-            hl_line: hl_line_quad,
+            lines: acc.lines,
+            cursor: acc.cursor,
+            hl_line: acc.hl_line,
             selections: acc.selections,
             search: acc.search,
             paren: acc.paren,
             scrollbar,
             icons: acc.icons,
-            images: image_quads,
+            images: acc.images,
             diagnostics: acc.diagnostics,
             git_gutter: acc.git_gutter,
             popup,
@@ -1533,7 +1675,7 @@ impl Element for EditorElement {
             virtual_text: acc.virtual_text,
             avy: acc.avy,
             extra_cursors: acc.extra_cursors,
-            cursor_rel_y: cursor_px.map(|p| p.y - bounds.top()),
+            cursor_rel_y: acc.cursor_px.map(|p| p.y - bounds.top()),
         }
     }
 
@@ -1786,245 +1928,15 @@ fn push_range_quads(
     }
 }
 
-/// Lay out the completion popup below `anchor` (the cursor cell's top-left):
-/// shape each visible candidate, size the box to the widest, and produce the
-/// background/border/selection quads plus positioned label lines.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_popup(
-    anchor: Point<Pixels>,
-    view: CompletionView,
-    max_rows: usize,
-    show_detail: bool,
-    show_kind: bool,
-    font: &Font,
-    font_size: Pixels,
-    line_height: Pixels,
-    editor_bounds: Bounds<Pixels>,
-    theme: &Theme,
-    window: &mut Window,
-) -> PopupLayout {
-    let total = view.items.len();
-    // Scroll the window so the selected row stays visible.
-    let start = if view.selected >= max_rows {
-        view.selected + 1 - max_rows
-    } else {
-        0
-    };
-    let end = (start + max_rows).min(total);
-    let visible = &view.items[start..end];
-
-    let fg = theme.color("completion-fg", theme.foreground());
-    let bg = theme.color(
-        "completion-bg",
-        theme.color("mode-line-bg", theme.background()),
-    );
-    let selected_bg = theme.color(
-        "completion-selected-bg",
-        theme.color("region", theme.foreground()),
-    );
-    let selected_fg = theme.color("completion-selected-fg", fg);
-    let border = theme.color("completion-border", theme.color("dim", theme.foreground()));
-    let dim = theme.color("dim", fg);
-    let kind_color = theme.color("completion-kind", theme.color("type", dim));
-
-    let run = |len: usize, color: Hsla| plain_run(len, font.clone(), color);
-
-    let mut shaped = Vec::new();
-    let mut max_width = px(0.);
-    for (i, row) in visible.iter().enumerate() {
-        // Each row is `label  detail  kind`, with the label in the foreground and
-        // the (optional, Scheme-gated) signature and kind dimmed.
-        let label_color = if start + i == view.selected {
-            selected_fg
-        } else {
-            fg
-        };
-        let mut text = row.label.clone();
-        let mut runs = vec![run(row.label.len(), label_color)];
-        if show_detail && let Some(detail) = &row.detail {
-            let segment = format!("  {detail}");
-            runs.push(run(segment.len(), dim));
-            text.push_str(&segment);
-        }
-        if show_kind && let Some(kind) = &row.kind {
-            let segment = format!("  {kind}");
-            runs.push(run(segment.len(), kind_color));
-            text.push_str(&segment);
-        }
-        let length = text.len();
-        // `shape_line` panics (aborting the editor) on an embedded newline. Items
-        // are sanitized at parse time, but guard here too so no future text source
-        // can crash the popup. Same byte length, so `runs` stay valid.
-        debug_assert!(!text.contains('\n'), "completion row text has a newline");
-        let text: String = text
-            .chars()
-            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-            .collect();
-        let line =
-            window
-                .text_system()
-                .shape_line(SharedString::from(text), font_size, &runs, None);
-        let width = line.x_for_index(length);
-        if width > max_width {
-            max_width = width;
-        }
-        shaped.push(line);
-    }
-
-    let padding = POPUP_PAD;
-    let width = max_width + padding + padding;
-    let rows = shaped.len();
-    let height = line_height * rows as f32;
-    // Default below the cursor line. Flip ABOVE it when the box would spill past
-    // the pane's bottom edge (off the window) AND there's more room above the
-    // cursor than below — so it stays on-screen instead of being clipped. When
-    // flipped, the box's bottom rests just above the cursor line (`anchor.y`).
-    let below_top = anchor.y + line_height;
-    let space_below = editor_bounds.bottom() - below_top;
-    let space_above = anchor.y - editor_bounds.top();
-    let top = if height > space_below && space_above > space_below {
-        anchor.y - height
-    } else {
-        below_top
-    };
-    // Keep the box within the editor horizontally.
-    let max_left = editor_bounds.right() - width;
-    let mut left = anchor.x;
-    if left > max_left {
-        left = max_left;
-    }
-    if left < editor_bounds.left() {
-        left = editor_bounds.left();
-    }
-
-    let mut quads = Vec::new();
-    // Border, then the background inset by 1px.
-    quads.push(fill(
-        Bounds::from_corners(
-            point(left - px(1.), top - px(1.)),
-            point(left + width + px(1.), top + height + px(1.)),
-        ),
-        border,
-    ));
-    quads.push(fill(
-        Bounds::from_corners(point(left, top), point(left + width, top + height)),
-        bg,
-    ));
-    // Selected-row highlight.
-    let selected_row = view.selected - start;
-    let sy = top + line_height * selected_row as f32;
-    quads.push(fill(
-        Bounds::from_corners(point(left, sy), point(left + width, sy + line_height)),
-        selected_bg,
-    ));
-
-    let hit = crate::editor::PopupHit {
-        bounds: Bounds::from_corners(point(left, top), point(left + width, top + height)),
-        row_height: line_height,
-        start,
-        rows,
-    };
-
-    let mut labels: Vec<(ShapedLine, Point<Pixels>)> = shaped
-        .into_iter()
-        .enumerate()
-        .map(|(i, line)| (line, point(left + padding, top + line_height * i as f32)))
-        .collect();
-
-    // Documentation side-panel for the selected item (resolved lazily). Sits to
-    // the right of the popup, or below it when there isn't room.
-    if let Some(doc) = view.doc.as_ref() {
-        let doc_fg = theme.color("completion-doc-fg", fg);
-        let doc_bg = theme.color("completion-doc-bg", bg);
-        let mut doc_lines: Vec<String> = Vec::new();
-        for raw in doc.lines() {
-            if raw.trim().is_empty() {
-                doc_lines.push(String::new());
-            } else {
-                let mut cur = String::new();
-                let mut cur_cols = 0usize;
-                for word in raw.split_whitespace() {
-                    // Wrap by character columns, not UTF-8 bytes, so non-ASCII
-                    // docs don't wrap early.
-                    let word_cols = word.chars().count();
-                    if cur.is_empty() {
-                        cur = word.to_string();
-                        cur_cols = word_cols;
-                    } else if cur_cols + 1 + word_cols <= DOC_WRAP_COLS {
-                        cur.push(' ');
-                        cur.push_str(word);
-                        cur_cols += 1 + word_cols;
-                    } else {
-                        doc_lines.push(std::mem::take(&mut cur));
-                        cur = word.to_string();
-                        cur_cols = word_cols;
-                    }
-                }
-                if !cur.is_empty() {
-                    doc_lines.push(cur);
-                }
-            }
-            if doc_lines.len() >= DOC_MAX_ROWS {
-                break;
-            }
-        }
-        doc_lines.truncate(DOC_MAX_ROWS);
-        if !doc_lines.is_empty() {
-            let mut shaped_doc = Vec::new();
-            let mut doc_w = px(0.);
-            for dl in &doc_lines {
-                let line = window.text_system().shape_line(
-                    SharedString::from(dl.clone()),
-                    font_size,
-                    &[run(dl.len(), doc_fg)],
-                    None,
-                );
-                let w = line.x_for_index(dl.len());
-                if w > doc_w {
-                    doc_w = w;
-                }
-                shaped_doc.push(line);
-            }
-            let doc_width = doc_w + padding + padding;
-            let doc_height = line_height * doc_lines.len() as f32;
-            let gap = px(6.);
-            let (dleft, dtop) = if left + width + gap + doc_width <= editor_bounds.right() {
-                (left + width + gap, top)
-            } else {
-                (left, top + height + gap)
-            };
-            quads.push(fill(
-                Bounds::from_corners(
-                    point(dleft - px(1.), dtop - px(1.)),
-                    point(dleft + doc_width + px(1.), dtop + doc_height + px(1.)),
-                ),
-                border,
-            ));
-            quads.push(fill(
-                Bounds::from_corners(
-                    point(dleft, dtop),
-                    point(dleft + doc_width, dtop + doc_height),
-                ),
-                doc_bg,
-            ));
-            for (i, line) in shaped_doc.into_iter().enumerate() {
-                labels.push((line, point(dleft + padding, dtop + line_height * i as f32)));
-            }
-        }
-    }
-
-    PopupLayout { quads, labels, hit }
-}
-
 /// One styled stretch of a line, before it becomes a `TextRun`.
 #[derive(Clone)]
 struct Seg {
     start: usize,
     end: usize,
     color: Hsla,
-    /// `None`, or `Some((wavy, color))` — the underline carries its own color
-    /// so a squiggle can be tinted without recoloring the text under it.
-    underline: Option<(bool, Hsla)>,
+    /// `None`, or `Some((style, color))` — the underline carries its own
+    /// color so a squiggle can be tinted without recoloring the text under it.
+    underline: Option<(Underline, Hsla)>,
     bold: bool,
     /// Background painted behind the run (`set-face-background`).
     background: Option<Hsla>,
@@ -2089,7 +2001,7 @@ fn line_runs(
         if let Some(i) = span.face {
             let name = face_name(i);
             seg.color = theme.color(name, default);
-            seg.underline = theme.underline(name).map(|wavy| (wavy, seg.color));
+            seg.underline = theme.underline(name).map(|style| (style, seg.color));
             seg.bold = theme.is_bold(name);
         }
         segs.push(seg);
@@ -2139,8 +2051,8 @@ fn line_runs(
             .font_of(face)
             .map(|f| SharedString::from(f.to_string()));
         let fcolor = theme.color(face, default);
-        let ul = theme.underline(face).map(|wavy| (wavy, fcolor));
-        let wavy_only = matches!(ul, Some((true, _)));
+        let ul = theme.underline(face).map(|style| (style, fcolor));
+        let wavy_only = matches!(ul, Some((Underline::Wavy, _)));
         let bold = theme.is_bold(face);
         let mut next = Vec::with_capacity(segs.len() + 2);
         for seg in segs.drain(..) {
@@ -2178,11 +2090,11 @@ fn line_runs(
         .filter(|seg| seg.end > seg.start)
         .map(|seg| {
             let mut run = plain_run(seg.end - seg.start, font.clone(), seg.color);
-            if let Some((wavy, ul_color)) = seg.underline {
+            if let Some((style, ul_color)) = seg.underline {
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.),
                     color: Some(ul_color),
-                    wavy,
+                    wavy: style == Underline::Wavy,
                 });
             }
             if seg.bold {
@@ -2195,381 +2107,6 @@ fn line_runs(
             run
         })
         .collect()
-}
-
-/// The `(row, first_col, last_col)` cell spans (inclusive) a terminal
-/// selection covers within the visible `rows` x `cols` viewport. Rows are
-/// viewport-relative and may be negative (scrolled above) or past the bottom:
-/// those are clipped, and a selection lying entirely outside the viewport yields
-/// nothing (rather than a phantom band clamped onto row 0). Block selections
-/// use the same columns on every row; a simple selection runs start..eol on its
-/// first row, full width in between, and 0..end on its last — with a clipped
-/// end row taking the full width it would have had.
-fn terminal_selection_spans(
-    sel: &crate::terminal::TermSelection,
-    rows: usize,
-    cols: usize,
-) -> Vec<(usize, usize, usize)> {
-    let mut spans = Vec::new();
-    if rows == 0 || cols == 0 || sel.end_row < 0 || sel.start_row >= rows as i32 {
-        return spans;
-    }
-    let first = sel.start_row.max(0) as usize;
-    let last = (sel.end_row as usize).min(rows - 1);
-    for r in first..=last {
-        let (c0, c1) = if sel.is_block {
-            (sel.start_col, sel.end_col)
-        } else {
-            let c0 = if sel.start_row == r as i32 {
-                sel.start_col
-            } else {
-                0
-            };
-            let c1 = if sel.end_row == r as i32 {
-                sel.end_col
-            } else {
-                cols - 1
-            };
-            (c0, c1)
-        };
-        let c1 = c1.min(cols - 1);
-        if c1 < c0 {
-            continue;
-        }
-        spans.push((r, c0, c1));
-    }
-    spans
-}
-
-/// The custom GPUI element that draws an embedded terminal grid. Like
-/// [`EditorElement`] it shapes and paints text itself, but over a fixed
-/// `cols × rows` cell grid read from the alacritty backend (via a plain-data
-/// [`TermSnapshot`](crate::terminal::TermSnapshot)) rather than a rope.
-pub struct TerminalElement {
-    pub editor: Entity<Editor>,
-    pub pane: usize,
-    /// The backing terminal id.
-    pub id: u64,
-}
-
-/// What `TerminalElement::prepaint` hands to `paint`: background fills, shaped
-/// glyph rows, and the cursor quad.
-pub struct TerminalPrepaint {
-    background: PaintQuad,
-    cell_backgrounds: Vec<PaintQuad>,
-    /// Selection highlight quads, painted over cell backgrounds, under glyphs.
-    selection: Vec<PaintQuad>,
-    rows: Vec<(ShapedLine, Point<Pixels>)>,
-    cursor: Option<PaintQuad>,
-}
-
-impl IntoElement for TerminalElement {
-    type Element = Self;
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for TerminalElement {
-    type RequestLayoutState = ();
-    type PrepaintState = TerminalPrepaint;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        let theme = cx.global::<Theme>();
-        // Terminal default colors: dedicated `terminal-*` faces, else the editor's
-        // foreground/background.
-        let default_fg = theme.color("terminal-foreground", theme.foreground());
-        let default_bg = theme.color("terminal-background", theme.background());
-        let cursor_color = theme.color("cursor", rgb(0x528bff).into());
-        let selection_color = theme.color(
-            "terminal-selection",
-            theme.color("region", rgba(0x3a5fcd55).into()),
-        );
-        let dfg = hsla_to_rgb_u32(default_fg);
-        let dbg = hsla_to_rgb_u32(default_bg);
-
-        let settings = cx.global::<crate::settings::Settings>();
-        let cursor_width = px(settings.cursor_width());
-
-        let style = window.text_style();
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = window.line_height();
-        let term_font = font(settings.font_family().to_string());
-        let mk_run = |len: usize, color: Hsla| plain_run(len, term_font.clone(), color);
-        // One monospace cell advance.
-        let em = window
-            .text_system()
-            .shape_line(
-                SharedString::from("0"),
-                font_size,
-                &[mk_run(1, default_fg)],
-                None,
-            )
-            .x_for_index(1);
-
-        // Cell grid that fits the viewport, and re-fit the backend to it.
-        let cols = if em > px(0.) {
-            (bounds.size.width / em) as usize
-        } else {
-            0
-        };
-        let rows = if line_height > px(0.) {
-            (bounds.size.height / line_height) as usize
-        } else {
-            0
-        };
-        let id = self.id;
-        self.editor.update(cx, |editor, _| {
-            editor.terminal_resize_fit(
-                id,
-                cols.max(1),
-                rows.max(1),
-                f32::from(em).max(1.0) as u16,
-                f32::from(line_height).max(1.0) as u16,
-            );
-        });
-
-        let snapshot = self.editor.read(cx).terminal_snapshot(id, dfg, dbg);
-        let background = fill(bounds, default_bg);
-        let mut cell_backgrounds = Vec::new();
-        let mut selection: Vec<PaintQuad> = Vec::new();
-        let mut shaped_rows = Vec::new();
-        let mut cursor = None;
-
-        if let Some(snapshot) = snapshot {
-            // Reassemble the sparse cell list into dense rows so column positions
-            // line up (gaps are spaces over the default background).
-            let cols = snapshot.cols;
-            let rows = snapshot.rows;
-            // Single flat grid (len rows*cols), indexed `r*cols + c`, instead of a
-            // per-row Vec to avoid the per-row allocation each frame.
-            let mut grid: Vec<Option<&crate::terminal::TermCell>> = vec![None; rows * cols];
-            for cell in &snapshot.cells {
-                if cell.row < rows && cell.col < cols {
-                    grid[cell.row * cols + cell.col] = Some(cell);
-                }
-            }
-
-            for (r, row_cells) in grid.chunks(cols).enumerate() {
-                let y = bounds.top() + line_height * r as f32;
-                // Background fills first.
-                for (c, cell) in row_cells.iter().enumerate() {
-                    if let Some(cell) = cell
-                        && let Some(bg) = cell.bg
-                    {
-                        let x = bounds.left() + em * c as f32;
-                        let w = if cell.wide { em * 2. } else { em };
-                        cell_backgrounds.push(fill(
-                            Bounds::new(point(x, y), size(w, line_height)),
-                            Hsla::from(rgb(bg)),
-                        ));
-                    }
-                }
-                // Build the row as grid-anchored segments of styled runs. A
-                // wide (CJK/emoji) glyph covers two columns but its shaped
-                // advance is whatever the (often fallback) font says, so the
-                // segment ends after it and the next one restarts exactly at
-                // column `c + 2` — later text stays on the `em * col` grid. The
-                // wide glyph's spacer column is skipped (it must not become an
-                // extra space).
-                let mut text = String::with_capacity(cols);
-                let mut runs: Vec<TextRun> = Vec::with_capacity(cols);
-                let mut seg_col = 0usize;
-                let mut skip_spacer = false;
-                for (c, cell) in row_cells.iter().enumerate() {
-                    if skip_spacer {
-                        skip_spacer = false;
-                        seg_col = c + 1;
-                        continue;
-                    }
-                    let (ch, color, bold, italic, underline) = match cell {
-                        Some(c) => {
-                            let ch = if c.ch == '\0' { ' ' } else { c.ch };
-                            (ch, Hsla::from(rgb(c.fg)), c.bold, c.italic, c.underline)
-                        }
-                        None => (' ', default_fg, false, false, false),
-                    };
-                    let wide = cell.is_some_and(|c| c.wide);
-                    text.push(ch);
-                    let mut f = term_font.clone();
-                    if bold {
-                        f.weight = FontWeight::BOLD;
-                    }
-                    if italic {
-                        f.style = FontStyle::Italic;
-                    }
-                    runs.push(TextRun {
-                        len: ch.len_utf8(),
-                        font: f,
-                        color,
-                        background_color: None,
-                        underline: underline.then(|| UnderlineStyle {
-                            thickness: px(1.),
-                            color: Some(color),
-                            wavy: false,
-                        }),
-                        strikethrough: None,
-                    });
-                    if wide {
-                        let shaped = window.text_system().shape_line(
-                            SharedString::from(std::mem::take(&mut text)),
-                            font_size,
-                            &std::mem::take(&mut runs),
-                            None,
-                        );
-                        shaped_rows.push((shaped, point(bounds.left() + em * seg_col as f32, y)));
-                        skip_spacer = true;
-                    }
-                }
-                if !text.is_empty() {
-                    let shaped = window.text_system().shape_line(
-                        SharedString::from(text),
-                        font_size,
-                        &runs,
-                        None,
-                    );
-                    shaped_rows.push((shaped, point(bounds.left() + em * seg_col as f32, y)));
-                }
-            }
-
-            // Selection highlight: one quad per visible row the range covers.
-            if let Some(sel) = &snapshot.selection {
-                for (r, c0, c1) in terminal_selection_spans(sel, rows, cols) {
-                    let x0 = bounds.left() + em * c0 as f32;
-                    let x1 = bounds.left() + em * (c1 + 1) as f32;
-                    let y = bounds.top() + line_height * r as f32;
-                    selection.push(fill(
-                        Bounds::from_corners(point(x0, y), point(x1, y + line_height)),
-                        selection_color,
-                    ));
-                }
-            }
-
-            if let Some(cur) = snapshot.cursor {
-                let x = bounds.left() + em * cur.col as f32;
-                let y = bounds.top() + line_height * cur.row as f32;
-                let (w, mut color) = if cur.block {
-                    (em, cursor_color)
-                } else {
-                    (cursor_width, cursor_color)
-                };
-                // A block cursor is translucent so the glyph under it stays legible.
-                if cur.block {
-                    color.a *= BLOCK_CURSOR_ALPHA;
-                }
-                cursor = Some(fill(Bounds::new(point(x, y), size(w, line_height)), color));
-            }
-        }
-
-        // Report the painted geometry so the editor can map mouse positions to
-        // grid cells for selection.
-        self.editor.update(cx, |editor, _| {
-            editor.set_terminal_geometry(
-                id,
-                point(bounds.left(), bounds.top()),
-                em,
-                line_height,
-                cols.max(1),
-                rows.max(1),
-            );
-        });
-
-        TerminalPrepaint {
-            background,
-            cell_backgrounds,
-            selection,
-            rows: shaped_rows,
-            cursor,
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let focus_handle = self.editor.read(cx).focus_handle.clone();
-
-        // Claim the IME/typed-text input handler for the selected terminal pane,
-        // just like `EditorElement`. Live terminal keys are grabbed in
-        // `on_key_down` (which sends PTY bytes and stops propagation before the
-        // IME), so this only matters when an overlay is open over the terminal —
-        // e.g. helm/minibuffer, which let plain text fall through to the IME.
-        // Without a handler here that text would be dropped, so typing to filter
-        // M-x wouldn't work after the shell exits and the terminal is still shown.
-        if self.editor.read(cx).pane_is_selected(self.pane) {
-            window.handle_input(
-                &focus_handle,
-                ElementInputHandler::new(bounds, self.editor.clone()),
-                cx,
-            );
-        }
-
-        let line_height = window.line_height();
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            window.paint_quad(prepaint.background.clone());
-            for quad in prepaint.cell_backgrounds.drain(..) {
-                window.paint_quad(quad);
-            }
-            for quad in prepaint.selection.drain(..) {
-                window.paint_quad(quad);
-            }
-            if focus_handle.is_focused(window)
-                && let Some(cursor) = prepaint.cursor.take()
-            {
-                window.paint_quad(cursor);
-            }
-            for (line, origin) in prepaint.rows.drain(..) {
-                line.paint(origin, line_height, window, cx).ok();
-            }
-        });
-        // Report bounds so click-to-focus routes to this pane like any other.
-        let pane = self.pane;
-        self.editor.update(cx, |editor, _| {
-            editor.report_pane_bounds(pane, bounds);
-        });
-    }
-}
-
-/// Pack a [`Hsla`] into a `0xRRGGBB` value for the terminal color resolver.
-fn hsla_to_rgb_u32(color: Hsla) -> u32 {
-    let rgba = gpui::Rgba::from(color);
-    let to_u8 = |v: f32| (v.clamp(0., 1.) * 255.0).round() as u32;
-    (to_u8(rgba.r) << 16) | (to_u8(rgba.g) << 8) | to_u8(rgba.b)
 }
 
 #[cfg(test)]
@@ -2846,32 +2383,6 @@ mod tests {
         // A ghost mid-line also pushes the end right.
         assert_eq!(display_end(5, Some((2, 7))), 12);
         assert_eq!(display_end(5, None), 5);
-    }
-
-    #[test]
-    fn terminal_selection_outside_viewport_paints_nothing() {
-        use crate::terminal::TermSelection;
-        let sel = |start_row, start_col, end_row, end_col| TermSelection {
-            start_row,
-            start_col,
-            end_row,
-            end_col,
-            is_block: false,
-        };
-        // Entirely above the viewport: no phantom band on row 0.
-        assert!(terminal_selection_spans(&sel(-5, 3, -2, 4), 10, 80).is_empty());
-        // Entirely below.
-        assert!(terminal_selection_spans(&sel(12, 0, 14, 4), 10, 80).is_empty());
-        // Starting above: row 0 is a full-width continuation up to the end.
-        assert_eq!(
-            terminal_selection_spans(&sel(-3, 5, 1, 4), 10, 80),
-            vec![(0, 0, 79), (1, 0, 4)]
-        );
-        // Running past the bottom: the last visible row is full width.
-        assert_eq!(
-            terminal_selection_spans(&sel(8, 2, 20, 4), 10, 80),
-            vec![(8, 2, 79), (9, 0, 79)]
-        );
     }
 
     #[test]

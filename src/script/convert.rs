@@ -76,6 +76,28 @@ impl steel::rvals::FromSteelVal for Callback {
     }
 }
 
+/// A list-of-strings argument; anything in it that isn't a string (or
+/// symbol) is dropped, and a non-list is the empty list — the
+/// [`steel_string_list`] coercion, so it never fails to convert.
+pub(crate) struct StringList(pub(crate) Vec<String>);
+
+impl steel::rvals::FromSteelVal for StringList {
+    fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
+        Ok(StringList(steel_string_list(val)))
+    }
+}
+
+/// A name argument given as a string or a symbol; any other value is taken
+/// as its printed form (so a bad argument reaches the editor, which reports
+/// it, instead of failing to type-check).
+pub(crate) struct Name(pub(crate) String);
+
+impl steel::rvals::FromSteelVal for Name {
+    fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
+        Ok(Name(steel_string(val).unwrap_or_else(|| val.to_string())))
+    }
+}
+
 /// Steel's own integer→`u16`/`usize` conversions are bare `as` casts, so a
 /// Scheme `-1` or `70000` silently wraps. These argument types validate the
 /// range instead and raise a Scheme conversion error when it's violated.
@@ -113,6 +135,69 @@ pub(crate) fn steel_string(value: &SteelVal) -> Option<String> {
         SteelVal::SymbolV(s) => Some(s.to_string()),
         _ => None,
     }
+}
+
+// --- grid argument converters (the `grid-*` primitives) ---------------------
+
+/// A value Scheme writes into a cell, as the cell's text: a string as is,
+/// a number in its shortest form, a boolean as `TRUE`/`FALSE`; anything
+/// else can't go in a cell.
+pub(crate) fn steel_cell_text(v: &SteelVal) -> Option<String> {
+    match v {
+        SteelVal::StringV(s) => Some(s.to_string()),
+        SteelVal::IntV(i) => Some(i.to_string()),
+        SteelVal::NumV(n) if n.is_finite() => Some(n.to_string()),
+        SteelVal::BoolV(b) => Some((if *b { "TRUE" } else { "FALSE" }).to_string()),
+        _ => None,
+    }
+}
+
+/// A rule/filter value from Scheme as text: numbers print plainly, strings
+/// and symbols as themselves.
+pub(crate) fn steel_value_text(v: &SteelVal) -> String {
+    match v {
+        SteelVal::IntV(i) => i.to_string(),
+        SteelVal::NumV(n) => n.to_string(),
+        other => steel_name(other),
+    }
+}
+
+/// A 0-based row/column index from Scheme (a non-negative integer).
+pub(crate) fn steel_index(v: &SteelVal) -> Option<usize> {
+    match v {
+        SteelVal::IntV(i) if *i >= 0 => Some(*i as usize),
+        _ => None,
+    }
+}
+
+/// A column from Scheme: a 0-based index or a column name (`"C"`, `'AA`).
+/// `#f` (and anything else) is `None` — "every column" where that's allowed.
+pub(crate) fn steel_col(v: &SteelVal) -> Option<usize> {
+    match v {
+        SteelVal::StringV(s) | SteelVal::SymbolV(s) => crate::grid::view::parse_col_name(s),
+        other => steel_index(other),
+    }
+}
+
+/// A palette color argument: `#f`, `""` or `none` is no color; an unknown
+/// name comes back as the second value, to be reported.
+pub(crate) fn steel_palette_color(v: &SteelVal) -> (Option<u8>, Option<String>) {
+    if matches!(v, SteelVal::BoolV(false)) {
+        return (None, None);
+    }
+    let name = steel_name(v);
+    if name.is_empty() || name.eq_ignore_ascii_case("none") {
+        return (None, None);
+    }
+    match crate::grid::cellfmt::color_index(&name) {
+        Some(i) => (Some(i), None),
+        None => (None, Some(name)),
+    }
+}
+
+/// A face, operator, or function name given as a string or a symbol.
+pub(crate) fn steel_name(v: &SteelVal) -> String {
+    steel_string(v).unwrap_or_default()
 }
 
 /// Convert a value passed to `(set-option …)` into an untyped [`OptionValue`].
@@ -189,7 +274,7 @@ pub(crate) fn steel_list(value: &SteelVal) -> Option<Vec<SteelVal>> {
 
 /// Rank `candidates` against `pattern` with nucleo (best first), dropping
 /// non-matches. An empty pattern keeps the list as-is. The matcher matches Helm's
-/// own (`helm_filter`), so a Scheme filter ranks identically to a native source.
+/// own (`HelmSession::refilter`), so a Scheme filter ranks identically to a native source.
 pub(crate) fn fuzzy_rank(pattern: &str, candidates: &[String]) -> Vec<String> {
     if pattern.is_empty() {
         return candidates.to_vec();

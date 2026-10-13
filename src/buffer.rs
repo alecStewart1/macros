@@ -40,6 +40,16 @@ fn char_class(c: char) -> CharClass {
     }
 }
 
+/// [`char_class`] for Vim WORDs (`W`, `B`, `E`, `gE`): every non-blank
+/// character is one class, so `foo.bar` is a single WORD.
+fn bigword_class(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Space
+    } else {
+        CharClass::Word
+    }
+}
+
 /// Text storage for a single editing buffer, backed by a [`Rope`] for O(log n)
 /// edits, line indexing, and UTF-16 conversion.
 ///
@@ -185,10 +195,22 @@ impl Buffer {
         (line, col)
     }
 
-    /// Byte range of line `i`, excluding any trailing line break.
+    /// Byte range of line `i`, excluding any trailing line break: one `\n`,
+    /// then one `\r` (so a CRLF pair is excluded whole). Allocation-free — the
+    /// break is probed byte-wise on the rope slice (both are ASCII, so a byte
+    /// match is a char match).
     pub fn line_range(&self, i: usize) -> Range<usize> {
-        let (range, _) = self.line(i);
-        range
+        let i = i.min(self.line_count().saturating_sub(1));
+        let start = self.rope.line_to_byte(i);
+        let line = self.rope.line(i);
+        let mut end = line.len_bytes();
+        if end > 0 && line.byte(end - 1) == b'\n' {
+            end -= 1;
+        }
+        if end > 0 && line.byte(end - 1) == b'\r' {
+            end -= 1;
+        }
+        start..start + end
     }
 
     /// Byte range of the line containing `offset`, excluding the line break.
@@ -198,13 +220,9 @@ impl Buffer {
 
     /// Line `i` as `(byte_range_excluding_break, text)`.
     pub fn line(&self, i: usize) -> (Range<usize>, String) {
-        let i = i.min(self.line_count().saturating_sub(1));
-        let start = self.rope.line_to_byte(i);
-        let raw = self.rope.line(i).to_string();
-        let trimmed = raw.strip_suffix('\n').unwrap_or(&raw);
-        let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
-        let text = trimmed.to_string();
-        (start..start + text.len(), text)
+        let range = self.line_range(i);
+        let text = self.slice_to_string(range.clone());
+        (range, text)
     }
 
     /// The bytes in `range` as an owned string. An inverted range (`start > end`)
@@ -243,18 +261,45 @@ impl Buffer {
 
     // --- Word motion ------------------------------------------------------
 
+    /// The char index of `from` (a byte offset, clamped).
+    fn char_at_byte(&self, from: usize) -> usize {
+        self.rope.byte_to_char(from.min(self.len()))
+    }
+
+    /// Walk forward from char index `ci` over chars passing `pred`, stopping
+    /// at `end`: the index of the first char that fails (or `end`). One rope
+    /// iterator, not an O(log n) `char` lookup per step.
+    fn skip_fwd(&self, ci: usize, end: usize, pred: impl Fn(char) -> bool) -> usize {
+        if ci >= end {
+            return ci;
+        }
+        ci + self
+            .rope
+            .chars_at(ci)
+            .take(end - ci)
+            .take_while(|&c| pred(c))
+            .count()
+    }
+
+    /// Walk backward from char index `ci` over the chars before it passing
+    /// `pred`, stopping at `start`: the index just after the first char that
+    /// fails (or `start`).
+    fn skip_back(&self, ci: usize, start: usize, pred: impl Fn(char) -> bool) -> usize {
+        let mut chars = self.rope.chars_at(ci);
+        let mut i = ci;
+        while i > start && chars.prev().is_some_and(&pred) {
+            i -= 1;
+        }
+        i
+    }
+
     /// The byte offset at the end of the next word at or after `from` — skips
     /// any leading non-word characters, then the word itself (Emacs `M-f`).
     pub fn forward_word(&self, from: usize) -> usize {
         let total = self.rope.len_chars();
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
-        while ci < total && !is_word_char(self.rope.char(ci)) {
-            ci += 1;
-        }
-        while ci < total && is_word_char(self.rope.char(ci)) {
-            ci += 1;
-        }
-        self.rope.char_to_byte(ci)
+        let ci = self.skip_fwd(self.char_at_byte(from), total, |c| !is_word_char(c));
+        self.rope
+            .char_to_byte(self.skip_fwd(ci, total, is_word_char))
     }
 
     /// The byte offset at the start of the next word at or after `from`, using
@@ -263,23 +308,23 @@ impl Buffer {
     /// on the first character of the next word. Unlike [`forward_word`], which
     /// stops at the *end* of a word (Emacs `M-f`), this stops at the *start*.
     pub fn forward_word_start(&self, from: usize) -> usize {
+        self.forward_start_by(from, char_class)
+    }
+
+    fn forward_start_by(&self, from: usize, class: impl Fn(char) -> CharClass) -> usize {
         let total = self.rope.len_chars();
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        let mut ci = self.char_at_byte(from);
         if ci >= total {
             return self.rope.char_to_byte(ci);
         }
         // Skip the current word/punctuation run. If we're already on
         // whitespace there's nothing to skip — we only need to skip below.
-        let start = char_class(self.rope.char(ci));
+        let start = class(self.rope.char(ci));
         if start != CharClass::Space {
-            while ci < total && char_class(self.rope.char(ci)) == start {
-                ci += 1;
-            }
+            ci = self.skip_fwd(ci, total, |c| class(c) == start);
         }
         // Skip the whitespace separating us from the next word.
-        while ci < total && char_class(self.rope.char(ci)) == CharClass::Space {
-            ci += 1;
-        }
+        ci = self.skip_fwd(ci, total, |c| class(c) == CharClass::Space);
         self.rope.char_to_byte(ci)
     }
 
@@ -290,15 +335,15 @@ impl Buffer {
     /// it), this is the exact mirror of [`Self::forward_word_start`] — so on
     /// `foo.bar` with point on `b`, `b` lands on `.`, not on `foo`.
     pub fn backward_word_start(&self, from: usize) -> usize {
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
-        while ci > 0 && char_class(self.rope.char(ci - 1)) == CharClass::Space {
-            ci -= 1;
-        }
+        self.backward_start_by(from, char_class)
+    }
+
+    fn backward_start_by(&self, from: usize, class: impl Fn(char) -> CharClass) -> usize {
+        let mut ci = self.char_at_byte(from);
+        ci = self.skip_back(ci, 0, |c| class(c) == CharClass::Space);
         if ci > 0 {
-            let class = char_class(self.rope.char(ci - 1));
-            while ci > 0 && char_class(self.rope.char(ci - 1)) == class {
-                ci -= 1;
-            }
+            let run = class(self.rope.char(ci - 1));
+            ci = self.skip_back(ci, 0, |c| class(c) == run);
         }
         self.rope.char_to_byte(ci)
     }
@@ -309,20 +354,20 @@ impl Buffer {
     /// [`Self::forward_word`] (Emacs `M-f`, word characters only) this stops at
     /// the end of a punctuation run too.
     pub fn forward_word_end(&self, from: usize) -> usize {
+        self.forward_end_by(from, char_class)
+    }
+
+    fn forward_end_by(&self, from: usize, class: impl Fn(char) -> CharClass) -> usize {
         let total = self.rope.len_chars();
-        let start = self.rope.byte_to_char(from.min(self.len()));
-        let mut ci = start + 1;
-        while ci < total && char_class(self.rope.char(ci)) == CharClass::Space {
-            ci += 1;
-        }
+        let start = self.char_at_byte(from);
+        let ci = self.skip_fwd(start + 1, total, |c| class(c) == CharClass::Space);
         if ci >= total {
             return self.rope.char_to_byte(total.saturating_sub(1).max(start));
         }
-        let class = char_class(self.rope.char(ci));
-        while ci + 1 < total && char_class(self.rope.char(ci + 1)) == class {
-            ci += 1;
-        }
-        self.rope.char_to_byte(ci)
+        // Onto the last char of the run starting at `ci`.
+        let run = class(self.rope.char(ci));
+        let end = self.skip_fwd(ci + 1, total, |c| class(c) == run);
+        self.rope.char_to_byte(end - 1)
     }
 
     /// Vim `ge` — ON the last character of the previous word: walk back out of
@@ -334,73 +379,36 @@ impl Buffer {
 
     /// Vim `gE` — like [`Self::backward_word_end`] over WORDs.
     pub fn backward_bigword_end(&self, from: usize) -> usize {
-        self.backward_end_by(from, |c| {
-            if c.is_whitespace() {
-                CharClass::Space
-            } else {
-                CharClass::Word
-            }
-        })
+        self.backward_end_by(from, bigword_class)
     }
 
     fn backward_end_by(&self, from: usize, class: impl Fn(char) -> CharClass) -> usize {
         let total = self.rope.len_chars();
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
+        let mut ci = self.char_at_byte(from);
         if ci < total {
             let here = class(self.rope.char(ci));
             if here != CharClass::Space {
-                while ci > 0 && class(self.rope.char(ci - 1)) == here {
-                    ci -= 1;
-                }
+                ci = self.skip_back(ci, 0, |c| class(c) == here);
             }
         }
-        while ci > 0 && class(self.rope.char(ci - 1)) == CharClass::Space {
-            ci -= 1;
-        }
+        ci = self.skip_back(ci, 0, |c| class(c) == CharClass::Space);
         self.rope.char_to_byte(ci.saturating_sub(1))
     }
 
     /// Vim `W` — the start of the next whitespace-delimited WORD (every
     /// non-blank character is one class, so `foo.bar` is a single WORD).
     pub fn forward_bigword_start(&self, from: usize) -> usize {
-        let total = self.rope.len_chars();
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
-        while ci < total && !self.rope.char(ci).is_whitespace() {
-            ci += 1;
-        }
-        while ci < total && self.rope.char(ci).is_whitespace() {
-            ci += 1;
-        }
-        self.rope.char_to_byte(ci)
+        self.forward_start_by(from, bigword_class)
     }
 
     /// Vim `B` — the start of the previous whitespace-delimited WORD.
     pub fn backward_bigword_start(&self, from: usize) -> usize {
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
-        while ci > 0 && self.rope.char(ci - 1).is_whitespace() {
-            ci -= 1;
-        }
-        while ci > 0 && !self.rope.char(ci - 1).is_whitespace() {
-            ci -= 1;
-        }
-        self.rope.char_to_byte(ci)
+        self.backward_start_by(from, bigword_class)
     }
 
     /// Vim `E` — the last character of the next whitespace-delimited WORD.
     pub fn forward_bigword_end(&self, from: usize) -> usize {
-        let total = self.rope.len_chars();
-        let start = self.rope.byte_to_char(from.min(self.len()));
-        let mut ci = start + 1;
-        while ci < total && self.rope.char(ci).is_whitespace() {
-            ci += 1;
-        }
-        if ci >= total {
-            return self.rope.char_to_byte(total.saturating_sub(1).max(start));
-        }
-        while ci + 1 < total && !self.rope.char(ci + 1).is_whitespace() {
-            ci += 1;
-        }
-        self.rope.char_to_byte(ci)
+        self.forward_end_by(from, bigword_class)
     }
 
     /// The character column (NOT byte offset) of `byte` within its line, and the
@@ -426,14 +434,8 @@ impl Buffer {
 
     /// The byte offset at the start of the word at or before `from` (Emacs `M-b`).
     pub fn backward_word(&self, from: usize) -> usize {
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
-        while ci > 0 && !is_word_char(self.rope.char(ci - 1)) {
-            ci -= 1;
-        }
-        while ci > 0 && is_word_char(self.rope.char(ci - 1)) {
-            ci -= 1;
-        }
-        self.rope.char_to_byte(ci)
+        let ci = self.skip_back(self.char_at_byte(from), 0, |c| !is_word_char(c));
+        self.rope.char_to_byte(self.skip_back(ci, 0, is_word_char))
     }
 
     /// The start of the word ending at `from`: walks back over word characters
@@ -444,11 +446,8 @@ impl Buffer {
     /// point (empty prefix), where `backward_word` would yield the whole
     /// `self.` and every candidate would be filtered out.
     pub fn word_start(&self, from: usize) -> usize {
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
-        while ci > 0 && is_word_char(self.rope.char(ci - 1)) {
-            ci -= 1;
-        }
-        self.rope.char_to_byte(ci)
+        self.rope
+            .char_to_byte(self.skip_back(self.char_at_byte(from), 0, is_word_char))
     }
 
     /// The run of same-class characters (word / punctuation / blanks — see
@@ -465,14 +464,8 @@ impl Buffer {
             return line.end..line.end;
         }
         let class = char_class(self.rope.char(ci));
-        let mut start = ci;
-        while start > lo && char_class(self.rope.char(start - 1)) == class {
-            start -= 1;
-        }
-        let mut end = ci + 1;
-        while end < hi && char_class(self.rope.char(end)) == class {
-            end += 1;
-        }
+        let start = self.skip_back(ci, lo, |c| char_class(c) == class);
+        let end = self.skip_fwd(ci + 1, hi, |c| char_class(c) == class);
         self.rope.char_to_byte(start)..self.rope.char_to_byte(end)
     }
 
@@ -481,11 +474,8 @@ impl Buffer {
     /// `string->number` is returned, not just its last hyphen-delimited piece.
     /// Returns `from` when the preceding char isn't a symbol char (empty prefix).
     pub fn backward_symbol(&self, from: usize) -> usize {
-        let mut ci = self.rope.byte_to_char(from.min(self.len()));
-        while ci > 0 && is_symbol_char(self.rope.char(ci - 1)) {
-            ci -= 1;
-        }
-        self.rope.char_to_byte(ci)
+        self.rope
+            .char_to_byte(self.skip_back(self.char_at_byte(from), 0, is_symbol_char))
     }
 
     // --- Grapheme-aware cursor movement -----------------------------------
@@ -642,6 +632,23 @@ mod tests {
     }
 
     #[test]
+    fn byte_at_char_column_maps_columns_and_clamps() {
+        // ASCII: column == byte offset within the line.
+        let b = Buffer::new("hello\nhi\n\naéb\r\nx");
+        assert_eq!(b.byte_at_char_column(0, 0), 0);
+        assert_eq!(b.byte_at_char_column(0, 3), 3);
+        // Past the end clamps to the line's end (a block column off a short row).
+        assert_eq!(b.byte_at_char_column(1, 5), 8);
+        assert_eq!(b.byte_at_char_column(2, 0), 9);
+        // Multi-byte chars: column 2 is the 'é' (2 bytes) + 1 ascii = byte 3.
+        assert_eq!(b.byte_at_char_column(3, 1), 11); // start of 'é'
+        assert_eq!(b.byte_at_char_column(3, 2), 13); // start of 'b'
+        assert_eq!(b.byte_at_char_column(3, 9), 14); // end, before the CRLF
+        // A line past the last clamps to the last line.
+        assert_eq!(b.byte_at_char_column(99, 0), 16);
+    }
+
+    #[test]
     fn word_range_at_selects_the_class_run_on_its_line() {
         let b = Buffer::new("foo.bar  baz\nqux");
         assert_eq!(b.word_range_at(1), 0..3); // foo
@@ -720,6 +727,10 @@ mod tests {
         assert_eq!(b.line_count(), 2);
         assert_eq!(b.line_range(0), 0..3);
         assert_eq!(b.line_range(1), 5..8);
+        assert_eq!(b.line(0), (0..3, "abc".to_string()));
+        // A bare trailing `\r` on the last line is excluded too.
+        assert_eq!(Buffer::new("ab\r").line_range(0), 0..2);
+        assert_eq!(Buffer::new("").line_range(0), 0..0);
         // C-f / C-d at EOL crosses the pair; C-b / Backspace at BOL does too.
         assert_eq!(b.next_grapheme(3), 5);
         assert_eq!(b.prev_grapheme(5), 3);

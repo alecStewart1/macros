@@ -38,9 +38,7 @@ pub(super) fn file_identity(path: &Path) -> PathBuf {
 impl Editor {
     /// Names of all open buffers (active first).
     pub(super) fn buffer_names(&self) -> Vec<String> {
-        let mut names = vec![self.active.name.clone()];
-        names.extend(self.inactive.iter().map(|d| d.name.clone()));
-        names
+        self.docs().map(|d| d.name.clone()).collect()
     }
 
     /// Publish the buffer list to Scheme (for `(buffer-names)`), plus the
@@ -59,15 +57,10 @@ impl Editor {
                     .into_owned()
             }
         };
-        let mut paths = HashMap::new();
-        if let Some(p) = self.active.path.as_deref() {
-            paths.insert(self.active.name.clone(), abs(p));
-        }
-        for d in &self.inactive {
-            if let Some(p) = d.path.as_deref() {
-                paths.insert(d.name.clone(), abs(p));
-            }
-        }
+        let paths = self
+            .docs()
+            .filter_map(|d| Some((d.name.clone(), abs(d.path.as_deref()?))))
+            .collect();
         self.script.set_buffer_paths(paths);
     }
 
@@ -87,28 +80,32 @@ impl Editor {
         )
     }
 
-    /// The name of the inactive buffer [`render_redirect`](Self::render_redirect)
-    /// points at, captured before `inactive` is reshuffled (a remove/retain/
-    /// insert shifts every later index) so [`reindex_redirect`](Self::reindex_redirect)
-    /// can re-resolve it afterwards.
-    pub(super) fn redirect_name(&self) -> Option<String> {
+    /// The index of the inactive document [`render_redirect`](Self::render_redirect)
+    /// names. Resolved by name on every use, so reshuffling `inactive` (a
+    /// remove/retain/insert shifts every later index) can never make it address
+    /// the wrong document; `None` when no redirect is set or that buffer is no
+    /// longer inactive.
+    pub(super) fn redirect_index(&self) -> Option<usize> {
         self.render_redirect
-            .and_then(|i| self.inactive.get(i))
-            .map(|d| d.name.clone())
+            .as_deref()
+            .and_then(|name| self.inactive_index(name))
     }
 
-    /// Re-point [`render_redirect`](Self::render_redirect) at the inactive
-    /// buffer `name` after `inactive` was mutated. If it's no longer inactive
-    /// (now the active buffer, or killed) the redirect ends — decorations then
-    /// target the active buffer, which is right when it was just activated —
-    /// and a stale index can never address the wrong document or run off the
-    /// end of the vector.
-    pub(super) fn reindex_redirect(&mut self, name: Option<String>) {
-        self.render_redirect = name.and_then(|n| self.inactive.iter().position(|d| d.name == n));
+    /// End [`render_redirect`](Self::render_redirect) if it names `name` — the
+    /// buffer just became active or was killed, so decorations target the
+    /// active buffer from now on (right when it was just activated), and a
+    /// later buffer that reuses the name never inherits the redirect.
+    fn end_redirect_to(&mut self, name: &str) {
+        if self.render_redirect.as_deref() == Some(name) {
+            self.render_redirect = None;
+        }
     }
 
     pub(super) fn install_active(&mut self, doc: Document) {
         self.active = doc;
+        if self.render_redirect.as_deref() == Some(self.active.name.as_str()) {
+            self.render_redirect = None; // see `end_redirect_to`
+        }
         // Markers are positions in the previous buffer; drop them on a switch.
         self.script.clear_markers();
         // Secondary selections / snippet fields are marker-backed, so they're
@@ -146,8 +143,8 @@ impl Editor {
         // An in-flight completion was for the buffer we just left; its answer
         // must not pop up (with that buffer's byte range) in this one.
         for server in self.servers.values_mut() {
-            if let Some((id, _)) = server.pending_completion.take() {
-                server.client.cancel(id);
+            if let Some(pending) = server.pending_completion.take() {
+                server.client.cancel(pending.id);
             }
         }
         // A buffer shown again after its server (re)started — or after it was
@@ -166,12 +163,8 @@ impl Editor {
     /// process-output surfacing). Both fire `buffer-switch-hook`; only a
     /// deliberate switch also fires `buffer-select-hook` — see [`switch_hooks`].
     pub(super) fn activate(&mut self, index: usize, deliberate: bool, cx: &mut Context<Self>) {
-        let redirect = self.redirect_name();
         let target = self.inactive.remove(index);
-        let current = self.snapshot_active();
-        self.inactive.push(current);
-        self.install_active(target);
-        self.reindex_redirect(redirect);
+        self.switch_to_doc(target);
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
@@ -202,27 +195,24 @@ impl Editor {
             self.echo("No other buffer", cx);
             return;
         }
-        let redirect = self.redirect_name();
         let target = self.inactive.remove(0);
-        self.cycle_to(target, true, redirect, cx);
+        self.cycle_to(target, true, cx);
     }
 
     /// `C-x <left>`: cycle backward (the active buffer goes to the front, the
     /// back buffer becomes active) — the exact inverse of `next-buffer`.
     pub(super) fn previous_buffer(&mut self, cx: &mut Context<Self>) {
-        let redirect = self.redirect_name();
         let Some(target) = self.inactive.pop() else {
             self.echo("No other buffer", cx);
             return;
         };
-        self.cycle_to(target, false, redirect, cx);
+        self.cycle_to(target, false, cx);
     }
 
     pub(super) fn cycle_to(
         &mut self,
         target: Document,
         current_to_back: bool,
-        redirect: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let current = self.snapshot_active();
@@ -232,7 +222,6 @@ impl Editor {
             self.inactive.insert(0, current);
         }
         self.install_active(target);
-        self.reindex_redirect(redirect);
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
@@ -362,10 +351,7 @@ impl Editor {
             return;
         }
         let name = self.unique_buffer_name(&name, &path);
-        let doc = make_document(name.clone(), Some(path), &contents);
-        let current = self.snapshot_active();
-        self.inactive.push(current);
-        self.install_active(doc);
+        self.switch_to_doc(make_document(name.clone(), Some(path), &contents));
         self.parse_full();
         self.move_to(0, cx);
         self.run_mode_hooks_once(cx);
@@ -384,14 +370,14 @@ impl Editor {
     /// names, since Scheme state (perspectives, buffer-locals, pane lists) is
     /// keyed by buffer name and a rename would orphan it.
     pub(super) fn unique_buffer_name(&self, base: &str, path: &Path) -> String {
-        let taken = |n: &str| self.active.name == n || self.inactive.iter().any(|d| d.name == n);
+        let taken = |n: &str| self.has_buffer(n);
         if !taken(base) {
             return base.to_string();
         }
         let identity = file_identity(path);
         // Other open files with the same file name, as canonical paths.
-        let others: Vec<PathBuf> = std::iter::once(&self.active)
-            .chain(&self.inactive)
+        let others: Vec<PathBuf> = self
+            .docs()
             .filter_map(|d| d.path.as_deref())
             .map(file_identity)
             .filter(|p| *p != identity && p.file_name() == identity.file_name())
@@ -496,13 +482,13 @@ impl Editor {
             )),
             // One sheet of a workbook written over the workbook would drop
             // its other sheets.
-            Some(g) if g.xlsx_source.as_deref().is_some_and(same) => Err(std::io::Error::other(
+            Some(g) if g.xlsx.source.as_deref().is_some_and(same) => Err(std::io::Error::other(
                 "this is one sheet of that workbook — writing it there would drop the others; \
                  save it under another name",
             )),
             // A protected .xlsx is never written over itself (save_bytes says
             // why).
-            Some(g) if own_file && !g.xlsx_lossy.is_empty() => self.active.save_bytes(),
+            Some(g) if own_file && !g.xlsx.lossy.is_empty() => self.active.save_bytes(),
             Some(g) => g.bytes_for(Path::new(&target)),
             None => self.active.save_bytes(),
         };
@@ -524,16 +510,18 @@ impl Editor {
     /// file in the main editor. Uses the first other pane, or splits if the
     /// selected pane is the only one. Focus moves to the file's window.
     pub(super) fn open_file_other_window(&mut self, path: String, cx: &mut Context<Self>) {
-        let mut leaves = Vec::new();
-        layout_leaves(&self.layout, &mut leaves);
-        let other = leaves.iter().copied().find(|&id| id != self.selected_pane);
+        let other = self
+            .layout
+            .leaves()
+            .into_iter()
+            .find(|&id| id != self.selected_pane);
         let target = match other {
             Some(id) => id,
             None => {
                 // Narrow split: the sidebar (the current pane) keeps this share.
                 const SIDEBAR_SPLIT_RATIO: f32 = 0.22;
                 let new_id = self.next_pane_id; // split assigns this id to the new pane
-                self.split_window_ratio(false, SIDEBAR_SPLIT_RATIO, cx);
+                self.split_window_ratio(SplitAxis::Horizontal, SIDEBAR_SPLIT_RATIO, cx);
                 new_id
             }
         };
@@ -604,11 +592,7 @@ impl Editor {
         // Only touch disk if some buffer actually visits this path — a watched
         // directory reports churn in files we don't have open, and reading those
         // would be pure waste.
-        let visited = self.active.path.as_deref() == Some(path)
-            || self
-                .inactive
-                .iter()
-                .any(|d| d.path.as_deref() == Some(path));
+        let visited = self.docs().any(|d| d.path.as_deref() == Some(path));
         if !visited {
             return;
         }
@@ -693,14 +677,7 @@ impl Editor {
         }
         let mut desired: HashSet<PathBuf> = self.fs.dirs.clone();
         if cx.global::<crate::settings::Settings>().auto_revert() {
-            if let Some(path) = &self.active.path {
-                desired.insert(path.clone());
-            }
-            for doc in &self.inactive {
-                if let Some(path) = &doc.path {
-                    desired.insert(path.clone());
-                }
-            }
+            desired.extend(self.docs().filter_map(|d| d.path.clone()));
         }
         let debouncer = self.fs.debouncer.as_mut().unwrap();
         for path in &desired {
@@ -763,7 +740,7 @@ impl Editor {
             cx.notify();
             return;
         }
-        match self.inactive.iter().position(|d| d.name == name) {
+        match self.inactive_index(name) {
             Some(index) => self.activate(index, deliberate, cx),
             None => self.echo(format!("No buffer named {name}"), cx),
         }
@@ -920,10 +897,7 @@ impl Editor {
 
     /// Mark whichever buffer visits `path` (active or not) as modified.
     fn mark_path_modified(&mut self, path: &Path) {
-        if let Some(doc) = std::iter::once(&mut self.active)
-            .chain(self.inactive.iter_mut())
-            .find(|d| d.path.as_deref() == Some(path))
-        {
+        if let Some(doc) = self.docs_mut().find(|d| d.path.as_deref() == Some(path)) {
             doc.modified = true;
         }
     }
@@ -990,12 +964,8 @@ impl Editor {
     }
 
     pub fn any_modified(&self) -> bool {
-        let active_dirty = self.active.modified && !is_special_buffer_name(&self.active.name);
-        let inactive_dirty = self
-            .inactive
-            .iter()
-            .any(|d| d.modified && !is_special_buffer_name(&d.name));
-        active_dirty || inactive_dirty
+        self.docs()
+            .any(|d| d.modified && !is_special_buffer_name(&d.name))
     }
 
     pub fn is_modified(&self) -> bool {
@@ -1075,8 +1045,7 @@ impl Editor {
     /// Names of the buffers [`any_modified`](Self::any_modified) counts as
     /// unsaved, active first.
     pub(super) fn modified_buffer_names(&self) -> Vec<String> {
-        std::iter::once(&self.active)
-            .chain(&self.inactive)
+        self.docs()
             .filter(|d| d.modified && !is_special_buffer_name(&d.name))
             .map(|d| d.name.clone())
             .collect()
@@ -1109,7 +1078,7 @@ impl Editor {
         // A modified grid with no file of its own (a sheet of a workbook, an
         // imported table) can't be saved here: say so rather than quit and
         // lose it.
-        for doc in std::iter::once(&self.active).chain(self.inactive.iter()) {
+        for doc in self.docs() {
             if doc.modified && doc.path.is_none() && doc.grid.is_some() {
                 failed.push(format!(
                     "{}: no file to save to (save it with :w)",
@@ -1244,13 +1213,11 @@ impl Editor {
         // path swaps buffers without `snapshot_active`'s flush).
         let killed_uri = document_uri(&self.active);
         self.lsp_close_document(&killed_uri);
-        let redirect = self.redirect_name();
         let replacement = self
             .inactive
             .pop()
             .unwrap_or_else(|| make_document("*scratch*".to_string(), None, ""));
         self.install_active(replacement);
-        self.reindex_redirect(redirect);
         // `install_active` re-pointed only the selected window; every other
         // window that showed the killed buffer follows it to the replacement
         // instead of keeping a dangling name (which selecting it would later
@@ -1299,10 +1266,9 @@ impl Editor {
     pub(super) fn kill_buffer_named(&mut self, name: &str, cx: &mut Context<Self>) {
         if name == self.active.name {
             self.kill_active_buffer(cx);
-        } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
-            let redirect = self.redirect_name();
+        } else if let Some(idx) = self.inactive_index(name) {
             let doc = self.inactive.remove(idx);
-            self.reindex_redirect(redirect);
+            self.end_redirect_to(name);
             self.lsp_close_document(&document_uri(&doc));
             // Non-selected windows that showed it switch to the most recent
             // other buffer (or the active one) rather than keep a dangling name.
@@ -1351,13 +1317,11 @@ impl Editor {
             .map(|(line, face)| (line, SharedString::from(face)))
             .collect();
         // Not shown anywhere: switch the selected window to a fresh buffer.
-        let redirect = self.redirect_name();
         let current = self.snapshot_active();
         // Replace any stale buffer of the same name, then install fresh.
         self.inactive.retain(|d| d.name != name);
         self.inactive.push(current);
         self.install_active(make_special_document(name, &mode, &text));
-        self.reindex_redirect(redirect);
         self.active.line_faces = faces;
         self.move_to(0, cx);
         self.active.modified = false;
@@ -1396,7 +1360,7 @@ impl Editor {
             // The old undo records address the replaced text; replaying one
             // against the new text corrupts it (or panics). Start fresh.
             self.active.reset_undo();
-            self.undo_group_started = false;
+            self.undo_grouping.boundary();
             self.active.line_faces = faces;
             self.lines.clear();
             let last = self.active.buffer.line_count().saturating_sub(1);
@@ -1407,7 +1371,7 @@ impl Editor {
             self.active.scroll_offset = px(f32::from(scroll).clamp(0.0, max.max(0.0)));
             self.active.modified = false;
             self.render_redirect = None;
-        } else if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
+        } else if let Some(idx) = self.inactive_index(&name) {
             // Shown in a non-selected pane: rebuild that inactive buffer in place,
             // keeping the viewing pane's cursor on the same line (clamped).
             let viewing_point = self
@@ -1432,7 +1396,7 @@ impl Editor {
             for pane in self.panes.iter_mut().filter(|p| p.buffer == name) {
                 pane.point = offset.min(new_len);
             }
-            self.render_redirect = Some(idx);
+            self.render_redirect = Some(name);
             cx.notify();
         }
         // Not shown anywhere → nothing to refresh passively.
@@ -1447,18 +1411,14 @@ impl Editor {
             // there in place — output flows into the buffer's own window without
             // yanking focus away from what the user is editing (e.g. a streaming
             // *compilation* pane). Mirrors `render_buffer`'s follow-the-buffer rule.
-            if self
+            let shown_elsewhere = self
                 .panes
                 .iter()
-                .any(|p| p.buffer == name && p.id != self.selected_pane)
-                && self.inactive.iter().any(|d| d.name == name)
-            {
-                let (new_end, line_count) = {
-                    let doc = self.inactive.iter_mut().find(|d| d.name == name).unwrap();
-                    let end = doc.buffer.len();
-                    doc.buffer.replace(end..end, &text);
-                    (doc.buffer.len(), doc.buffer.line_count())
-                };
+                .any(|p| p.buffer == name && p.id != self.selected_pane);
+            if let Some(doc) = self.inactive_doc_mut(&name).filter(|_| shown_elsewhere) {
+                let end = doc.buffer.len();
+                doc.buffer.replace(end..end, &text);
+                let (new_end, line_count) = (doc.buffer.len(), doc.buffer.line_count());
                 let line_h = f32::from(self.line_height).max(1.0);
                 let content_h = line_count as f32 * line_h;
                 for pane in self.panes.iter_mut().filter(|p| p.buffer == name) {
@@ -1473,12 +1433,10 @@ impl Editor {
                 cx.notify();
                 return;
             }
-            if let Some(idx) = self.inactive.iter().position(|d| d.name == name) {
+            if let Some(idx) = self.inactive_index(&name) {
                 self.activate(idx, false, cx); // process output surfacing, not a user switch
             } else {
-                let current = self.snapshot_active();
-                self.inactive.push(current);
-                self.install_active(make_document(name, None, ""));
+                self.switch_to_doc(make_document(name, None, ""));
             }
         }
         let end = self.active.buffer.len();
@@ -1507,14 +1465,12 @@ impl Editor {
             }
             return;
         }
-        let Some(idx) = self.inactive.iter().position(|d| d.name == name) else {
+        let Some(idx) = self.inactive_index(&name) else {
             // Not shown anywhere (or unknown) → nothing on screen to refresh.
             return;
         };
         self.publish_inactive_snapshot(idx);
-        self.render_redirect = Some(idx);
-        // org--fontify emits only overlay/indent writes (no buffer create/kill),
-        // so `idx` stays valid across the apply loop.
+        self.render_redirect = Some(name);
         for command in self.script.call_action("org--fontify", None) {
             self.apply_command(command, cx);
         }
@@ -1530,7 +1486,7 @@ impl Editor {
         if self.active.name == name {
             Some(&self.active)
         } else {
-            self.inactive.iter().find(|d| d.name == name)
+            self.inactive_doc(name)
         }
     }
 
@@ -1543,8 +1499,46 @@ impl Editor {
         if self.active.name == name {
             Some(&mut self.active)
         } else {
-            self.inactive.iter_mut().find(|d| d.name == name)
+            self.inactive_doc_mut(name)
         }
+    }
+
+    /// Every open buffer's [`Document`], the active one first.
+    pub(super) fn docs(&self) -> impl Iterator<Item = &Document> {
+        std::iter::once(&self.active).chain(&self.inactive)
+    }
+
+    /// Mutable twin of [`Self::docs`] (same caveat as [`Self::doc_mut`]).
+    pub(super) fn docs_mut(&mut self) -> impl Iterator<Item = &mut Document> {
+        std::iter::once(&mut self.active).chain(&mut self.inactive)
+    }
+
+    /// Whether some open buffer (active or inactive) is named `name`.
+    pub(super) fn has_buffer(&self, name: &str) -> bool {
+        self.doc(name).is_some()
+    }
+
+    /// The position of the inactive buffer `name` in `inactive`.
+    pub(super) fn inactive_index(&self, name: &str) -> Option<usize> {
+        self.inactive.iter().position(|d| d.name == name)
+    }
+
+    /// The inactive [`Document`] named `name` (never the active buffer).
+    pub(super) fn inactive_doc(&self, name: &str) -> Option<&Document> {
+        self.inactive.iter().find(|d| d.name == name)
+    }
+
+    /// Mutable twin of [`Self::inactive_doc`].
+    pub(super) fn inactive_doc_mut(&mut self, name: &str) -> Option<&mut Document> {
+        self.inactive.iter_mut().find(|d| d.name == name)
+    }
+
+    /// Make `doc` the active buffer, moving the current one to the back of the
+    /// inactive list. Only the swap: callers parse, run hooks, and notify.
+    pub(super) fn switch_to_doc(&mut self, doc: Document) {
+        let current = self.snapshot_active();
+        self.inactive.push(current);
+        self.install_active(doc);
     }
 
     /// Borrow the rope buffer named `name` — the active buffer or any inactive
@@ -1610,9 +1604,8 @@ impl Editor {
         if self.active.name == dst {
             let (s, e) = line_span(&self.active.buffer, ds, de);
             self.replace_region(s, e, &text, cx);
-        } else if let Some(idx) = self.inactive.iter().position(|d| d.name == dst) {
+        } else if let Some(doc) = self.inactive_doc_mut(dst) {
             let (len, uri, full) = {
-                let doc = &mut self.inactive[idx];
                 let (s, e) = line_span(&doc.buffer, ds, de);
                 doc.buffer.replace(s..e, &text);
                 doc.reset_undo(); // unrecorded edit: old records are stale
@@ -1760,9 +1753,7 @@ mod editor_state_tests {
         let editor = cx.new(Editor::new);
         editor.update(cx, |e, _| {
             for name in names {
-                let current = e.snapshot_active();
-                e.inactive.push(current);
-                e.install_active(make_document(name.to_string(), None, "aéb\n"));
+                e.switch_to_doc(make_document(name.to_string(), None, "aéb\n"));
             }
         });
         editor
@@ -1777,27 +1768,26 @@ mod editor_state_tests {
         let ed = editor_with(cx, &["a", "b", "c", "d"]);
         ed.update(cx, |e, cx| {
             // Active "d"; redirect at "c".
-            let c = e.inactive.iter().position(|d| d.name == "c").unwrap();
-            e.render_redirect = Some(c);
+            e.render_redirect = Some("c".into());
             // Removing an earlier inactive buffer shifts "c" down one slot.
             let first = e.inactive[0].name.clone();
             e.kill_buffer_named(&first, cx);
-            let c = e.inactive.iter().position(|d| d.name == "c");
-            assert_eq!(e.render_redirect, c, "{:?}", inactive_names(e));
+            let c = e.inactive_index("c");
+            assert_eq!(e.redirect_index(), c, "{:?}", inactive_names(e));
             // Activating the redirected buffer ends the redirect (it's active).
             e.activate(c.unwrap(), false, cx);
             assert_eq!(e.active.name, "c");
             assert_eq!(e.render_redirect, None);
-            // Killing the redirected buffer can't leave a dangling index.
-            let b = e.inactive.iter().position(|d| d.name == "b").unwrap();
-            e.render_redirect = Some(b);
+            // Killing the redirected buffer ends the redirect, so a later
+            // buffer reusing the name doesn't inherit it.
+            e.render_redirect = Some("b".into());
             e.kill_buffer_named("b", cx);
             assert_eq!(e.render_redirect, None);
             // Popping the last inactive buffer on an active kill.
-            let last = e.inactive.len() - 1;
+            let last = e.inactive.last().unwrap().name.clone();
             e.render_redirect = Some(last);
             e.kill_active_buffer(cx);
-            assert!(e.render_redirect.is_none_or(|i| i < e.inactive.len()));
+            assert_eq!(e.render_redirect, None);
         });
     }
 
@@ -1806,7 +1796,7 @@ mod editor_state_tests {
         let ed = editor_with(cx, &["a", "b"]);
         ed.update(cx, |e, cx| {
             // Two windows on "b".
-            e.split_window(true, cx);
+            e.split_window(SplitAxis::Vertical, cx);
             assert_eq!(e.panes.len(), 2);
             assert!(e.panes.iter().all(|p| p.buffer == "b"));
             e.kill_active_buffer(cx);
@@ -1818,9 +1808,7 @@ mod editor_state_tests {
             );
             // An inactive buffer shown in the other window.
             let other = e.panes.iter().find(|p| p.id != e.selected_pane).unwrap().id;
-            let current = e.snapshot_active();
-            e.inactive.push(current);
-            e.install_active(make_document("c".into(), None, "x"));
+            e.switch_to_doc(make_document("c".into(), None, "x"));
             let c_pane = e.panes.iter_mut().find(|p| p.id == other).unwrap();
             c_pane.buffer = "zzz".into();
             e.inactive.push(make_document("zzz".into(), None, "y"));
@@ -1835,7 +1823,7 @@ mod editor_state_tests {
     fn selecting_a_pane_snaps_its_saved_point_to_a_char_boundary(cx: &mut TestAppContext) {
         let ed = editor_with(cx, &["a"]);
         ed.update(cx, |e, cx| {
-            e.split_window(true, cx);
+            e.split_window(SplitAxis::Vertical, cx);
             let other = e.panes.iter().find(|p| p.id != e.selected_pane).unwrap().id;
             // Byte 2 is inside "é" (bytes 1..3 of "aéb").
             e.panes.iter_mut().find(|p| p.id == other).unwrap().point = 2;

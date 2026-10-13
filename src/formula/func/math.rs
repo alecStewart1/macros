@@ -1,105 +1,116 @@
 //! Math functions.
 
-use super::args::{MANY, area, def, opt_int, opt_num, trunc_i64, volatile};
-use super::{Arg, Ctx, FuncDef, num, numbers, ok};
+use super::args::{MANY, area, def, int, opt_int, opt_num};
+use super::{Arg, Ctx, FuncDef, num, numbers};
 use crate::formula::decimal::{self, Mode, to_15_digits};
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("SUM", 1, MANY, sum),
-    def("PRODUCT", 1, MANY, product),
-    def("ABS", 1, 1, abs),
-    def("ROUND", 2, 2, round),
-    def("ROUNDUP", 2, 2, roundup),
-    def("ROUNDDOWN", 2, 2, rounddown),
-    def("INT", 1, 1, int),
-    def("TRUNC", 1, 2, trunc),
-    def("MOD", 2, 2, modulo),
-    def("POWER", 2, 2, power),
-    def("SQRT", 1, 1, sqrt),
-    def("EXP", 1, 1, exp),
-    def("LN", 1, 1, ln),
-    def("LOG", 1, 2, log),
-    def("LOG10", 1, 1, log10),
-    def("CEILING", 2, 2, ceiling),
-    def("CEILING.MATH", 1, 3, ceiling_math),
-    def("FLOOR", 2, 2, floor),
-    def("FLOOR.MATH", 1, 3, floor_math),
-    def("SIGN", 1, 1, sign),
-    def("PI", 0, 0, pi),
-    volatile("RAND", 0, 0, rand),
-    volatile("RANDBETWEEN", 2, 2, randbetween),
-    def("SUMPRODUCT", 1, MANY, sumproduct),
-    def("QUOTIENT", 2, 2, quotient),
-    def("GCD", 1, MANY, gcd),
-    def("LCM", 1, MANY, lcm),
-    def("FACT", 1, 1, fact),
-    def("EVEN", 1, 1, even),
-    def("ODD", 1, 1, odd),
-    def("MROUND", 2, 2, mround),
+    def!("SUM", 1, MANY, sum, "number1, [number2], …"),
+    def!("PRODUCT", 1, MANY, product, "number1, [number2], …"),
+    def!("ABS", 1, 1, abs, "number"),
+    def!("ROUND", 2, 2, round, "number, num_digits"),
+    def!("ROUNDUP", 2, 2, roundup, "number, num_digits"),
+    def!("ROUNDDOWN", 2, 2, rounddown, "number, num_digits"),
+    def!("INT", 1, 1, int_, "number"),
+    def!("TRUNC", 1, 2, trunc, "number, [num_digits]"),
+    def!("MOD", 2, 2, modulo, "number, divisor"),
+    def!("POWER", 2, 2, power, "number, power"),
+    def!("SQRT", 1, 1, sqrt, "number"),
+    def!("EXP", 1, 1, exp, "number"),
+    def!("LN", 1, 1, ln, "number"),
+    def!("LOG", 1, 2, log, "number, [base]"),
+    def!("LOG10", 1, 1, log10, "number"),
+    def!("CEILING", 2, 2, ceiling, "number, significance"),
+    def!(
+        "CEILING.MATH",
+        1,
+        3,
+        ceiling_math,
+        "number, [significance], [mode]"
+    ),
+    def!("FLOOR", 2, 2, floor, "number, significance"),
+    def!(
+        "FLOOR.MATH",
+        1,
+        3,
+        floor_math,
+        "number, [significance], [mode]"
+    ),
+    def!("SIGN", 1, 1, sign, "number"),
+    def!("PI", 0, 0, pi, ""),
+    def!(volatile "RAND", 0, 0, rand, ""),
+    def!(volatile "RANDBETWEEN", 2, 2, randbetween, "bottom, top"),
+    def!("SUMPRODUCT", 1, MANY, sumproduct, "array1, [array2], …"),
+    def!("QUOTIENT", 2, 2, quotient, "numerator, denominator"),
+    def!("GCD", 1, MANY, gcd, "number1, [number2], …"),
+    def!("LCM", 1, MANY, lcm, "number1, [number2], …"),
+    def!("FACT", 1, 1, fact, "number"),
+    def!("EVEN", 1, 1, even, "number"),
+    def!("ODD", 1, 1, odd, "number"),
+    def!("MROUND", 2, 2, mround, "number, multiple"),
 ];
 
-fn unary(args: &[Arg], ctx: &mut dyn Ctx, f: impl Fn(f64) -> Result<f64, ErrorKind>) -> Value {
-    ok(num(&args[0], ctx).and_then(f))
+fn unary(
+    args: &[Arg],
+    ctx: &mut dyn Ctx,
+    f: impl Fn(f64) -> Result<f64, ErrorKind>,
+) -> Result<f64, ErrorKind> {
+    f(num(&args[0], ctx)?)
 }
 
 fn binary(
     args: &[Arg],
     ctx: &mut dyn Ctx,
     f: impl Fn(f64, f64) -> Result<f64, ErrorKind>,
-) -> Value {
-    ok((|| f(num(&args[0], ctx)?, num(&args[1], ctx)?))())
+) -> Result<f64, ErrorKind> {
+    f(num(&args[0], ctx)?, num(&args[1], ctx)?)
 }
 
-fn sum(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).map(|ns| ns.iter().sum()))
+fn sum(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    Ok(numbers(args, ctx)?.iter().sum())
 }
 
-fn product(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).map(|ns| {
-        if ns.is_empty() {
-            0.0
-        } else {
-            ns.iter().product()
-        }
-    }))
+fn product(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let ns = numbers(args, ctx)?;
+    Ok(if ns.is_empty() {
+        0.0
+    } else {
+        ns.iter().product()
+    })
 }
 
-fn abs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn abs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| Ok(x.abs()))
 }
 
-fn round_with(args: &[Arg], ctx: &mut dyn Ctx, mode: Mode) -> Value {
-    ok((|| {
-        let x = num(&args[0], ctx)?;
-        // num_digits is truncated, as Excel does.
-        let d = trunc_i64(num(&args[1], ctx)?)?.clamp(-400, 400) as i32;
-        Ok(decimal::round(x, d, mode))
-    })())
+fn round_with(args: &[Arg], ctx: &mut dyn Ctx, mode: Mode) -> Result<f64, ErrorKind> {
+    let x = num(&args[0], ctx)?;
+    // num_digits is truncated, as Excel does.
+    let d = int(&args[1], ctx)?.clamp(-400, 400) as i32;
+    Ok(decimal::round(x, d, mode))
 }
 
-fn round(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn round(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     round_with(args, ctx, Mode::Half)
 }
 
-fn roundup(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn roundup(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     round_with(args, ctx, Mode::Up)
 }
 
-fn rounddown(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn rounddown(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     round_with(args, ctx, Mode::Down)
 }
 
-fn int(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn int_(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| Ok(x.floor()))
 }
 
-fn trunc(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let x = num(&args[0], ctx)?;
-        let d = opt_int(args.get(1), ctx, 0)?.clamp(-400, 400) as i32;
-        Ok(decimal::round(x, d, Mode::Down))
-    })())
+fn trunc(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let x = num(&args[0], ctx)?;
+    let d = opt_int(args.get(1), ctx, 0)?.clamp(-400, 400) as i32;
+    Ok(decimal::round(x, d, Mode::Down))
 }
 
 /// Excel's MOD: the result takes the divisor's sign (`MOD(-3,2)` is 1,
@@ -118,7 +129,7 @@ pub fn excel_mod(n: f64, d: f64) -> Result<f64, ErrorKind> {
     Ok(r)
 }
 
-fn modulo(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn modulo(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     binary(args, ctx, excel_mod)
 }
 
@@ -141,11 +152,11 @@ pub fn excel_power(x: f64, y: f64) -> Result<f64, ErrorKind> {
     }
 }
 
-fn power(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn power(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     binary(args, ctx, excel_power)
 }
 
-fn sqrt(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn sqrt(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| {
         if x < 0.0 {
             Err(ErrorKind::Num)
@@ -155,11 +166,11 @@ fn sqrt(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     })
 }
 
-fn exp(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn exp(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| Ok(x.exp()))
 }
 
-fn ln(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn ln(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| {
         if x <= 0.0 {
             Err(ErrorKind::Num)
@@ -169,28 +180,26 @@ fn ln(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     })
 }
 
-fn log(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let x = num(&args[0], ctx)?;
-        let base = opt_num(args.get(1), ctx, 10.0)?;
-        if x <= 0.0 || base <= 0.0 {
-            return Err(ErrorKind::Num);
-        }
-        if base == 1.0 {
-            return Err(ErrorKind::Div0);
-        }
-        Ok(if base == 10.0 {
-            x.log10()
-        } else if base == 2.0 {
-            x.log2()
-        } else {
-            // ln/ln leaves noise (LOG(8,2) would be 3.0000000000000004).
-            to_15_digits(x.ln() / base.ln())
-        })
-    })())
+fn log(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let x = num(&args[0], ctx)?;
+    let base = opt_num(args.get(1), ctx, 10.0)?;
+    if x <= 0.0 || base <= 0.0 {
+        return Err(ErrorKind::Num);
+    }
+    if base == 1.0 {
+        return Err(ErrorKind::Div0);
+    }
+    Ok(if base == 10.0 {
+        x.log10()
+    } else if base == 2.0 {
+        x.log2()
+    } else {
+        // ln/ln leaves noise (LOG(8,2) would be 3.0000000000000004).
+        to_15_digits(x.ln() / base.ln())
+    })
 }
 
-fn log10(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn log10(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| {
         if x <= 0.0 {
             Err(ErrorKind::Num)
@@ -205,7 +214,7 @@ fn quotient_15(x: f64, sig: f64) -> f64 {
     to_15_digits(x / sig)
 }
 
-fn ceiling(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn ceiling(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     binary(args, ctx, |x, sig| {
         if x == 0.0 || sig == 0.0 {
             return Ok(0.0);
@@ -217,7 +226,7 @@ fn ceiling(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     })
 }
 
-fn floor(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn floor(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     binary(args, ctx, |x, sig| {
         if sig == 0.0 {
             return if x == 0.0 {
@@ -233,35 +242,33 @@ fn floor(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     })
 }
 
-fn ceiling_math(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn ceiling_math(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     round_math(args, ctx, true)
 }
 
-fn floor_math(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn floor_math(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     round_math(args, ctx, false)
 }
 
 /// CEILING.MATH (`up`) / FLOOR.MATH: to a multiple of the significance,
 /// up or down; a non-zero mode turns the direction around for negatives.
-fn round_math(args: &[Arg], ctx: &mut dyn Ctx, up: bool) -> Value {
-    ok((|| {
-        let x = num(&args[0], ctx)?;
-        let sig = opt_num(args.get(1), ctx, 1.0)?.abs();
-        let mode = opt_num(args.get(2), ctx, 0.0)?;
-        if sig == 0.0 {
-            return Ok(0.0);
-        }
-        let q = quotient_15(x, sig);
-        let k = if (x < 0.0 && mode != 0.0) == up {
-            q.floor()
-        } else {
-            q.ceil()
-        };
-        Ok(to_15_digits(k * sig))
-    })())
+fn round_math(args: &[Arg], ctx: &mut dyn Ctx, up: bool) -> Result<f64, ErrorKind> {
+    let x = num(&args[0], ctx)?;
+    let sig = opt_num(args.get(1), ctx, 1.0)?.abs();
+    let mode = opt_num(args.get(2), ctx, 0.0)?;
+    if sig == 0.0 {
+        return Ok(0.0);
+    }
+    let q = quotient_15(x, sig);
+    let k = if (x < 0.0 && mode != 0.0) == up {
+        q.floor()
+    } else {
+        q.ceil()
+    };
+    Ok(to_15_digits(k * sig))
 }
 
-fn sign(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn sign(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| {
         Ok(if x > 0.0 {
             1.0
@@ -281,50 +288,46 @@ fn rand(_: &[Arg], ctx: &mut dyn Ctx) -> Value {
     Value::Number(ctx.random())
 }
 
-fn randbetween(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let lo = num(&args[0], ctx)?.ceil();
-        let hi = num(&args[1], ctx)?.floor();
-        if lo > hi {
-            return Err(ErrorKind::Num);
-        }
-        let r = ctx.random();
-        Ok((lo + (r * (hi - lo + 1.0)).floor()).min(hi))
-    })())
+fn randbetween(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let lo = num(&args[0], ctx)?.ceil();
+    let hi = num(&args[1], ctx)?.floor();
+    if lo > hi {
+        return Err(ErrorKind::Num);
+    }
+    let r = ctx.random();
+    Ok((lo + (r * (hi - lo + 1.0)).floor()).min(hi))
 }
 
-fn sumproduct(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let mut acc: Option<Vec<f64>> = None;
-        let mut dims = None;
-        for a in args {
-            let ar = area(a, ctx)?;
-            let d = (ar.rows(), ar.cols());
-            if *dims.get_or_insert(d) != d {
-                return Err(ErrorKind::Value);
-            }
-            let vals = ar.values(ctx);
-            let mut nums = Vec::with_capacity(vals.len());
-            for v in vals {
-                nums.push(match v {
-                    Value::Number(n) => n,
-                    Value::Error(e) => return Err(e),
-                    _ => 0.0,
-                });
-            }
-            acc = Some(match acc {
-                None => nums,
-                Some(mut p) => {
-                    p.iter_mut().zip(&nums).for_each(|(x, y)| *x *= y);
-                    p
-                }
+fn sumproduct(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let mut acc: Option<Vec<f64>> = None;
+    let mut dims = None;
+    for a in args {
+        let ar = area(a, ctx)?;
+        let d = (ar.rows(), ar.cols());
+        if *dims.get_or_insert(d) != d {
+            return Err(ErrorKind::Value);
+        }
+        let vals = ar.values(ctx);
+        let mut nums = Vec::with_capacity(vals.len());
+        for v in vals {
+            nums.push(match v {
+                Value::Number(n) => n,
+                Value::Error(e) => return Err(e),
+                _ => 0.0,
             });
         }
-        Ok(acc.unwrap_or_default().iter().sum())
-    })())
+        acc = Some(match acc {
+            None => nums,
+            Some(mut p) => {
+                p.iter_mut().zip(&nums).for_each(|(x, y)| *x *= y);
+                p
+            }
+        });
+    }
+    Ok(acc.unwrap_or_default().iter().sum())
 }
 
-fn quotient(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn quotient(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     binary(args, ctx, |n, d| {
         if d == 0.0 {
             Err(ErrorKind::Div0)
@@ -356,28 +359,26 @@ fn gcd2(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-fn gcd(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(integers(args, ctx).map(|ns| ns.into_iter().fold(0, gcd2) as f64))
+fn gcd(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    integers(args, ctx).map(|ns| ns.into_iter().fold(0, gcd2) as f64)
 }
 
-fn lcm(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let mut acc: u128 = 1;
-        for n in integers(args, ctx)? {
-            if n == 0 {
-                return Ok(0.0);
-            }
-            let n = n as u128;
-            acc = acc / gcd2(acc as u64, n as u64) as u128 * n;
-            if acc as f64 >= MAX_EXACT {
-                return Err(ErrorKind::Num);
-            }
+fn lcm(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let mut acc: u128 = 1;
+    for n in integers(args, ctx)? {
+        if n == 0 {
+            return Ok(0.0);
         }
-        Ok(acc as f64)
-    })())
+        let n = n as u128;
+        acc = acc / gcd2(acc as u64, n as u64) as u128 * n;
+        if acc as f64 >= MAX_EXACT {
+            return Err(ErrorKind::Num);
+        }
+    }
+    Ok(acc as f64)
 }
 
-fn fact(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn fact(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| {
         if x < 0.0 {
             return Err(ErrorKind::Num);
@@ -390,11 +391,11 @@ fn fact(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     })
 }
 
-fn even(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn even(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| Ok(away_to_parity(x, false)))
 }
 
-fn odd(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn odd(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| Ok(away_to_parity(x, true)))
 }
 
@@ -409,7 +410,7 @@ fn away_to_parity(x: f64, odd: bool) -> f64 {
     if x < 0.0 { -a } else { a }
 }
 
-fn mround(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn mround(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     binary(args, ctx, |n, m| {
         if m == 0.0 || n == 0.0 {
             return Ok(0.0);

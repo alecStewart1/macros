@@ -5,6 +5,7 @@
 // console of their own.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod a1;
 mod analyze;
 mod anvil;
 mod assets;
@@ -19,9 +20,11 @@ mod grid;
 mod grid_fn;
 mod highlight;
 mod json_format;
+mod jsonrpc;
 mod lsp;
 mod mcp;
 mod mode;
+mod net;
 mod process;
 mod runtime;
 mod save;
@@ -32,6 +35,7 @@ mod spell;
 mod terminal;
 mod textplot;
 mod theme;
+mod transport;
 mod update;
 mod util;
 mod workspace;

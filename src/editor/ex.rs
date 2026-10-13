@@ -6,6 +6,8 @@
 //! and apply each command as one edit of the smallest span it touches, so
 //! marks and the jump list ride along.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::input::Handled;
@@ -49,6 +51,103 @@ pub(super) struct ExLine {
     pub name: String,
     pub bang: bool,
     pub arg: String,
+}
+
+/// An ex command, resolved from any of its names and abbreviations by
+/// [`ExCmd::lookup`] — the one alias table. The line commands (the first
+/// group) take a range and run under `:g`; the rest are plain verbs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExCmd {
+    Substitute,
+    /// `:&` / `:&&` — repeat the last substitute.
+    SubRepeat,
+    Global,
+    VGlobal,
+    Normal,
+    Delete,
+    Yank,
+    Move,
+    Copy,
+    Join,
+    /// `:>` / `:<<` … (one step per character).
+    Shift,
+    Sort,
+    Put,
+    /// `:=` — echo a line number.
+    LineNumber,
+    Mark,
+    /// `:p` / `:#` / `:nu` — only meaningful as `:g`'s command.
+    Print,
+    Write,
+    Quit,
+    WriteQuit,
+    WriteQuitAll,
+    Edit,
+    NoHighlight,
+    Buffer,
+    BufferNext,
+    BufferPrev,
+    BufferDelete,
+    Split,
+    VSplit,
+    Only,
+    New,
+    VNew,
+    WinCmd,
+    Close,
+    Registers,
+    Marks,
+    Jumps,
+    ClearJumps,
+    DelMarks,
+}
+
+impl ExCmd {
+    /// The command named `name` (as [`parse_ex_line`] splits it off).
+    pub(super) fn lookup(name: &str) -> Option<Self> {
+        use ExCmd::*;
+        Some(match name {
+            "s" | "su" | "sub" | "substitute" => Substitute,
+            "&" | "&&" => SubRepeat,
+            "g" | "gl" | "global" => Global,
+            "v" | "vg" | "vglobal" => VGlobal,
+            "norm" | "norma" | "normal" => Normal,
+            "d" | "de" | "del" | "delete" => Delete,
+            "y" | "ya" | "yank" => Yank,
+            "m" | "mo" | "move" => Move,
+            "t" | "co" | "copy" => Copy,
+            "j" | "jo" | "join" => Join,
+            ">" | ">>" | ">>>" | "<" | "<<" | "<<<" => Shift,
+            "sor" | "sort" => Sort,
+            "pu" | "put" => Put,
+            "=" => LineNumber,
+            "k" | "ma" | "mark" => Mark,
+            "p" | "pr" | "print" | "#" | "nu" | "number" => Print,
+            "w" | "write" => Write,
+            "q" | "quit" | "qa" | "qall" | "quitall" => Quit,
+            "wq" | "x" | "xit" => WriteQuit,
+            "wqa" | "wqall" | "xa" | "xall" => WriteQuitAll,
+            "e" | "edit" => Edit,
+            "noh" | "nohl" | "nohlsearch" => NoHighlight,
+            "b" | "bu" | "buf" | "buffer" => Buffer,
+            "bn" | "bnext" => BufferNext,
+            "bp" | "bN" | "bprev" | "bprevious" | "bNext" => BufferPrev,
+            "bd" | "bdel" | "bdelete" => BufferDelete,
+            "split" | "sp" | "spl" => Split,
+            "vsplit" | "vs" | "vsp" | "vspl" => VSplit,
+            "only" | "on" => Only,
+            "new" => New,
+            "vne" | "vnew" => VNew,
+            "winc" | "wincmd" => WinCmd,
+            "close" | "clo" => Close,
+            "reg" | "registers" | "di" | "display" => Registers,
+            "marks" => Marks,
+            "ju" | "jumps" => Jumps,
+            "cle" | "clearjumps" => ClearJumps,
+            "delm" | "delmarks" => DelMarks,
+            _ => return None,
+        })
+    }
 }
 
 /// Read a delimited pattern body up to the (unescaped) `delim`, returning it
@@ -217,7 +316,7 @@ pub(super) fn parse_ex_line(input: &str) -> ExLine {
 pub(super) struct SubSpec {
     pub pattern: String,
     pub replacement: String,
-    pub flags: String,
+    pub flags: SubFlags,
     pub count: Option<usize>,
     /// `:s` with no pattern part at all (repeat the last substitute).
     pub bare: bool,
@@ -253,14 +352,83 @@ pub(super) fn parse_sub(arg: &str) -> SubSpec {
     }
 }
 
-fn split_flags_count(s: &str) -> (String, Option<usize>) {
+/// Every character `:s` accepts as a flag.
+const SUB_FLAG_CHARS: &str = "&cegiInp#lr";
+
+/// A `:s` command's flags. Only the ones the engine acts on are kept; the
+/// rest (`p`, `#`, `l`, `r`) are accepted and ignored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct SubFlags {
+    /// A leading `&`: keep the last substitute's flags.
+    pub keep: bool,
+    /// `c`: confirm each replacement.
+    pub confirm: bool,
+    /// `e`: no error when nothing matches.
+    pub no_error: bool,
+    /// `g`: every match on the line, not just the first.
+    pub global: bool,
+    /// `i`: ignore case.
+    pub icase: bool,
+    /// `I`: don't ignore case (wins over `i`).
+    pub no_icase: bool,
+    /// `n`: count the matches, substitute nothing.
+    pub count_only: bool,
+}
+
+impl SubFlags {
+    /// Whether the pattern ignores case: `i` without `I`.
+    pub fn ignore_case(&self) -> bool {
+        self.icase && !self.no_icase
+    }
+
+    /// These flags added to `last`'s (`:&&`, `:s&`); the `&` is spent.
+    fn merged_into(self, last: SubFlags) -> Self {
+        Self {
+            keep: false,
+            confirm: last.confirm || self.confirm,
+            no_error: last.no_error || self.no_error,
+            global: last.global || self.global,
+            icase: last.icase || self.icase,
+            no_icase: last.no_icase || self.no_icase,
+            count_only: last.count_only || self.count_only,
+        }
+    }
+}
+
+impl std::str::FromStr for SubFlags {
+    /// The first character that isn't a `:s` flag.
+    type Err = char;
+
+    fn from_str(s: &str) -> Result<Self, char> {
+        let mut flags = Self {
+            keep: s.starts_with('&'),
+            ..Self::default()
+        };
+        for c in s.chars() {
+            match c {
+                'c' => flags.confirm = true,
+                'e' => flags.no_error = true,
+                'g' => flags.global = true,
+                'i' => flags.icase = true,
+                'I' => flags.no_icase = true,
+                'n' => flags.count_only = true,
+                c if SUB_FLAG_CHARS.contains(c) => {}
+                c => return Err(c),
+            }
+        }
+        Ok(flags)
+    }
+}
+
+fn split_flags_count(s: &str) -> (SubFlags, Option<usize>) {
     let s = s.trim();
-    let flags: String = s
+    // Flag characters are ASCII: the count is the byte length too.
+    let n = s
         .chars()
-        .take_while(|c| "&cegiInp#lr".contains(*c))
-        .collect();
-    let rest = s[flags.len()..].trim();
-    (flags, rest.parse().ok())
+        .take_while(|c| SUB_FLAG_CHARS.contains(*c))
+        .count();
+    let flags = s[..n].parse().unwrap_or_default();
+    (flags, s[n..].trim().parse().ok())
 }
 
 /// The Vim pattern dialect over Rust's regex syntax: `\<` / `\>` word
@@ -389,16 +557,17 @@ pub(super) fn sort_lines(lines: &[String], flags: &str, reverse: bool) -> Vec<St
     let icase = flags.contains('i');
     let numeric = flags.contains('n');
     let unique = flags.contains('u');
-    let num_of = |s: &str| -> Option<i64> {
-        let re = Regex::new(r"-?\d+").ok()?;
-        re.find(s).and_then(|m| m.as_str().parse().ok())
-    };
+    static NUMBER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"-?\d+").expect("valid number regex"));
+    let num_of = |s: &str| -> Option<i64> { NUMBER.find(s).and_then(|m| m.as_str().parse().ok()) };
     let mut v: Vec<String> = lines.to_vec();
+    // `sort_by_cached_key` is stable and computes each key once (not once
+    // per comparison).
     if numeric {
         // Lines without a number sort first, in their original order.
-        v.sort_by_key(|l| num_of(l).map_or((0, 0), |n| (1, n)));
+        v.sort_by_cached_key(|l| num_of(l).map_or((0, 0), |n| (1, n)));
     } else if icase {
-        v.sort_by_key(|l| l.to_lowercase());
+        v.sort_by_cached_key(|l| l.to_lowercase());
     } else {
         v.sort();
     }
@@ -472,7 +641,66 @@ pub(super) fn token_keystroke(tok: &str) -> Option<Keystroke> {
     })
 }
 
+/// The replay events running `:normal` keys on each of `lines` in turn:
+/// go to the line, type the keys, then `<Esc>` back to Normal.
+fn normal_events_on_lines(lines: impl Iterator<Item = i64>, tokens: &[String]) -> Vec<MacroEvent> {
+    let mut events = Vec::new();
+    for l in lines {
+        events.push(MacroEvent::Command(format!("(evil-ex-goto-line \"{l}\")")));
+        events.extend(tokens.iter().cloned().map(MacroEvent::Key));
+        events.push(MacroEvent::Key("<Esc>".into()));
+    }
+    events
+}
+
 // --- the editor side -------------------------------------------------------------
+
+/// Why an ex command failed — echoed through `Display`, in Vim's wording
+/// (with its `E…:` code where Vim has one).
+#[derive(Debug)]
+pub(super) enum ExError {
+    InvalidAddress,
+    InvalidRange,
+    MarkNotSet(char),
+    NoPreviousSubstitute,
+    NoPreviousRegex,
+    EmptyRegister(char),
+    MoveIntoItself,
+    ArgumentRequired,
+    InvalidCommand,
+    /// The pattern, when the message names it.
+    PatternNotFound(Option<String>),
+    InvalidRegex(regex::Error),
+    /// The `:g` sub-command that isn't a line command.
+    NotUnderGlobal(String),
+}
+
+impl std::fmt::Display for ExError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidAddress => f.write_str("E14: Invalid address"),
+            Self::InvalidRange => f.write_str("E16: Invalid range"),
+            Self::MarkNotSet(c) => write!(f, "E20: Mark not set: {c}"),
+            Self::NoPreviousSubstitute => f.write_str("E35: No previous substitute"),
+            Self::NoPreviousRegex => f.write_str("E35: No previous regular expression"),
+            Self::EmptyRegister(r) => write!(f, "E353: Nothing in register {r}"),
+            Self::MoveIntoItself => f.write_str("E134: Cannot move a range of lines into itself"),
+            Self::ArgumentRequired => f.write_str("E471: Argument required"),
+            Self::InvalidCommand => f.write_str("E476: Invalid command"),
+            Self::PatternNotFound(Some(pat)) => write!(f, "E486: Pattern not found: {pat}"),
+            Self::PatternNotFound(None) => f.write_str("E486: Pattern not found"),
+            Self::InvalidRegex(e) => write!(f, "Invalid regex: {e}"),
+            Self::NotUnderGlobal(cmd) => write!(f, "Not supported under :g: {cmd}"),
+        }
+    }
+}
+
+impl std::error::Error for ExError {}
+
+/// The 0-based index of 1-based line `l` (below 1 is the first line).
+fn line_index(l: i64) -> usize {
+    (l - 1).max(0) as usize
+}
 
 /// The state of an interactive `:s///c`.
 pub(super) struct SubConfirm {
@@ -484,12 +712,21 @@ pub(super) struct SubConfirm {
     pub undo_base: UndoBase,
 }
 
+impl SubConfirm {
+    /// ORIGINAL byte span `a..b` mapped onto the edited buffer.
+    fn shifted(&self, a: usize, b: usize) -> Range<usize> {
+        let at = |p: usize| (p as isize + self.shift).max(0) as usize;
+        at(a)..at(b)
+    }
+}
+
 /// The last `:s`, for `:s` / `&` / `:&&` / `g&`.
 #[derive(Clone, Debug)]
 pub(super) struct LastSub {
     pub pattern: String,
     pub replacement: String,
-    pub flags: String,
+    /// Never [`SubFlags::keep`].
+    pub flags: SubFlags,
 }
 
 impl Editor {
@@ -510,11 +747,24 @@ impl Editor {
         self.active.buffer.line_index_at_byte(self.point()) as i64 + 1
     }
 
+    /// Byte range of line `l` (1-based; below 1 is the first line), excluding
+    /// its line break.
+    fn ex_line_range(&self, l: i64) -> Range<usize> {
+        self.active.buffer.line_range(line_index(l))
+    }
+
     /// Line `l` (1-based) without its newline.
     fn ex_line(&self, l: i64) -> String {
-        self.active
-            .buffer
-            .slice_to_string(self.active.buffer.line_range((l - 1).max(0) as usize))
+        self.active.buffer.slice_to_string(self.ex_line_range(l))
+    }
+
+    /// Park the cursor on line `l`'s first non-blank — where the line
+    /// commands leave it. `l` is clamped to the buffer's real lines (an edit
+    /// may have shrunk them).
+    fn ex_land_on(&mut self, l: i64) {
+        let l = l.min(self.ex_last_line()).max(1);
+        let pos = self.ex_line_range(l).start;
+        self.collapse_to(self.first_non_blank(pos));
     }
 
     fn ex_lines(&self, s: i64, e: i64) -> Vec<String> {
@@ -524,8 +774,8 @@ impl Editor {
     /// Byte span of lines `s..=e`' text (first line start → last line end,
     /// excluding the last newline).
     fn ex_text_span(&self, s: i64, e: i64) -> Range<usize> {
-        let a = self.active.buffer.line_range((s - 1) as usize).start;
-        let b = self.active.buffer.line_range((e - 1) as usize).end;
+        let a = self.ex_line_range(s).start;
+        let b = self.ex_line_range(e).end;
         a..b
     }
 
@@ -544,40 +794,26 @@ impl Editor {
     /// aware): the break after them, or — on the buffer's last line — the
     /// break before them.
     fn ex_line_block_span(&self, s: i64, e: i64) -> Range<usize> {
-        let buf = &self.active.buffer;
-        let a = buf.line_range((s - 1) as usize).start;
-        let le = buf.line_range((e - 1) as usize).end;
-        if (e as usize) < buf.line_count() {
-            a..buf.line_range(e as usize).start
+        let a = self.ex_line_range(s).start;
+        let le = self.ex_line_range(e).end;
+        if line_index(e) + 1 < self.active.buffer.line_count() {
+            a..self.ex_line_range(e + 1).start
         } else if s > 1 {
-            buf.line_range((s - 2) as usize).end..le
+            self.ex_line_range(s - 1).end..le
         } else {
             a..le
         }
     }
 
     /// Resolve one address to a 1-based line (not range-checked).
-    fn ex_resolve_addr(&self, a: &Addr, cur: i64) -> Result<i64, String> {
+    fn ex_resolve_addr(&self, a: &Addr, cur: i64) -> Result<i64, ExError> {
         let base = match &a.base {
             AddrBase::Num(n) => *n,
             AddrBase::Cur => cur,
             AddrBase::Last => self.ex_last_line(),
             AddrBase::Mark(c) => {
-                let c = if *c == '`' { '\'' } else { *c };
-                let pos = if c.is_ascii_uppercase() {
-                    self.vim
-                        .global_marks
-                        .get(&c)
-                        .filter(|g| g.buffer == self.active.name)
-                        .map(|g| g.pos)
-                } else {
-                    self.vim
-                        .marks
-                        .get(&self.active.name)
-                        .and_then(|m| m.get(&c))
-                        .copied()
-                };
-                let pos = pos.ok_or_else(|| format!("E20: Mark not set: {c}"))?;
+                let c = super::vim::normalize_mark(*c);
+                let pos = self.mark_pos_in_active(c).ok_or(ExError::MarkNotSet(c))?;
                 self.active
                     .buffer
                     .line_index_at_byte(pos.min(self.active.buffer.len())) as i64
@@ -589,8 +825,7 @@ impl Editor {
                 } else {
                     pat.clone()
                 };
-                let re = Regex::new(&vim_pattern(&pat, false))
-                    .map_err(|e| format!("Invalid regex: {e}"))?;
+                let re = Regex::new(&vim_pattern(&pat, false)).map_err(ExError::InvalidRegex)?;
                 let last = self.ex_last_line();
                 let order: Vec<i64> = if *forward {
                     (cur + 1..=last).chain(1..=cur).collect()
@@ -600,7 +835,7 @@ impl Editor {
                 order
                     .into_iter()
                     .find(|&l| re.is_match(&self.ex_line(l)))
-                    .ok_or_else(|| format!("E486: Pattern not found: {pat}"))?
+                    .ok_or_else(|| ExError::PatternNotFound(Some(pat.clone())))?
             }
         };
         Ok(base + a.offset)
@@ -610,9 +845,9 @@ impl Editor {
     /// defaulting to `default` when there is none.
     fn ex_resolve_range(
         &self,
-        range: &Option<ExRange>,
+        range: Option<&ExRange>,
         default: (i64, i64),
-    ) -> Result<(i64, i64), String> {
+    ) -> Result<(i64, i64), ExError> {
         let (s, e) = self.ex_resolve_range0(range, default)?;
         Ok((s.max(1), e.max(1)))
     }
@@ -621,9 +856,9 @@ impl Editor {
     /// line).
     fn ex_resolve_range0(
         &self,
-        range: &Option<ExRange>,
+        range: Option<&ExRange>,
         default: (i64, i64),
-    ) -> Result<(i64, i64), String> {
+    ) -> Result<(i64, i64), ExError> {
         let cur = self.ex_cur_line();
         let last = self.ex_last_line();
         let (s, e) = match range {
@@ -641,7 +876,7 @@ impl Editor {
         };
         let (s, e) = if s > e { (e, s) } else { (s, e) };
         if s < 0 || e > last {
-            return Err("E16: Invalid range".into());
+            return Err(ExError::InvalidRange);
         }
         Ok((s, e))
     }
@@ -650,31 +885,34 @@ impl Editor {
     /// Returns false when it isn't one (the caller's plain verbs take it).
     pub(super) fn ex_dispatch(&mut self, line: &ExLine, cx: &mut Context<Self>) -> bool {
         let cur = self.ex_cur_line();
-        let res = match (line.name.as_str(), line.range.is_some()) {
-            // `:{range}` alone: go to its last line.
-            ("", true) => self.ex_goto(&line.range, cx),
-            ("s" | "su" | "sub" | "substitute", _) => self.ex_sub(line, false, cx),
-            ("&" | "&&", _) => self.ex_sub(line, true, cx),
-            ("g" | "gl" | "global", _) => self.ex_global(line, !line.bang, cx),
-            ("v" | "vg" | "vglobal", _) => self.ex_global(line, false, cx),
-            ("norm" | "norma" | "normal", _) => self.ex_normal(line, cx),
-            ("d" | "de" | "del" | "delete", _) => self.ex_delete(line, cx),
-            ("y" | "ya" | "yank", _) => self.ex_yank(line, cx),
-            ("m" | "mo" | "move", _) => self.ex_move_copy(line, true, cx),
-            ("t" | "co" | "copy", _) => self.ex_move_copy(line, false, cx),
-            ("j" | "jo" | "join", _) => self.ex_join(line, cx),
-            (">" | ">>" | ">>>" | "<" | "<<" | "<<<", _) => self.ex_shift(line, cx),
-            ("sor" | "sort", _) => self.ex_sort(line, cx),
-            ("pu" | "put", _) => self.ex_put(line, cx),
-            ("=", _) => {
-                let l =
-                    self.ex_resolve_range(&line.range, (self.ex_last_line(), self.ex_last_line()));
+        // `:{range}` alone: go to its last line.
+        let goto = line.name.is_empty() && line.range.is_some();
+        let res = match ExCmd::lookup(&line.name) {
+            _ if goto => self.ex_goto(line.range.as_ref(), cx),
+            Some(ExCmd::Substitute) => self.ex_sub(line, false, cx),
+            Some(ExCmd::SubRepeat) => self.ex_sub(line, true, cx),
+            Some(ExCmd::Global) => self.ex_global(line, !line.bang, cx),
+            Some(ExCmd::VGlobal) => self.ex_global(line, false, cx),
+            Some(ExCmd::Normal) => self.ex_normal(line, cx),
+            Some(ExCmd::Delete) => self.ex_delete(line, cx),
+            Some(ExCmd::Yank) => self.ex_yank(line, cx),
+            Some(ExCmd::Move) => self.ex_move_copy(line, true, cx),
+            Some(ExCmd::Copy) => self.ex_move_copy(line, false, cx),
+            Some(ExCmd::Join) => self.ex_join(line, cx),
+            Some(ExCmd::Shift) => self.ex_shift(line, cx),
+            Some(ExCmd::Sort) => self.ex_sort(line, cx),
+            Some(ExCmd::Put) => self.ex_put(line, cx),
+            Some(ExCmd::LineNumber) => {
+                let l = self.ex_resolve_range(
+                    line.range.as_ref(),
+                    (self.ex_last_line(), self.ex_last_line()),
+                );
                 l.map(|(_, e)| self.echo(e.to_string(), cx))
             }
-            ("k" | "ma" | "mark", _) => {
-                self.ex_resolve_range(&line.range, (cur, cur))
+            Some(ExCmd::Mark) => {
+                self.ex_resolve_range(line.range.as_ref(), (cur, cur))
                     .map(|(_, e)| {
-                        let pos = self.active.buffer.line_range((e - 1) as usize).start;
+                        let pos = self.ex_line_range(e).start;
                         let keep = self.point();
                         self.collapse_to(pos);
                         self.evil_set_mark(&line.arg, cx);
@@ -684,17 +922,17 @@ impl Editor {
             _ => return false,
         };
         if let Err(e) = res {
-            self.echo(e, cx);
+            self.echo(e.to_string(), cx);
         }
         cx.notify();
         true
     }
 
-    fn ex_goto(&mut self, range: &Option<ExRange>, cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_goto(&mut self, range: Option<&ExRange>, cx: &mut Context<Self>) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
         let (_, e) = self.ex_resolve_range(range, (cur, cur))?;
         self.record_jump();
-        let start = self.active.buffer.line_range((e - 1) as usize).start;
+        let start = self.ex_line_range(e).start;
         let target = self.first_non_blank(start);
         self.move_to(target, cx);
         Ok(())
@@ -723,9 +961,9 @@ impl Editor {
     }
 
     /// `:[range]d [x] [count]` — delete lines (linewise, into register x).
-    fn ex_delete(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_delete(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
-        let (s, e) = self.ex_resolve_range(&line.range, (cur, cur))?;
+        let (s, e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
         let (reg, count) = Self::ex_reg_count(&line.arg);
         let (s, e) = self.ex_apply_count(s, e, count);
         self.ex_delete_lines(s, e, reg, cx);
@@ -739,23 +977,15 @@ impl Editor {
         let span = self.ex_line_block_span(s, e);
         let mut text = self.ex_lines(s, e).join("\n");
         text.push('\n');
-        if reg != Some('_') {
-            self.set_clipboard(&text, cx);
-            self.note_register_kill(registers::KillKind::Delete, reg, &text);
-            self.push_kill(text);
-            self.evil_yank_linewise = true;
-            self.vim.registers.set_linewise_last(true);
-        }
+        self.file_kill(registers::KillKind::Delete, reg, text, true, cx);
         self.edit(span, "");
-        let line = (s - 1).min(self.ex_last_line() - 1).max(0) as usize;
-        let pos = self.active.buffer.line_range(line).start;
-        self.collapse_to(self.first_non_blank(pos));
+        self.ex_land_on(s);
     }
 
     /// `:[range]y [x] [count]` — yank lines.
-    fn ex_yank(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_yank(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
-        let (s, e) = self.ex_resolve_range(&line.range, (cur, cur))?;
+        let (s, e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
         let (reg, count) = Self::ex_reg_count(&line.arg);
         let (s, e) = self.ex_apply_count(s, e, count);
         if reg == Some('_') {
@@ -763,11 +993,7 @@ impl Editor {
         }
         let mut text = self.ex_lines(s, e).join("\n");
         text.push('\n');
-        self.set_clipboard(&text, cx);
-        self.note_register_kill(registers::KillKind::Yank, reg, &text);
-        self.push_kill(text);
-        self.evil_yank_linewise = true;
-        self.vim.registers.set_linewise_last(true);
+        self.file_kill(registers::KillKind::Yank, reg, text, true, cx);
         Ok(())
     }
 
@@ -778,13 +1004,13 @@ impl Editor {
         line: &ExLine,
         mv: bool,
         _cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
-        let (s, e) = self.ex_resolve_range(&line.range, (cur, cur))?;
-        let (addr, _) = parse_addr(line.arg.trim()).ok_or("E14: Invalid address")?;
+        let (s, e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
+        let (addr, _) = parse_addr(line.arg.trim()).ok_or(ExError::InvalidAddress)?;
         let t = self.ex_resolve_addr(&addr, cur)?;
         if t < 0 || t > self.ex_last_line() {
-            return Err("E16: Invalid range".into());
+            return Err(ExError::InvalidRange);
         }
         let block = self.ex_lines(s, e);
         let n = e - s + 1;
@@ -795,19 +1021,17 @@ impl Editor {
             if t == 0 {
                 ed.edit(0..0, &format!("{text}{eol}"));
             } else {
-                let at = ed.active.buffer.line_range((t - 1) as usize).end;
+                let at = ed.ex_line_range(t).end;
                 ed.edit(at..at, &format!("{eol}{text}"));
             }
         };
         if !mv {
             insert_after(self, t);
-            let last = t + n;
-            let pos = self.active.buffer.line_range((last - 1) as usize).start;
-            self.collapse_to(self.first_non_blank(pos));
+            self.ex_land_on(t + n);
             return Ok(());
         }
         if t >= s && t < e {
-            return Err("E134: Cannot move a range of lines into itself".into());
+            return Err(ExError::MoveIntoItself);
         }
         if t == e || t == s - 1 {
             return Ok(()); // already there
@@ -815,8 +1039,8 @@ impl Editor {
         // A delete plus an insert, not one rewrite of the whole span: lines
         // in between keep their marks and `:g` anchors, and the moved lines
         // take their marks along.
-        let block_start = self.active.buffer.line_range((s - 1) as usize).start;
-        let block_end = self.active.buffer.line_range((e - 1) as usize).end;
+        let block_start = self.ex_line_range(s).start;
+        let block_end = self.ex_line_range(e).end;
         let moved = self.take_vim_positions(block_start..block_end + 1);
         self.begin_undo_group();
         let last = if t > e {
@@ -831,17 +1055,16 @@ impl Editor {
             t + n
         };
         self.end_undo_group();
-        let first = self.active.buffer.line_range((last - n) as usize).start;
+        let first = self.ex_line_range(last - n + 1).start;
         self.restore_vim_positions(moved, first);
-        let pos = self.active.buffer.line_range((last - 1) as usize).start;
-        self.collapse_to(self.first_non_blank(pos));
+        self.ex_land_on(last);
         Ok(())
     }
 
     /// `:[range]j[!] [count]` — join lines (default: this and the next).
-    fn ex_join(&mut self, line: &ExLine, _cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_join(&mut self, line: &ExLine, _cx: &mut Context<Self>) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
-        let (mut s, mut e) = self.ex_resolve_range(&line.range, (cur, cur))?;
+        let (mut s, mut e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
         if let Ok(n) = line.arg.trim().parse::<i64>() {
             s = e;
             e = s + n - 1;
@@ -854,31 +1077,29 @@ impl Editor {
         }
         let joined = join_lines(&self.ex_lines(s, e), line.bang);
         let span = self.ex_text_span(s, e);
-        let start = span.start;
         self.edit(span, &joined);
-        self.collapse_to(self.first_non_blank(start));
+        self.ex_land_on(s);
         Ok(())
     }
 
     /// `:[range]>` / `:[range]<<` … — shift lines (one step per `>`).
-    fn ex_shift(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_shift(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
-        let (s, e) = self.ex_resolve_range(&line.range, (cur, cur))?;
+        let (s, e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
         let (s, e) = self.ex_apply_count(s, e, line.arg.trim().parse().ok());
         let dir: isize = if line.name.starts_with('>') { 1 } else { -1 };
         let step = self.structural_indent_width(cx).max(1);
         for _ in 0..line.name.len() {
-            self.shift_line_range((s - 1) as usize, (e - 1) as usize, dir, step);
+            self.shift_line_range(line_index(s), line_index(e), dir, step);
         }
-        let pos = self.active.buffer.line_range((e - 1) as usize).start;
-        self.collapse_to(self.first_non_blank(pos));
+        self.ex_land_on(e);
         Ok(())
     }
 
     /// `:[range]sort[!] [i][n][u]` (default: every line).
-    fn ex_sort(&mut self, line: &ExLine, _cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_sort(&mut self, line: &ExLine, _cx: &mut Context<Self>) -> Result<(), ExError> {
         let last = self.ex_last_line();
-        let (s, e) = self.ex_resolve_range(&line.range, (1, last))?;
+        let (s, e) = self.ex_resolve_range(line.range.as_ref(), (1, last))?;
         let sorted = sort_lines(&self.ex_lines(s, e), &line.arg, line.bang);
         let span = self.ex_text_span(s, e);
         let start = span.start;
@@ -889,13 +1110,13 @@ impl Editor {
 
     /// `:[line]pu[!] [x]` — put register x (default: unnamed) as lines below
     /// (`!`: above) the line.
-    fn ex_put(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_put(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
-        let (_, l) = self.ex_resolve_range0(&line.range, (cur, cur))?;
+        let (_, l) = self.ex_resolve_range0(line.range.as_ref(), (cur, cur))?;
         let reg = line.arg.trim().chars().next().unwrap_or('"');
         let v = self
             .evil_register_value(reg, cx)
-            .ok_or_else(|| format!("E353: Nothing in register {reg}"))?;
+            .ok_or(ExError::EmptyRegister(reg))?;
         let text = v.text.strip_suffix('\n').unwrap_or(&v.text);
         let text = text.strip_suffix('\r').unwrap_or(text);
         let eol = self.ex_eol();
@@ -905,51 +1126,50 @@ impl Editor {
             text.replace("\r\n", "\n").replace('\n', eol)
         };
         let (at, ins, first) = if line.bang || l == 0 {
-            let at = self.active.buffer.line_range((l.max(1) - 1) as usize).start;
+            let at = self.ex_line_range(l.max(1)).start;
             (at, format!("{text}{eol}"), l.max(1))
         } else {
-            let at = self.active.buffer.line_range((l - 1) as usize).end;
+            let at = self.ex_line_range(l).end;
             (at, format!("{eol}{text}"), l + 1)
         };
         self.edit(at..at, &ins);
-        let pos = self.active.buffer.line_range((first - 1) as usize).start;
-        self.collapse_to(self.first_non_blank(pos));
+        self.ex_land_on(first);
         Ok(())
     }
 
     /// `:s`, `:&`, `:&&`: substitute over the range (default: this line).
-    fn ex_sub(&mut self, line: &ExLine, amp: bool, cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_sub(&mut self, line: &ExLine, amp: bool, cx: &mut Context<Self>) -> Result<(), ExError> {
         let cur = self.ex_cur_line();
-        let (s, e) = self.ex_resolve_range(&line.range, (cur, cur))?;
+        let (s, e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
         let mut spec = parse_sub(&line.arg);
         // `:&&` / `:s&` keep the last flags.
-        let keep_flags = line.name == "&&" || spec.flags.starts_with('&');
+        let keep_flags = line.name == "&&" || spec.flags.keep;
         if amp || spec.bare {
             let last = self
                 .vim
                 .last_sub
                 .clone()
-                .ok_or("E35: No previous substitute")?;
+                .ok_or(ExError::NoPreviousSubstitute)?;
             spec.pattern = last.pattern;
             spec.replacement = last.replacement;
             if keep_flags {
-                spec.flags = format!("{}{}", last.flags, spec.flags.trim_start_matches('&'));
+                spec.flags = spec.flags.merged_into(last.flags);
             }
-        } else if spec.flags.starts_with('&')
+        } else if spec.flags.keep
             && let Some(last) = &self.vim.last_sub
         {
-            spec.flags = format!("{}{}", last.flags, &spec.flags[1..]);
+            spec.flags = spec.flags.merged_into(last.flags);
         }
         if spec.pattern.is_empty() {
-            spec.pattern = self
-                .search_query
-                .clone()
-                .ok_or("E35: No previous regular expression")?;
+            spec.pattern = self.search_query.clone().ok_or(ExError::NoPreviousRegex)?;
         }
         self.vim.last_sub = Some(LastSub {
             pattern: spec.pattern.clone(),
             replacement: spec.replacement.clone(),
-            flags: spec.flags.replace('&', ""),
+            flags: SubFlags {
+                keep: false,
+                ..spec.flags
+            },
         });
         // `n` and the search highlight compile it as a plain regex: store the
         // converted pattern (`\c` / `\<` resolved).
@@ -964,15 +1184,14 @@ impl Editor {
         e: i64,
         spec: &SubSpec,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExError> {
         let (s, e) = self.ex_apply_count(s, e, spec.count);
-        let icase = spec.flags.contains('i') && !spec.flags.contains('I');
-        let re = Regex::new(&vim_pattern(&spec.pattern, icase))
-            .map_err(|err| format!("Invalid regex: {err}"))?;
+        let icase = spec.flags.ignore_case();
+        let re = Regex::new(&vim_pattern(&spec.pattern, icase)).map_err(ExError::InvalidRegex)?;
         let rep = vim_replacement(&spec.replacement);
-        let global = spec.flags.contains('g');
+        let global = spec.flags.global;
         let lines = self.ex_lines(s, e);
-        if spec.flags.contains('n') {
+        if spec.flags.count_only {
             let n: usize = lines
                 .iter()
                 .map(|l| {
@@ -983,13 +1202,13 @@ impl Editor {
             self.echo(format!("{n} match{}", if n == 1 { "" } else { "es" }), cx);
             return Ok(());
         }
-        if spec.flags.contains('c') {
+        if spec.flags.confirm {
             return self.ex_sub_confirm_start(s, e, &re, &rep, global, cx);
         }
         let (new, n) = substitute_lines(&lines, &re, &rep, global);
         if n == 0 {
-            if !spec.flags.contains('e') {
-                return Err(format!("E486: Pattern not found: {}", spec.pattern));
+            if !spec.flags.no_error {
+                return Err(ExError::PatternNotFound(Some(spec.pattern.clone())));
             }
             return Ok(());
         }
@@ -1007,10 +1226,8 @@ impl Editor {
         }
         self.end_undo_group();
         // The cursor goes to the last substituted line (its line count can
-        // have grown with `\n` replacements — clamp).
-        let line = (last_changed - 1).min(self.ex_last_line() - 1).max(0) as usize;
-        let pos = self.active.buffer.line_range(line).start;
-        self.collapse_to(self.first_non_blank(pos));
+        // have grown with `\n` replacements — clamped).
+        self.ex_land_on(last_changed);
         if n > 1 {
             self.echo(format!("{n} substitutions"), cx);
         }
@@ -1027,10 +1244,10 @@ impl Editor {
         rep: &str,
         global: bool,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExError> {
         let mut matches = std::collections::VecDeque::new();
         for l in s..=e {
-            let base = self.active.buffer.line_range((l - 1) as usize).start;
+            let base = self.ex_line_range(l).start;
             let text = self.ex_line(l);
             for caps in re.captures_iter(&text) {
                 let m = caps.get(0).expect("group 0");
@@ -1043,7 +1260,7 @@ impl Editor {
             }
         }
         if matches.is_empty() {
-            return Err("E486: Pattern not found".into());
+            return Err(ExError::PatternNotFound(None));
         }
         self.vim.sub_confirm = Some(SubConfirm {
             matches,
@@ -1064,10 +1281,7 @@ impl Editor {
             self.ex_sub_confirm_finish(cx);
             return;
         };
-        let shift = c.shift;
-        let a = (a as isize + shift).max(0) as usize;
-        let b = (b as isize + shift).max(0) as usize;
-        self.active.selected_range = a..b;
+        self.active.selected_range = c.shifted(a, b);
         self.active.selection_reversed = false;
         self.active.mark_active = true;
         self.ensure_cursor_visible();
@@ -1101,13 +1315,11 @@ impl Editor {
         let Some((a, b, rep)) = c.matches.pop_front() else {
             return;
         };
-        let shift = c.shift;
+        let span = c.shifted(a, b);
         c.shift += rep.len() as isize - (b - a) as isize;
         c.done += 1;
-        let a = (a as isize + shift).max(0) as usize;
-        let b = (b as isize + shift).max(0) as usize;
         self.active.mark_active = false;
-        let end = self.edit(a..b, &rep);
+        let end = self.edit(span, &rep);
         self.collapse_to(end);
     }
 
@@ -1160,21 +1372,18 @@ impl Editor {
         line: &ExLine,
         matching: bool,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExError> {
         let last = self.ex_last_line();
-        let (s, e) = self.ex_resolve_range(&line.range, (1, last))?;
+        let (s, e) = self.ex_resolve_range(line.range.as_ref(), (1, last))?;
         let arg = line.arg.trim_start();
-        let delim = arg.chars().next().ok_or("E476: Invalid command")?;
+        let delim = arg.chars().next().ok_or(ExError::InvalidCommand)?;
         let (pat, cmd) = take_delimited(&arg[delim.len_utf8()..], delim);
         let pat = if pat.is_empty() {
-            self.search_query
-                .clone()
-                .ok_or("E35: No previous regular expression")?
+            self.search_query.clone().ok_or(ExError::NoPreviousRegex)?
         } else {
             pat
         };
-        let re =
-            Regex::new(&vim_pattern(&pat, false)).map_err(|err| format!("Invalid regex: {err}"))?;
+        let re = Regex::new(&vim_pattern(&pat, false)).map_err(ExError::InvalidRegex)?;
         self.search_query = Some(vim_pattern(&pat, false));
         let cmd = if cmd.trim().is_empty() {
             "p".to_string()
@@ -1185,44 +1394,29 @@ impl Editor {
             .filter(|&l| re.is_match(&self.ex_line(l)) == matching)
             .collect();
         if lines.is_empty() {
-            return Err("E486: Pattern not found".into());
+            return Err(ExError::PatternNotFound(None));
         }
         let sub = parse_ex_line(&cmd);
-        if matches!(sub.name.as_str(), "norm" | "norma" | "normal") {
-            let mut events = Vec::new();
-            for l in lines.iter().rev() {
-                events.push(MacroEvent::Command(format!("(evil-ex-goto-line \"{l}\")")));
-                for tok in normal_key_tokens(&sub.arg) {
-                    events.push(MacroEvent::Key(tok));
-                }
-                events.push(MacroEvent::Key("<Esc>".into()));
-            }
+        let sub_cmd = ExCmd::lookup(&sub.name);
+        if sub_cmd == Some(ExCmd::Normal) {
+            let tokens = normal_key_tokens(&sub.arg);
+            let events = normal_events_on_lines(lines.iter().rev().copied(), &tokens);
             self.replay_events(events, true, cx);
             return Ok(());
         }
-        if matches!(
-            sub.name.as_str(),
-            "p" | "pr" | "print" | "#" | "nu" | "number"
-        ) {
-            let text = lines
+        if sub_cmd == Some(ExCmd::Print) {
+            let rows: Vec<String> = lines
                 .iter()
                 .map(|&l| format!("{l:>6} {}", self.ex_line(l)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.render_buffer(
-                "*global*".into(),
-                "help-mode".into(),
-                text + "\n",
-                Vec::new(),
-                cx,
-            );
+                .collect();
+            self.show_listing("*global*", &rows, cx);
             return Ok(());
         }
         // Anchors (line starts) that ride along with the edits; one whose
         // line was deleted is dropped.
         self.vim.ex_anchors = lines
             .iter()
-            .map(|&l| Some(self.active.buffer.line_range((l - 1) as usize).start))
+            .map(|&l| Some(self.ex_line_range(l).start))
             .collect();
         let base = self.undo_base();
         let mut i = 0;
@@ -1244,7 +1438,7 @@ impl Editor {
                 if !self.ex_dispatch(&one, cx) {
                     self.vim.ex_anchors.clear();
                     self.squash_undo_since(&base);
-                    return Err(format!("Not supported under :g: {cmd}"));
+                    return Err(ExError::NotUnderGlobal(cmd));
                 }
             }
             i += 1;
@@ -1256,27 +1450,23 @@ impl Editor {
 
     /// `:[range]norm[al][!] {keys}` — run Normal-state keys on each line of
     /// the range (or once, here).
-    fn ex_normal(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), String> {
+    fn ex_normal(&mut self, line: &ExLine, cx: &mut Context<Self>) -> Result<(), ExError> {
         let tokens = normal_key_tokens(&line.arg);
         if tokens.is_empty() {
-            return Err("E471: Argument required".into());
+            return Err(ExError::ArgumentRequired);
         }
-        let mut events = Vec::new();
-        match &line.range {
+        let events = match &line.range {
             None => {
-                events.extend(tokens.into_iter().map(MacroEvent::Key));
+                let mut events: Vec<MacroEvent> = tokens.into_iter().map(MacroEvent::Key).collect();
                 events.push(MacroEvent::Key("<Esc>".into()));
+                events
             }
             Some(_) => {
                 let cur = self.ex_cur_line();
-                let (s, e) = self.ex_resolve_range(&line.range, (cur, cur))?;
-                for l in (s..=e).rev() {
-                    events.push(MacroEvent::Command(format!("(evil-ex-goto-line \"{l}\")")));
-                    events.extend(tokens.iter().cloned().map(MacroEvent::Key));
-                    events.push(MacroEvent::Key("<Esc>".into()));
-                }
+                let (s, e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
+                normal_events_on_lines((s..=e).rev(), &tokens)
             }
-        }
+        };
         self.replay_events(events, true, cx);
         Ok(())
     }
@@ -1401,6 +1591,12 @@ mod tests {
         assert_eq!((l.name.as_str(), l.range.is_none()), ("wq", true));
         let l = parse_ex_line("q!");
         assert_eq!((l.name.as_str(), l.bang), ("q", true));
+        assert_eq!(ExCmd::lookup("norma"), Some(ExCmd::Normal));
+        assert_eq!(ExCmd::lookup("<<<"), Some(ExCmd::Shift));
+        assert_eq!(ExCmd::lookup("bN"), Some(ExCmd::BufferPrev));
+        assert_eq!(ExCmd::lookup("ma"), Some(ExCmd::Mark));
+        assert_eq!(ExCmd::lookup("marks"), Some(ExCmd::Marks));
+        assert_eq!(ExCmd::lookup("nope"), None);
     }
 
     #[test]
@@ -1408,14 +1604,21 @@ mod tests {
         let s = parse_sub("/a\\/b/c/gi 3");
         assert_eq!(s.pattern, "a/b");
         assert_eq!(s.replacement, "c");
-        assert_eq!(s.flags, "gi");
+        assert_eq!(s.flags, "gi".parse().unwrap());
+        assert!(s.flags.global && s.flags.ignore_case());
+        assert_eq!(
+            "giI".parse::<SubFlags>().map(|f| f.ignore_case()),
+            Ok(false)
+        );
+        assert_eq!("&g".parse::<SubFlags>().map(|f| f.keep), Ok(true));
+        assert_eq!("gx".parse::<SubFlags>(), Err('x'));
         assert_eq!(s.count, Some(3));
         let s = parse_sub("#x#y#");
         assert_eq!((s.pattern.as_str(), s.replacement.as_str()), ("x", "y"));
         let s = parse_sub("");
         assert!(s.bare);
         let s = parse_sub("g");
-        assert!(s.bare && s.flags == "g");
+        assert!(s.bare && s.flags.global);
         assert_eq!(vim_replacement(r"<\1>&\&$"), "<${1}>${0}&$$");
         assert_eq!(vim_pattern(r"\<foo\>", false), r"\bfoo\b");
         assert_eq!(vim_pattern(r"\cFoo", false), "(?i)Foo");

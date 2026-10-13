@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::formula::refs;
+
 /// Excel's default column width at 100% zoom: 8.43 characters of Calibri 11,
 /// which Excel renders as 64 px.
 pub const DEFAULT_COL_WIDTH: f64 = 64.0;
@@ -340,9 +342,9 @@ pub struct FormulaCompletion {
 pub struct PointRef {
     pub span: std::ops::Range<usize>,
     /// The fixed corner (moves with plain arrows; stays put with Shift).
-    pub anchor: (usize, usize),
+    pub anchor: Pos,
     /// The moving corner.
-    pub at: (usize, usize),
+    pub at: Pos,
 }
 
 impl CellEdit {
@@ -366,7 +368,7 @@ impl CellEdit {
     }
 
     /// Insert (or replace the pointed) reference text for `anchor`..`at`.
-    pub fn set_point(&mut self, anchor: (usize, usize), at: (usize, usize)) {
+    pub fn set_point(&mut self, anchor: Pos, at: Pos) {
         let text = if anchor == at {
             cell_name(at.0, at.1)
         } else {
@@ -514,9 +516,9 @@ impl CellEdit {
 #[derive(Debug, Clone)]
 pub struct GridView {
     /// `(row, col)` of the cursor cell.
-    pub cursor: (usize, usize),
+    pub cursor: Pos,
     /// The other corner of a range selection, when one is active.
-    pub anchor: Option<(usize, usize)>,
+    pub anchor: Option<Pos>,
     pub sel_kind: SelKind,
     /// Scroll offsets into the scrollable area (past frozen rows), unzoomed px.
     pub scroll_x: f64,
@@ -530,9 +532,9 @@ pub struct GridView {
     pub bar_visible: bool,
     /// Cells show formulas instead of their results (`grid-show-formulas`).
     pub show_formulas: bool,
-    /// Cells outlined by `grid-trace-precedents` / `-dependents`, as
-    /// `(r0, c0, r1, c1)` rectangles; cleared by the next command.
-    pub trace: Vec<(usize, usize, usize, usize)>,
+    /// Cells outlined by `grid-trace-precedents` / `-dependents`; cleared
+    /// by the next command.
+    pub trace: Vec<CellRange>,
     /// The cells-area viewport (excluding headers and the formula bar) in
     /// *screen* px, as last painted. Used to keep the cursor in view.
     pub viewport: (f64, f64),
@@ -559,6 +561,17 @@ impl Default for GridView {
     }
 }
 
+/// One column or row on screen: where it starts (screen px from the cells
+/// area's left or top edge) and how wide or tall it draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisibleLine {
+    pub idx: usize,
+    pub pos: f32,
+    pub size: f32,
+    /// A frozen row (drawn over the scrolled ones).
+    pub frozen: bool,
+}
+
 /// An inclusive cell rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellRange {
@@ -569,6 +582,32 @@ pub struct CellRange {
 }
 
 impl CellRange {
+    /// Just the cell `(r, c)`.
+    pub fn cell((r, c): Pos) -> Self {
+        Self {
+            r0: r,
+            c0: c,
+            r1: r,
+            c1: c,
+        }
+    }
+
+    /// From `(r0, c0, r1, c1)` bounds (as [`crate::formula::ast::Area::bounds`]
+    /// gives them).
+    pub fn from_bounds((r0, c0, r1, c1): (usize, usize, usize, usize)) -> Self {
+        Self { r0, c0, r1, c1 }
+    }
+
+    /// One cell only.
+    pub fn is_single(&self) -> bool {
+        self.r0 == self.r1 && self.c0 == self.c1
+    }
+
+    /// Every cell, row by row.
+    pub fn cells(self) -> impl Iterator<Item = Pos> {
+        (self.r0..=self.r1).flat_map(move |r| (self.c0..=self.c1).map(move |c| (r, c)))
+    }
+
     pub fn contains(&self, r: usize, c: usize) -> bool {
         (self.r0..=self.r1).contains(&r) && (self.c0..=self.c1).contains(&c)
     }
@@ -579,6 +618,14 @@ impl CellRange {
 
     pub fn cols(&self) -> usize {
         self.c1 - self.c0 + 1
+    }
+
+    /// The first and last row, or column, it spans.
+    pub fn span(&self, axis: refs::Axis) -> (usize, usize) {
+        match axis {
+            refs::Axis::Rows => (self.r0, self.r1),
+            refs::Axis::Cols => (self.c0, self.c1),
+        }
     }
 }
 
@@ -609,6 +656,21 @@ impl GridView {
             }
         }
         range
+    }
+
+    /// The rows' or the columns' geometry.
+    pub fn axis(&self, which: refs::Axis) -> &Axis {
+        match which {
+            refs::Axis::Rows => &self.rows,
+            refs::Axis::Cols => &self.cols,
+        }
+    }
+
+    pub fn axis_mut(&mut self, which: refs::Axis) -> &mut Axis {
+        match which {
+            refs::Axis::Rows => &mut self.rows,
+            refs::Axis::Cols => &mut self.cols,
+        }
     }
 
     /// Zoomed size of column `c` / row `r`, in screen px.
@@ -709,6 +771,65 @@ impl GridView {
         self.clamp_scroll();
     }
 
+    /// The columns on screen across `width` screen px of cells area, left
+    /// to right (hidden ones skipped).
+    pub fn visible_cols(&self, width: f32) -> Vec<VisibleLine> {
+        let mut out = Vec::new();
+        let mut c = self.col_at(0.0);
+        loop {
+            let x = self.col_x(c) as f32;
+            if x >= width || c >= MAX_INDEX {
+                break;
+            }
+            let w = self.col_px(c) as f32;
+            if w > 0.0 {
+                out.push(VisibleLine {
+                    idx: c,
+                    pos: x,
+                    size: w,
+                    frozen: false,
+                });
+            }
+            c = self.cols.next_visible(c + 1);
+        }
+        out
+    }
+
+    /// The rows on screen down `height` screen px of cells area: the
+    /// frozen ones first, then the scrolled ones (hidden ones skipped).
+    pub fn visible_rows(&self, height: f32) -> Vec<VisibleLine> {
+        let mut out = Vec::new();
+        let mut push = |r: usize, y: f32, frozen: bool| {
+            let h = self.row_px(r) as f32;
+            if h > 0.0 {
+                out.push(VisibleLine {
+                    idx: r,
+                    pos: y,
+                    size: h,
+                    frozen,
+                });
+            }
+        };
+        for r in 0..self.frozen_rows {
+            let y = self.row_y(r) as f32;
+            if y >= height {
+                break; // the rest of the frozen band is off screen
+            }
+            push(r, y, true);
+        }
+        let mut r = self.top_row();
+        loop {
+            let y = self.row_y(r) as f32;
+            if y >= height || r >= MAX_INDEX {
+                break;
+            }
+            push(r, y, false);
+            // Skips a filter's hidden rows in one jump, however many.
+            r = self.rows.next_visible(r + 1);
+        }
+        out
+    }
+
     /// Step the zoom one preset up (`dir > 0`) or down.
     pub fn step_zoom(&mut self, dir: i32) {
         let i = ZOOM_STEPS
@@ -746,6 +867,21 @@ pub fn parse_cell_name(s: &str) -> Option<(usize, usize)> {
 /// A `(row, col)` cell position.
 pub type Pos = (usize, usize);
 
+/// `p`'s coordinate along `axis`: its row or its column.
+pub fn coord(p: Pos, axis: refs::Axis) -> usize {
+    match axis {
+        refs::Axis::Rows => p.0,
+        refs::Axis::Cols => p.1,
+    }
+}
+
+pub fn coord_mut(p: &mut Pos, axis: refs::Axis) -> &mut usize {
+    match axis {
+        refs::Axis::Rows => &mut p.0,
+        refs::Axis::Cols => &mut p.1,
+    }
+}
+
 /// Parse an address or range: `C7`, `B2:D9`. A range returns both corners.
 pub fn parse_address(s: &str) -> Option<(Pos, Option<Pos>)> {
     match s.split_once(':') {
@@ -756,7 +892,7 @@ pub fn parse_address(s: &str) -> Option<(Pos, Option<Pos>)> {
 
 /// Name of a range for the name box: `C7` alone, `B2:D9` for a rectangle.
 pub fn range_name(range: &CellRange) -> String {
-    if range.r0 == range.r1 && range.c0 == range.c1 {
+    if range.is_single() {
         cell_name(range.r0, range.c0)
     } else {
         format!(
@@ -1084,6 +1220,57 @@ mod tests {
             parse_clipboard_block("a,b\tc", b','),
             vec![vec!["a,b", "c"]]
         );
+    }
+
+    #[test]
+    fn visible_lines_skip_hidden_and_put_frozen_rows_first() {
+        let mut v = GridView {
+            frozen_rows: 1,
+            scroll_y: 40.0,
+            ..GridView::default()
+        };
+        v.cols.set_hidden(1, true);
+        let line = |idx, pos, size, frozen| VisibleLine {
+            idx,
+            pos,
+            size,
+            frozen,
+        };
+        assert_eq!(
+            v.visible_cols(200.0),
+            [
+                line(0, 0.0, 64.0, false),
+                line(2, 64.0, 64.0, false),
+                line(3, 128.0, 64.0, false),
+                line(4, 192.0, 64.0, false),
+            ]
+        );
+        // Row 0 frozen at the top; the scroll starts the rest at row 3.
+        assert_eq!(
+            v.visible_rows(70.0),
+            [
+                line(0, 0.0, 20.0, true),
+                line(3, 20.0, 20.0, false),
+                line(4, 40.0, 20.0, false),
+                line(5, 60.0, 20.0, false),
+            ]
+        );
+        v.zoom = 2.0;
+        assert_eq!(v.visible_rows(30.0), [line(0, 0.0, 40.0, true)]);
+    }
+
+    #[test]
+    fn cell_range_cells() {
+        let r = CellRange::from_bounds((1, 2, 2, 3));
+        assert!(!r.is_single());
+        assert_eq!(
+            r.cells().collect::<Vec<_>>(),
+            [(1, 2), (1, 3), (2, 2), (2, 3)]
+        );
+        let one = CellRange::cell((4, 5));
+        assert!(one.is_single());
+        assert_eq!(one.cells().collect::<Vec<_>>(), [(4, 5)]);
+        assert_eq!(range_name(&one), "F5");
     }
 
     #[test]

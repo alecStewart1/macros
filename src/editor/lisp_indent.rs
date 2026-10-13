@@ -74,6 +74,57 @@ fn lisp_form_indents_body(head: &str) -> bool {
     )
 }
 
+/// A cursor over the scanned text that tracks the column of the char it is on
+/// (a newline starts column 0 on the next line).
+struct Scanner {
+    chars: Vec<char>,
+    i: usize,
+    col: usize,
+}
+
+impl Scanner {
+    /// The char `ahead` places past the current one.
+    fn peek_at(&self, ahead: usize) -> Option<char> {
+        self.chars.get(self.i + ahead).copied()
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.peek_at(0)
+    }
+
+    /// Whether the next two chars are `a` then `b`.
+    fn at(&self, a: char, b: char) -> bool {
+        self.peek() == Some(a) && self.peek_at(1) == Some(b)
+    }
+
+    /// Step over one char (a no-op at the end), keeping the column in step.
+    fn bump(&mut self) {
+        if let Some(c) = self.peek() {
+            self.col = if c == '\n' { 0 } else { self.col + 1 };
+            self.i += 1;
+        }
+    }
+
+    fn bump_n(&mut self, n: usize) {
+        for _ in 0..n {
+            self.bump();
+        }
+    }
+
+    /// Step over spaces and tabs.
+    fn skip_blanks(&mut self) {
+        while matches!(self.peek(), Some(' ' | '\t')) {
+            self.bump();
+        }
+    }
+
+    /// Whether the scanner sits at the end of meaningful content on its line
+    /// (see [`lisp_line_end`]).
+    fn at_line_end(&self) -> bool {
+        lisp_line_end(&self.chars, self.i)
+    }
+}
+
 /// Target indentation column for a line whose preceding text — from the start
 /// of the enclosing top-level form (a line beginning at column 0) up to the
 /// insertion point — is `text`. A pragmatic Lisp indenter: continuation lines
@@ -82,109 +133,65 @@ fn lisp_form_indents_body(head: &str) -> bool {
 /// `tab-width` option the tree-sitter languages use). Strings, line and block
 /// comments, and char literals are skipped so their parens don't count.
 pub(super) fn lisp_indent_for(text: &str, tab_width: usize) -> usize {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
+    let mut s = Scanner {
+        chars: text.chars().collect(),
+        i: 0,
+        col: 0,
+    };
     // Open delimiters still unclosed at the end: (column, char-index just past
     // it, delimiter char).
     let mut stack: Vec<(usize, usize, char)> = Vec::new();
-    let mut i = 0usize;
-    let mut col = 0usize;
-    while i < n {
-        match chars[i] {
-            '\n' => {
-                col = 0;
-                i += 1;
-            }
+    while let Some(ch) = s.peek() {
+        match ch {
             ';' => {
-                while i < n && chars[i] != '\n' {
-                    i += 1; // leave the '\n' to reset col on the next pass
+                // Leave the '\n' to reset the column on the next pass.
+                while s.peek().is_some_and(|c| c != '\n') {
+                    s.bump();
                 }
             }
             '"' => {
-                i += 1;
-                col += 1;
-                while i < n {
-                    match chars[i] {
-                        '\\' => {
-                            i += 1;
-                            col += 1;
-                            if i < n {
-                                if chars[i] == '\n' {
-                                    col = 0;
-                                } else {
-                                    col += 1;
-                                }
-                                i += 1;
-                            }
-                        }
+                s.bump();
+                while let Some(c) = s.peek() {
+                    match c {
+                        // The escape and the char it escapes.
+                        '\\' => s.bump_n(2),
                         '"' => {
-                            i += 1;
-                            col += 1;
+                            s.bump();
                             break;
                         }
-                        '\n' => {
-                            col = 0;
-                            i += 1;
-                        }
-                        _ => {
-                            col += 1;
-                            i += 1;
-                        }
+                        _ => s.bump(),
                     }
                 }
             }
-            '#' if i + 1 < n && chars[i + 1] == '\\' => {
-                // Char literal `#\x` — the `#`, the `\`, and the literal char
-                // are skipped (trailing letters of a named char like `#\space`
-                // are harmless symbol chars that hold no parens).
-                i += 2;
-                col += 2;
-                if i < n {
-                    if chars[i] == '\n' {
-                        col = 0;
-                    } else {
-                        col += 1;
-                    }
-                    i += 1;
-                }
-            }
-            '#' if i + 1 < n && chars[i + 1] == '|' => {
+            // Char literal `#\x` — the `#`, the `\`, and the literal char are
+            // skipped (trailing letters of a named char like `#\space` are
+            // harmless symbol chars that hold no parens).
+            '#' if s.at('#', '\\') => s.bump_n(3),
+            '#' if s.at('#', '|') => {
                 // Nestable block comment `#| ... |#`.
-                i += 2;
-                col += 2;
+                s.bump_n(2);
                 let mut depth = 1usize;
-                while i < n && depth > 0 {
-                    if chars[i] == '#' && i + 1 < n && chars[i + 1] == '|' {
+                while depth > 0 && s.peek().is_some() {
+                    if s.at('#', '|') {
                         depth += 1;
-                        i += 2;
-                        col += 2;
-                    } else if chars[i] == '|' && i + 1 < n && chars[i + 1] == '#' {
+                        s.bump_n(2);
+                    } else if s.at('|', '#') {
                         depth -= 1;
-                        i += 2;
-                        col += 2;
-                    } else if chars[i] == '\n' {
-                        col = 0;
-                        i += 1;
+                        s.bump_n(2);
                     } else {
-                        col += 1;
-                        i += 1;
+                        s.bump();
                     }
                 }
             }
             '(' | '[' | '{' => {
-                stack.push((col, i + 1, chars[i]));
-                i += 1;
-                col += 1;
+                stack.push((s.col, s.i + 1, ch));
+                s.bump();
             }
             ')' | ']' | '}' => {
                 stack.pop();
-                i += 1;
-                col += 1;
+                s.bump();
             }
-            _ => {
-                i += 1;
-                col += 1;
-            }
+            _ => s.bump(),
         }
     }
 
@@ -194,42 +201,36 @@ pub(super) fn lisp_indent_for(text: &str, tab_width: usize) -> usize {
 
     // Walk from just past the opener to the head token / first argument,
     // tracking columns. The char at `after` sits at column open_col + 1.
-    let mut j = after;
-    let mut c = open_col + 1;
-    while j < n && (chars[j] == ' ' || chars[j] == '\t') {
-        j += 1;
-        c += 1;
-    }
+    s.i = after;
+    s.col = open_col + 1;
+    s.skip_blanks();
     // Nothing but a comment after the opener on its line → indent one past it.
-    if lisp_line_end(&chars, j) {
+    if s.at_line_end() {
         return open_col + 1;
     }
     // Data lists / vectors, or a list used as the head, align under the first
     // element rather than applying special-form rules.
-    if open != '(' || matches!(chars[j], '(' | '[' | '{') {
-        return c;
+    if open != '(' || matches!(s.peek(), Some('(' | '[' | '{')) {
+        return s.col;
     }
-    let head_start = j;
-    while j < n
-        && !chars[j].is_whitespace()
-        && !matches!(chars[j], '(' | ')' | '[' | ']' | '{' | '}')
+    let head_start = s.i;
+    while s
+        .peek()
+        .is_some_and(|c| !c.is_whitespace() && !matches!(c, '(' | ')' | '[' | ']' | '{' | '}'))
     {
-        j += 1;
-        c += 1;
+        s.bump();
     }
-    if lisp_form_indents_body(&chars[head_start..j].iter().collect::<String>()) {
+    let head: String = s.chars[head_start..s.i].iter().collect();
+    if lisp_form_indents_body(&head) {
         return open_col + tab_width;
     }
     // Function call: align under the first argument when it shares the head's
     // line; otherwise one past the opener.
-    while j < n && (chars[j] == ' ' || chars[j] == '\t') {
-        j += 1;
-        c += 1;
-    }
-    if lisp_line_end(&chars, j) {
+    s.skip_blanks();
+    if s.at_line_end() {
         return open_col + 1;
     }
-    c
+    s.col
 }
 
 /// Whether position `j` in `chars` is the end of meaningful content on its line:
@@ -251,12 +252,8 @@ impl Editor {
         let mut i = self.active.buffer.line_index_at_byte(pos);
         loop {
             let range = self.active.buffer.line_range(i);
-            if self
-                .active
-                .buffer
-                .slice_to_string(range.clone())
-                .starts_with('(')
-            {
+            // `(` is ASCII: test the line's first byte, no string needed.
+            if !range.is_empty() && self.active.buffer.rope().byte(range.start) == b'(' {
                 return range.start;
             }
             if i == 0 {

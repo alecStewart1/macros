@@ -131,8 +131,9 @@ pub struct MakeProcessArgs {
 
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
-    /// A grid-buffer command (scheme/grid.scm); see [`crate::grid::cmd`].
-    Grid(crate::grid::cmd::GridCmd),
+    /// A grid-buffer command (scheme/grid.scm), with the count or `C-u`
+    /// flag its key carried; see [`crate::grid::cmd`].
+    Grid(crate::grid::cmd::GridInvocation),
     /// `(grid-extensions '("csv" …))`: extensions that open as a grid.
     GridExtensions(Vec<String>),
     /// `(grid-goto-address "C7")`: move the grid cursor (or select a range).
@@ -362,12 +363,12 @@ pub enum EditorCommand {
     /// `workspace/symbol` for the given query (read via `read-string`).
     LspWorkspaceSymbol(String),
     /// Generic LSP bridge: send `method` with params built from `kind`
-    /// ("position"|"document"|"range"|"region"|"positions"|"raw") merged with
-    /// `params` (a JSON object string), delivering the result JSON to Steel fn
-    /// `callback`. This exposes the whole protocol to Scheme.
+    /// (parsed from "position"|"document"|"range"|"region"|"positions"|"raw")
+    /// merged with `params` (a JSON object string), delivering the result JSON
+    /// to Steel fn `callback`. This exposes the whole protocol to Scheme.
     LspRequest {
         method: String,
-        kind: String,
+        kind: crate::lsp::ParamsKind,
         params: String,
         callback: String,
     },
@@ -621,8 +622,10 @@ pub enum EditorCommand {
     /// anywhere in the subtree under a watched root fires `directory-changed-hook`
     /// with the changed root. For magit watching a whole repo. Replace semantics.
     WatchTree(String, Vec<String>),
-    /// Configure a language server: `(set-lsp "rust" "rust-analyzer")`.
-    SetLsp(String, String),
+    /// Configure a language server: `(set-lsp "rust" "rust-analyzer")`. The
+    /// env overrides in effect at the call (`with-process-env`) are captured
+    /// and applied whenever the server is spawned, like `dap-start`.
+    SetLsp(String, String, EnvOverrides),
     /// Map a file extension to a server key / config language:
     /// `(set-extension "rs" "rust")`.
     SetExtension(String, String),
@@ -681,20 +684,16 @@ pub enum EditorCommand {
     /// Render `text` into a read-only buffer `name` with major mode `mode` and
     /// per-line faces `(line, face)`, switching to it (creating it if needed,
     /// refreshing in place — point preserved — if already shown).
+    ///
+    /// With `quiet`, refresh the buffer wherever it already lives without
+    /// switching to it or moving focus — the auto-refresh path for the
+    /// dired-sidebar/dired view when a watched directory changes on disk.
     RenderBuffer {
         name: String,
         mode: String,
         text: String,
         line_faces: Vec<(usize, String)>,
-    },
-    /// Like [`RenderBuffer`], but refresh the buffer wherever it already lives
-    /// without switching to it or moving focus — the auto-refresh path for the
-    /// dired-sidebar/dired view when a watched directory changes on disk.
-    RenderBufferQuiet {
-        name: String,
-        mode: String,
-        text: String,
-        line_faces: Vec<(usize, String)>,
+        quiet: bool,
     },
     /// Move point to the start of (0-based) line `n` in the active buffer.
     GotoLine(usize),

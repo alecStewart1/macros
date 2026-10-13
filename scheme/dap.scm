@@ -57,9 +57,9 @@
 (define (dap--changed) (for-each (lambda (p) (p)) *dap-on-change*))
 
 ;; --- small JSON helpers (string->jsexpr hashes key by symbol) -----------------
-(define (dap--get o k) (if (hash? o) (hash-try-get o k) #f))
+(define dap--get json-get)
 (define (dap--str o k) (let ((v (dap--get o k))) (if (string? v) v "")))
-(define (dap--int x) (if (number? x) (exact (round x)) 0))
+(define dap--int json-int)
 (define (dap--list x) (if (list? x) x '()))
 (define (dap--truncate s n)
   (if (> (string-length s) n) (string-append (substring s 0 n) "…") s))
@@ -74,14 +74,7 @@
 (define (dap--buffer-truename) (dap--truename (buffer-file-name)))
 
 ;; The name of an open buffer visiting `path` (compared by truename), or #f.
-(define (dap--buffer-visiting path)
-  (let ((tn (dap--truename path)))
-    (let loop ((names (buffer-names)))
-      (cond ((null? names) #f)
-            ((let ((f (buffer-file-name-of (car names))))
-               (and (not (equal? f "")) (equal? (dap--truename f) tn)))
-             (car names))
-            (else (loop (cdr names)))))))
+(define (dap--buffer-visiting path) (find-buffer-visiting path))
 
 ;; Show `path` at 1-based `line`, optionally painting the stopped-line face.
 ;; An already-open buffer is switched to (its own window if it has one) and
@@ -183,12 +176,9 @@
 (define *dap-adapters* '())
 (define (dap-register-adapter id exts start launch)
   (set! *dap-adapters*
-        (cons (list id exts start launch)
-              (filter (lambda (a) (not (equal? (car a) id))) *dap-adapters*))))
+        (alist-set *dap-adapters* id (list exts start launch))))
 
-(define (dap--file-ext path)
-  (let ((m (regexp-captures "\\.([A-Za-z0-9]+)$" path)))
-    (if (null? m) "" (nth m 1))))
+(define (dap--file-ext path) (file-extension path))
 
 (define (dap--adapter-for path)
   (let ((ext (dap--file-ext path)))
@@ -348,7 +338,7 @@
 
 (define (dap--note-verified path results)
   (set! *dap-bp-unverified*
-        (filter (lambda (pl) (not (equal? (car pl) path))) *dap-bp-unverified*))
+        (alist-remove *dap-bp-unverified* path))
   (let loop ((bps (dap--bps-for path)) (rs results))
     (when (and (not (null? bps)) (not (null? rs)))
       (when (not (dap--get (car rs) 'verified))

@@ -18,21 +18,52 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::args::{Area, SHEET_COLS, SHEET_ROWS, area, def, opt_bool, opt_int, trunc_i64};
-use super::{Arg, Ctx, FuncDef, RangeRef, num, scalar};
+use super::args::{Area, area, def, given, int, opt_bool, opt_int, opt_num, positive};
+use super::{Arg, Ctx, FuncDef, RangeRef, scalar};
+use crate::a1::{MAX_COLS, MAX_ROWS};
 use crate::formula::criteria::{Pattern, fold, has_wildcards};
 use crate::formula::value::{ErrorKind, Value, cmp_text};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("VLOOKUP", 3, 4, vlookup),
-    def("HLOOKUP", 3, 4, hlookup),
-    def("XLOOKUP", 3, 6, xlookup),
-    def("MATCH", 2, 3, match_),
-    def("INDEX", 2, 4, index),
-    def("ROW", 0, 1, row),
-    def("COLUMN", 0, 1, column),
-    def("ROWS", 1, 1, rows),
-    def("COLUMNS", 1, 1, columns),
+    def!(
+        "VLOOKUP",
+        3,
+        4,
+        vlookup,
+        "lookup_value, table_array, col_index_num, [range_lookup]"
+    ),
+    def!(
+        "HLOOKUP",
+        3,
+        4,
+        hlookup,
+        "lookup_value, table_array, row_index_num, [range_lookup]"
+    ),
+    def!(
+        "XLOOKUP",
+        3,
+        6,
+        xlookup,
+        "lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode]"
+    ),
+    def!(
+        "MATCH",
+        2,
+        3,
+        match_,
+        "lookup_value, lookup_array, [match_type]"
+    ),
+    def!(
+        "INDEX",
+        2,
+        4,
+        index,
+        "array, row_num, [column_num], [area_num]"
+    ),
+    def!("ROW", 0, 1, row, "[reference]"),
+    def!("COLUMN", 0, 1, column, "[reference]"),
+    def!("ROWS", 1, 1, rows, "array"),
+    def!("COLUMNS", 1, 1, columns, "array"),
 ];
 
 /// A normalised exact-match key: numbers by value (`-0` is `0`), text
@@ -47,11 +78,16 @@ pub enum Key {
 impl Key {
     pub fn of(v: &Value) -> Option<Key> {
         match v {
-            Value::Number(n) => Some(Key::Num(if *n == 0.0 { 0 } else { n.to_bits() })),
+            Value::Number(n) => Some(Key::num(*n)),
             Value::Text(s) => Some(Key::Text(s.chars().map(fold).collect())),
             Value::Bool(b) => Some(Key::Bool(*b)),
             Value::Empty | Value::Error(_) => None,
         }
+    }
+
+    /// A number's key (`-0` and `0` are one key).
+    pub fn num(n: f64) -> Key {
+        Key::Num(if n == 0.0 { 0 } else { n.to_bits() })
     }
 }
 
@@ -213,131 +249,200 @@ fn find_sorted(ctx: &dyn Ctx, vec: &Area, needle: &Value, descending: bool) -> O
     best
 }
 
-fn vlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn vlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
     table_lookup(args, ctx, false)
 }
 
-fn hlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn hlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
     table_lookup(args, ctx, true)
 }
 
 /// VLOOKUP (search the first column, return from column `k`) and HLOOKUP
 /// (first row, row `k`).
-fn table_lookup(args: &[Arg], ctx: &mut dyn Ctx, horizontal: bool) -> Value {
-    let r = (|| {
-        let needle = needle(&args[0], ctx)?;
-        let table = area(&args[1], ctx)?;
-        let k = trunc_i64(num(&args[2], ctx)?)?;
-        let approx = opt_bool(args.get(3), ctx, true)?;
-        let span = if horizontal {
-            table.rows()
-        } else {
-            table.cols()
-        };
-        if k < 1 {
-            return Err(ErrorKind::Value);
-        }
-        if k as usize > span {
-            return Err(ErrorKind::Ref);
-        }
-        let keys = if horizontal {
-            table.sub(0, 0, 1, table.cols())
-        } else {
-            table.sub(0, 0, table.rows(), 1)
-        };
-        let i = if approx {
-            find_sorted(&*ctx, &keys, &needle, false)
-        } else {
-            find_exact(ctx, &keys, &needle, true, false)
-        }
-        .ok_or(ErrorKind::NA)?;
-        let k = k as usize - 1;
-        Ok(if horizontal {
-            table.get(&*ctx, k, i)
-        } else {
-            table.get(&*ctx, i, k)
-        })
-    })();
-    r.unwrap_or_else(Value::Error)
+fn table_lookup(args: &[Arg], ctx: &mut dyn Ctx, horizontal: bool) -> Result<Value, ErrorKind> {
+    let needle = needle(&args[0], ctx)?;
+    let table = area(&args[1], ctx)?;
+    let k = int(&args[2], ctx)?;
+    let approx = opt_bool(args.get(3), ctx, true)?;
+    let span = if horizontal {
+        table.rows()
+    } else {
+        table.cols()
+    };
+    let k = positive(k)?;
+    if k > span {
+        return Err(ErrorKind::Ref);
+    }
+    let keys = if horizontal {
+        table.sub(0, 0, 1, table.cols())
+    } else {
+        table.sub(0, 0, table.rows(), 1)
+    };
+    let i = if approx {
+        find_sorted(&*ctx, &keys, &needle, false)
+    } else {
+        find_exact(ctx, &keys, &needle, true, false)
+    }
+    .ok_or(ErrorKind::NA)?;
+    let k = k - 1;
+    Ok(if horizontal {
+        table.get(&*ctx, k, i)
+    } else {
+        table.get(&*ctx, i, k)
+    })
 }
 
-/// `MATCH(value, vector, [type])`: type 1 (default) the last value ≤ in
-/// ascending data, 0 exact (with wildcards), -1 the last value ≥ in
-/// descending data. A 2-D lookup array is `#N/A`.
-fn match_(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let r = (|| {
-        let needle = needle(&args[0], ctx)?;
-        let vec = area(&args[1], ctx)?;
-        let t = super::args::opt_num(args.get(2), ctx, 1.0)?;
-        if !vec.is_vector() {
-            return Err(ErrorKind::NA);
-        }
-        let i = if t == 0.0 {
-            find_exact(ctx, &vec, &needle, true, false)
+/// MATCH's `match_type`: its sign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchType {
+    /// Positive (the default 1): the last value ≤ in ascending data.
+    LessOrEqual,
+    /// 0: an exact match, with wildcards.
+    Exact,
+    /// Negative: the last value ≥ in descending data.
+    GreaterOrEqual,
+}
+
+impl From<f64> for MatchType {
+    fn from(t: f64) -> MatchType {
+        if t == 0.0 {
+            MatchType::Exact
+        } else if t < 0.0 {
+            MatchType::GreaterOrEqual
         } else {
-            find_sorted(&*ctx, &vec, &needle, t < 0.0)
-        };
-        i.map(|i| Value::Number((i + 1) as f64))
-            .ok_or(ErrorKind::NA)
-    })();
-    r.unwrap_or_else(Value::Error)
+            MatchType::LessOrEqual
+        }
+    }
+}
+
+/// `MATCH(value, vector, [type])` (see [`MatchType`]). A 2-D lookup array
+/// is `#N/A`.
+fn match_(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
+    let needle = needle(&args[0], ctx)?;
+    let vec = area(&args[1], ctx)?;
+    let t = MatchType::from(opt_num(args.get(2), ctx, 1.0)?);
+    if !vec.is_vector() {
+        return Err(ErrorKind::NA);
+    }
+    let i = match t {
+        MatchType::Exact => find_exact(ctx, &vec, &needle, true, false),
+        MatchType::LessOrEqual => find_sorted(&*ctx, &vec, &needle, false),
+        MatchType::GreaterOrEqual => find_sorted(&*ctx, &vec, &needle, true),
+    };
+    i.map(|i| Value::Number((i + 1) as f64))
+        .ok_or(ErrorKind::NA)
+}
+
+/// XLOOKUP's `match_mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchMode {
+    /// 0 (the default): exact only.
+    Exact,
+    /// -1: exact, else the next smaller value.
+    NextSmaller,
+    /// 1: exact, else the next larger value.
+    NextLarger,
+    /// 2: `*`/`?`/`~` wildcards.
+    Wildcard,
+}
+
+impl TryFrom<i64> for MatchMode {
+    type Error = ErrorKind;
+
+    fn try_from(n: i64) -> Result<MatchMode, ErrorKind> {
+        match n {
+            0 => Ok(MatchMode::Exact),
+            -1 => Ok(MatchMode::NextSmaller),
+            1 => Ok(MatchMode::NextLarger),
+            2 => Ok(MatchMode::Wildcard),
+            _ => Err(ErrorKind::Value),
+        }
+    }
+}
+
+/// XLOOKUP's `search_mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchMode {
+    /// 1 (the default): first to last.
+    First,
+    /// -1: last to first.
+    Last,
+    /// 2: binary search over ascending data.
+    Ascending,
+    /// -2: binary search over descending data.
+    Descending,
+}
+
+impl TryFrom<i64> for SearchMode {
+    type Error = ErrorKind;
+
+    fn try_from(n: i64) -> Result<SearchMode, ErrorKind> {
+        match n {
+            1 => Ok(SearchMode::First),
+            -1 => Ok(SearchMode::Last),
+            2 => Ok(SearchMode::Ascending),
+            -2 => Ok(SearchMode::Descending),
+            _ => Err(ErrorKind::Value),
+        }
+    }
 }
 
 /// `XLOOKUP(value, lookup, return, [if_not_found], [match_mode],
 /// [search_mode])`. v1 returns one value: with a 2-D return array, the
 /// first cell of the matched row (or column).
-fn xlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let r = (|| {
-        let needle = needle(&args[0], ctx)?;
-        let look = area(&args[1], ctx)?;
-        let ret = area(&args[2], ctx)?;
-        let match_mode = opt_int(args.get(4), ctx, 0)?;
-        let search_mode = opt_int(args.get(5), ctx, 1)?;
-        if !look.is_vector()
-            || !matches!(match_mode, -1..=2)
-            || !matches!(search_mode, -2 | -1 | 1 | 2)
-        {
-            return Err(ErrorKind::Value);
-        }
-        let vertical = look.cols() == 1;
-        let n = look.len();
-        if (vertical && ret.rows() != n) || (!vertical && ret.cols() != n) {
-            return Err(ErrorKind::Value);
-        }
-        let found = match search_mode {
-            1 | -1 => xlinear(ctx, &look, &needle, match_mode, search_mode == -1),
-            _ => xbinary(&*ctx, &look, &needle, match_mode, search_mode == -2),
-        };
-        match found {
-            Some(i) => Ok(if vertical {
-                ret.get(&*ctx, i, 0)
-            } else {
-                ret.get(&*ctx, 0, i)
-            }),
-            None => match args.get(3) {
-                None | Some(Arg::Omitted) => Err(ErrorKind::NA),
-                Some(a) => Ok(scalar(a, ctx)),
-            },
-        }
-    })();
-    r.unwrap_or_else(Value::Error)
+fn xlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
+    let needle = needle(&args[0], ctx)?;
+    let look = area(&args[1], ctx)?;
+    let ret = area(&args[2], ctx)?;
+    let match_mode = opt_int(args.get(4), ctx, 0)?;
+    let search_mode = opt_int(args.get(5), ctx, 1)?;
+    if !look.is_vector() {
+        return Err(ErrorKind::Value);
+    }
+    let match_mode = MatchMode::try_from(match_mode)?;
+    let search_mode = SearchMode::try_from(search_mode)?;
+    let vertical = look.cols() == 1;
+    let n = look.len();
+    if (vertical && ret.rows() != n) || (!vertical && ret.cols() != n) {
+        return Err(ErrorKind::Value);
+    }
+    let found = match search_mode {
+        SearchMode::First => xlinear(ctx, &look, &needle, match_mode, false),
+        SearchMode::Last => xlinear(ctx, &look, &needle, match_mode, true),
+        SearchMode::Ascending => xbinary(&*ctx, &look, &needle, match_mode, false),
+        SearchMode::Descending => xbinary(&*ctx, &look, &needle, match_mode, true),
+    };
+    match found {
+        Some(i) => Ok(if vertical {
+            ret.get(&*ctx, i, 0)
+        } else {
+            ret.get(&*ctx, 0, i)
+        }),
+        None => match given(args.get(3)) {
+            None => Err(ErrorKind::NA),
+            Some(a) => Ok(scalar(a, ctx)),
+        },
+    }
 }
 
 fn xlinear(
     ctx: &mut dyn Ctx,
     look: &Area,
     needle: &Value,
-    mode: i64,
+    mode: MatchMode,
     reverse: bool,
 ) -> Option<usize> {
-    if let Some(i) = find_exact(ctx, look, needle, mode == 2, reverse) {
+    let wildcards = mode == MatchMode::Wildcard;
+    if let Some(i) = find_exact(ctx, look, needle, wildcards, reverse) {
         return Some(i);
     }
-    if mode == 0 || mode == 2 {
-        return None;
-    }
-    // Next smaller (-1) or next larger (1): the closest same-typed value,
-    // the first one met in search order on ties.
+    let smaller = match mode {
+        MatchMode::Exact | MatchMode::Wildcard => return None,
+        MatchMode::NextSmaller => true,
+        MatchMode::NextLarger => false,
+    };
+    // Next smaller or next larger: the closest same-typed value, the first
+    // one met in search order on ties.
     let (r, c) = look.data_dims(&*ctx);
     let vals = if look.cols() == 1 {
         look.window(&*ctx, r, 1)
@@ -356,7 +461,7 @@ fn xlinear(
             continue;
         }
         let o = cmp_same(v, needle);
-        let side_ok = if mode < 0 {
+        let side_ok = if smaller {
             o == Ordering::Less
         } else {
             o == Ordering::Greater
@@ -368,7 +473,7 @@ fn xlinear(
             None => true,
             Some(b) => {
                 let ob = cmp_same(v, &vals[b]);
-                if mode < 0 {
+                if smaller {
                     ob == Ordering::Greater
                 } else {
                     ob == Ordering::Less
@@ -386,7 +491,7 @@ fn xbinary(
     ctx: &dyn Ctx,
     look: &Area,
     needle: &Value,
-    mode: i64,
+    mode: MatchMode,
     descending: bool,
 ) -> Option<usize> {
     let j = find_sorted(ctx, look, needle, descending);
@@ -394,7 +499,7 @@ fn xbinary(
     if exact.is_some() {
         return exact;
     }
-    if mode == 2 {
+    if mode == MatchMode::Wildcard {
         // Wildcards aren't valid with binary search: fall back to a scan.
         return if let Value::Text(t) = needle {
             let pat = Pattern::new(t);
@@ -412,9 +517,13 @@ fn xbinary(
         |from: usize| (from..look.len()).find(|&i| same_type(&look.vget(ctx, i), needle));
     // Ascending: j is the last ≤ (next smaller); the next larger follows it.
     // Descending: j is the last ≥ (next larger); the next smaller follows it.
-    let toward_j = if descending { mode == 1 } else { mode == -1 };
+    let toward_j = if descending {
+        mode == MatchMode::NextLarger
+    } else {
+        mode == MatchMode::NextSmaller
+    };
     match (toward_j, j) {
-        (_, _) if mode == 0 => None,
+        (_, _) if mode == MatchMode::Exact => None,
         (true, j) => j,
         (false, Some(j)) => next_typed(j + 1),
         (false, None) => next_typed(0),
@@ -425,85 +534,83 @@ fn xbinary(
 /// column of 0 asks for a whole column or row, which would spill — v1 has
 /// no spilling, so that's `#VALUE!` unless the dimension is a single cell.
 /// Returns a value, not a reference (`INDEX(…):INDEX(…)` isn't supported).
-fn index(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let r = (|| {
-        if args.len() == 4 && !matches!(args[3], Arg::Omitted) && opt_int(args.get(3), ctx, 1)? != 1
-        {
-            return Err(ErrorKind::Ref);
+fn index(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
+    if let Some(a) = given(args.get(3))
+        && int(a, ctx)? != 1
+    {
+        return Err(ErrorKind::Ref);
+    }
+    // Whole-column references keep Excel's dimensions here.
+    let (rows, cols, base) = match &args[0] {
+        Arg::Range(rg) => {
+            ctx.extent(rg.sheet.as_deref()).ok_or(ErrorKind::Ref)?;
+            let rows = if rg.r1 == usize::MAX {
+                MAX_ROWS - rg.r0.min(MAX_ROWS - 1)
+            } else {
+                rg.rows()
+            };
+            let cols = if rg.c1 == usize::MAX {
+                MAX_COLS - rg.c0.min(MAX_COLS - 1)
+            } else {
+                rg.cols()
+            };
+            (rows, cols, None)
         }
-        // Whole-column references keep Excel's dimensions here.
-        let (rows, cols, base) = match &args[0] {
-            Arg::Range(rg) => {
-                ctx.extent(rg.sheet.as_deref()).ok_or(ErrorKind::Ref)?;
-                let rows = if rg.r1 == usize::MAX {
-                    SHEET_ROWS - rg.r0.min(SHEET_ROWS - 1)
-                } else {
-                    rg.rows()
-                };
-                let cols = if rg.c1 == usize::MAX {
-                    SHEET_COLS - rg.c0.min(SHEET_COLS - 1)
-                } else {
-                    rg.cols()
-                };
-                (rows, cols, None)
-            }
-            a => {
-                let ar = area(a, ctx)?;
-                (ar.rows(), ar.cols(), Some(ar))
-            }
-        };
-        let row_arg = opt_int(args.get(1), ctx, 0)?;
-        let col_given = matches!(args.get(2), Some(a) if !matches!(a, Arg::Omitted));
-        let col_arg = opt_int(args.get(2), ctx, 0)?;
-        let (mut r, mut c) = if !col_given && rows == 1 && cols > 1 {
-            // A single row: the one number picks the column.
-            (1, row_arg)
-        } else if !col_given && cols == 1 {
-            (row_arg, 1)
-        } else {
-            (row_arg, col_arg)
-        };
-        if r < 0 || c < 0 {
+        a => {
+            let ar = area(a, ctx)?;
+            (ar.rows(), ar.cols(), Some(ar))
+        }
+    };
+    let row_arg = opt_int(args.get(1), ctx, 0)?;
+    let col_given = given(args.get(2)).is_some();
+    let col_arg = opt_int(args.get(2), ctx, 0)?;
+    let (mut r, mut c) = if !col_given && rows == 1 && cols > 1 {
+        // A single row: the one number picks the column.
+        (1, row_arg)
+    } else if !col_given && cols == 1 {
+        (row_arg, 1)
+    } else {
+        (row_arg, col_arg)
+    };
+    if r < 0 || c < 0 {
+        return Err(ErrorKind::Value);
+    }
+    if r as usize > rows || c as usize > cols {
+        return Err(ErrorKind::Ref);
+    }
+    if r == 0 {
+        if rows != 1 {
             return Err(ErrorKind::Value);
         }
-        if r as usize > rows || c as usize > cols {
-            return Err(ErrorKind::Ref);
+        r = 1;
+    }
+    if c == 0 {
+        if cols != 1 {
+            return Err(ErrorKind::Value);
         }
-        if r == 0 {
-            if rows != 1 {
-                return Err(ErrorKind::Value);
-            }
-            r = 1;
-        }
-        if c == 0 {
-            if cols != 1 {
-                return Err(ErrorKind::Value);
-            }
-            c = 1;
-        }
-        let (r, c) = (r as usize - 1, c as usize - 1);
-        Ok(match (base, &args[0]) {
-            (Some(ar), _) => ar.get(&*ctx, r, c),
-            (None, Arg::Range(rg)) => ctx.cell(rg.sheet.as_deref(), rg.r0 + r, rg.c0 + c),
-            _ => Value::Error(ErrorKind::Value),
-        })
-    })();
-    r.unwrap_or_else(Value::Error)
+        c = 1;
+    }
+    let (r, c) = (r as usize - 1, c as usize - 1);
+    Ok(match (base, &args[0]) {
+        (Some(ar), _) => ar.get(&*ctx, r, c),
+        (None, Arg::Range(rg)) => ctx.cell(rg.sheet.as_deref(), rg.r0 + r, rg.c0 + c),
+        _ => Value::Error(ErrorKind::Value),
+    })
 }
 
 /// `ROW([ref])`: the 1-based row of the reference's top-left cell, or of
 /// the formula's own cell.
 fn row(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match args.first() {
-        None | Some(Arg::Omitted) => Value::Number((ctx.here().0 + 1) as f64),
+    match given(args.first()) {
+        None => Value::Number((ctx.here().0 + 1) as f64),
         Some(Arg::Range(r)) => Value::Number((r.r0 + 1) as f64),
         Some(_) => Value::Error(ErrorKind::Value),
     }
 }
 
 fn column(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match args.first() {
-        None | Some(Arg::Omitted) => Value::Number((ctx.here().1 + 1) as f64),
+    match given(args.first()) {
+        None => Value::Number((ctx.here().1 + 1) as f64),
         Some(Arg::Range(r)) => Value::Number((r.c0 + 1) as f64),
         Some(_) => Value::Error(ErrorKind::Value),
     }
@@ -513,7 +620,7 @@ fn column(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
 /// is 1,048,576).
 fn rows(args: &[Arg], _: &mut dyn Ctx) -> Value {
     Value::Number(match &args[0] {
-        Arg::Range(r) if r.r1 == usize::MAX => SHEET_ROWS.saturating_sub(r.r0),
+        Arg::Range(r) if r.r1 == usize::MAX => MAX_ROWS.saturating_sub(r.r0),
         Arg::Range(r) => r.rows(),
         Arg::Array(a) => a.rows,
         _ => 1,
@@ -522,7 +629,7 @@ fn rows(args: &[Arg], _: &mut dyn Ctx) -> Value {
 
 fn columns(args: &[Arg], _: &mut dyn Ctx) -> Value {
     Value::Number(match &args[0] {
-        Arg::Range(r) if r.c1 == usize::MAX => SHEET_COLS.saturating_sub(r.c0),
+        Arg::Range(r) if r.c1 == usize::MAX => MAX_COLS.saturating_sub(r.c0),
         Arg::Range(r) => r.cols(),
         Arg::Array(a) => a.cols,
         _ => 1,

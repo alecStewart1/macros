@@ -10,13 +10,13 @@ use regex::Regex;
 use super::*;
 
 /// Incremental-search (`C-s`) transient state, held in [`Editor::isearch`]
-/// only while an `Isearch` minibuffer is open. `forward` is the current
+/// only while an `Isearch` minibuffer is open. `dir` is the current
 /// direction (toggled by C-r/C-s), `origin` is where point was when the search
 /// began (restored on C-g), `from` is the offset the current attempt searches
 /// from, and `matched` is the range of the current hit (the base for the next
 /// repeat).
 pub(super) struct IsearchState {
-    pub(super) forward: bool,
+    pub(super) dir: Direction,
     pub(super) origin: usize,
     pub(super) from: usize,
     pub(super) matched: Option<Range<usize>>,
@@ -53,19 +53,18 @@ impl Editor {
     /// Start an incremental search. Reads a query in the minibuffer and matches
     /// it live (see `isearch_update`); `C-s`/`C-r` repeat, `RET` finishes leaving
     /// point on the match, and `C-g` aborts back to where the search began.
-    pub(super) fn isearch_start(&mut self, forward: bool, cx: &mut Context<Self>) {
+    pub(super) fn isearch_start(&mut self, dir: Direction, cx: &mut Context<Self>) {
         let point = self.point();
         self.isearch = Some(IsearchState {
-            forward,
+            dir,
             origin: point,
             from: point,
             matched: None,
         });
         self.search_query = None;
-        let prompt = if forward {
-            "I-search: "
-        } else {
-            "I-search backward: "
+        let prompt = match dir {
+            Direction::Forward => "I-search: ",
+            Direction::Backward => "I-search backward: ",
         };
         self.open_minibuffer(prompt, MinibufferPurpose::Isearch, "", cx);
     }
@@ -76,20 +75,20 @@ impl Editor {
         let Some(query) = self.minibuffer.as_ref().map(|mb| mb.input.clone()) else {
             return;
         };
-        let Some((forward, from)) = self.isearch.as_ref().map(|st| (st.forward, st.from)) else {
+        let Some((dir, from)) = self.isearch.as_ref().map(|st| (st.dir, st.from)) else {
             return;
         };
-        self.isearch_run(&query, forward, from, cx);
+        self.isearch_run(&query, dir, from, cx);
     }
 
-    /// `C-s` / `C-r` while searching: repeat in `forward`'s direction. An empty
+    /// `C-s` / `C-r` while searching: repeat in direction `dir`. An empty
     /// search string first recalls the previous one (Emacs `C-s C-s`); otherwise
     /// the search advances past the current match.
-    pub(super) fn isearch_repeat(&mut self, forward: bool, cx: &mut Context<Self>) {
+    pub(super) fn isearch_repeat(&mut self, dir: Direction, cx: &mut Context<Self>) {
         let Some(st) = self.isearch.as_mut() else {
             return;
         };
-        st.forward = forward;
+        st.dir = dir;
         let empty = self
             .minibuffer
             .as_ref()
@@ -98,18 +97,16 @@ impl Editor {
             if let Some(prev) = self.last_isearch.clone()
                 && let Some(mb) = self.minibuffer.as_mut()
             {
-                mb.input = prev;
-                mb.cursor = mb.input.len();
+                mb.set_input(prev);
             }
         } else if let Some(m) = st.matched.clone() {
             // Step off the current match so the next hit is a different one.
             // Backward from a match at byte 0 there's nothing before it: wrap
             // to the end so the search lands on the LAST match (saturating to
             // 0 would just find the same match again).
-            st.from = if forward {
-                m.start + 1
-            } else {
-                m.start.checked_sub(1).unwrap_or(usize::MAX)
+            st.from = match dir {
+                Direction::Forward => m.start + 1,
+                Direction::Backward => m.start.checked_sub(1).unwrap_or(usize::MAX),
             };
         }
         let from = self.isearch.as_ref().map_or(0, |st| st.from);
@@ -118,7 +115,7 @@ impl Editor {
             .as_ref()
             .map(|mb| mb.input.clone())
             .unwrap_or_default();
-        self.isearch_run(&query, forward, from, cx);
+        self.isearch_run(&query, dir, from, cx);
     }
 
     /// Find the next match of `query` from `from` in the given direction, wrapping
@@ -128,7 +125,7 @@ impl Editor {
     pub(super) fn isearch_run(
         &mut self,
         query: &str,
-        forward: bool,
+        dir: Direction,
         from: usize,
         cx: &mut Context<Self>,
     ) {
@@ -160,23 +157,25 @@ impl Editor {
             .filter(|m| m.end() > m.start())
             .map(|m| m.start()..m.end())
             .collect();
-        let found = if forward {
-            matches
+        let found = match dir {
+            Direction::Forward => matches
                 .iter()
                 .find(|m| m.start >= from)
                 .or_else(|| matches.first())
-                .cloned()
-        } else {
-            matches
+                .cloned(),
+            Direction::Backward => matches
                 .iter()
                 .rev()
                 .find(|m| m.start <= from)
                 .or_else(|| matches.last())
-                .cloned()
+                .cloned(),
         };
         match found {
             Some(m) => {
-                let target = if forward { m.end } else { m.start };
+                let target = match dir {
+                    Direction::Forward => m.end,
+                    Direction::Backward => m.start,
+                };
                 if let Some(st) = self.isearch.as_mut() {
                     st.matched = Some(m);
                 }

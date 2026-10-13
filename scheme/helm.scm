@@ -128,7 +128,7 @@
 ;; All lines become "N: text" candidates; Helm's fuzzy filter narrows them as
 ;; you type, and the action jumps to line N. Shared by helm-imenu.
 (define (buffer-lines-numbered)
-  (let loop ((lines (split-many (buffer-string) "\n")) (n 0) (acc '()))
+  (let loop ((lines (buffer-lines)) (n 0) (acc '()))
     (if (null? lines)
         (reverse acc)
         (loop (cdr lines) (+ n 1)
@@ -148,7 +148,7 @@
              line)))
     (if (null? m) #f (nth m 1))))
 (define (imenu-candidates)
-  (let loop ((lines (split-many (buffer-string) "\n")) (n 0) (acc '()))
+  (let loop ((lines (buffer-lines)) (n 0) (acc '()))
     (if (null? lines)
         (reverse acc)
         (let ((nm (imenu-name (car lines))))

@@ -449,99 +449,100 @@
 ;; Keymap — Normal (selection-first). Plain keys are commands here.
 ;; =====================================================================
 ;; motion
-(define-key "helix-normal" "h" 'helix-char-left)
-(define-key "helix-normal" "l" 'helix-char-right)
-(define-key "helix-normal" "j" 'helix-line-down)
-(define-key "helix-normal" "k" 'helix-line-up)
-(define-key "helix-normal" "w" 'helix-word-next)
-(define-key "helix-normal" "e" 'helix-word-end)
-(define-key "helix-normal" "b" 'helix-word-prev)
-(define-key "helix-normal" "0" 'helix-goto-line-start)
-(define-key "helix-normal" "$" 'helix-goto-line-end)
-(define-key "helix-normal" "x" 'helix-select-line)
-;; X — extend to whole lines WITHOUT growing downward. `x` grows a line per
-;; press; `X` just rounds the current selection out to line bounds, so pressing
-;; it repeatedly is idempotent (Helix's extend_to_line_bounds). They were the
-;; same command, which made `X` a second `x`.
-(define-key "helix-normal" "shift-x" 'helix-extend-to-line-bounds)
-(define-key "helix-normal" "%" 'helix-select-all)          ; % — select whole buffer
-(define-key "helix-normal" "f" 'helix-find-char-forward)   ; f/t/F/T — char find (selects)
-(define-key "helix-normal" "shift-f" 'helix-find-char-backward)
-(define-key "helix-normal" "t" 'helix-till-char-forward)
-(define-key "helix-normal" "shift-t" 'helix-till-char-backward)
-(define-key "helix-normal" "g g" 'helix-goto-top)     ; gg — top of file
-(define-key "helix-normal" "g e" 'helix-goto-bottom)  ; ge — bottom of file
-(define-key "helix-normal" "g h" 'helix-goto-line-start)
-(define-key "helix-normal" "g l" 'helix-goto-line-end)
-(define-key "helix-normal" "g s" 'helix-goto-first-nonblank) ; gs — first non-blank
-(define-key "helix-normal" "g w" 'avy-goto-char)      ; gw — jump by char (avy)
-(define-key "helix-normal" "g q" 'helix-reflow)       ; gq — reflow selected lines (:reflow)
-;; selection management
-(define-key "helix-normal" "v" 'helix-toggle-extend)  ; toggle select/extend
-(define-key "helix-normal" ";" 'helix-collapse)       ; collapse to cursors
-(define-key "helix-normal" "," 'helix-keep-primary)   ; keep only primary
-(define-key "helix-normal" "shift-c" 'mc-add-cursor-below) ; C — cursor below
-(define-key "helix-normal" "escape" 'helix-escape)
-;; changes (act on the selection — noun→verb)
-(define-key "helix-normal" "d" 'helix-delete)
-(define-key "helix-normal" "c" 'helix-change)
-(define-key "helix-normal" "y" 'helix-yank)
-(define-key "helix-normal" "p" 'helix-paste-after)       ; p / P — paste after/before each selection
-(define-key "helix-normal" "shift-p" 'helix-paste-before)
-(define-key "helix-normal" "r" 'helix-replace-char)   ; r<char> — replace EVERY selected char
-(define-key "helix-normal" "u" 'undo)
-(define-key "helix-normal" "shift-u" 'redo)           ; U — redo
-(define-key "helix-normal" "shift-j" 'helix-join-lines)   ; J — join selected lines
-(define-key "helix-normal" "~" 'helix-switch-case)        ; ~ — toggle case
-(define-key "helix-normal" "`" 'helix-to-lowercase)       ; ` — lowercase
-(define-key "helix-normal" "alt-`" 'helix-to-uppercase)   ; M-` — uppercase
-(define-key "helix-normal" "alt-;" 'helix-flip-selections); M-; — flip anchor/head
-;; enter insert
-(define-key "helix-normal" "i" 'helix-insert-before)
-(define-key "helix-normal" "a" 'helix-append-after)
-(define-key "helix-normal" "shift-i" 'helix-insert-line-start) ; I — insert at line start
-(define-key "helix-normal" "shift-a" 'helix-append-line-end)   ; A — append at line end
-(define-key "helix-normal" "o" 'helix-open-below)
-(define-key "helix-normal" "shift-o" 'helix-open-above)
-;; search & ex
-(define-key "helix-normal" "/" 'evil-search-forward)
-(define-key "helix-normal" "n" 'evil-search-next)
-(define-key "helix-normal" "shift-n" 'evil-search-previous)
-(define-key "helix-normal" ":" 'evil-ex-command)
-;; scrolling (shared with evil)
-(define-key "helix-normal" "ctrl-d" 'helix-half-page-down)
-(define-key "helix-normal" "ctrl-u" 'helix-half-page-up)
-(define-key "helix-normal" "ctrl-f" 'helix-page-down)      ; full page forward
-(define-key "helix-normal" "ctrl-b" 'helix-page-up)        ; full page back
-;; Arrow/editing keys move like h/j/k/l. Unbound, they'd fall through to the
-;; Emacs motions, which EXTEND the active selection instead of moving.
-(define-key "helix-normal" "left" 'helix-char-left)
-(define-key "helix-normal" "right" 'helix-char-right)
-(define-key "helix-normal" "up" 'helix-line-up)
-(define-key "helix-normal" "down" 'helix-line-down)
-(define-key "helix-normal" "backspace" 'helix-char-left)
-(define-key "helix-normal" "home" 'helix-goto-line-start)
-(define-key "helix-normal" "end" 'helix-goto-line-end)
-(define-key "helix-normal" "z z" 'recenter)                ; zz — center cursor line
-;; WORD motions (Helix's shifted trio) — whitespace-delimited, selecting.
-(define-key "helix-normal" "shift-w" 'helix-bigword-next)
-(define-key "helix-normal" "shift-e" 'helix-bigword-end)
-(define-key "helix-normal" "shift-b" 'helix-bigword-prev)
-;; indent / outdent the selected lines
-(define-key "helix-normal" ">" 'indent-region)
-(define-key "helix-normal" "<" 'outdent-region)
-;; LSP navigation — the evil map has had these since day one; Helix's own
-;; keymap uses the same `gd` and shows docs on `K`.
-(define-key "helix-normal" "g d" 'lsp-find-definition)
-(define-key "helix-normal" "g r" 'lsp-find-references)
-(define-key "helix-normal" "shift-k" 'lsp-hover)
-;; Same Emacs-chord shadowing as evil-normal: these four Emacs defaults EDIT the
-;; buffer, and `C-o` in particular silently inserted a newline in Normal state.
-(define-key "helix-normal" "ctrl-o" 'xref-pop-marker)
-(define-key "helix-normal" "ctrl-k" 'evil-undefined)
-(define-key "helix-normal" "ctrl-w" 'evil-undefined)
-(define-key "helix-normal" "ctrl-y" 'evil-undefined)
-(define-key "helix-normal" "ctrl-t" 'evil-undefined)
+(define-keys "helix-normal"
+  '(("h" helix-char-left)
+    ("l" helix-char-right)
+    ("j" helix-line-down)
+    ("k" helix-line-up)
+    ("w" helix-word-next)
+    ("e" helix-word-end)
+    ("b" helix-word-prev)
+    ("0" helix-goto-line-start)
+    ("$" helix-goto-line-end)
+    ("x" helix-select-line)
+    ;; X — extend to whole lines WITHOUT growing downward. `x` grows a line per
+    ;; press; `X` just rounds the current selection out to line bounds, so pressing
+    ;; it repeatedly is idempotent (Helix's extend_to_line_bounds). They were the
+    ;; same command, which made `X` a second `x`.
+    ("shift-x" helix-extend-to-line-bounds)
+    ("%" helix-select-all)                   ; % — select whole buffer
+    ("f" helix-find-char-forward)            ; f/t/F/T — char find (selects)
+    ("shift-f" helix-find-char-backward)
+    ("t" helix-till-char-forward)
+    ("shift-t" helix-till-char-backward)
+    ("g g" helix-goto-top)                   ; gg — top of file
+    ("g e" helix-goto-bottom)                ; ge — bottom of file
+    ("g h" helix-goto-line-start)
+    ("g l" helix-goto-line-end)
+    ("g s" helix-goto-first-nonblank)        ; gs — first non-blank
+    ("g w" avy-goto-char)                    ; gw — jump by char (avy)
+    ("g q" helix-reflow)                     ; gq — reflow selected lines (:reflow)
+    ;; selection management
+    ("v" helix-toggle-extend)                ; toggle select/extend
+    (";" helix-collapse)                     ; collapse to cursors
+    ("," helix-keep-primary)                 ; keep only primary
+    ("shift-c" mc-add-cursor-below)          ; C — cursor below
+    ("escape" helix-escape)
+    ;; changes (act on the selection — noun→verb)
+    ("d" helix-delete)
+    ("c" helix-change)
+    ("y" helix-yank)
+    ("p" helix-paste-after)                  ; p / P — paste after/before each selection
+    ("shift-p" helix-paste-before)
+    ("r" helix-replace-char)                 ; r<char> — replace EVERY selected char
+    ("u" undo)
+    ("shift-u" redo)                         ; U — redo
+    ("shift-j" helix-join-lines)             ; J — join selected lines
+    ("~" helix-switch-case)                  ; ~ — toggle case
+    ("`" helix-to-lowercase)                 ; ` — lowercase
+    ("alt-`" helix-to-uppercase)             ; M-` — uppercase
+    ("alt-;" helix-flip-selections)          ; M-; — flip anchor/head
+    ;; enter insert
+    ("i" helix-insert-before)
+    ("a" helix-append-after)
+    ("shift-i" helix-insert-line-start)      ; I — insert at line start
+    ("shift-a" helix-append-line-end)        ; A — append at line end
+    ("o" helix-open-below)
+    ("shift-o" helix-open-above)
+    ;; search & ex
+    ("/" evil-search-forward)
+    ("n" evil-search-next)
+    ("shift-n" evil-search-previous)
+    (":" evil-ex-command)
+    ;; scrolling (shared with evil)
+    ("ctrl-d" helix-half-page-down)
+    ("ctrl-u" helix-half-page-up)
+    ("ctrl-f" helix-page-down)               ; full page forward
+    ("ctrl-b" helix-page-up)                 ; full page back
+    ;; Arrow/editing keys move like h/j/k/l. Unbound, they'd fall through to the
+    ;; Emacs motions, which EXTEND the active selection instead of moving.
+    ("left" helix-char-left)
+    ("right" helix-char-right)
+    ("up" helix-line-up)
+    ("down" helix-line-down)
+    ("backspace" helix-char-left)
+    ("home" helix-goto-line-start)
+    ("end" helix-goto-line-end)
+    ("z z" recenter)                         ; zz — center cursor line
+    ;; WORD motions (Helix's shifted trio) — whitespace-delimited, selecting.
+    ("shift-w" helix-bigword-next)
+    ("shift-e" helix-bigword-end)
+    ("shift-b" helix-bigword-prev)
+    ;; indent / outdent the selected lines
+    (">" indent-region)
+    ("<" outdent-region)
+    ;; LSP navigation — the evil map has had these since day one; Helix's own
+    ;; keymap uses the same `gd` and shows docs on `K`.
+    ("g d" lsp-find-definition)
+    ("g r" lsp-find-references)
+    ("shift-k" lsp-hover)
+    ;; Same Emacs-chord shadowing as evil-normal: these four Emacs defaults EDIT the
+    ;; buffer, and `C-o` in particular silently inserted a newline in Normal state.
+    ("ctrl-o" xref-pop-marker)
+    ("ctrl-k" evil-undefined)
+    ("ctrl-w" evil-undefined)
+    ("ctrl-y" evil-undefined)
+    ("ctrl-t" evil-undefined)))
 
 ;; =====================================================================
 ;; Keymap — Insert. Plain keys self-insert; Escape returns to Normal,

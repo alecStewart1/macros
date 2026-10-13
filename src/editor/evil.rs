@@ -2,9 +2,44 @@
 
 use regex::Regex;
 
+use super::ex::{ExCmd, parse_ex_line};
 use super::*;
 
+/// A block-wise Visual rectangle: rows `top..=bottom` (0-based lines) and
+/// character columns `left..=right` (inclusive, vim semantics).
+#[derive(Clone, Copy, Debug)]
+struct BlockRect {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+}
+
+impl BlockRect {
+    fn rows(self) -> std::ops::RangeInclusive<usize> {
+        self.top..=self.bottom
+    }
+}
+
 impl Editor {
+    /// Whether Vim (evil) modal editing is on — not plain Emacs keys and not
+    /// Helix, which reuses the state machine but has no Vim registers or marks.
+    pub(super) fn vim_active(&self) -> bool {
+        self.evil != EvilState::Disabled && !self.modal_helix
+    }
+
+    /// Leave Helix behind when switching modal styles: `modal_helix` steers
+    /// EVERY keymap lookup (see `evil_keymap`), and Helix's extra selections
+    /// don't survive the switch.
+    fn leave_helix(&mut self, cx: &mut Context<Self>) {
+        if self.modal_helix {
+            self.modal_helix = false;
+            if self.has_extra_cursors() {
+                self.mc_clear(cx);
+            }
+        }
+    }
+
     /// True in Normal/Visual, where plain keys are commands (not self-insert).
     pub(super) fn evil_intercepts(&self) -> bool {
         matches!(
@@ -82,15 +117,9 @@ impl Editor {
     }
 
     pub(super) fn evil_enable(&mut self, cx: &mut Context<Self>) {
-        // Leaving Helix behind: `modal_helix` steers EVERY keymap lookup (see
-        // `evil_keymap`), so switching styles must clear it or `(evil-mode)`
-        // from Helix silently keeps the Helix keymaps (and the Helix banner).
-        if self.modal_helix {
-            self.modal_helix = false;
-            if self.has_extra_cursors() {
-                self.mc_clear(cx);
-            }
-        }
+        // Or `(evil-mode)` from Helix silently keeps the Helix keymaps (and
+        // the Helix banner).
+        self.leave_helix(cx);
         self.evil = EvilState::Normal;
         self.active.mark_active = false;
         cx.notify();
@@ -204,18 +233,15 @@ impl Editor {
         let last_byte = region.end.saturating_sub(1).max(region.start);
         let last = self.active.buffer.line_index_at_byte(last_byte);
 
-        let target = |ed: &Self, line: usize| -> usize {
-            let lr = ed.active.buffer.line_range(line);
-            if at_eol { lr.end } else { lr.start }
-        };
         // Primary cursor on the first line; a secondary cursor on each of the
-        // rest. `collapse_to` clears the selection so the insert path replicates.
-        let primary = target(self, first);
-        self.collapse_to(primary);
-        for line in (first + 1)..=last {
-            let pos = target(self, line);
-            self.mc_add_cursor_at(pos);
-        }
+        // rest.
+        let positions: Vec<usize> = (first..=last)
+            .map(|line| {
+                let lr = self.active.buffer.line_range(line);
+                if at_eol { lr.end } else { lr.start }
+            })
+            .collect();
+        self.place_cursors(positions);
         self.evil_insert_state(cx);
     }
 
@@ -230,28 +256,87 @@ impl Editor {
         cx.notify();
     }
 
+    /// The block-wise Visual rectangle (see [`Self::visual_block_rect`]).
+    fn block_rect(&self) -> Option<BlockRect> {
+        let (top, bottom, left, right) = self.visual_block_rect()?;
+        Some(BlockRect {
+            top,
+            bottom,
+            left,
+            right,
+        })
+    }
+
+    /// The byte offset of character column `col` on each of the rectangle's
+    /// rows, top-down (clamped to each row's end).
+    fn block_column(&self, rect: BlockRect, col: usize) -> Vec<usize> {
+        rect.rows()
+            .map(|row| self.active.buffer.byte_at_char_column(row, col))
+            .collect()
+    }
+
+    /// The byte span of the rectangle's columns on each row, top-down — empty
+    /// on a row shorter than its left column.
+    fn block_row_spans(&self, rect: BlockRect) -> Vec<Range<usize>> {
+        let buf = &self.active.buffer;
+        rect.rows()
+            .map(|row| {
+                let s = buf.byte_at_char_column(row, rect.left);
+                let e = buf.byte_at_char_column(row, rect.right + 1);
+                s..e.max(s)
+            })
+            .collect()
+    }
+
+    /// Edit every row's span with `replacement(span)`, bottom-up so earlier
+    /// edits don't shift later rows' offsets, as one undo step.
+    fn block_edit_rows(
+        &mut self,
+        rect: BlockRect,
+        replacement: impl Fn(&Self, &Range<usize>) -> String,
+    ) {
+        self.begin_undo_group();
+        for span in self.block_row_spans(rect).into_iter().rev() {
+            if !span.is_empty() {
+                let new = replacement(self, &span);
+                self.edit(span, &new);
+            }
+        }
+        self.end_undo_group();
+    }
+
+    /// Back to Normal with the cursor at the block's top-left.
+    fn block_exit_to_top_left(&mut self, rect: BlockRect, cx: &mut Context<Self>) {
+        let cursor = self.active.buffer.byte_at_char_column(rect.top, rect.left);
+        self.collapse_to(cursor);
+        self.evil_normal_state(cx);
+    }
+
+    /// The primary cursor at the first of `positions` and a secondary cursor
+    /// at each of the rest. `collapse_to` clears the selection so the insert
+    /// path replicates.
+    fn place_cursors(&mut self, positions: impl IntoIterator<Item = usize>) {
+        let mut positions = positions.into_iter();
+        if let Some(first) = positions.next() {
+            self.collapse_to(first);
+            for p in positions {
+                self.mc_add_cursor_at(p);
+            }
+        }
+    }
+
     /// Block `I` (`append` false) / `A` (`append` true): drop a cursor at the
     /// block's left column (or just past its right column) on every row and
     /// switch to Insert, so typed text replicates down the column via the
     /// multiple-cursors machinery — vim's block-wise insert. Escape collapses the
     /// cursors back to one.
     pub(super) fn evil_block_insert(&mut self, append: bool, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let col = if append { right + 1 } else { left };
-        let mut positions = Vec::new();
-        for row in top..=bottom {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            positions.push(lr.start + char_col_byte(&line, col));
-        }
-        if let Some((&first, rest)) = positions.split_first() {
-            self.collapse_to(first);
-            for &p in rest {
-                self.mc_add_cursor_at(p);
-            }
-        }
+        let col = if append { rect.right + 1 } else { rect.left };
+        let positions = self.block_column(rect, col);
+        self.place_cursors(positions);
         self.evil_insert_state(cx);
     }
 
@@ -264,41 +349,20 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let reg = self.take_kill_register();
-        if reg == Some('_') {
-            return;
-        }
-        self.set_clipboard(&text, cx);
-        self.note_register_kill(kind, reg, &text);
-        self.push_kill(text);
-        self.evil_yank_linewise = false;
+        self.file_kill(kind, reg, text, false, cx);
     }
 
     /// Block `d`/`x`: delete the rectangle (columns `[left, right]` on every row),
     /// copy it to the kill ring + system clipboard, and return to Normal with the
     /// cursor at the block's top-left.
     pub(super) fn evil_block_delete(&mut self, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let killed = self.block_text(top, bottom, left, right);
+        let killed = self.block_text(rect);
         self.save_block_kill(super::registers::KillKind::Delete, killed, cx);
-        // Delete bottom-up so earlier edits don't shift later rows' offsets.
-        self.begin_undo_group();
-        for row in (top..=bottom).rev() {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            let s = char_col_byte(&line, left);
-            let e = char_col_byte(&line, right + 1);
-            if e > s {
-                self.edit(lr.start + s..lr.start + e, "");
-            }
-        }
-        self.end_undo_group();
-        let top_line = self.active.buffer.line_range(top);
-        let line = self.active.buffer.slice_to_string(top_line.clone());
-        let cursor = top_line.start + char_col_byte(&line, left);
-        self.collapse_to(cursor);
-        self.evil_normal_state(cx);
+        self.block_edit_rows(rect, |_, _| String::new());
+        self.block_exit_to_top_left(rect, cx);
     }
 
     /// Block `c`: delete the rectangle (like [`Self::evil_block_delete`]), then
@@ -306,78 +370,42 @@ impl Editor {
     /// Insert, so the replacement text lands on all rows at once — vim's
     /// block-wise change. Escape collapses the cursors back to one.
     pub(super) fn evil_block_change(&mut self, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let killed = self.block_text(top, bottom, left, right);
+        let killed = self.block_text(rect);
         self.save_block_kill(super::registers::KillKind::Delete, killed, cx);
-        self.begin_undo_group();
-        for row in (top..=bottom).rev() {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            let s = char_col_byte(&line, left);
-            let e = char_col_byte(&line, right + 1);
-            if e > s {
-                self.edit(lr.start + s..lr.start + e, "");
-            }
-        }
-        self.end_undo_group();
+        self.block_edit_rows(rect, |_, _| String::new());
         // Cursors are computed AFTER the deletes, so each row's left column is
         // its post-delete position.
-        let mut positions = Vec::new();
-        for row in top..=bottom {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            positions.push(lr.start + char_col_byte(&line, left));
-        }
-        if let Some((&first, rest)) = positions.split_first() {
-            self.collapse_to(first);
-            for &p in rest {
-                self.mc_add_cursor_at(p);
-            }
-        }
+        let positions = self.block_column(rect, rect.left);
+        self.place_cursors(positions);
         self.evil_insert_state(cx);
     }
 
     /// Block `y`: copy the rectangle to the kill ring + system clipboard without
     /// removing it; the cursor returns to the block's top-left.
     pub(super) fn evil_block_yank(&mut self, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let text = self.block_text(top, bottom, left, right);
+        let text = self.block_text(rect);
         self.save_block_kill(super::registers::KillKind::Yank, text, cx);
-        let top_line = self.active.buffer.line_range(top);
-        let line = self.active.buffer.slice_to_string(top_line.clone());
-        let cursor = top_line.start + char_col_byte(&line, left);
-        self.collapse_to(cursor);
-        self.evil_normal_state(cx);
+        self.block_exit_to_top_left(rect, cx);
     }
 
     /// Block `r<char>`: overwrite every char inside the rectangle (only the
     /// `[left, right]` columns of each row, rows shorter than `left` untouched),
     /// then return to Normal at the block's top-left.
     pub(super) fn evil_block_replace(&mut self, ch: &str, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        self.begin_undo_group();
-        for row in (top..=bottom).rev() {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            let s = char_col_byte(&line, left);
-            let e = char_col_byte(&line, right + 1);
-            if e > s {
-                let n = line[s..e].chars().count();
-                self.edit(lr.start + s..lr.start + e, &ch.repeat(n));
-            }
-        }
-        self.end_undo_group();
-        let top_line = self.active.buffer.line_range(top);
-        let line = self.active.buffer.slice_to_string(top_line.clone());
-        let cursor = top_line.start + char_col_byte(&line, left);
-        self.collapse_to(cursor);
-        self.evil_normal_state(cx);
+        self.block_edit_rows(rect, |ed, span| {
+            let buf = &ed.active.buffer;
+            ch.repeat(buf.byte_to_char(span.end) - buf.byte_to_char(span.start))
+        });
+        self.block_exit_to_top_left(rect, cx);
     }
 
     /// Helix `p` (after) / `P` (before): paste the clipboard/kill-ring text at
@@ -463,17 +491,10 @@ impl Editor {
     /// The text inside a block rectangle: columns `[left, right]` of rows
     /// `[top, bottom]`, one buffer line per row joined by newlines (rows shorter
     /// than `left` contribute an empty string).
-    fn block_text(&self, top: usize, bottom: usize, left: usize, right: usize) -> String {
-        (top..=bottom)
-            .map(|row| {
-                let line = self
-                    .active
-                    .buffer
-                    .slice_to_string(self.active.buffer.line_range(row));
-                let s = char_col_byte(&line, left);
-                let e = char_col_byte(&line, right + 1).max(s);
-                line[s..e].to_string()
-            })
+    fn block_text(&self, rect: BlockRect) -> String {
+        self.block_row_spans(rect)
+            .into_iter()
+            .map(|span| self.active.buffer.slice_to_string(span))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -483,12 +504,7 @@ impl Editor {
         // `(helix-enabled?)` keeps reporting Helix with no modal mode on at all
         // (which is how `C-h t` ended up opening the Helix tutorial in Emacs
         // mode).
-        if self.modal_helix {
-            self.modal_helix = false;
-            if self.has_extra_cursors() {
-                self.mc_clear(cx);
-            }
-        }
+        self.leave_helix(cx);
         self.evil = EvilState::Disabled;
         cx.notify();
     }
@@ -502,7 +518,8 @@ impl Editor {
         // `"ap` / `"+p` / `"0p`: paste a register instead of the kill ring.
         // Peeked, not taken, so `"a3p` pastes it three times; the register
         // prefix expires at the next command boundary.
-        let reg = (self.evil != EvilState::Disabled && !self.modal_helix)
+        let reg = self
+            .vim_active()
             .then_some(self.vim.pending_register)
             .flatten();
         if let Some(r) = reg {
@@ -608,11 +625,11 @@ impl Editor {
     // --- evil search (`/` `?` `n` `N`) and ex commands (`:`) --------------
 
     pub(super) fn evil_search_forward(&mut self, cx: &mut Context<Self>) {
-        self.open_minibuffer("/", MinibufferPurpose::SearchForward, "", cx);
+        self.open_minibuffer("/", MinibufferPurpose::Search(Direction::Forward), "", cx);
     }
 
     pub(super) fn evil_search_backward(&mut self, cx: &mut Context<Self>) {
-        self.open_minibuffer("?", MinibufferPurpose::SearchBackward, "", cx);
+        self.open_minibuffer("?", MinibufferPurpose::Search(Direction::Backward), "", cx);
     }
 
     /// `n` — repeat the last search in its original direction (vim semantics:
@@ -696,7 +713,7 @@ impl Editor {
             return;
         }
         // Ranges and the line commands (`:%s`, `:'<,'>d`, `:g/…/`, `:12`, …).
-        let parsed = super::ex::parse_ex_line(cmd);
+        let parsed = parse_ex_line(cmd);
         if self.ex_dispatch(&parsed, cx) {
             return;
         }
@@ -704,86 +721,87 @@ impl Editor {
             self.echo(format!("E481: No range allowed: {cmd}"), cx);
             return;
         }
-        {
-            // Split a verb from its optional argument (`:e file`, `:b name`, …).
-            let (verb, arg) = match cmd.split_once(char::is_whitespace) {
-                Some((v, a)) => (v, a.trim()),
-                None => (cmd, ""),
-            };
-            match verb {
-                // Write / quit.
-                "w" | "write" if !arg.is_empty() => self.write_buffer_to(arg, cx),
-                "w" | "write" => self.save_buffer(cx),
-                // Every quit here ends the APP (vim's would close one window),
-                // so the non-`!` forms refuse while ANY buffer is unsaved —
-                // vim's E37/E162 — and `!` is the explicit discard.
-                "q" | "quit" | "qa" | "qall" | "quitall" => {
-                    if !self.refuse_quit_if_modified(cx) {
-                        self.quit_now(cx);
-                    }
+        // The verb is the first whitespace-separated word (`:e file`,
+        // `:b name`, …). It must be exactly the parsed name plus its `!`: one
+        // glued to its argument (`:b2`, `:e!x`) is unknown.
+        let (verb, arg) = match cmd.split_once(char::is_whitespace) {
+            Some((v, a)) => (v, a.trim()),
+            None => (cmd, ""),
+        };
+        let bang = parsed.bang;
+        let spelled = verb.strip_suffix('!').filter(|_| bang).unwrap_or(verb);
+        let kind = ExCmd::lookup(&parsed.name).filter(|_| spelled == parsed.name);
+        match (kind, bang) {
+            // Write / quit.
+            (Some(ExCmd::Write), false) if !arg.is_empty() => self.write_buffer_to(arg, cx),
+            (Some(ExCmd::Write), false) => self.save_buffer(cx),
+            // Every quit here ends the APP (vim's would close one window),
+            // so the non-`!` forms refuse while ANY buffer is unsaved —
+            // vim's E37/E162 — and `!` is the explicit discard.
+            (Some(ExCmd::Quit), false) => {
+                if !self.refuse_quit_if_modified(cx) {
+                    self.quit_now(cx);
                 }
-                "q!" | "quit!" | "qa!" | "qall!" | "quitall!" => self.quit_now(cx),
-                // Write-then-quit must save *synchronously*: `save_buffer` spawns
-                // a background write that `cx.quit()` would cancel mid-flight
-                // (see `save_all_modified`'s quit-path contract). A failed write
-                // aborts the quit so the error stays visible and no work is lost.
-                "wq" | "x" | "xit" => {
-                    if self.save_active_sync(cx) && !self.refuse_quit_if_modified(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                // `:wq!` writes this buffer, then quits discarding the others.
-                "wq!" | "x!" | "xit!" => {
-                    if self.save_active_sync(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                // Still refuses if something couldn't be written (a modified
-                // buffer with no file, e.g. an edited *scratch*-like buffer).
-                "wqa" | "wqall" | "xa" | "xall" => {
-                    if self.save_all_modified(cx) && !self.refuse_quit_if_modified(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                "wqa!" | "wqall!" | "xa!" | "xall!" => {
-                    if self.save_all_modified(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                // Files.
-                "e!" | "edit!" => self.revert_buffer(cx),
-                "e" | "edit" if !arg.is_empty() => self.find_file(arg, cx),
-                "e" | "edit" => self.echo("Usage: :e <file>", cx),
-                // Clear search highlighting.
-                "noh" | "nohl" | "nohlsearch" => {
-                    self.search_query = None;
-                    cx.notify();
-                }
-                // Buffers.
-                "b" | "bu" | "buf" | "buffer" if !arg.is_empty() => self.switch_to_buffer(arg, cx),
-                "bn" | "bnext" => self.next_buffer(cx),
-                "bp" | "bN" | "bprev" | "bprevious" | "bNext" => self.previous_buffer(cx),
-                "bd" | "bdel" | "bdelete" => self.kill_buffer(cx),
-                // Windows (Vim abbreviations): :split / :vsplit and friends.
-                "split" | "sp" | "spl" => self.split_window(true, cx),
-                "vsplit" | "vs" | "vsp" | "vspl" => self.split_window(false, cx),
-                "only" | "on" => self.delete_other_windows(cx),
-                "new" => self.new_window_buffer(true, cx),
-                "vne" | "vnew" => self.new_window_buffer(false, cx),
-                "winc" | "wincmd" => self.run_wincmd(arg, cx),
-                "close" | "clo" => self.delete_window(cx),
-                "reg" | "registers" | "di" | "display" => self.show_registers(arg, cx),
-                "marks" => self.show_marks(arg, cx),
-                "ju" | "jumps" => self.show_jumps(cx),
-                "cle" | "clearjumps" => {
-                    self.vim.jumps.clear();
-                    self.vim.jump_idx = 0;
-                }
-                "delm" | "delmarks" => self.delete_marks(arg, false, cx),
-                "delm!" | "delmarks!" => self.delete_marks(arg, true, cx),
-                "k" | "mark" | "ma" => self.evil_set_mark(arg, cx),
-                other => self.echo(format!("Unknown ex command: {other}"), cx),
             }
+            (Some(ExCmd::Quit), true) => self.quit_now(cx),
+            // Write-then-quit must save *synchronously*: `save_buffer` spawns
+            // a background write that `cx.quit()` would cancel mid-flight
+            // (see `save_all_modified`'s quit-path contract). A failed write
+            // aborts the quit so the error stays visible and no work is lost.
+            (Some(ExCmd::WriteQuit), false) => {
+                if self.save_active_sync(cx) && !self.refuse_quit_if_modified(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            // `:wq!` writes this buffer, then quits discarding the others.
+            (Some(ExCmd::WriteQuit), true) => {
+                if self.save_active_sync(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            // Still refuses if something couldn't be written (a modified
+            // buffer with no file, e.g. an edited *scratch*-like buffer).
+            (Some(ExCmd::WriteQuitAll), false) => {
+                if self.save_all_modified(cx) && !self.refuse_quit_if_modified(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            (Some(ExCmd::WriteQuitAll), true) => {
+                if self.save_all_modified(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            // Files.
+            (Some(ExCmd::Edit), true) => self.revert_buffer(cx),
+            (Some(ExCmd::Edit), false) if !arg.is_empty() => self.find_file(arg, cx),
+            (Some(ExCmd::Edit), false) => self.echo("Usage: :e <file>", cx),
+            // Clear search highlighting.
+            (Some(ExCmd::NoHighlight), false) => {
+                self.search_query = None;
+                cx.notify();
+            }
+            // Buffers.
+            (Some(ExCmd::Buffer), false) if !arg.is_empty() => self.switch_to_buffer(arg, cx),
+            (Some(ExCmd::BufferNext), false) => self.next_buffer(cx),
+            (Some(ExCmd::BufferPrev), false) => self.previous_buffer(cx),
+            (Some(ExCmd::BufferDelete), false) => self.kill_buffer(cx),
+            // Windows (Vim abbreviations): :split / :vsplit and friends.
+            (Some(ExCmd::Split), false) => self.split_window(SplitAxis::Vertical, cx),
+            (Some(ExCmd::VSplit), false) => self.split_window(SplitAxis::Horizontal, cx),
+            (Some(ExCmd::Only), false) => self.delete_other_windows(cx),
+            (Some(ExCmd::New), false) => self.new_window_buffer(SplitAxis::Vertical, cx),
+            (Some(ExCmd::VNew), false) => self.new_window_buffer(SplitAxis::Horizontal, cx),
+            (Some(ExCmd::WinCmd), false) => self.run_wincmd(arg, cx),
+            (Some(ExCmd::Close), false) => self.delete_window(cx),
+            (Some(ExCmd::Registers), false) => self.show_registers(arg, cx),
+            (Some(ExCmd::Marks), false) => self.show_marks(arg, cx),
+            (Some(ExCmd::Jumps), false) => self.show_jumps(cx),
+            (Some(ExCmd::ClearJumps), false) => {
+                self.vim.jumps.clear();
+                self.vim.jump_idx = 0;
+            }
+            (Some(ExCmd::DelMarks), bang) => self.delete_marks(arg, bang, cx),
+            _ => self.echo(format!("Unknown ex command: {verb}"), cx),
         }
     }
 }

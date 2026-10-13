@@ -9,6 +9,8 @@ use gpui::Context;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::jsonrpc::Message;
+use crate::lsp::{CallDirection, ParamsKind};
 
 /// The final path component of `path`, falling back to the whole string when
 /// there is no `/` (matches the bare `rsplit('/').next().unwrap_or(path)` idiom).
@@ -23,12 +25,24 @@ fn is_builtin_lsp(command: &str) -> bool {
     command == "builtin" || command.starts_with("builtin:")
 }
 
+/// A configured server (from `set-lsp`): its launch command and the env
+/// overrides captured when it was configured.
+#[derive(Clone)]
+pub(super) struct LspCommand {
+    pub(super) command: String,
+    pub(super) env: crate::process::EnvOverrides,
+}
+
 /// One pending `textDocument/didChange`: the server's language plus the
-/// pre-edit `(line, character)` bounds of the range being replaced.
-pub(super) type LspChange = (String, (usize, usize), (usize, usize));
+/// pre-edit bounds of the range being replaced.
+pub(super) struct LspChange {
+    pub(super) language: String,
+    pub(super) start: lsp::Position,
+    pub(super) end: lsp::Position,
+}
 
 /// Cap on the `*lsp-log*` scrollback ring (captured server stderr).
-const LSP_LOG_CAP: usize = 2000;
+pub(super) const LSP_LOG_CAP: usize = 2000;
 
 /// Cap on the xref jump-back ring (`pop-tag-mark` locations).
 const XREF_MARKER_RING_CAP: usize = 64;
@@ -54,7 +68,7 @@ impl Editor {
             None => {}
         }
 
-        let Some(command) = self.lsp_commands.get(&language).cloned() else {
+        let Some(LspCommand { command, env }) = self.lsp_commands.get(&language).cloned() else {
             return; // no server configured for this language
         };
 
@@ -70,7 +84,7 @@ impl Editor {
                 &[]
             };
             let (server, rx) = SteelLsp::start(seed, globals);
-            Ok((LspBackend::Builtin(Box::new(server)), rx))
+            Ok((Box::new(server) as Box<dyn LanguageServer>, rx))
         } else {
             let root = self
                 .active
@@ -80,7 +94,8 @@ impl Editor {
                 .map(Path::to_path_buf)
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_default();
-            LspClient::start(&command, &root).map(|(c, rx)| (LspBackend::External(Box::new(c)), rx))
+            LspClient::start(&command, &root, &env)
+                .map(|(c, rx)| (Box::new(c) as Box<dyn LanguageServer>, rx))
         };
         let (client, mut rx) = match started {
             Ok(v) => v,
@@ -88,7 +103,7 @@ impl Editor {
                 // Record the cause in *lsp-log* (persistent) as well as the echo
                 // area (transient) — a failed spawn is otherwise invisible.
                 let line = format!("[{language}] could not start `{command}`: {reason}");
-                push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
+                self.lsp_log.push(line.clone());
                 self.append_to_log_buffer("*lsp-log*", &line);
                 self.echo(format!("Could not start {command}: {reason}"), cx);
                 return;
@@ -118,16 +133,11 @@ impl Editor {
                 client,
                 ready: false,
                 exited: false,
-                save: None,
-                code_action_resolve: false,
-                sync_kind: lsp::SyncKind::Full,
+                caps: lsp::ServerCapabilities::default(),
                 open: HashSet::new(),
                 versions: HashMap::new(),
                 pending_completion: None,
                 pending: HashMap::new(),
-                semantic_legend: Vec::new(),
-                prepare_rename: false,
-                completion_triggers: Vec::new(),
                 semantic_state: HashMap::new(),
                 _task: task,
             },
@@ -173,27 +183,30 @@ impl Editor {
         end_byte: usize,
     ) -> Option<LspChange> {
         let language = self.active_language()?;
-        let start = self.active.buffer.byte_to_position(start_byte);
-        let end = self.active.buffer.byte_to_position(end_byte);
-        Some((language, start, end))
+        Some(LspChange {
+            language,
+            start: self.active.buffer.byte_to_position(start_byte).into(),
+            end: self.active.buffer.byte_to_position(end_byte).into(),
+        })
     }
 
-    /// Notify the active buffer's server of an edit. `start`/`end` are the
-    /// pre-edit LSP positions of the replaced range; `text` is the new content.
-    pub(super) fn lsp_did_change(
-        &mut self,
-        language: &str,
-        start: (usize, usize),
-        end: (usize, usize),
-        text: &str,
-    ) {
+    /// Notify the active buffer's server of an edit: `change` (from
+    /// [`lsp_change_positions`](Self::lsp_change_positions)) was replaced by
+    /// `text`.
+    pub(super) fn lsp_did_change(&mut self, change: LspChange, text: &str) {
+        let LspChange {
+            language,
+            start,
+            end,
+        } = change;
+        let language = language.as_str();
         let Some(uri) = self.active_uri() else {
             return;
         };
         let Some((sync_kind, open)) = self
             .servers
             .get(language)
-            .map(|s| (s.sync_kind, s.open.contains(&uri)))
+            .map(|s| (s.caps.sync_kind, s.open.contains(&uri)))
         else {
             return;
         };
@@ -256,65 +269,24 @@ impl Editor {
         message: Value,
         cx: &mut Context<Self>,
     ) {
-        // Notifications and server→client requests.
-        if let Some(method) = message["method"].as_str() {
-            if let Some(id) = message.get("id").cloned() {
-                self.on_lsp_server_request(&language, id, method, &message["params"], cx);
-            } else if method == lsp::EXITED_METHOD {
-                self.on_lsp_server_exit(&language, cx);
-            } else if method == "$/progress" {
-                self.on_lsp_progress(&language, &message["params"]);
-            } else if method == "textDocument/publishDiagnostics" {
-                let (uri, diagnostics) = lsp::parse_diagnostics(&message["params"]);
-                // Diagnostics are keyed only by URI, and each server runs its own
-                // async task — so after a language switch (e.g. `scheme` →
-                // `macros-scheme` via `macros-steel-mode`) the OLD server's
-                // late-arriving publish could clobber the new one's. For the active
-                // buffer, accept diagnostics only from its CURRENT language server;
-                // a stale server's are dropped. (Background buffers — a different
-                // URI — are unaffected.)
-                let stale_for_active = self.active_uri().as_deref() == Some(&uri)
-                    && self.active_language().as_deref() != Some(&language);
-                if !stale_for_active {
-                    self.diagnostics.insert(uri, diagnostics);
-                    cx.notify();
-                }
-            } else if method == "$/stderr" {
-                // Server stderr, captured into `*lsp-log*` (tagged by language)
-                // and appended live to the buffer if it's open.
-                if let Some(line) = message["params"]["line"].as_str() {
-                    let line = format!("[{language}] {line}");
-                    push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
-                    self.append_to_log_buffer("*lsp-log*", &line);
-                    cx.notify();
-                }
+        let (id, result) = match Message::from(message) {
+            Message::Request { id, method, params } => {
+                self.on_lsp_server_request(&language, id, &method, &params, cx);
+                return;
             }
-            return;
-        }
-
-        // Responses to our requests.
-        if message.get("id").is_none() {
-            return;
-        }
+            Message::Notification { method, params } => {
+                self.on_lsp_notification(&language, &method, &params, cx);
+                return;
+            }
+            // Responses to our requests.
+            Message::Response { id, result, .. } => (id, result),
+            Message::Invalid => return,
+        };
         let is_init = self.servers.get(&language).is_some_and(|s| !s.ready);
         if is_init {
-            let sync_kind = lsp::parse_sync_kind(&message["result"]);
-            let legend = lsp::parse_semantic_legend(&message["result"]);
-            let prepare_rename = lsp::parse_prepare_rename_support(&message["result"]);
-            let completion_triggers = lsp::parse_completion_triggers(&message["result"]);
-            let save = lsp::parse_save_option(&message["result"]);
-            let code_action_resolve =
-                message["result"]["capabilities"]["codeActionProvider"]["resolveProvider"]
-                    .as_bool()
-                    .unwrap_or(false);
             if let Some(server) = self.servers.get_mut(&language) {
                 server.ready = true;
-                server.save = save;
-                server.code_action_resolve = code_action_resolve;
-                server.sync_kind = sync_kind;
-                server.semantic_legend = legend;
-                server.prepare_rename = prepare_rename;
-                server.completion_triggers = completion_triggers;
+                server.caps = lsp::ServerCapabilities::from_initialize(&result);
                 server.client.initialized();
             }
             // Open the buffer that triggered the server (if it's this language).
@@ -324,36 +296,78 @@ impl Editor {
             cx.notify();
             return;
         }
+        let Some(id) = id.as_i64() else {
+            return; // all our request ids are numbers
+        };
 
         // A completion response?
         let completion =
             self.servers
                 .get_mut(&language)
-                .and_then(|server| match server.pending_completion {
-                    Some((id, _)) if Some(id) == message["id"].as_i64() => {
-                        server.pending_completion.take()
-                    }
+                .and_then(|server| match &server.pending_completion {
+                    Some(pending) if pending.id == id => server.pending_completion.take(),
                     _ => None,
                 });
-        if let Some((_, range)) = completion {
+        if let Some(PendingCompletion { range, .. }) = completion {
             // Typing (or a buffer switch) since the request makes the reply's
             // range stale; drop it rather than slice text that moved.
             let Some(range) = self.completion_reply_range(range.start, range.end) else {
                 return;
             };
-            let items = lsp::parse_completion(&message["result"]);
+            let items = lsp::parse_completion(&result);
             self.show_completion(items, range, cx);
             return;
         }
 
         // A navigation / rename / symbols / … response?
-        let pending = message["id"].as_i64().and_then(|id| {
-            self.servers
-                .get_mut(&language)
-                .and_then(|server| server.pending.remove(&id))
-        });
+        let pending = self
+            .servers
+            .get_mut(&language)
+            .and_then(|server| server.pending.remove(&id));
         if let Some((kind, target)) = pending {
-            self.handle_lsp_response(&language, kind, target, &message["result"], cx);
+            self.handle_lsp_response(&language, kind, target, &result, cx);
+        }
+    }
+
+    /// A server notification (including the reader thread's synthetic
+    /// `$/stderr` and exit ones).
+    fn on_lsp_notification(
+        &mut self,
+        language: &str,
+        method: &str,
+        params: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        match method {
+            lsp::EXITED_METHOD => self.on_lsp_server_exit(language, cx),
+            "$/progress" => self.on_lsp_progress(language, params),
+            "textDocument/publishDiagnostics" => {
+                let (uri, diagnostics) = lsp::parse_diagnostics(params);
+                // Diagnostics are keyed only by URI, and each server runs its own
+                // async task — so after a language switch (e.g. `scheme` →
+                // `macros-scheme` via `macros-steel-mode`) the OLD server's
+                // late-arriving publish could clobber the new one's. For the active
+                // buffer, accept diagnostics only from its CURRENT language server;
+                // a stale server's are dropped. (Background buffers — a different
+                // URI — are unaffected.)
+                let stale_for_active = self.active_uri().as_deref() == Some(&uri)
+                    && self.active_language().as_deref() != Some(language);
+                if !stale_for_active {
+                    self.diagnostics.insert(uri, diagnostics);
+                    cx.notify();
+                }
+            }
+            "$/stderr" => {
+                // Server stderr, captured into `*lsp-log*` (tagged by language)
+                // and appended live to the buffer if it's open.
+                if let Some(line) = params["line"].as_str() {
+                    let line = format!("[{language}] {line}");
+                    self.lsp_log.push(line.clone());
+                    self.append_to_log_buffer("*lsp-log*", &line);
+                    cx.notify();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -436,7 +450,7 @@ impl Editor {
             server.exited = true;
         }
         let line = format!("[{language}] server exited");
-        push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
+        self.lsp_log.push(line.clone());
         self.append_to_log_buffer("*lsp-log*", &line);
         self.echo(
             format!("Language server for {language} exited — M-x lsp-restart to restart it"),
@@ -570,7 +584,7 @@ impl Editor {
         let wants_text = self
             .servers
             .values()
-            .any(|s| s.save == Some(true) && s.open.contains(uri));
+            .any(|s| s.caps.save == Some(true) && s.open.contains(uri));
         let text = if wants_text {
             match self.document_for_uri(uri) {
                 Some(None) => Some(self.active.buffer.full_text()),
@@ -581,7 +595,7 @@ impl Editor {
             None
         };
         for server in self.servers.values_mut() {
-            if let Some(include_text) = server.save
+            if let Some(include_text) = server.caps.save
                 && server.ready
                 && server.open.contains(uri)
             {
@@ -597,7 +611,7 @@ impl Editor {
     /// path. A full-text change is valid for incremental servers too.
     pub(super) fn lsp_sync_document(&mut self, uri: &str, text: &str) {
         for server in self.servers.values_mut() {
-            if server.sync_kind == lsp::SyncKind::None || !server.open.contains(uri) {
+            if server.caps.sync_kind == lsp::SyncKind::None || !server.open.contains(uri) {
                 continue;
             }
             let version = server.versions.entry(uri.to_string()).or_insert(1);
@@ -717,21 +731,28 @@ impl Editor {
                     SemanticKind::Range => lsp::semantic_data(result),
                     SemanticKind::Full => {
                         let data = lsp::semantic_data(result);
-                        server
-                            .semantic_state
-                            .insert(uri.clone(), (lsp::semantic_result_id(result), data.clone()));
+                        server.semantic_state.insert(
+                            uri.clone(),
+                            SemanticCache {
+                                result_id: lsp::semantic_result_id(result),
+                                data: data.clone(),
+                            },
+                        );
                         data
                     }
                     SemanticKind::Delta => {
                         let prev = server
                             .semantic_state
                             .get(&uri)
-                            .map(|(_, d)| d.clone())
+                            .map(|cache| cache.data.clone())
                             .unwrap_or_default();
                         let merged = lsp::apply_semantic_delta(&prev, result);
                         server.semantic_state.insert(
                             uri.clone(),
-                            (lsp::semantic_result_id(result), merged.clone()),
+                            SemanticCache {
+                                result_id: lsp::semantic_result_id(result),
+                                data: merged.clone(),
+                            },
                         );
                         merged
                     }
@@ -739,7 +760,7 @@ impl Editor {
                 if !fresh {
                     return;
                 }
-                let tokens = lsp::decode_semantic_data(&data, &server.semantic_legend);
+                let tokens = lsp::decode_semantic_data(&data, &server.caps.semantic_legend);
                 let records: Vec<String> = tokens
                     .iter()
                     .map(|(line, col, len, ty)| format!("{line}\t{col}\t{len}\t{ty}"))
@@ -755,8 +776,8 @@ impl Editor {
                 Some(prep) => {
                     let placeholder = prep.placeholder.unwrap_or_else(|| match prep.range {
                         Some((s, e)) => {
-                            let sb = self.active.buffer.position_to_byte(s.0, s.1);
-                            let eb = self.active.buffer.position_to_byte(e.0, e.1);
+                            let sb = self.active.buffer.position_to_byte(s.line, s.character);
+                            let eb = self.active.buffer.position_to_byte(e.line, e.character);
                             self.active.buffer.slice_to_string(sb..eb)
                         }
                         None => self.identifier_at_point(),
@@ -786,25 +807,28 @@ impl Editor {
                     self.set_code_lens(line, character, &title, cx);
                 }
             }
-            CallHierarchyPrepare(incoming) => self.lsp_call_hierarchy_calls(incoming, result, cx),
-            CallHierarchyCalls(incoming) => {
-                let key = if incoming { "from" } else { "to" };
-                let calls = lsp::parse_call_hierarchy(result, key);
+            CallHierarchyPrepare(direction) => self.lsp_call_hierarchy_calls(direction, result, cx),
+            CallHierarchyCalls(direction) => {
+                let calls = lsp::parse_call_hierarchy(result, direction);
                 if calls.is_empty() {
                     self.echo("No calls found", cx);
                     return;
                 }
-                let direction = if incoming { "Incoming" } else { "Outgoing" };
                 let mut rows = Vec::new();
                 let mut targets = Vec::new();
                 for (name, loc) in &calls {
                     let short = lsp::uri_to_path(&loc.uri);
                     let short = basename(&short);
-                    rows.push(format!("{name}  —  {short}:{}", loc.start.0 + 1));
-                    targets.push((loc.uri.clone(), loc.start.0, loc.start.1));
+                    rows.push(format!("{name}  —  {short}:{}", loc.start.line + 1));
+                    targets.push((loc.uri.clone(), loc.start.line, loc.start.character));
                 }
                 self.xref_targets = targets;
-                let text = format!("{direction} calls ({})\n\n{}", calls.len(), rows.join("\n"));
+                let text = format!(
+                    "{} calls ({})\n\n{}",
+                    direction.label(),
+                    calls.len(),
+                    rows.join("\n")
+                );
                 self.render_buffer(
                     "*lsp-xref*".into(),
                     "lsp-xref-mode".into(),
@@ -879,7 +903,7 @@ impl Editor {
             .active_language()
             .and_then(|l| self.servers.get(&l))
             .and_then(|s| s.semantic_state.get(&uri))
-            .and_then(|(id, _)| id.clone());
+            .and_then(|cache| cache.result_id.clone());
         match prev_id {
             Some(id) => {
                 let params = json!({
@@ -930,7 +954,7 @@ impl Editor {
         let supports = self
             .active_language()
             .and_then(|l| self.servers.get(&l))
-            .is_some_and(|s| s.prepare_rename);
+            .is_some_and(|s| s.caps.prepare_rename);
         if supports {
             self.lsp_send(
                 "textDocument/prepareRename",
@@ -1024,8 +1048,8 @@ impl Editor {
     ) {
         let full = self.active.buffer.full_text();
         let main = lsp::TextEdit {
-            start: self.active.buffer.byte_to_position(anchor),
-            end: self.active.buffer.byte_to_position(point),
+            start: self.active.buffer.byte_to_position(anchor).into(),
+            end: self.active.buffer.byte_to_position(point).into(),
             new_text: choice.insert_text.clone(),
         };
         let mut edits = choice.additional_edits.clone();
@@ -1035,8 +1059,14 @@ impl Editor {
         // edits that fall entirely before the anchor (e.g. an import at the top).
         let mut shift: isize = 0;
         for e in &choice.additional_edits {
-            let s = self.active.buffer.position_to_byte(e.start.0, e.start.1);
-            let en = self.active.buffer.position_to_byte(e.end.0, e.end.1);
+            let s = self
+                .active
+                .buffer
+                .position_to_byte(e.start.line, e.start.character);
+            let en = self
+                .active
+                .buffer
+                .position_to_byte(e.end.line, e.end.character);
             if en <= anchor {
                 shift += e.new_text.len() as isize - (en as isize - s as isize);
             }
@@ -1048,10 +1078,10 @@ impl Editor {
     }
 
     /// `prepareCallHierarchy` at point (incoming/outgoing call hierarchy).
-    pub(super) fn lsp_call_hierarchy(&mut self, incoming: bool, cx: &mut Context<Self>) {
+    pub(super) fn lsp_call_hierarchy(&mut self, direction: CallDirection, cx: &mut Context<Self>) {
         self.lsp_send(
             "textDocument/prepareCallHierarchy",
-            PendingRequest::CallHierarchyPrepare(incoming),
+            PendingRequest::CallHierarchyPrepare(direction),
             Self::text_doc_position,
             cx,
         );
@@ -1062,7 +1092,7 @@ impl Editor {
     /// integers — unlike a Scheme round-trip).
     pub(super) fn lsp_call_hierarchy_calls(
         &mut self,
-        incoming: bool,
+        direction: CallDirection,
         prepared: &Value,
         cx: &mut Context<Self>,
     ) {
@@ -1070,13 +1100,8 @@ impl Editor {
             self.echo("No call hierarchy at point", cx);
             return;
         };
-        let method = if incoming {
-            "callHierarchy/incomingCalls"
-        } else {
-            "callHierarchy/outgoingCalls"
-        };
-        let kind = PendingRequest::CallHierarchyCalls(incoming);
-        self.lsp_dispatch(method, json!({ "item": item }), kind);
+        let kind = PendingRequest::CallHierarchyCalls(direction);
+        self.lsp_dispatch(direction.method(), json!({ "item": item }), kind);
     }
 
     // --- LSP navigation / rename / symbols / formatting ---------------------
@@ -1297,8 +1322,8 @@ impl Editor {
             .into_iter()
             .flatten()
             .filter(|d| {
-                let s = buffer.position_to_byte(d.start.0, d.start.1);
-                let e = buffer.position_to_byte(d.end.0, d.end.1).max(s);
+                let s = buffer.position_to_byte(d.start.line, d.start.character);
+                let e = buffer.position_to_byte(d.end.line, d.end.character).max(s);
                 s < end && e > start || s == start
             })
             .map(|d| d.raw.clone())
@@ -1334,7 +1359,7 @@ impl Editor {
             0 => self.echo(format!("No {what} found"), cx),
             1 => {
                 let loc = &locations[0];
-                self.goto_file_position(loc.uri.clone(), loc.start.0, loc.start.1, cx);
+                self.goto_file_position(loc.uri.clone(), loc.start.line, loc.start.character, cx);
             }
             _ => self.helm_locations(what, locations, cx),
         }
@@ -1361,11 +1386,11 @@ impl Editor {
                     .collect()
             });
             let short = basename(&path);
-            let text = lines.get(loc.start.0).map_or("", |s| s.trim());
+            let text = lines.get(loc.start.line).map_or("", |s| s.trim());
             candidates.push(format!(
                 "{short}:{}:{}: {text}",
-                loc.start.0 + 1,
-                loc.start.1 + 1
+                loc.start.line + 1,
+                loc.start.character + 1
             ));
         }
         let source = HelmSource {
@@ -1386,7 +1411,7 @@ impl Editor {
         let path = lsp::uri_to_path(&loc.uri);
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let lines: Vec<&str> = content.lines().collect();
-        let target = loc.start.0;
+        let target = loc.start.line;
         const CONTEXT: usize = 8;
         let start = target.saturating_sub(CONTEXT);
         let end = (target + CONTEXT + 1).min(lines.len());
@@ -1494,50 +1519,48 @@ impl Editor {
 
     /// Base request params for `kind`, with the active buffer's URI/position/
     /// range filled in. `extra` (a JSON object) is merged over the base; for
-    /// `"raw"` the base is empty and `extra` is used verbatim.
-    pub(super) fn lsp_build_params(&self, kind: &str, extra: Value, uri: &str) -> Value {
-        let (line, character) = self.active.buffer.byte_to_position(self.point());
-        let position = json!({ "line": line, "character": character });
-        let document_range = {
-            let (el, ec) = self
-                .active
-                .buffer
-                .byte_to_position(self.active.buffer.len());
-            json!({ "start": { "line": 0, "character": 0 }, "end": { "line": el, "character": ec } })
+    /// [`ParamsKind::Raw`] the base is empty and `extra` is used verbatim.
+    pub(super) fn lsp_build_params(&self, kind: ParamsKind, extra: Value, uri: &str) -> Value {
+        let buffer = &self.active.buffer;
+        let range_json = |start: usize, end: usize| {
+            let (sl, sc) = buffer.byte_to_position(start);
+            let (el, ec) = buffer.byte_to_position(end);
+            json!({ "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } })
         };
-        let region_range = {
-            let (s, e) = if self.active.mark_active {
-                (
-                    self.active.selected_range.start,
-                    self.active.selected_range.end,
-                )
-            } else {
-                let l = self.active.buffer.line_range_at(self.point());
-                (l.start, l.end)
-            };
-            let s = self.active.buffer.byte_to_position(s);
-            let e = self.active.buffer.byte_to_position(e);
-            json!({ "start": { "line": s.0, "character": s.1 }, "end": { "line": e.0, "character": e.1 } })
+        let position = || {
+            let (line, character) = buffer.byte_to_position(self.point());
+            json!({ "line": line, "character": character })
         };
         let mut params = match kind {
-            "document" => json!({ "textDocument": { "uri": uri } }),
-            "range" => json!({ "textDocument": { "uri": uri }, "range": document_range }),
-            "region" => json!({
+            ParamsKind::Document => json!({ "textDocument": { "uri": uri } }),
+            ParamsKind::Range => json!({
                 "textDocument": { "uri": uri },
-                "range": region_range,
-                "options": { "tabSize": 4, "insertSpaces": true }
+                "range": range_json(0, buffer.len())
             }),
-            "positions" => json!({ "textDocument": { "uri": uri }, "positions": [position] }),
-            "raw" => json!({}),
-            // "position" and anything unknown → textDocument + position.
-            _ => json!({ "textDocument": { "uri": uri }, "position": position }),
-        };
-        if let (Some(base), Some(ext)) = (params.as_object_mut(), extra.as_object()) {
-            for (k, v) in ext {
-                base.insert(k.clone(), v.clone());
+            ParamsKind::Region => {
+                let region = if self.active.mark_active {
+                    self.active.selected_range.clone()
+                } else {
+                    buffer.line_range_at(self.point())
+                };
+                json!({
+                    "textDocument": { "uri": uri },
+                    "range": range_json(region.start, region.end),
+                    "options": { "tabSize": 4, "insertSpaces": true }
+                })
             }
-        } else if kind == "raw" {
-            params = extra;
+            ParamsKind::Positions => {
+                json!({ "textDocument": { "uri": uri }, "positions": [position()] })
+            }
+            ParamsKind::Raw => json!({}),
+            ParamsKind::Position => {
+                json!({ "textDocument": { "uri": uri }, "position": position() })
+            }
+        };
+        match (params.as_object_mut(), extra) {
+            (Some(base), Value::Object(ext)) => base.extend(ext),
+            (_, extra) if kind == ParamsKind::Raw => params = extra,
+            _ => {}
         }
         params
     }
@@ -1547,7 +1570,7 @@ impl Editor {
     pub(super) fn lsp_script_request(
         &mut self,
         method: String,
-        kind: String,
+        kind: ParamsKind,
         params_json: String,
         callback: String,
         cx: &mut Context<Self>,
@@ -1557,7 +1580,7 @@ impl Editor {
             return;
         };
         let extra: Value = serde_json::from_str(&params_json).unwrap_or(Value::Null);
-        let params = self.lsp_build_params(&kind, extra, &uri);
+        let params = self.lsp_build_params(kind, extra, &uri);
         if !self.lsp_dispatch(&method, params, PendingRequest::Script(callback)) {
             self.echo(NO_LSP_FOR_BUFFER, cx);
         }
@@ -1599,7 +1622,7 @@ impl Editor {
                 format!("  ({})", sym.container)
             };
             rows.push(format!("{indent}{kind}  {}{container}", sym.name));
-            targets.push((sym.uri.clone(), sym.start.0, sym.start.1));
+            targets.push((sym.uri.clone(), sym.start.line, sym.start.character));
         }
         self.xref_targets = targets;
         let text = format!("Symbols ({})\n\n{}", symbols.len(), rows.join("\n"));
@@ -1720,15 +1743,7 @@ impl Editor {
             removed: doc.buffer.full_text(),
             inserted: new.to_string(),
         };
-        let node = doc.undo_tree.len();
-        let parent = doc.undo_current;
-        doc.undo_tree.push(UndoNode {
-            parent: Some(parent),
-            children: Vec::new(),
-            edit: vec![record],
-        });
-        doc.undo_tree[parent].children.push(node);
-        doc.undo_current = node;
+        doc.undo.record(record);
         doc.buffer.replace(0..len, new);
         doc.modified = true;
         let uri = document_uri(doc);
@@ -1878,7 +1893,7 @@ impl Editor {
                         } else {
                             new
                         };
-                        out.push(format!("  {}: {new}", e.start.0 + 1));
+                        out.push(format!("  {}: {new}", e.start.line + 1));
                     }
                 }
             }
@@ -1927,7 +1942,7 @@ impl Editor {
         let can_resolve = self
             .active_language()
             .and_then(|l| self.servers.get(&l))
-            .is_some_and(|s| s.code_action_resolve);
+            .is_some_and(|s| s.caps.code_action_resolve);
         if can_resolve && let Some(raw) = action.resolve.clone() {
             let mut original = action.clone();
             original.resolve = None;

@@ -1,6 +1,7 @@
 //! Debug Adapter Protocol transport: spawn (or TCP-connect to) a debug
 //! adapter and speak Content-Length-framed JSON with it — the same wire
-//! format as LSP, so the framing reader is shared with [`crate::lsp`].
+//! format as LSP, so spawning and framing are shared with it via
+//! [`crate::transport`].
 //!
 //! Deliberately protocol-free: no `seq` stamping, no request/response
 //! correlation, no capability knowledge. The whole DAP state machine lives in
@@ -11,18 +12,18 @@
 //! reading, writing, TCP connecting, and reaping all happen on worker threads
 //! (or, for [`DapClient::finish`], the caller's background executor).
 
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use serde_json::{Value, json};
 
-use crate::util::HideConsole;
+use crate::process::ProcessGroup;
+use crate::transport;
 
 /// How long a TCP connect (`dap-connect`) may take before the session is
 /// declared dead. The connect runs on the transport's writer thread.
@@ -44,13 +45,10 @@ struct SocketSlot {
 }
 
 pub struct DapClient {
-    /// The adapter process for a stdio session; `None` for a TCP session
-    /// (whose server process, if any, Scheme spawns and owns via
+    /// The adapter's process group for a stdio session; `None` for a TCP
+    /// session (whose server process, if any, Scheme spawns and owns via
     /// `make-process`).
-    child: Option<Child>,
-    /// Set once `child` has been waited on: from then on its pid (and process
-    /// group id) may be reused, so it must never be signalled again.
-    reaped: bool,
+    child: Option<ProcessGroup>,
     /// For TCP sessions, the slot the connector thread fills in, so `kill`
     /// can shut the stream down (the reader and writer threads then unwind on
     /// their own) or cancel a connect still in flight.
@@ -67,83 +65,39 @@ impl DapClient {
         env: &crate::process::EnvOverrides,
         cwd: &Path,
     ) -> Result<(Self, UnboundedReceiver<Value>), String> {
-        // A missing cwd would otherwise surface as "not found in PATH".
-        crate::lsp::check_spawn_cwd(cwd)?;
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .hide_console();
-        env.apply(&mut cmd);
         // Its own process group, so `kill` takes down the debuggee the adapter
-        // spawned too, not just the adapter (mirrors `make-process`).
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(format!(
-                    "`{program}` not found in PATH. \
-                     If it's installed via nvm/pyenv/cargo/brew, the GUI launch may not see it — \
-                     try (setenv \"PATH\" …) in init.scm. PATH={}",
-                    std::env::var("PATH").unwrap_or_default(),
-                ));
-            }
-            Err(e) => return Err(format!("spawning `{program}`: {e}")),
-        };
-        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            // Can't happen with piped stdio; don't leak the process if it does.
-            let mut client = Self::from_child(child);
-            client.kill();
-            return Err("adapter has no stdio pipes".to_string());
-        };
+        // spawned too, not just the adapter (mirrors `make-process`). A
+        // missing cwd is reported as such, not as "not found in PATH".
+        let transport::StdioTransport {
+            group,
+            stdin,
+            stdout,
+            stderr,
+        } = transport::spawn_stdio(program, args, cwd, env).map_err(|e| e.to_string())?;
 
         let (tx, rx) = unbounded();
         // Forward the adapter's stderr as synthetic DAP `output` events, so
         // Scheme's one console handler shows a crash or startup failure
         // without a second channel (the LSP client's `$/stderr` trick).
-        if let Some(stderr) = child.stderr.take() {
-            let tx_err = tx.clone();
-            std::thread::spawn(move || {
-                crate::lsp::for_each_stderr_line(stderr, |line| {
-                    let msg = json!({
-                        "seq": 0, "type": "event", "event": "output",
-                        "body": { "category": "stderr", "output": format!("{line}\n") }
-                    });
-                    tx_err.unbounded_send(msg).is_ok()
+        let tx_err = tx.clone();
+        std::thread::spawn(move || {
+            transport::for_each_stderr_line(stderr, |line| {
+                let msg = json!({
+                    "seq": 0, "type": "event", "event": "output",
+                    "body": { "category": "stderr", "output": format!("{line}\n") }
                 });
+                tx_err.unbounded_send(msg).is_ok()
             });
-        }
-        std::thread::spawn(move || crate::lsp::read_frames(BufReader::new(stdout), &tx));
+        });
+        std::thread::spawn(move || transport::read_frames(BufReader::new(stdout), &tx));
 
         // Writer thread: drains framed messages to stdin off the UI thread.
-        let (outgoing, out_rx) = channel::<String>();
-        std::thread::spawn(move || {
-            while let Ok(frame) = out_rx.recv() {
-                if stdin.write_all(frame.as_bytes()).is_err() {
-                    break; // pipe closed
-                }
-                let _ = stdin.flush();
-            }
-        });
-
-        let mut client = Self::from_child(child);
-        client.outgoing = outgoing;
-        Ok((client, rx))
-    }
-
-    fn from_child(child: Child) -> Self {
-        Self {
-            child: Some(child),
-            reaped: false,
+        let client = Self {
+            child: Some(group),
             socket: None,
-            outgoing: channel().0,
-        }
+            outgoing: transport::spawn_writer(stdin),
+        };
+        Ok((client, rx))
     }
 
     /// Connect to an adapter serving DAP on a socket instead of stdio (delve's
@@ -179,7 +133,7 @@ impl DapClient {
                     Err(e) => last_err = format!("connecting to {host}:{port}: {e}"),
                 }
             }
-            let Some(mut writer) = stream else {
+            let Some(writer) = stream else {
                 return fail(last_err);
             };
             let (reader, shutdown) = match (writer.try_clone(), writer.try_clone()) {
@@ -194,19 +148,13 @@ impl DapClient {
                 }
                 slot.stream = Some(shutdown);
             }
-            std::thread::spawn(move || crate::lsp::read_frames(BufReader::new(reader), &tx));
-            while let Ok(frame) = out_rx.recv() {
-                if writer.write_all(frame.as_bytes()).is_err() {
-                    break; // connection closed
-                }
-                let _ = writer.flush();
-            }
+            std::thread::spawn(move || transport::read_frames(BufReader::new(reader), &tx));
+            transport::write_frames(out_rx, writer);
         });
 
         (
             Self {
                 child: None,
-                reaped: false,
                 socket: Some(slot),
                 outgoing,
             },
@@ -219,23 +167,15 @@ impl DapClient {
     /// the adapter has died; the editor drops the session when its message
     /// channel closes.
     pub fn send(&self, body: &str) {
-        let _ = self
-            .outgoing
-            .send(format!("Content-Length: {}\r\n\r\n{body}", body.len()));
+        let _ = self.outgoing.send(transport::frame(body));
     }
 
     /// End the session: kill the adapter's process group (stdio) or shut the
     /// socket down / cancel the pending connect (TCP). The reader thread then
     /// sees EOF and the editor's message pump reports the exit.
     pub fn kill(&mut self) {
-        if !self.reaped
-            && let Some(child) = self.child.as_mut()
-        {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-            let _ = child.kill();
+        if let Some(group) = self.child.as_mut() {
+            group.kill_now(); // a no-op once reaped
         }
         if let Some(slot) = self.socket.as_ref() {
             let mut slot = slot.lock().unwrap();
@@ -256,28 +196,10 @@ impl DapClient {
             let error = slot.lock().unwrap().error.take();
             return (if error.is_some() { -1 } else { 0 }, error);
         }
-        let Some(child) = self.child.as_mut() else {
+        let Some(group) = self.child.as_mut() else {
             return (0, None);
         };
-        let deadline = Instant::now() + REAP_GRACE;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Ok(None) => {
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(-(child.id() as i32), libc::SIGKILL);
-                    }
-                    let _ = child.kill();
-                    break child.wait().ok();
-                }
-                Err(_) => break None,
-            }
-        };
-        self.reaped = true;
+        let status = group.reap_with_grace(REAP_GRACE);
         (status.and_then(|s| s.code()).unwrap_or(-1), None)
     }
 }
@@ -286,14 +208,8 @@ impl DapClient {
 /// down, app quitting) must not leave the adapter and its debuggee running.
 impl Drop for DapClient {
     fn drop(&mut self) {
+        // SIGKILLs the group; dropping the `ProcessGroup` then reaps it.
         self.kill();
-        if !self.reaped
-            && let Some(child) = self.child.as_mut()
-        {
-            // SIGKILLed above, so this returns promptly; it reaps the zombie.
-            let _ = child.wait();
-            self.reaped = true;
-        }
     }
 }
 
@@ -301,7 +217,8 @@ impl Drop for DapClient {
 mod tests {
     use super::*;
     use futures::StreamExt;
-    use std::io::BufRead;
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
 
     #[test]
     fn start_with_missing_cwd_reports_the_directory() {

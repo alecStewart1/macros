@@ -89,7 +89,7 @@
 ;; so git operations get real pathspecs rather than the literal arrow string.
 (define (entry-status e) (substring e 0 2))
 (define (entry-path e) (substring e 3 (string-length e)))
-(define (char-at s i) (substring s i (+ i 1)))
+(define (magit-char-at s i) (substring s i (+ i 1)))
 
 ;; The pathspecs a "OLD -> NEW" (or plain) section path covers — used for `add` /
 ;; `reset` / `checkout`, which must name every side of a rename.
@@ -177,16 +177,16 @@
 ;; (passed in as `entries`) rather than each re-running `git status`.
 ;; Staged / unstaged carry their status label: (label path).
 (define (magit-staged entries)
-  (map (lambda (e) (list (magit-label (char-at e 0)) (entry-path e)))
+  (map (lambda (e) (list (magit-label (magit-char-at e 0)) (entry-path e)))
        (filter (lambda (e)
-                 (let ((x (char-at e 0)))
+                 (let ((x (magit-char-at e 0)))
                    (and (not (equal? x " ")) (not (equal? x "?")))))
                entries)))
 
 (define (magit-unstaged entries)
-  (map (lambda (e) (list (magit-label (char-at e 1)) (entry-path e)))
+  (map (lambda (e) (list (magit-label (magit-char-at e 1)) (entry-path e)))
        (filter (lambda (e)
-                 (let ((y (char-at e 1)))
+                 (let ((y (magit-char-at e 1)))
                    (and (not (equal? y " ")) (not (equal? y "?")))))
                entries)))
 
@@ -438,15 +438,10 @@
 
 ;; Emit a paired removed-run + added-run: the removed lines first (in file
 ;; order), each accented against its positional partner, then the added lines.
+;; (Steel's `for-each` takes one list, so the runs are zipped with `map cons`.)
 (define (magit-emit-paired-lines rem add)
-  (let loop ((rs rem) (as add))
-    (when (not (null? rs))
-      (magit-emit-intra-line (car rs) (car as) #t)
-      (loop (cdr rs) (cdr as))))
-  (let loop ((rs rem) (as add))
-    (when (not (null? as))
-      (magit-emit-intra-line (car as) (car rs) #f)
-      (loop (cdr rs) (cdr as)))))
+  (for-each (lambda (p) (magit-emit-intra-line (car p) (cdr p) #t)) (map cons rem add))
+  (for-each (lambda (p) (magit-emit-intra-line (car p) (cdr p) #f)) (map cons add rem)))
 
 ;; Emit a hunk body (the lines after the @@ header) with within-line word diff:
 ;; an N-removed / N-added block is paired and intra-highlighted; everything else
@@ -471,7 +466,7 @@
 ;; Split a `git diff` into (header . hunks): the file header (lines before the
 ;; first @@) and each @@-hunk as its own string. The header + one hunk form a
 ;; valid patch for `git apply` (hunk-level staging).
-(define (parse-diff raw)
+(define (magit-parse-diff raw)
   (let loop ((lines (split-many raw "\n")) (header '()) (hunks '()) (cur '()) (in #f))
     (cond
       ((null? lines)
@@ -487,7 +482,7 @@
 ;; --- bulk diff (one git call per section, not per file) ---------------------
 ;; A single `git diff` lists every changed file; splitting it per file lets one
 ;; invocation replace N. Each file's slice is byte-identical to what
-;; `git diff -- <path>` prints, so parse-diff and hunk-apply are unaffected.
+;; `git diff -- <path>` prints, so magit-parse-diff and hunk-apply are unaffected.
 
 ;; Split bulk diff lines into per-file line-lists (each starts at "diff --git").
 (define (split-diff-files lines)
@@ -631,7 +626,7 @@
     (magit-emit-file-heading label path)
     (let ((body-start (section-point-line)))
       (when (member (cons type path) *magit-expanded*)
-        (let* ((parsed (parse-diff diff-text))
+        (let* ((parsed (magit-parse-diff diff-text))
                (header (car parsed))
                (hunks (cdr parsed)))
           (if (magit-structural?)
@@ -1821,14 +1816,7 @@
 ;; record is unambiguous: a 40-hex SHA header line, key/value lines, then the
 ;; source line (prefixed with a tab). Parse into `(final-line sha author epoch
 ;; summary)` records, in file order.
-(define (magit-blame-hex40? line)
-  (and (>= (string-length line) 41)
-       (equal? (substring line 40 41) " ")
-       (let loop ((i 0))
-         (cond ((>= i 40) #t)
-               ((string-contains? "0123456789abcdef" (substring line i (+ i 1)))
-                (loop (+ i 1)))
-               (else #f)))))
+(define (magit-blame-hex40? line) (= (string-match "^[0-9a-f]{40} " line) 0))
 (define (magit-blame-parse lines)
   (let loop ((ls lines) (sha "") (author "") (epoch 0) (summary "") (fline 0) (acc '()))
     (cond
@@ -1930,8 +1918,7 @@
             recs))
 ;; The file to blame: the buffer's real path — its name may be uniquified
 ;; (`mod.rs<parser>`), which git can't resolve. Falls back to the name.
-(define (magit-blame-file)
-  (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f)))
+(define (magit-blame-file) (buffer-path-or-name))
 (define (magit-blame-ensure)
   (when (not (equal? (magit-blame-file) *magit-blame-buf*))
     (magit-blame-store (magit-blame-file) (magit-blame-fetch (buffer-directory) (magit-blame-file))))
@@ -2165,42 +2152,43 @@
 ;; --- keymaps ----------------------------------------------------------------
 ;; magit-status (matches magit's keys; uppercase = shift-, shown prettified in
 ;; transient menus via Rust pretty_key).
-(define-key "magit-status" "s" 'magit-stage)
-(define-key "magit-status" "shift-s" 'magit-stage-all)
-(define-key "magit-status" "u" 'magit-unstage)
-(define-key "magit-status" "shift-u" 'magit-unstage-all)
-(define-key "magit-status" "k" 'magit-discard)
-(define-key "magit-status" "c" 'magit-commit-popup)
-(define-key "magit-status" "b" 'magit-branch-popup)
-(define-key "magit-status" "shift-p" 'magit-push-popup)
-(define-key "magit-status" "shift-f" 'magit-pull-popup)
-(define-key "magit-status" "f" 'magit-fetch-popup)
-(define-key "magit-status" "z" 'magit-stash-popup)
-(define-key "magit-status" "l" 'magit-log-popup)
-(define-key "magit-status" "shift-x" 'magit-reset-popup)
-(define-key "magit-status" "shift-m" 'magit-remote-popup)
-(define-key "magit-status" "t" 'magit-tag-popup)
-(define-key "magit-status" "m" 'magit-merge-popup)
-(define-key "magit-status" "shift-b" 'magit-blame)
-(define-key "magit-status" "r" 'magit-rebase-popup)
-(define-key "magit-status" "y" 'magit-copy)
-(define-key "magit-status" "i" 'magit-gitignore)
-(define-key "magit-status" "$" 'magit-process-buffer)
-(define-key "magit-status" "shift-h" 'magit-toggle-history)
-(define-key "magit-status" "?" 'magit-dispatch)
-(define-key "magit-status" "g" 'magit-refresh)
-(define-key "magit-status" "v" 'magit-toggle-view)
-(define-key "magit-status" "n" 'next-line)
-(define-key "magit-status" "p" 'previous-line)
-(define-key "magit-status" "alt-n" 'magit-next-section)
-(define-key "magit-status" "alt-p" 'magit-prev-section)
-(define-key "magit-status" "q" 'magit-quit)
-(define-key "magit-status" "tab" 'magit-toggle-fold)
-(define-key "magit-status" "backtab" 'magit-cycle-all)
-(define-key "magit-status" "shift-tab" 'magit-cycle-all)
-(define-key "magit-status" "enter" 'magit-visit-file)
-;; Shadows fundamental's C-g inside magit so it can cancel a live push/pull.
-(define-key "magit-status" "ctrl-g" 'magit-keyboard-quit)
+(define-keys "magit-status"
+  '(("s" magit-stage)
+    ("shift-s" magit-stage-all)
+    ("u" magit-unstage)
+    ("shift-u" magit-unstage-all)
+    ("k" magit-discard)
+    ("c" magit-commit-popup)
+    ("b" magit-branch-popup)
+    ("shift-p" magit-push-popup)
+    ("shift-f" magit-pull-popup)
+    ("f" magit-fetch-popup)
+    ("z" magit-stash-popup)
+    ("l" magit-log-popup)
+    ("shift-x" magit-reset-popup)
+    ("shift-m" magit-remote-popup)
+    ("t" magit-tag-popup)
+    ("m" magit-merge-popup)
+    ("shift-b" magit-blame)
+    ("r" magit-rebase-popup)
+    ("y" magit-copy)
+    ("i" magit-gitignore)
+    ("$" magit-process-buffer)
+    ("shift-h" magit-toggle-history)
+    ("?" magit-dispatch)
+    ("g" magit-refresh)
+    ("v" magit-toggle-view)
+    ("n" next-line)
+    ("p" previous-line)
+    ("alt-n" magit-next-section)
+    ("alt-p" magit-prev-section)
+    ("q" magit-quit)
+    ("tab" magit-toggle-fold)
+    ("backtab" magit-cycle-all)
+    ("shift-tab" magit-cycle-all)
+    ("enter" magit-visit-file)
+    ;; Shadows fundamental's C-g inside magit so it can cancel a live push/pull.
+    ("ctrl-g" magit-keyboard-quit)))
 
 ;; Evil + Helix overlays (each consulted only under its own modal mode, before
 ;; the keymap above, so the Emacs defaults are untouched). The collection layer
@@ -2215,14 +2203,15 @@
 (for-each
  (lambda (prefix)
    (let ((km (string-append prefix "magit-status")))
-     (define-key km "x" 'magit-discard)
-     (define-key km "g g" 'evil-goto-first-line)
-     (define-key km "shift-g" 'evil-goto-last-line)
-     (define-key km "g r" 'magit-refresh)
-     (define-key km "0" 'move-beginning-of-line)
-     (define-key km "^" 'evil-first-non-blank)
-     ;; Escape = the modal C-g: cancels a live push/pull like C-g does.
-     (define-key km "escape" 'magit-keyboard-quit)))
+     (define-keys km
+       '(("x" magit-discard)
+         ("g g" evil-goto-first-line)
+         ("shift-g" evil-goto-last-line)
+         ("g r" magit-refresh)
+         ("0" move-beginning-of-line)
+         ("^" evil-first-non-blank)
+         ;; Escape = the modal C-g: cancels a live push/pull like C-g does.
+         ("escape" magit-keyboard-quit)))))
  (list "evil-normal:" "helix-normal:"))
 ;; Helix goes to the bottom with `g e`, not `G` (which is vim's). Both are bound
 ;; under Helix so either muscle memory works, matching dired-sidebar.
@@ -2243,10 +2232,11 @@
 (define-key "fundamental" "ctrl-x shift-m" 'helm-magit)
 
 ;; C-x v …: inline git-blame controls on the current file buffer (Emacs vc-prefix).
-(define-key "fundamental" "ctrl-x v b" 'magit-blame-toggle)        ; full-file blame
-(define-key "fundamental" "ctrl-x v shift-b" 'magit-blame-line-toggle) ; current-line blame
-(define-key "fundamental" "ctrl-x v enter" 'magit-blame-show)     ; show commit at point
-(define-key "fundamental" "ctrl-x v y" 'magit-blame-copy)         ; copy hash at point
+(define-keys "fundamental"
+  '(("ctrl-x v b" magit-blame-toggle)             ; full-file blame
+    ("ctrl-x v shift-b" magit-blame-line-toggle)  ; current-line blame
+    ("ctrl-x v enter" magit-blame-show)           ; show commit at point
+    ("ctrl-x v y" magit-blame-copy)))             ; copy hash at point
 
 ;; `magit` is the familiar alias for `magit-status`.
 (define-command (magit) (magit-status))

@@ -9,7 +9,7 @@
 (for-each (lambda (e) (set-extension e "markdown"))
           (list "md" "markdown" "mdown" "mkd" "mkdn"))
 
-(define (md-lines) (split-many (buffer-string) "\n"))
+(define (md-lines) (buffer-lines))
 
 (define (md-heading-line? line)
   (>= (string-match "^#+ " line) 0))
@@ -36,10 +36,7 @@
 (define (md--active?)
   ;; The visited file's path (the buffer name of a uniquified buffer is
   ;; `README.md<dir>`), or the buffer name for a fileless buffer.
-  (let ((b (let ((f (buffer-file-name)))
-             (if (or (not (string? f)) (equal? f "")) (current-buffer) f))))
-    (or (ends-with? b ".md") (ends-with? b ".markdown")
-        (ends-with? b ".mdown") (ends-with? b ".mkd") (ends-with? b ".mkdn"))))
+  (ends-with-any? (buffer-path-or-name) (list ".md" ".markdown" ".mdown" ".mkd" ".mkdn")))
 
 ;; Font multiplier per heading level — h1 biggest, tapering toward body size.
 (define (md--heading-scale level)
@@ -185,48 +182,47 @@
           ((md-heading-line? (nth lines n)) n)
           (else (loop (- n 1))))))
 
+;; Walk `ls` (the lines from index `n` on) to the first heading whose level is
+;; `level` or higher → its index, else the index just past the last line. One
+;; pass over a list tail (no per-step `nth`).
+(define (md--section-end-from ls n level)
+  (cond ((null? ls) n)
+        ((and (md-heading-line? (car ls)) (<= (md-heading-level (car ls)) level)) n)
+        (else (md--section-end-from (cdr ls) (+ n 1) level))))
+
 ;; First line index after the section starting at `start` (of level `level`):
 ;; the next heading whose level is the same or higher, else end of buffer. This
 ;; is the section body's exclusive end, so the body is the half-open
 ;; `[start+1, end)`.
 (define (md-section-end lines start level)
   (let ((total (length lines)))
-    (let loop ((n (+ start 1)))
-      (cond ((>= n total) total)
-            ((and (md-heading-line? (nth lines n))
-                  (<= (md-heading-level (nth lines n)) level))
-             n)
-            (else (loop (+ n 1)))))))
+    (if (>= (+ start 1) total)
+        total
+        (md--section-end-from (list-tail lines (+ start 1)) (+ start 1) level))))
 
 ;; Exclusive body end of the section headed by `start`.
 (define (md--section-body-end lines start)
   (md-section-end lines start (md-heading-level (nth lines start))))
 
 ;; Heading line indices that have a non-empty body (so are actually foldable).
+;; Each heading's section end is scanned from the heading's own list tail.
 (define (md--foldable-headings lines)
   (let loop ((ls lines) (i 0) (acc '()))
     (cond ((null? ls) (reverse acc))
           ((and (md-heading-line? (car ls))
-                (> (md--section-body-end lines i) (+ i 1)))
+                (> (md--section-end-from (cdr ls) (+ i 1) (md-heading-level (car ls)))
+                   (+ i 1)))
            (loop (cdr ls) (+ i 1) (cons i acc)))
           (else (loop (cdr ls) (+ i 1) acc)))))
 
 ;; Per-buffer set of folded heading line numbers (mirrors org's fold state),
 ;; plus each one's text anchor so the numbers can be relocated after edits shift
 ;; the lines (see fold-anchors-capture in folding.scm).
-(define *md-folded* '())
-(define *md-folded-anchors* '())
-(define (md--folded-get) (buffer-state-get *md-folded* '()))
-(define (md--folded-set v)
-  (set! *md-folded* (buffer-state-set *md-folded* v))
-  (set! *md-folded-anchors*
-        (buffer-state-set *md-folded-anchors* (fold-anchors-capture (md-lines) v))))
+(define *md-fold-store* (make-fold-store (lambda (n) n) (lambda (n m) m)))
+(define (md--folded-get) (fold-store-get *md-fold-store*))
+(define (md--folded-set v) (fold-store-set *md-fold-store* v))
 ;; Relocate the recorded folded lines to where their headings are now.
-(define (md--folded-resync lines)
-  (let ((v (md--folded-get)))
-    (when (not (null? v))
-      (md--folded-set
-       (fold-anchors-relocate-lines (buffer-state-get *md-folded-anchors* '()) lines v)))))
+(define (md--folded-resync lines) (fold-store-resync *md-fold-store* lines))
 (define (md--folded? line) (if (member line (md--folded-get)) #t #f))
 
 ;; Re-hide every folded section from scratch (the only unfold primitive is

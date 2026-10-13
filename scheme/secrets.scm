@@ -68,10 +68,7 @@
     (if (string? v) v "")))
 
 ;; Value after `key` in a '(key value …) option list, else `default`.
-(define (secrets--opt opts key default)
-  (cond ((or (null? opts) (null? (cdr opts))) default)
-        ((equal? (car opts) key) (cadr opts))
-        (else (secrets--opt (cddr opts) key default))))
+(define (secrets--opt opts key default) (plist-get opts key default))
 
 (define (secrets--label host user port)
   (string-append (if (equal? user "") "" (string-append user "@"))

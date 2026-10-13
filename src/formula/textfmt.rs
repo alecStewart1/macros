@@ -19,6 +19,10 @@
 //! Not supported (deviation): fractions (`# ?/?`), which print `/` as a
 //! literal; locale-specific calendars (`B2`, `e`, `g`).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use super::date;
 use super::decimal::{Dec, Mode};
 use super::value::{ErrorKind, Value, general_format, parse_number};
@@ -68,6 +72,8 @@ enum CondOp {
 struct Section {
     toks: Vec<Tok>,
     cond: Option<(CondOp, f64)>,
+    /// How `toks` lay out a number (unused by a date section).
+    layout: NumLayout,
 }
 
 impl Section {
@@ -278,7 +284,8 @@ fn parse_section(src: &str) -> Section {
         }
     }
     resolve_minutes(&mut toks);
-    Section { toks, cond }
+    let layout = NumLayout::of(&toks);
+    Section { toks, cond, layout }
 }
 
 /// `m`/`mm` are minutes right after an hour code or right before a seconds
@@ -324,170 +331,279 @@ fn parse_cond(s: &str) -> Option<(CondOp, f64)> {
     Some((op, parse_number(rest.trim())?))
 }
 
-/// Format any value with a format code, as `TEXT` does: numbers (and text
-/// that reads as a number) through the numeric sections, other text through
-/// the text section (or unchanged), booleans as `TRUE`/`FALSE`.
-pub fn format_value(v: &Value, code: &str, date1904: bool) -> Result<String, ErrorKind> {
-    match v {
-        Value::Error(e) => Err(*e),
-        Value::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
-        Value::Empty => format_number(0.0, code, date1904),
-        Value::Number(n) => format_number(*n, code, date1904),
-        Value::Text(s) => match parse_number(s.trim()) {
-            Some(n) => format_number(n, code, date1904),
-            None => match date::parse_datetime(s, None, date1904) {
-                Some(dt) => format_number(dt.serial(), code, date1904),
-                None => Ok(format_text(s, code)),
-            },
-        },
-    }
+/// A parsed format code, ready to format any number of values: each
+/// section's tokens and numeric layout are worked out once
+/// ([`NumberFormat::parse`]) rather than on every call.
+#[derive(Clone, Debug)]
+pub struct NumberFormat {
+    /// Every section as written, the text one (the fourth) included.
+    secs: Vec<Section>,
 }
 
-/// Format text: the fourth section, or a lone section holding `@`;
-/// otherwise the text unchanged.
-pub fn format_text(s: &str, code: &str) -> String {
-    let secs = split_sections(code);
-    let sec = if secs.len() >= 4 {
-        parse_section(secs[3])
-    } else if secs.len() == 1 && parse_section(secs[0]).has_at() {
-        parse_section(secs[0])
-    } else {
-        return s.to_string();
-    };
-    let mut out = String::new();
-    for t in &sec.toks {
-        match t {
-            Tok::At => out.push_str(s),
-            Tok::Lit(l) => out.push_str(l),
-            _ => {}
+impl NumberFormat {
+    pub fn parse(code: &str) -> NumberFormat {
+        NumberFormat {
+            secs: split_sections(code)
+                .into_iter()
+                .map(parse_section)
+                .collect(),
         }
     }
-    out
-}
 
-/// Format a number with a format code.
-pub fn format_number(n: f64, code: &str, date1904: bool) -> Result<String, ErrorKind> {
-    if !n.is_finite() {
-        return Err(ErrorKind::Num);
-    }
-    let raw = split_sections(code);
-    let mut secs: Vec<Section> = raw.iter().map(|s| parse_section(s)).collect();
-    if secs.len() > 4 {
-        return Err(ErrorKind::Value);
-    }
-    // The text section takes no part in numbers.
-    if secs.len() == 4 {
-        secs.pop();
-    }
-    let has_cond = secs.iter().take(2).any(|s| s.cond.is_some());
-    let (sec, show_minus) = if has_cond {
-        if secs[0].test(n) {
-            (&secs[0], n < 0.0)
-        } else if secs.len() >= 2 && secs[1].cond.is_some() && secs[1].test(n) {
-            (&secs[1], false)
-        } else if secs.len() >= 3 {
-            (&secs[2], n < 0.0)
-        } else if secs.len() == 2 && secs[1].cond.is_none() {
-            (&secs[1], n < 0.0)
-        } else {
-            return Err(ErrorKind::Value);
-        }
-    } else {
-        match secs.len() {
-            1 => (&secs[0], n < 0.0),
-            2 => (if n < 0.0 { &secs[1] } else { &secs[0] }, false),
-            _ => (
-                if n > 0.0 {
-                    &secs[0]
-                } else if n < 0.0 {
-                    &secs[1]
-                } else {
-                    &secs[2]
+    /// Format any value, as `TEXT` does: numbers (and text that reads as a
+    /// number) through the numeric sections, other text through the text
+    /// section (or unchanged), booleans as `TRUE`/`FALSE`.
+    pub fn format_value(&self, v: &Value, date1904: bool) -> Result<String, ErrorKind> {
+        match v {
+            Value::Error(e) => Err(*e),
+            Value::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
+            Value::Empty => self.format(0.0, date1904),
+            Value::Number(n) => self.format(*n, date1904),
+            Value::Text(s) => match parse_number(s.trim()) {
+                Some(n) => self.format(n, date1904),
+                None => match date::parse_datetime(s, None, date1904) {
+                    Some(dt) => self.format(dt.serial(), date1904),
+                    None => Ok(self.format_text(s)),
                 },
-                false,
-            ),
+            },
         }
-    };
-    let a = n.abs();
-    if sec.is_date() {
-        // Dates and times can't be negative.
-        if n < 0.0 && (show_minus || secs.len() == 1) {
+    }
+
+    /// Format text: the fourth section, or a lone section holding `@`;
+    /// otherwise the text unchanged.
+    pub fn format_text(&self, s: &str) -> String {
+        let secs = &self.secs;
+        let sec = if secs.len() >= 4 {
+            &secs[3]
+        } else if secs.len() == 1 && secs[0].has_at() {
+            &secs[0]
+        } else {
+            return s.to_string();
+        };
+        let mut out = String::new();
+        for t in &sec.toks {
+            match t {
+                Tok::At => out.push_str(s),
+                Tok::Lit(l) => out.push_str(l),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Format a number.
+    pub fn format(&self, n: f64, date1904: bool) -> Result<String, ErrorKind> {
+        if !n.is_finite() {
+            return Err(ErrorKind::Num);
+        }
+        if self.secs.len() > 4 {
             return Err(ErrorKind::Value);
         }
-        return format_date(a, sec, date1904);
+        // The text section takes no part in numbers.
+        let secs = &self.secs[..self.secs.len().min(3)];
+        let has_cond = secs.iter().take(2).any(|s| s.cond.is_some());
+        let (sec, show_minus) = if has_cond {
+            if secs[0].test(n) {
+                (&secs[0], n < 0.0)
+            } else if secs.len() >= 2 && secs[1].cond.is_some() && secs[1].test(n) {
+                (&secs[1], false)
+            } else if secs.len() >= 3 {
+                (&secs[2], n < 0.0)
+            } else if secs.len() == 2 && secs[1].cond.is_none() {
+                (&secs[1], n < 0.0)
+            } else {
+                return Err(ErrorKind::Value);
+            }
+        } else {
+            match secs.len() {
+                1 => (&secs[0], n < 0.0),
+                2 => (if n < 0.0 { &secs[1] } else { &secs[0] }, false),
+                _ => (
+                    if n > 0.0 {
+                        &secs[0]
+                    } else if n < 0.0 {
+                        &secs[1]
+                    } else {
+                        &secs[2]
+                    },
+                    false,
+                ),
+            }
+        };
+        let a = n.abs();
+        if sec.is_date() {
+            // Dates and times can't be negative.
+            if n < 0.0 && (show_minus || secs.len() == 1) {
+                return Err(ErrorKind::Value);
+            }
+            return format_date(a, sec, date1904);
+        }
+        let body = format_num_section(a, sec);
+        Ok(if show_minus { format!("-{body}") } else { body })
     }
-    let body = format_num_section(a, sec);
-    Ok(if show_minus { format!("-{body}") } else { body })
+}
+
+/// `code` parsed, from a small per-thread cache: grid cells format with a
+/// handful of codes, over and over.
+fn cached(code: &str) -> Rc<NumberFormat> {
+    /// Past this many codes the cache starts over.
+    const CAPACITY: usize = 256;
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, Rc<NumberFormat>>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with_borrow_mut(|cache| {
+        if let Some(f) = cache.get(code) {
+            return Rc::clone(f);
+        }
+        if cache.len() >= CAPACITY {
+            cache.clear();
+        }
+        let f = Rc::new(NumberFormat::parse(code));
+        cache.insert(code.to_string(), Rc::clone(&f));
+        f
+    })
+}
+
+/// Format any value with a format code ([`NumberFormat::format_value`]).
+pub fn format_value(v: &Value, code: &str, date1904: bool) -> Result<String, ErrorKind> {
+    cached(code).format_value(v, date1904)
+}
+
+/// The shape of a numeric section, which depends only on its tokens:
+/// worked out when the code is parsed.
+#[derive(Clone, Debug, Default)]
+struct NumLayout {
+    /// Where the exponent token is (`E+`), if scientific.
+    exp_at: Option<usize>,
+    /// The mantissa is `toks[..mant_end]` (everything before the exponent).
+    mant_end: usize,
+    /// Digit placeholder kinds (`0 # ?`) left and right of the point.
+    int_kinds: Vec<char>,
+    frac_kinds: Vec<char>,
+    /// The exponent's placeholder kinds.
+    exp_kinds: Vec<char>,
+    /// A thousands separator between integer placeholders.
+    thousands: bool,
+    /// Scaling commas: each divides by 1,000.
+    scale: i32,
+    /// Which mantissa commas show as literal commas.
+    comma_lit: Vec<bool>,
+    /// `%` signs in the mantissa: each multiplies by 100.
+    percents: i32,
+    has_general: bool,
+    has_at: bool,
+}
+
+impl NumLayout {
+    fn of(toks: &[Tok]) -> NumLayout {
+        let exp_at = toks.iter().position(|t| matches!(t, Tok::Exp(_)));
+        let mant_end = exp_at.unwrap_or(toks.len());
+        let mant = &toks[..mant_end];
+        let point_at = mant.iter().position(|t| *t == Tok::Point);
+        let int_end = point_at.unwrap_or(mant.len());
+        let int_kinds = digit_kinds(&mant[..int_end]);
+        let frac_kinds = point_at
+            .map(|p| digit_kinds(&mant[p + 1..]))
+            .unwrap_or_default();
+        let exp_kinds = exp_at
+            .map(|e| digit_kinds(&toks[e + 1..]))
+            .unwrap_or_default();
+
+        // Classify commas: thousands (between int digits), scaling (after
+        // the last digit placeholder), else literal.
+        let last_digit = mant.iter().rposition(|t| matches!(t, Tok::Digit(_)));
+        let first_digit = mant.iter().position(|t| matches!(t, Tok::Digit(_)));
+        let mut thousands = false;
+        let mut scale = 0i32;
+        let mut comma_lit = vec![false; mant.len()];
+        for (i, t) in mant.iter().enumerate() {
+            if *t != Tok::Comma {
+                continue;
+            }
+            let Some(fd) = first_digit else {
+                comma_lit[i] = true;
+                continue;
+            };
+            if i < fd {
+                comma_lit[i] = true;
+            } else if i < int_end
+                && mant[i + 1..int_end]
+                    .iter()
+                    .any(|t| matches!(t, Tok::Digit(_)))
+            {
+                thousands = true;
+            } else if last_digit.is_none_or(|ld| i > ld)
+                || mant[i + 1..].iter().find(|t| **t != Tok::Comma) == Some(&Tok::Point)
+            {
+                scale += 1;
+            } else {
+                comma_lit[i] = true;
+            }
+        }
+        NumLayout {
+            exp_at,
+            mant_end,
+            int_kinds,
+            frac_kinds,
+            exp_kinds,
+            thousands,
+            scale,
+            comma_lit,
+            percents: mant.iter().filter(|t| **t == Tok::Percent).count() as i32,
+            has_general: toks.contains(&Tok::General),
+            has_at: toks.contains(&Tok::At),
+        }
+    }
+
+    fn any_digit(&self) -> bool {
+        !self.int_kinds.is_empty() || !self.frac_kinds.is_empty()
+    }
+}
+
+/// The placeholder kinds (`0 # ?`) among `toks`, in order.
+fn digit_kinds(toks: &[Tok]) -> Vec<char> {
+    toks.iter()
+        .filter_map(|t| match t {
+            Tok::Digit(c) => Some(*c),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Render a non-negative number through a numeric section (the caller adds
 /// any minus sign).
 fn format_num_section(a: f64, sec: &Section) -> String {
     let toks = &sec.toks;
-    // Split at the exponent.
-    let exp_at = toks.iter().position(|t| matches!(t, Tok::Exp(_)));
-    let mant = &toks[..exp_at.unwrap_or(toks.len())];
-    let point_at = mant.iter().position(|t| *t == Tok::Point);
-    let int_end = point_at.unwrap_or(mant.len());
-    let digit_kinds = |r: &[Tok]| -> Vec<char> {
-        r.iter()
-            .filter_map(|t| {
-                if let Tok::Digit(c) = t {
-                    Some(*c)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
-    let int_kinds = digit_kinds(&mant[..int_end]);
-    let frac_kinds = point_at
-        .map(|p| digit_kinds(&mant[p + 1..]))
-        .unwrap_or_default();
-    let any_digit = !int_kinds.is_empty() || !frac_kinds.is_empty();
-
-    // Classify commas: thousands (between int digits), scaling (after the
-    // last digit placeholder), else literal.
-    let last_digit = mant.iter().rposition(|t| matches!(t, Tok::Digit(_)));
-    let first_digit = mant.iter().position(|t| matches!(t, Tok::Digit(_)));
-    let mut thousands = false;
-    let mut scale = 0i32;
-    let mut comma_lit = vec![false; mant.len()];
-    for (i, t) in mant.iter().enumerate() {
-        if *t != Tok::Comma {
-            continue;
-        }
-        let Some(fd) = first_digit else {
-            comma_lit[i] = true;
-            continue;
-        };
-        if i < fd {
-            comma_lit[i] = true;
-        } else if i < int_end
-            && mant[i + 1..int_end]
-                .iter()
-                .any(|t| matches!(t, Tok::Digit(_)))
-        {
-            thousands = true;
-        } else if last_digit.is_none_or(|ld| i > ld)
-            || mant[i + 1..].iter().find(|t| **t != Tok::Comma) == Some(&Tok::Point)
-        {
-            scale += 1;
-        } else {
-            comma_lit[i] = true;
-        }
-    }
-    let percents = mant.iter().filter(|t| **t == Tok::Percent).count() as i32;
+    let lay = &sec.layout;
 
     // Scale as decimal digits, not by float multiplication.
     let mut d = Dec::from_f64(a);
     if !d.is_zero() {
-        d.point += 2 * percents - 3 * scale;
+        d.point += 2 * lay.percents - 3 * lay.scale;
     }
 
+    if !lay.any_digit() {
+        return render_digitless(&d, toks, lay);
+    }
+    let mut exponent = 0i32;
+    if lay.exp_at.is_some() {
+        exponent = normalise_exponent(&mut d, lay);
+    }
+    let mut out = render_mantissa(&d, &toks[..lay.mant_end], lay);
+    if let Some(e) = lay.exp_at {
+        let Tok::Exp(plus) = toks[e] else {
+            unreachable!()
+        };
+        render_exponent(&mut out, exponent, plus, &toks[e + 1..], &lay.exp_kinds);
+    }
+    out
+}
+
+/// A section with no digit placeholders: `General` (with any literals), a
+/// literal-only section, or `@` in a numeric section (General again).
+fn render_digitless(d: &Dec, toks: &[Tok], lay: &NumLayout) -> String {
     let mut out = String::new();
-    let general_only = toks.contains(&Tok::General) && !any_digit;
-    if general_only {
+    if lay.has_general {
         let g = general_format(d.to_f64());
         for t in toks {
             match t {
@@ -498,23 +614,17 @@ fn format_num_section(a: f64, sec: &Section) -> String {
                 _ => {}
             }
         }
-        return out;
-    }
-    if !any_digit && !toks.contains(&Tok::At) {
-        // Literal-only section.
+    } else if !lay.has_at {
         for (i, t) in toks.iter().enumerate() {
             match t {
                 Tok::Lit(l) => out.push_str(l),
                 Tok::Percent => out.push('%'),
                 Tok::Point => out.push('.'),
-                Tok::Comma if comma_lit.get(i).copied().unwrap_or(true) => out.push(','),
+                Tok::Comma if lay.comma_lit.get(i).copied().unwrap_or(true) => out.push(','),
                 _ => {}
             }
         }
-        return out;
-    }
-    if !any_digit {
-        // `@` in a numeric section: General.
+    } else {
         let g = general_format(d.to_f64());
         for t in toks {
             match t {
@@ -523,33 +633,42 @@ fn format_num_section(a: f64, sec: &Section) -> String {
                 _ => {}
             }
         }
-        return out;
     }
+    out
+}
 
-    let frac_n = frac_kinds.len();
-    let mut exponent = 0i32;
-    if exp_at.is_some() {
-        // `##0.0E+0` (several placeholders with a '#') is engineering
-        // notation: the exponent is a multiple of the placeholder count.
-        // Otherwise the mantissa fills every integer placeholder.
-        let p = int_kinds.len().max(1) as i32;
-        let engineering = p > 1 && int_kinds.contains(&'#');
-        if !d.is_zero() {
-            let mag = d.point - 1; // floor(log10)
-            exponent = if engineering {
-                mag.div_euclid(p) * p
-            } else {
-                mag - (p - 1)
-            };
-            d.point -= exponent;
-            // Rounding up can add a digit (9.995 → 10.00): renormalise.
-            if d.round(frac_n as i32, Mode::Half).point > p {
-                let step = if engineering { p } else { 1 };
-                exponent += step;
-                d.point -= step;
-            }
-        }
+/// Move `d`'s point for scientific notation and return the exponent.
+/// `##0.0E+0` (several placeholders with a '#') is engineering notation:
+/// the exponent is a multiple of the placeholder count. Otherwise the
+/// mantissa fills every integer placeholder.
+fn normalise_exponent(d: &mut Dec, lay: &NumLayout) -> i32 {
+    if d.is_zero() {
+        return 0;
     }
+    let frac_n = lay.frac_kinds.len();
+    let p = lay.int_kinds.len().max(1) as i32;
+    let engineering = p > 1 && lay.int_kinds.contains(&'#');
+    let mag = d.point - 1; // floor(log10)
+    let mut exponent = if engineering {
+        mag.div_euclid(p) * p
+    } else {
+        mag - (p - 1)
+    };
+    d.point -= exponent;
+    // Rounding up can add a digit (9.995 → 10.00): renormalise.
+    if d.round(frac_n as i32, Mode::Half).point > p {
+        let step = if engineering { p } else { 1 };
+        exponent += step;
+        d.point -= step;
+    }
+    exponent
+}
+
+/// The mantissa: `d` rounded to the fraction placeholders and laid into the
+/// placeholders, separators and literals of `mant`.
+fn render_mantissa(d: &Dec, mant: &[Tok], lay: &NumLayout) -> String {
+    let frac_n = lay.frac_kinds.len();
+    let frac_kinds = &lay.frac_kinds;
     let r = d.round(frac_n as i32, Mode::Half);
     let (int_s, frac_s) = r.fixed_parts(frac_n);
     let int_digits: Vec<char> = int_s.chars().collect();
@@ -567,7 +686,9 @@ fn format_num_section(a: f64, sec: &Section) -> String {
         };
     }
 
-    let p_int = int_kinds.len();
+    let thousands = lay.thousands;
+    let p_int = lay.int_kinds.len();
+    let mut out = String::new();
     let mut int_k = 0usize; // int placeholder index
     let mut frac_k = 0usize;
     let mut in_frac = false;
@@ -621,7 +742,7 @@ fn format_num_section(a: f64, sec: &Section) -> String {
                 in_frac = true;
             }
             Tok::Comma => {
-                if comma_lit[i] {
+                if lay.comma_lit[i] {
                     out.push(',');
                 }
             }
@@ -631,58 +752,47 @@ fn format_num_section(a: f64, sec: &Section) -> String {
             Tok::Date(_) | Tok::Exp(_) => {}
         }
     }
-    if let Some(e) = exp_at {
-        let Tok::Exp(plus) = toks[e] else {
-            unreachable!()
-        };
-        out.push('E');
-        if exponent < 0 {
-            out.push('-');
-        } else if plus {
-            out.push('+');
-        }
-        let etoks = &toks[e + 1..];
-        let ekinds: Vec<char> = etoks
-            .iter()
-            .filter_map(|t| {
-                if let Tok::Digit(c) = t {
-                    Some(*c)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let edigits: Vec<char> = exponent.unsigned_abs().to_string().chars().collect();
-        let pe = ekinds.len();
-        let mut k = 0;
-        for t in etoks {
-            match t {
-                Tok::Digit(kind) => {
-                    if k == 0 {
-                        for extra in (pe..edigits.len()).rev() {
-                            out.push(edigits[edigits.len() - 1 - extra]);
-                        }
+    out
+}
+
+/// `E`, the sign, and the exponent laid into its placeholders (`etoks`,
+/// whose kinds are `ekinds`).
+fn render_exponent(out: &mut String, exponent: i32, plus: bool, etoks: &[Tok], ekinds: &[char]) {
+    out.push('E');
+    if exponent < 0 {
+        out.push('-');
+    } else if plus {
+        out.push('+');
+    }
+    let edigits: Vec<char> = exponent.unsigned_abs().to_string().chars().collect();
+    let pe = ekinds.len();
+    let mut k = 0;
+    for t in etoks {
+        match t {
+            Tok::Digit(kind) => {
+                if k == 0 {
+                    for extra in (pe..edigits.len()).rev() {
+                        out.push(edigits[edigits.len() - 1 - extra]);
                     }
-                    let pos = pe - 1 - k;
-                    if pos < edigits.len() {
-                        out.push(edigits[edigits.len() - 1 - pos]);
-                    } else if *kind == '0' {
-                        out.push('0');
-                    } else if *kind == '?' {
-                        out.push(' ');
-                    }
-                    k += 1;
                 }
-                Tok::Lit(l) => out.push_str(l),
-                Tok::Percent => out.push('%'),
-                _ => {}
+                let pos = pe - 1 - k;
+                if pos < edigits.len() {
+                    out.push(edigits[edigits.len() - 1 - pos]);
+                } else if *kind == '0' {
+                    out.push('0');
+                } else if *kind == '?' {
+                    out.push(' ');
+                }
+                k += 1;
             }
-        }
-        if pe == 0 {
-            out.extend(edigits);
+            Tok::Lit(l) => out.push_str(l),
+            Tok::Percent => out.push('%'),
+            _ => {}
         }
     }
-    out
+    if pe == 0 {
+        out.extend(edigits);
+    }
 }
 
 fn pad(n: u64, width: usize) -> String {
@@ -775,6 +885,14 @@ fn format_date(a: f64, sec: &Section, date1904: bool) -> Result<String, ErrorKin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn format_number(n: f64, code: &str, date1904: bool) -> Result<String, ErrorKind> {
+        NumberFormat::parse(code).format(n, date1904)
+    }
+
+    fn format_text(s: &str, code: &str) -> String {
+        NumberFormat::parse(code).format_text(s)
+    }
 
     fn f(n: f64, code: &str) -> String {
         format_number(n, code, false).unwrap()

@@ -179,8 +179,7 @@ fn marks_jumps_and_windows(cx: &mut TestAppContext) {
     // Windows: C-w v splits, C-w l / C-w h move between them.
     let first = ed.read_with(cx, |e, _| e.selected_pane);
     keys(&ed, cx, "ctrl-w v");
-    let mut leaves = Vec::new();
-    ed.read_with(cx, |e, _| layout_leaves(&e.layout, &mut leaves));
+    let leaves = ed.read_with(cx, |e, _| e.layout.leaves());
     assert_eq!(leaves.len(), 2);
     keys(&ed, cx, "ctrl-w l");
     let right = ed.read_with(cx, |e, _| e.selected_pane);
@@ -188,8 +187,7 @@ fn marks_jumps_and_windows(cx: &mut TestAppContext) {
     keys(&ed, cx, "ctrl-w h");
     assert_eq!(ed.read_with(cx, |e, _| e.selected_pane), first);
     keys(&ed, cx, "ctrl-w o");
-    let mut leaves = Vec::new();
-    ed.read_with(cx, |e, _| layout_leaves(&e.layout, &mut leaves));
+    let leaves = ed.read_with(cx, |e, _| e.layout.leaves());
     assert_eq!(leaves.len(), 1);
 }
 
@@ -650,7 +648,7 @@ fn insert_at_hidden_range_start_stays_visible(cx: &mut TestAppContext) {
 fn undo_groups_nest_and_respect_buffer_switches(cx: &mut TestAppContext) {
     let ed = setup(cx, "\n");
     ed.update(cx, |e, _| {
-        let before = e.active.undo_tree.len();
+        let before = e.active.undo.len();
         e.begin_undo_group();
         e.edit(0..0, "a");
         e.begin_undo_group(); // e.g. a `C-u 3` repeat inside a Scheme batch
@@ -658,8 +656,8 @@ fn undo_groups_nest_and_respect_buffer_switches(cx: &mut TestAppContext) {
         e.end_undo_group();
         e.edit(2..2, "c"); // still inside the outer group
         e.end_undo_group();
-        assert_eq!(e.active.undo_tree.len(), before + 1, "one undo node");
-        assert_eq!(e.active.undo_tree[e.active.undo_current].edit.len(), 3);
+        assert_eq!(e.active.undo.len(), before + 1, "one undo node");
+        assert_eq!(e.active.undo.nodes[e.active.undo.current].edit.len(), 3);
 
         // Group open in buffer A, then the batch switches to B and edits.
         e.begin_undo_group();
@@ -670,9 +668,9 @@ fn undo_groups_nest_and_respect_buffer_switches(cx: &mut TestAppContext) {
         e.edit(0..0, "y");
         e.end_undo_group();
         // B's edit is its own node off B's root — not appended to the root.
-        assert_eq!(e.active.undo_tree.len(), 2);
-        assert_eq!(e.active.undo_current, 1);
-        assert!(e.active.undo_tree[0].edit.is_empty());
+        assert_eq!(e.active.undo.len(), 2);
+        assert_eq!(e.active.undo.current, 1);
+        assert!(e.active.undo.nodes[0].edit.is_empty());
     });
 }
 
@@ -682,11 +680,11 @@ fn isearch_backward_repeat_wraps_from_buffer_start(cx: &mut TestAppContext) {
     let ed = setup(cx, "foo bar foo\n");
     ed.update(cx, |e, cx| {
         e.collapse_to(0);
-        e.isearch_start(false, cx);
+        e.isearch_start(Direction::Backward, cx);
         e.minibuffer.as_mut().unwrap().input = "foo".into();
         e.isearch_update(cx);
         assert_eq!(e.point(), 0);
-        e.isearch_repeat(false, cx);
+        e.isearch_repeat(Direction::Backward, cx);
         assert_eq!(e.point(), 8, "wrapped to the last match");
     });
 }
@@ -810,8 +808,8 @@ fn workspace_edit_matches_buffers_by_file_identity(cx: &mut TestAppContext) {
             changes: vec![(
                 lsp::path_to_uri(&real),
                 vec![lsp::TextEdit {
-                    start: (0, 0),
-                    end: (0, 3),
+                    start: lsp::Position::new(0, 0),
+                    end: lsp::Position::new(0, 3),
                     new_text: "new".into(),
                 }],
             )],
@@ -979,7 +977,7 @@ fn marks_and_jumps_into_gone_buffers(cx: &mut TestAppContext) {
 fn read_passwd_masks_and_skips_history(cx: &mut TestAppContext) {
     let ed = setup(cx, "\n");
     ed.update(cx, |e, cx| {
-        e.push_minibuffer_history("older entry");
+        e.minibuffer_history.push("older entry");
         e.script
             .eval("(define got-pw #f) (define (take-pw pw) (set! got-pw pw))")
             .unwrap();
@@ -1000,7 +998,7 @@ fn read_passwd_masks_and_skips_history(cx: &mut TestAppContext) {
         assert_eq!(e.minibuffer.as_ref().unwrap().input, " pä ss ");
         e.mb_submit(cx);
         assert!(e.minibuffer.is_none());
-        assert_eq!(e.minibuffer_history, vec!["older entry".to_string()]);
+        assert_eq!(e.minibuffer_history.entries(), ["older entry".to_string()]);
         // The engine is FIFO: this sync eval runs after the dispatched call.
         assert_eq!(
             e.script.eval("got-pw").unwrap().value.as_deref(),

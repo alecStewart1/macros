@@ -475,7 +475,7 @@ fn regression_formula_bar_click_caret(cx: &mut TestAppContext) {
                 .x_for_index(1),
         )
     });
-    let geo = ed.read_with(vcx, |e, _| *e.grid_geom.get(&0).unwrap());
+    let geo = ed.read_with(vcx, |e, _| *e.grid_ui.geom.get(&0).unwrap());
     eprintln!("geo {geo:?}");
     let (ox, oy) = (f32::from(geo.origin.x), f32::from(geo.origin.y));
     let x = ox + 200.0 + 34.0 + 40.0 * chrome_w + 0.3 * chrome_w;
@@ -507,16 +507,16 @@ fn regression_header_click_left_edge_after_hidden_col_collapses(cx: &mut TestApp
     let (ed, vcx) = setup_window(cx, "a,b,c\n1,2,3\n");
     vscheme(&ed, vcx, "(grid-set-column-hidden 0 #t)");
     let _ = draw(&ed, vcx);
-    let geo = ed.read_with(vcx, |e, _| *e.grid_geom.get(&0).unwrap());
+    let geo = ed.read_with(vcx, |e, _| *e.grid_ui.geom.get(&0).unwrap());
     eprintln!("geo {geo:?}");
     let (ox, oy) = (f32::from(geo.origin.x), f32::from(geo.origin.y));
     let (x0, y) = (ox + geo.header_w + 1.0, oy + geo.bar_h + geo.header_h / 2.0);
     // Click column B's header 1 px inside its left edge, wobbling 1 px.
     ed.update(vcx, |e, cx| {
         e.grid_mouse_down(point(px(x0), px(y)), gpui::MouseButton::Left, 1, false, cx);
-        eprintln!("drag {:?}", e.grid_drag);
+        eprintln!("drag {:?}", e.grid_ui.drag);
         e.grid_mouse_move(point(px(x0 + 1.0), px(y)), cx);
-        eprintln!("drag {:?}", e.grid_drag);
+        eprintln!("drag {:?}", e.grid_ui.drag);
         e.grid_mouse_up(cx);
     });
     let (w, sel) = ed.read_with(vcx, |e, _| {

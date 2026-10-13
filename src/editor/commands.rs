@@ -13,6 +13,10 @@ use crate::theme::Theme;
 
 use super::*;
 
+/// A category dispatcher: handles the commands it owns, handing any other back.
+type CommandHandler =
+    fn(&mut Editor, EditorCommand, &mut Context<Editor>) -> Result<(), EditorCommand>;
+
 impl Editor {
     /// Apply a command, honoring a pending universal-argument (Emacs `C-u N`):
     /// a repeatable command runs `N` times (as one undo group for edits); others
@@ -20,7 +24,7 @@ impl Editor {
     /// script, or an OS-special action — flows through here.
     pub(super) fn apply_command(&mut self, command: EditorCommand, cx: &mut Context<Self>) {
         match self.uarg.pending.take() {
-            Some(n) if n > 1 && is_repeatable(&command) => {
+            Some(n) if n > 1 && command.is_repeatable() => {
                 self.status = SharedString::default();
                 self.begin_undo_group();
                 for _ in 0..n {
@@ -39,74 +43,38 @@ impl Editor {
         self.last_was_yank = yank_like;
     }
 
-    /// Route a command to the first category dispatcher that owns it. Each
-    /// `cmd_*` handler returns `Err(command)` for variants it does not own, so
-    /// the command falls through to the next; the partition is exhaustive.
-    fn dispatch_command(&mut self, command: EditorCommand, cx: &mut Context<Self>) {
-        // Grid commands, and generic ones (undo, save, clipboard) that mean
-        // something else in a grid buffer, go first.
-        let command = match self.cmd_grid(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_motion(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_edit(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_view(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_buffer(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_window(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_lsp(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_completion(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_helm(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_evil(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_overlay(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_proc(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_extras(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_misc(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_session(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
+    /// The category dispatchers, in routing order. Each `cmd_*` handler
+    /// returns `Err(command)` for variants it does not own, so the command
+    /// falls through to the next; the partition is exhaustive. Grid commands,
+    /// and generic ones (undo, save, clipboard) that mean something else in a
+    /// grid buffer, go first.
+    const COMMAND_HANDLERS: &[CommandHandler] = &[
+        Self::cmd_grid,
+        Self::cmd_motion,
+        Self::cmd_edit,
+        Self::cmd_view,
+        Self::cmd_buffer,
+        Self::cmd_window,
+        Self::cmd_lsp,
+        Self::cmd_completion,
+        Self::cmd_helm,
+        Self::cmd_evil,
+        Self::cmd_overlay,
+        Self::cmd_proc,
+        Self::cmd_extras,
+        Self::cmd_misc,
+        Self::cmd_session,
+    ];
+
+    /// Route a command to the first of [`Self::COMMAND_HANDLERS`] that owns it.
+    fn dispatch_command(&mut self, mut command: EditorCommand, cx: &mut Context<Self>) {
+        for handler in Self::COMMAND_HANDLERS {
+            match handler(self, command, cx) {
+                Ok(()) => return,
+                Err(c) => command = c,
+            }
+        }
         debug_assert!(false, "unhandled editor command: {command:?}");
-        let _ = command;
     }
 
     /// Cursor motion, selection, marks, and goto.
@@ -247,7 +215,7 @@ impl Editor {
         // touching the rope, so they must not be refused here.
         if self.active.special.is_some()
             && self.active_running_terminal_id().is_none()
-            && is_interactive_edit(&command)
+            && command.is_interactive_edit()
         {
             self.echo("Buffer is read-only", cx);
             return Ok(());
@@ -333,8 +301,8 @@ impl Editor {
                 max_width,
             } => self.set_line_image(line, path, max_width, cx),
             ClearLineImages => {
-                let redirected = self.render_redirect.is_some();
-                let images = self.redirect_target().line_images;
+                let redirected = self.redirect_index().is_some();
+                let images = &mut self.redirect_target().line_images;
                 if !images.is_empty() {
                     images.clear();
                     // Only the active buffer's rows moved under the cursor.
@@ -355,14 +323,11 @@ impl Editor {
                 // commands carry stale byte offsets, so the batch loop drops
                 // them (`apply_script_outcome`) and the caller's `on_stale`
                 // reschedules the repaint.
-                let (cur_name, cur_tick) =
-                    match self.render_redirect.filter(|&i| i < self.inactive.len()) {
-                        Some(i) => (
-                            self.inactive[i].name.as_str(),
-                            self.inactive[i].buffer.tick(),
-                        ),
-                        None => (self.active.name.as_str(), self.active.buffer.tick()),
-                    };
+                let target = match self.redirect_index() {
+                    Some(i) => &self.inactive[i],
+                    None => &self.active,
+                };
+                let (cur_name, cur_tick) = (target.name.as_str(), target.buffer.tick());
                 if cur_name != name || cur_tick != tick {
                     self.script_batch_stale = true;
                     if !on_stale.is_empty() {
@@ -509,8 +474,6 @@ impl Editor {
             SwitchToBufferNamed(name) => self.switch_to_buffer(&name, cx),
             KillBufferNamed(name) => self.kill_buffer_named(&name, cx),
             SetMajorMode(mode) => {
-                let mut modes = ModeStack::default();
-                modes.push(Mode::new("fundamental"));
                 // A mode whose name matches a bundled tree-sitter language carries
                 // that language, so highlighting AND the language server follow the
                 // mode — `M-x rust-mode` on any buffer colors it and (via the
@@ -522,8 +485,7 @@ impl Editor {
                 if language_highlighter.is_some() {
                     new_mode = new_mode.with_language(&mode);
                 }
-                modes.push(new_mode);
-                self.active.modes = modes;
+                self.active.modes = ModeStack::with_major(new_mode);
                 if let Some(h) = language_highlighter {
                     self.active.highlighter = Some(h);
                     self.parse_full();
@@ -555,10 +517,7 @@ impl Editor {
                 if mode.is_empty() {
                     self.active.special = None;
                 } else {
-                    let mut modes = ModeStack::default();
-                    modes.push(Mode::new("fundamental"));
-                    modes.push(Mode::new(&mode));
-                    self.active.modes = modes;
+                    self.active.modes = ModeStack::with_major(Mode::new(&mode));
                     self.active.special = Some(mode);
                     self.active.modified = false;
                 }
@@ -603,12 +562,14 @@ impl Editor {
                 mode,
                 text,
                 line_faces,
+                quiet: false,
             } => self.render_buffer(name, mode, text, line_faces, cx),
-            RenderBufferQuiet {
+            RenderBuffer {
                 name,
                 mode,
                 text,
                 line_faces,
+                quiet: true,
             } => self.render_buffer_quiet(name, mode, text, line_faces, cx),
             AppendToBuffer { name, text } => self.append_to_buffer(name, text, cx),
             FontifyOrgBuffer(name) => self.fontify_org_buffer(name, cx),
@@ -660,16 +621,18 @@ impl Editor {
                 sticky,
             } => self.open_transient(title, columns, sticky, cx),
             TransientQuit => self.transient_quit(cx),
-            SplitWindowBelow => self.split_window(true, cx),
-            SplitWindowRight => self.split_window(false, cx),
-            SplitWindowRightRatio(ratio) => self.split_window_ratio(false, ratio as f32, cx),
+            SplitWindowBelow => self.split_window(SplitAxis::Vertical, cx),
+            SplitWindowRight => self.split_window(SplitAxis::Horizontal, cx),
+            SplitWindowRightRatio(ratio) => {
+                self.split_window_ratio(SplitAxis::Horizontal, ratio as f32, cx)
+            }
             OtherWindow => self.other_window(cx),
             DeleteWindow => self.delete_window(cx),
             DeleteOtherWindows => self.delete_other_windows(cx),
-            EnlargeWindow => self.resize_window(true, 0.05, cx),
-            ShrinkWindow => self.resize_window(true, -0.05, cx),
-            EnlargeWindowHorizontally => self.resize_window(false, 0.05, cx),
-            ShrinkWindowHorizontally => self.resize_window(false, -0.05, cx),
+            EnlargeWindow => self.resize_window(SplitAxis::Vertical, 0.05, cx),
+            ShrinkWindow => self.resize_window(SplitAxis::Vertical, -0.05, cx),
+            EnlargeWindowHorizontally => self.resize_window(SplitAxis::Horizontal, 0.05, cx),
+            ShrinkWindowHorizontally => self.resize_window(SplitAxis::Horizontal, -0.05, cx),
             other => return Err(other),
         }
         Ok(())
@@ -683,8 +646,9 @@ impl Editor {
     ) -> Result<(), EditorCommand> {
         use EditorCommand::*;
         match command {
-            SetLsp(language, command) => {
-                self.lsp_commands.insert(language, command);
+            SetLsp(language, command, env) => {
+                self.lsp_commands
+                    .insert(language, super::lsp_methods::LspCommand { command, env });
             }
             SetLanguageId(ext, language_id) => {
                 self.language_ids.insert(ext, language_id);
@@ -702,8 +666,12 @@ impl Editor {
             LspCodeAction => self.lsp_code_action(cx),
             LspFormatBuffer => self.lsp_format(cx),
             LspRestart => self.lsp_restart(cx),
-            LspCallHierarchyIncoming => self.lsp_call_hierarchy(true, cx),
-            LspCallHierarchyOutgoing => self.lsp_call_hierarchy(false, cx),
+            LspCallHierarchyIncoming => {
+                self.lsp_call_hierarchy(crate::lsp::CallDirection::Incoming, cx)
+            }
+            LspCallHierarchyOutgoing => {
+                self.lsp_call_hierarchy(crate::lsp::CallDirection::Outgoing, cx)
+            }
             LspPrepareRename => self.lsp_prepare_rename(cx),
             LspCodeLens => self.lsp_code_lens(cx),
             LspXrefVisit => self.lsp_xref_visit(cx),
@@ -909,8 +877,8 @@ impl Editor {
             TopLeftWindow => self.window_corner(false, cx),
             BottomRightWindow => self.window_corner(true, cx),
             BalanceWindows => self.balance_windows(cx),
-            MaximizeWindowHeight => self.maximize_window(true, cx),
-            MaximizeWindowWidth => self.maximize_window(false, cx),
+            MaximizeWindowHeight => self.maximize_window(SplitAxis::Vertical, cx),
+            MaximizeWindowWidth => self.maximize_window(SplitAxis::Horizontal, cx),
             MoveWindowFarLeft => self.move_window_far(panes::Dir::Left, cx),
             MoveWindowFarDown => self.move_window_far(panes::Dir::Down, cx),
             MoveWindowFarUp => self.move_window_far(panes::Dir::Up, cx),
@@ -918,8 +886,8 @@ impl Editor {
             ExchangeWindow => self.exchange_window(cx),
             RotateWindowsDown => self.rotate_windows(true, cx),
             RotateWindowsUp => self.rotate_windows(false, cx),
-            NewWindowBelow => self.new_window_buffer(true, cx),
-            NewWindowRight => self.new_window_buffer(false, cx),
+            NewWindowBelow => self.new_window_buffer(SplitAxis::Vertical, cx),
+            NewWindowRight => self.new_window_buffer(SplitAxis::Horizontal, cx),
             EvilExCommand => {
                 // From Visual, the command line starts on the selected lines
                 // (`:'<,'>`), and Visual ends — as in Vim.
@@ -934,8 +902,8 @@ impl Editor {
                 let initial = if visual { "'<,'>" } else { "" };
                 self.open_minibuffer(":", MinibufferPurpose::ExCommand, initial, cx);
             }
-            IsearchForward => self.isearch_start(true, cx),
-            IsearchBackward => self.isearch_start(false, cx),
+            IsearchForward => self.isearch_start(Direction::Forward, cx),
+            IsearchBackward => self.isearch_start(Direction::Backward, cx),
             other => return Err(other),
         }
         Ok(())
@@ -977,8 +945,8 @@ impl Editor {
             SetFoldMarker { line, open } => self.overlay_set_fold_marker(line, open, cx),
             ClearFoldMarkers => self.overlay_clear_fold_markers(cx),
             ClearOverlays => {
-                let redirected = self.render_redirect.is_some();
-                *self.redirect_target().overlays = Overlays::default();
+                let redirected = self.redirect_index().is_some();
+                self.redirect_target().overlays = Overlays::default();
                 // Only the active buffer's folds/rows moved under the cursor.
                 if !redirected {
                     self.ensure_cursor_visible();
@@ -1221,8 +1189,8 @@ impl Editor {
             ExecuteExtendedCommand => {
                 self.open_minibuffer("M-x ", MinibufferPurpose::ExecuteCommand, "", cx);
             }
-            ListMessages => self.list_messages(cx),
-            ListLspLog => self.list_lsp_log(cx),
+            ListMessages => self.open_log_buffer("*Messages*", |e| &e.messages, cx),
+            ListLspLog => self.open_log_buffer("*lsp-log*", |e| &e.lsp_log, cx),
             CheckForUpdates => self.check_for_updates(cx),
             InstallGrammar(args) => {
                 // Empty strings are the Scheme wrapper's "use the default" sentinel.
@@ -1252,10 +1220,7 @@ impl Editor {
                 if let Some(uri) = self.active_uri() {
                     self.diagnostics.remove(&uri);
                 }
-                let mut modes = ModeStack::default();
-                modes.push(Mode::new("fundamental"));
-                modes.push(Mode::new("macros-steel").with_language("macros-scheme"));
-                self.active.modes = modes;
+                self.active.modes = scheme_mode_stack(true);
                 // `macros-scheme` has no grammar of its own; it shares Scheme's,
                 // exactly as `make_document` wires it for auto-detected files.
                 self.active.highlighter = Highlighter::scheme();
@@ -1458,39 +1423,71 @@ impl Editor {
     }
 }
 
-/// Whether `command` is an *interactive* text mutation — the kind a keybinding
-/// runs on "the text at point". These are refused in read-only special buffers
-/// (see [`Editor::cmd_edit`]). The explicitly-addressed primitives
-/// (`ReplaceRegion`, `DeleteRegion`, `InsertAt`, `KillRegionBetween`, `Insert`)
-/// are NOT listed: Scheme uses them to populate and rewrite these buffers, and
-/// no default keybinding reaches them.
-fn is_interactive_edit(command: &EditorCommand) -> bool {
-    use EditorCommand::*;
-    matches!(
-        command,
-        Newline
-            | OpenLine
-            | IndentForTab
-            | ReindentRegion
-            | JsonPrettyPrintBuffer
-            | JsonPrettyPrintRegion
-            | DeleteChar
-            | DeleteBackwardChar
-            | TransposeChars
-            | KillLine
-            | KillWord
-            | BackwardKillWord
-            | KillRegion
-            | ClipboardCut
-            | ClipboardPaste
-            | Yank
-            | YankPop
-    )
+impl EditorCommand {
+    /// Whether this command repeats under a universal-argument (Emacs `C-u N`).
+    /// Limited to motions and simple edits, where "do it N times" is the meaning;
+    /// modal/meta commands (`M-x`, eval, quit, toggles, …) run once regardless.
+    pub(super) fn is_repeatable(&self) -> bool {
+        use EditorCommand::*;
+        matches!(
+            self,
+            ForwardChar
+                | BackwardChar
+                | NextLine
+                | PreviousLine
+                | ForwardWord
+                | BackwardWord
+                | ScrollUp
+                | ScrollDown
+                | EvilScrollUp
+                | EvilScrollDown
+                | DeleteChar
+                | DeleteBackwardChar
+                | KillWord
+                | BackwardKillWord
+                | KillLine
+                | Newline
+                | OpenLine
+                | TransposeChars
+                | Yank
+                | Undo
+                | Redo
+        )
+    }
+
+    /// Whether this is an *interactive* text mutation — the kind a keybinding
+    /// runs on "the text at point". These are refused in read-only special buffers
+    /// (see `Editor::cmd_edit`). The explicitly-addressed primitives
+    /// (`ReplaceRegion`, `DeleteRegion`, `InsertAt`, `KillRegionBetween`, `Insert`)
+    /// are NOT listed: Scheme uses them to populate and rewrite these buffers, and
+    /// no default keybinding reaches them.
+    pub(super) fn is_interactive_edit(&self) -> bool {
+        use EditorCommand::*;
+        matches!(
+            self,
+            Newline
+                | OpenLine
+                | IndentForTab
+                | ReindentRegion
+                | JsonPrettyPrintBuffer
+                | JsonPrettyPrintRegion
+                | DeleteChar
+                | DeleteBackwardChar
+                | TransposeChars
+                | KillLine
+                | KillWord
+                | BackwardKillWord
+                | KillRegion
+                | ClipboardCut
+                | ClipboardPaste
+                | Yank
+                | YankPop
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_interactive_edit;
     use crate::script::EditorCommand::*;
 
     #[test]
@@ -1514,7 +1511,7 @@ mod tests {
             IndentForTab,
             DeleteBackwardChar,
         ] {
-            assert!(is_interactive_edit(&c), "{c:?} must be refused");
+            assert!(c.is_interactive_edit(), "{c:?} must be refused");
         }
         // Programmatic primitives still run — that is how Scheme builds and
         // rewrites these buffers.
@@ -1536,7 +1533,7 @@ mod tests {
             Undo,
             Redo,
         ] {
-            assert!(!is_interactive_edit(&c), "{c:?} must stay allowed");
+            assert!(!c.is_interactive_edit(), "{c:?} must stay allowed");
         }
     }
 }

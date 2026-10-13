@@ -1,6 +1,7 @@
 //! The built-in function library and the interface every function uses.
 //!
-//! A function is a plain `fn(&[Arg], &mut dyn Ctx) -> Value`. Arguments
+//! A function is a plain `fn(&[Arg], &mut dyn Ctx) -> R`, where `R` is
+//! anything [`IntoValue`] (typically `Result<f64, ErrorKind>`). Arguments
 //! arrive evaluated, except for the handful of short-circuiting forms (`IF`,
 //! `IFS`, `IFERROR`, `IFNA`, `CHOOSE`, `SWITCH`) that the evaluator runs
 //! itself. Ranges arrive unevaluated as [`RangeRef`]s and are read through
@@ -10,7 +11,8 @@
 //! Each category lives in its own file and exposes a `FUNCS` table; the
 //! registry here concatenates them.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use super::value::{ErrorKind, Value};
 
@@ -152,6 +154,11 @@ pub struct FuncDef {
     pub min_args: usize,
     /// `usize::MAX` for variadic functions.
     pub max_args: usize,
+    /// The argument names, for the signature hint shown while a formula is
+    /// typed (see [`sigs`]).
+    pub sig: &'static str,
+    /// The body, its result already converted to a cell value (see
+    /// [`args::def`]).
     pub f: fn(&[Arg], &mut dyn Ctx) -> Value,
     /// Re-run on every recalculation (`NOW`, `RAND`).
     pub volatile: bool,
@@ -159,11 +166,20 @@ pub struct FuncDef {
 
 /// The function named `name` (case-insensitive).
 pub fn lookup(name: &str) -> Option<&'static FuncDef> {
-    let upper = name.to_ascii_uppercase();
-    TABLES
-        .iter()
-        .flat_map(|t| t.iter())
-        .find(|f| f.name == upper)
+    static BY_NAME: OnceLock<HashMap<&str, &FuncDef>> = OnceLock::new();
+    let by_name = BY_NAME.get_or_init(|| {
+        let mut map = HashMap::new();
+        for f in all() {
+            map.entry(f.name).or_insert(f);
+        }
+        map
+    });
+    // Names in a parsed formula are already upper case (`Expr::Call`).
+    if name.bytes().any(|b| b.is_ascii_lowercase()) {
+        by_name.get(name.to_ascii_uppercase().as_str()).copied()
+    } else {
+        by_name.get(name).copied()
+    }
 }
 
 /// Every built-in function, for completion and docs.
@@ -172,22 +188,42 @@ pub fn all() -> impl Iterator<Item = &'static FuncDef> {
 }
 
 /// Functions the evaluator implements itself because they don't evaluate
-/// every argument (they short-circuit): `(name, min_args, max_args)`.
-pub const SPECIAL: &[(&str, usize, usize)] = &[
-    ("IF", 2, 3),
-    ("IFS", 2, usize::MAX),
-    ("IFERROR", 2, 2),
-    ("IFNA", 2, 2),
-    ("CHOOSE", 2, usize::MAX),
-    ("SWITCH", 3, usize::MAX),
+/// every argument (they short-circuit): `(name, min_args, max_args,
+/// signature)`.
+pub const SPECIAL: &[(&str, usize, usize, &str)] = &[
+    ("IF", 2, 3, "logical_test, value_if_true, [value_if_false]"),
+    (
+        "IFS",
+        2,
+        usize::MAX,
+        "condition1, value1, [condition2, value2], …",
+    ),
+    ("IFERROR", 2, 2, "value, value_if_error"),
+    ("IFNA", 2, 2, "value, value_if_na"),
+    ("CHOOSE", 2, usize::MAX, "index, value1, [value2], …"),
+    (
+        "SWITCH",
+        3,
+        usize::MAX,
+        "expression, value1, result1, [value2, result2], …, [default]",
+    ),
 ];
+
+/// The [`SPECIAL`] entry for `name` (case-insensitive).
+fn special_form(name: &str) -> Option<&'static (&'static str, usize, usize, &'static str)> {
+    SPECIAL.iter().find(|s| s.0.eq_ignore_ascii_case(name))
+}
 
 /// Arity of an evaluator-implemented form (see [`SPECIAL`]).
 pub fn special(name: &str) -> Option<(usize, usize)> {
-    SPECIAL
-        .iter()
-        .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
-        .map(|&(_, min, max)| (min, max))
+    special_form(name).map(|&(_, min, max, _)| (min, max))
+}
+
+/// The argument list of function `name`, built-in or evaluator form.
+pub fn signature(name: &str) -> Option<&'static str> {
+    lookup(name)
+        .map(|f| f.sig)
+        .or_else(|| special_form(name).map(|s| s.3))
 }
 
 pub mod args;
@@ -222,43 +258,24 @@ const TABLES: &[&[FuncDef]] = &[
 /// *inside ranges or arrays* are skipped (`SUM(A1:A3)` ignores a text cell).
 /// Errors anywhere propagate. Returns the collected numbers.
 pub fn numbers(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<f64>, ErrorKind> {
-    let mut out = Vec::new();
-    for arg in args {
-        match arg {
-            Arg::Omitted => {}
-            Arg::Value(v) => match v {
-                Value::Empty => {}
-                v => out.push(v.to_number_in(ctx.date1904())?),
-            },
-            Arg::Array(a) => {
-                for v in &a.data {
-                    match v {
-                        Value::Number(n) => out.push(*n),
-                        Value::Error(e) => return Err(*e),
-                        _ => {}
-                    }
-                }
+    let d1904 = ctx.date1904();
+    args::fold_args(
+        args,
+        ctx,
+        Vec::new(),
+        |out, v| {
+            out.push(v.to_number_in(d1904)?);
+            Ok(())
+        },
+        |out, v| match v {
+            Value::Number(n) => {
+                out.push(*n);
+                Ok(())
             }
-            Arg::Range(r) => {
-                if ctx.extent(r.sheet.as_deref()).is_none() {
-                    return Err(ErrorKind::Ref);
-                }
-                let Some(r) = ctx.data_part(r) else {
-                    continue;
-                };
-                let mut err = None;
-                ctx.for_each(&r, &mut |_, _, v| match v {
-                    Value::Number(n) => out.push(n),
-                    Value::Error(e) if err.is_none() => err = Some(e),
-                    _ => {}
-                });
-                if let Some(e) = err {
-                    return Err(e);
-                }
-            }
-        }
-    }
-    Ok(out)
+            Value::Error(e) => Err(*e),
+            _ => Ok(()),
+        },
+    )
 }
 
 /// A single value from an argument: a range must be one cell (or, for a
@@ -287,11 +304,67 @@ pub fn text(arg: &Arg, ctx: &mut dyn Ctx) -> Result<Arc<str>, ErrorKind> {
     scalar(arg, ctx).to_text()
 }
 
-/// Turn a `Result` into a cell value.
-pub fn ok(r: Result<f64, ErrorKind>) -> Value {
-    match r {
-        Ok(n) if n.is_finite() => Value::Number(n),
-        Ok(_) => Value::Error(ErrorKind::Num),
-        Err(e) => Value::Error(e),
+/// Excel's cell text limit; longer text results are `#VALUE!`.
+pub const MAX_TEXT_LEN: usize = 32_767;
+
+/// What a function body can return: anything that becomes one cell value.
+/// The [`FuncDef`] tables wrap each body with [`IntoValue::into_value`], so
+/// a body returns `Result<f64, ErrorKind>` (or `String`, `bool`, `Value`, …)
+/// and uses `?` freely.
+pub trait IntoValue {
+    fn into_value(self) -> Value;
+}
+
+impl IntoValue for Value {
+    fn into_value(self) -> Value {
+        self
+    }
+}
+
+/// A number; `#NUM!` when not finite.
+impl IntoValue for f64 {
+    fn into_value(self) -> Value {
+        if self.is_finite() {
+            Value::Number(self)
+        } else {
+            Value::Error(ErrorKind::Num)
+        }
+    }
+}
+
+impl IntoValue for bool {
+    fn into_value(self) -> Value {
+        Value::Bool(self)
+    }
+}
+
+/// Text; `#VALUE!` past [`MAX_TEXT_LEN`] characters.
+impl IntoValue for String {
+    fn into_value(self) -> Value {
+        if self.chars().count() > MAX_TEXT_LEN {
+            Value::Error(ErrorKind::Value)
+        } else {
+            Value::Text(Arc::from(self))
+        }
+    }
+}
+
+/// Text; `#VALUE!` past [`MAX_TEXT_LEN`] characters.
+impl IntoValue for Arc<str> {
+    fn into_value(self) -> Value {
+        if self.chars().count() > MAX_TEXT_LEN {
+            Value::Error(ErrorKind::Value)
+        } else {
+            Value::Text(self)
+        }
+    }
+}
+
+impl<T: IntoValue> IntoValue for Result<T, ErrorKind> {
+    fn into_value(self) -> Value {
+        match self {
+            Ok(v) => v.into_value(),
+            Err(e) => Value::Error(e),
+        }
     }
 }

@@ -43,11 +43,6 @@
                                    " (" (car kms) ")")))
           (else (loop (cdr kms))))))
 
-;; Drop duplicates from a list (keeps the last of each — fine, we sort after).
-(define (dedupe lst)
-  (cond ((null? lst) '())
-        ((member (car lst) (cdr lst)) (dedupe (cdr lst)))
-        (else (cons (car lst) (dedupe (cdr lst))))))
 
 ;; First line of a function's doc (its source comment), or "".
 (define (doc-summary name)
@@ -57,7 +52,7 @@
 ;; Every name apropos / helm-apropos searches: commands, Scheme functions and
 ;; variables, and editor options (so "font" surfaces the `font-size` option).
 (define (all-names)
-  (sort-strings (dedupe (append (all-commands) (function-list) (option-list)))))
+  (sort-strings (dedup (append (all-commands) (function-list) (option-list)))))
 
 ;; "name  —  one-line summary" for the apropos listing (bare name if undocumented).
 (define (apropos-row n)

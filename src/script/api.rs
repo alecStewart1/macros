@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone)]
 pub(crate) struct ApiEntry {
     pub(crate) name: String,
-    pub(crate) section: &'static str,
+    pub(crate) section: Section,
     pub(crate) args: Vec<String>,
     pub(crate) ret: String,
 }
@@ -25,7 +25,7 @@ pub(crate) struct ApiEntry {
 impl ApiEntry {
     /// Build an entry from the `std::any::type_name`s of steel's `RegisterFn`
     /// marker (`Wrapper<(A, B)>`) and the closure's return type.
-    pub(crate) fn new(name: &str, section: &'static str, args_ty: &str, ret_ty: &str) -> Self {
+    pub(crate) fn new(name: &str, section: Section, args_ty: &str, ret_ty: &str) -> Self {
         ApiEntry {
             name: name.to_string(),
             section,
@@ -38,94 +38,79 @@ impl ApiEntry {
     }
 }
 
-/// Every category, in display order, with a one-line description. A
-/// `reg.section` name missing from here still works; it just has no blurb.
-const SECTIONS: &[(&str, &str)] = &[
-    (
-        "commands",
-        "Nullary editor commands (motions, edits, UI toggles); call for effect",
-    ),
-    (
-        "editing",
-        "Mutate the current buffer: insert, goto, regions, selections",
-    ),
-    (
-        "buffer-reads",
-        "Read the current buffer: point, text, lines, regions",
-    ),
-    (
-        "motions",
-        "Pure position math: compute a new byte offset without moving",
-    ),
-    ("markers", "Positions that move with edits"),
-    ("regexp", "Regex over strings and over the buffer"),
-    ("text", "Pure string utilities: diffs, fuzzy match, quoting"),
-    (
-        "buffers",
-        "Buffers and windows: names, files, buffer-locals, window layout",
-    ),
-    (
-        "special-buffers",
-        "Read-only rendered buffers (magit-style) and their highlights",
-    ),
-    (
-        "overlays",
-        "Overlays, text properties, folds, line suffixes",
-    ),
-    (
-        "decorations",
-        "Per-line icons/images/indent/scale, ghost text, staleness guards",
-    ),
-    ("faces", "Faces (colors, fonts, underline) and themes"),
-    (
-        "prompts",
-        "Messages, minibuffer reads, pickers (helm), y-or-n-p, transients",
-    ),
-    (
-        "grid",
-        "Grid (CSV) buffers: read cells and state, edit, view, and style",
-    ),
-    ("ui", "Mode line and titlebar"),
-    ("keymaps", "Key bindings and the command list"),
-    ("modal", "Evil/Helix state: marks, ex, counts, search query"),
-    ("hooks-timers", "Hooks and timers"),
-    ("options", "Editor options (get/set/list)"),
-    ("help", "Introspection: docs, versions, this API reference"),
-    ("languages", "Bundled/installed tree-sitter grammars"),
-    ("tree-sitter", "Syntax-tree queries over the current buffer"),
-    ("lsp", "Language-server requests and diagnostics"),
-    ("spell", "Native spell checking"),
-    ("plotting", "Text plotting: charts rendered to text + faces"),
-    ("files", "File system: read/write/list/watch, directories"),
-    ("search", "ripgrep-backed file walking and grep"),
-    (
-        "git",
-        "gix-backed git reads (log, diff, status, blame, refs)",
-    ),
-    (
-        "processes",
-        "Subprocesses (sync and streaming) and the environment",
-    ),
-    (
-        "http",
-        "HTTP client (streaming), loopback HTTP server, open-url",
-    ),
-    (
-        "sockets",
-        "TCP/TLS/UDP sockets, async sockets, WebSockets, DNS",
-    ),
-    ("sqlite", "Embedded SQLite (with FTS5)"),
-    (
-        "crypto",
-        "Random bytes, sha256, base64url/hex, charset decoding",
-    ),
-    ("time-ids", "Timestamps and unique IDs"),
-    ("dap", "Debug Adapter Protocol transport"),
-    ("anvil", "ANVIL: a second, independent Steel interpreter"),
-    ("terminal", "Embedded terminals"),
-    ("session", "Session persistence (savehist / desktop)"),
-    ("secrets", "The unlocked authinfo.gpg secrets store"),
-];
+/// The API reference's categories. `reg.section(…)` files every following
+/// registration under one ([`super::Registrar::section`]).
+macro_rules! sections {
+    ($($variant:ident = $name:literal, $blurb:literal;)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub(crate) enum Section {
+            $($variant,)*
+        }
+
+        impl Section {
+            /// Every category, in display order.
+            pub(crate) const ALL: &'static [Section] = &[$(Section::$variant,)*];
+
+            /// The category's name, as `(api-reference category …)` takes it.
+            pub(crate) fn name(self) -> &'static str {
+                match self {
+                    $(Section::$variant => $name,)*
+                }
+            }
+
+            /// A one-line description for the category index.
+            pub(crate) fn blurb(self) -> &'static str {
+                match self {
+                    $(Section::$variant => $blurb,)*
+                }
+            }
+        }
+    };
+}
+
+// Display order, with each category's one-line description.
+sections! {
+    Commands = "commands", "Nullary editor commands (motions, edits, UI toggles); call for effect";
+    Editing = "editing", "Mutate the current buffer: insert, goto, regions, selections";
+    BufferReads = "buffer-reads", "Read the current buffer: point, text, lines, regions";
+    Motions = "motions", "Pure position math: compute a new byte offset without moving";
+    Markers = "markers", "Positions that move with edits";
+    Regexp = "regexp", "Regex over strings and over the buffer";
+    Text = "text", "Pure string utilities: diffs, fuzzy match, quoting";
+    Buffers = "buffers", "Buffers and windows: names, files, buffer-locals, window layout";
+    SpecialBuffers = "special-buffers",
+        "Read-only rendered buffers (magit-style) and their highlights";
+    Overlays = "overlays", "Overlays, text properties, folds, line suffixes";
+    Decorations = "decorations", "Per-line icons/images/indent/scale, ghost text, staleness guards";
+    Faces = "faces", "Faces (colors, fonts, underline) and themes";
+    Prompts = "prompts", "Messages, minibuffer reads, pickers (helm), y-or-n-p, transients";
+    Grid = "grid", "Grid (CSV) buffers: read cells and state, edit, view, and style";
+    Ui = "ui", "Mode line and titlebar";
+    Keymaps = "keymaps", "Key bindings and the command list";
+    Modal = "modal", "Evil/Helix state: marks, ex, counts, search query";
+    HooksTimers = "hooks-timers", "Hooks and timers";
+    Options = "options", "Editor options (get/set/list)";
+    Help = "help", "Introspection: docs, versions, this API reference";
+    Languages = "languages", "Bundled/installed tree-sitter grammars";
+    TreeSitter = "tree-sitter", "Syntax-tree queries over the current buffer";
+    Lsp = "lsp", "Language-server requests and diagnostics";
+    Spell = "spell", "Native spell checking";
+    Plotting = "plotting", "Text plotting: charts rendered to text + faces";
+    Files = "files", "File system: read/write/list/watch, directories";
+    Search = "search", "ripgrep-backed file walking and grep";
+    Git = "git", "gix-backed git reads (log, diff, status, blame, refs)";
+    Processes = "processes", "Subprocesses (sync and streaming) and the environment";
+    Http = "http", "HTTP client (streaming), loopback HTTP server, open-url";
+    Sockets = "sockets", "TCP/TLS/UDP sockets, async sockets, WebSockets, DNS";
+    Sqlite = "sqlite", "Embedded SQLite (with FTS5)";
+    Crypto = "crypto", "Random bytes, sha256, base64url/hex, charset decoding";
+    TimeIds = "time-ids", "Timestamps and unique IDs";
+    Dap = "dap", "Debug Adapter Protocol transport";
+    Anvil = "anvil", "ANVIL: a second, independent Steel interpreter";
+    Terminal = "terminal", "Embedded terminals";
+    Session = "session", "Session persistence (savehist / desktop)";
+    Secrets = "secrets", "The unlocked authinfo.gpg secrets store";
+}
 
 const TYPES_LEGEND: &str = "Types: string, int, number, bool, any (any Steel value), \
 callback (a 'symbol or \"string\" naming a global function — not a lambda), \
@@ -201,13 +186,14 @@ fn friendly_type(ty: &str) -> String {
             .unwrap_or_default()
     };
     match base {
-        "String" | "str" | "SteelString" | "Cow" => "string".into(),
+        "String" | "str" | "SteelString" | "Cow" | "Name" => "string".into(),
         "bool" => "bool".into(),
         "isize" | "usize" | "i64" | "u64" | "i32" | "u32" | "u16" | "u8" | "NonNeg" => "int".into(),
         "Port" => "port".into(),
         "f64" | "f32" => "number".into(),
         "SteelVal" => "any".into(),
         "Callback" => "callback".into(),
+        "StringList" => "list<string>".into(),
         "Vec" | "VecDeque" => format!("list<{}>", arg(0)),
         "Option" => format!("{}|#f", arg(0)),
         "Result" => arg(0),
@@ -216,11 +202,69 @@ fn friendly_type(ty: &str) -> String {
     }
 }
 
-/// Rust sources whose registrations carry `//` doc comments.
-const RUST_SOURCES: &[&str] = &[
-    include_str!("registry.rs"),
-    include_str!("session.rs"),
-    include_str!("../authinfo.rs"),
+/// Rust sources whose registrations carry `//` doc comments, by path
+/// (relative to `src/`). Every `script/prims/*.rs` must be listed — the
+/// `doc_sources_cover_every_prims_file` test enforces it.
+const DOC_SOURCES: &[(&str, &str)] = &[
+    ("script/registry.rs", include_str!("registry.rs")),
+    ("script/session.rs", include_str!("session.rs")),
+    ("authinfo.rs", include_str!("../authinfo.rs")),
+    ("script/prims/anvil.rs", include_str!("prims/anvil.rs")),
+    (
+        "script/prims/buffer_reads.rs",
+        include_str!("prims/buffer_reads.rs"),
+    ),
+    ("script/prims/buffers.rs", include_str!("prims/buffers.rs")),
+    ("script/prims/crypto.rs", include_str!("prims/crypto.rs")),
+    ("script/prims/dap.rs", include_str!("prims/dap.rs")),
+    (
+        "script/prims/decorations.rs",
+        include_str!("prims/decorations.rs"),
+    ),
+    ("script/prims/editing.rs", include_str!("prims/editing.rs")),
+    ("script/prims/faces.rs", include_str!("prims/faces.rs")),
+    ("script/prims/files.rs", include_str!("prims/files.rs")),
+    ("script/prims/git.rs", include_str!("prims/git.rs")),
+    ("script/prims/grid.rs", include_str!("prims/grid.rs")),
+    ("script/prims/help.rs", include_str!("prims/help.rs")),
+    ("script/prims/hooks.rs", include_str!("prims/hooks.rs")),
+    ("script/prims/http.rs", include_str!("prims/http.rs")),
+    ("script/prims/keymaps.rs", include_str!("prims/keymaps.rs")),
+    (
+        "script/prims/languages.rs",
+        include_str!("prims/languages.rs"),
+    ),
+    ("script/prims/lsp.rs", include_str!("prims/lsp.rs")),
+    ("script/prims/markers.rs", include_str!("prims/markers.rs")),
+    ("script/prims/modal.rs", include_str!("prims/modal.rs")),
+    ("script/prims/motions.rs", include_str!("prims/motions.rs")),
+    ("script/prims/options.rs", include_str!("prims/options.rs")),
+    (
+        "script/prims/overlays.rs",
+        include_str!("prims/overlays.rs"),
+    ),
+    (
+        "script/prims/plotting.rs",
+        include_str!("prims/plotting.rs"),
+    ),
+    ("script/prims/process.rs", include_str!("prims/process.rs")),
+    ("script/prims/prompts.rs", include_str!("prims/prompts.rs")),
+    ("script/prims/regexp.rs", include_str!("prims/regexp.rs")),
+    ("script/prims/search.rs", include_str!("prims/search.rs")),
+    ("script/prims/sockets.rs", include_str!("prims/sockets.rs")),
+    (
+        "script/prims/special_buffers.rs",
+        include_str!("prims/special_buffers.rs"),
+    ),
+    ("script/prims/spell.rs", include_str!("prims/spell.rs")),
+    ("script/prims/sqlite.rs", include_str!("prims/sqlite.rs")),
+    ("script/prims/text.rs", include_str!("prims/text.rs")),
+    ("script/prims/time.rs", include_str!("prims/time.rs")),
+    (
+        "script/prims/tree_sitter.rs",
+        include_str!("prims/tree_sitter.rs"),
+    ),
+    ("script/prims/ui.rs", include_str!("prims/ui.rs")),
 ];
 
 /// name → the `//` comment block immediately above its registration.
@@ -228,7 +272,7 @@ fn rust_docs() -> &'static HashMap<String, String> {
     static DOCS: OnceLock<HashMap<String, String>> = OnceLock::new();
     DOCS.get_or_init(|| {
         let mut docs = HashMap::new();
-        for src in RUST_SOURCES {
+        for (_, src) in DOC_SOURCES {
             scrape_rust_docs(src, &mut docs);
         }
         docs
@@ -362,16 +406,16 @@ pub(crate) fn render(entries: &[ApiEntry], category: &str, search: &str) -> Stri
     let mut hits = 0;
     let in_cat = |c: &str| category.is_empty() || c == category;
 
-    let mut last = "";
-    for e in entries.iter().filter(|e| in_cat(e.section)) {
+    let mut last = None;
+    for e in entries.iter().filter(|e| in_cat(e.section.name())) {
         let doc = docs.get(&e.name).map(String::as_str).unwrap_or("");
         let sig = rust_signature(e);
         if !matches(&words, &format!("{sig} {doc}")) {
             continue;
         }
-        if e.section != last {
-            out.push_str(&format!("\n== {} (Rust primitives) ==\n", e.section));
-            last = e.section;
+        if last != Some(e.section) {
+            out.push_str(&format!("\n== {} (Rust primitives) ==\n", e.section.name()));
+            last = Some(e.section);
         }
         push_entry(&mut out, &sig, doc);
         hits += 1;
@@ -402,7 +446,7 @@ pub(crate) fn render(entries: &[ApiEntry], category: &str, search: &str) -> Stri
 }
 
 fn render_index(entries: &[ApiEntry]) -> String {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut counts: HashMap<Section, usize> = HashMap::new();
     for e in entries {
         *counts.entry(e.section).or_default() += 1;
     }
@@ -416,15 +460,10 @@ fn render_index(entries: &[ApiEntry]) -> String {
     let mut row = |name: &str, n: usize, blurb: &str| {
         out.push_str(&format!("  {name:<16} {n:>4}  {blurb}\n"));
     };
-    for (name, blurb) in SECTIONS {
-        if let Some(n) = counts.remove(name) {
-            row(name, n, blurb);
+    for &section in Section::ALL {
+        if let Some(&n) = counts.get(&section) {
+            row(section.name(), n, section.blurb());
         }
-    }
-    let mut rest: Vec<_> = counts.into_iter().collect();
-    rest.sort();
-    for (name, n) in rest {
-        row(name, n, "");
     }
 
     out.push_str(
@@ -470,7 +509,7 @@ mod tests {
     fn entry<A: 'static, R: 'static>(name: &str) -> ApiEntry {
         ApiEntry::new(
             name,
-            "test",
+            Section::Faces,
             std::any::type_name::<steel::steel_vm::register_fn::Wrapper<A>>(),
             std::any::type_name::<R>(),
         )
@@ -571,11 +610,37 @@ mod tests {
         assert!(docs["grid-set-cell-fill-color"].contains("purple"));
     }
 
+    /// A primitives file missing from `DOC_SOURCES` would silently lose every
+    /// doc it carries from the API reference.
+    #[test]
+    fn doc_sources_cover_every_prims_file() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/script/prims");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".rs") || name == "mod.rs" {
+                continue;
+            }
+            let path = format!("script/prims/{name}");
+            assert!(
+                DOC_SOURCES.iter().any(|(p, _)| *p == path),
+                "{path} is not in DOC_SOURCES"
+            );
+        }
+    }
+
     #[test]
     fn render_index_category_and_search() {
         let entries = vec![
             entry::<(String,), ()>("set-face-font"),
-            ApiEntry::new("tcp-connect", "sockets", "Wrapper<(String, u16)>", "usize"),
+            ApiEntry::new(
+                "tcp-connect",
+                Section::Sockets,
+                "Wrapper<(String, u16)>",
+                "usize",
+            ),
         ];
         let idx = render(&entries, "", "");
         assert!(idx.contains("2 Rust primitives"));

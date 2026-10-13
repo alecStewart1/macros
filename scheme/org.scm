@@ -171,7 +171,7 @@
 ;; ===========================================================================
 ;; Buffer line / offset helpers (operate on the active buffer)
 ;; ===========================================================================
-(define (org--lines) (split-many (buffer-string) "\n"))
+(define (org--lines) (buffer-lines))
 
 ;; Lines-list variants: loops should split the buffer ONCE via (org--lines) and
 ;; thread the list through these, not call the one-shot helpers per iteration
@@ -263,9 +263,7 @@
 ;; The visited file's path, or the buffer name for a fileless buffer. Name-based
 ;; checks must use this: a uniquified buffer is named `notes.org<dir>`, which
 ;; no longer ends in ".org".
-(define (org--file-or-name)
-  (let ((f (buffer-file-name)))
-    (if (or (not (string? f)) (equal? f "")) (current-buffer) f)))
+(define (org--file-or-name) (buffer-path-or-name))
 
 ;; Is the active buffer an Org buffer? (.org file, or explicitly activated.)
 (define (org--active?)
@@ -395,27 +393,29 @@
           (let* ((line (car lines))
                  (lend (+ off (utf8-length line)))
                  (lvl (org--heading-level line)))
-            (cond
-              ((and insrc (org--block-end? line))
-               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-              (insrc
-               (org--span off lend "org-block") (loop (cdr lines) (+ lend 1) #t))
-              ((org--block-begin? line)
-               (org--span off lend "org-meta")
-               (loop (cdr lines) (+ lend 1)
-                     (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0)))
-              ((org--block-end? line)
-               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-              (lvl
-               (org--fontify-heading off line lvl) (loop (cdr lines) (+ lend 1) #f))
-              ((or (org--keyword-line? line) (org--comment-line? line))
-               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-              ((org--drawer-line? line)
-               (org--span off lend "org-drawer") (loop (cdr lines) (+ lend 1) #f))
-              ((org--table-line? line)
-               (org--span off lend "org-table") (loop (cdr lines) (+ lend 1) #f))
-              (else
-               (org--fontify-plain off line) (loop (cdr lines) (+ lend 1) #f))))))
+            ;; Paint this line; each branch yields whether the NEXT line is
+            ;; inside a src/example block.
+            (loop (cdr lines) (+ lend 1)
+                  (cond
+                    ((and insrc (org--block-end? line))
+                     (org--span off lend "org-meta") #f)
+                    (insrc
+                     (org--span off lend "org-block") #t)
+                    ((org--block-begin? line)
+                     (org--span off lend "org-meta")
+                     (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0))
+                    ((org--block-end? line)
+                     (org--span off lend "org-meta") #f)
+                    (lvl
+                     (org--fontify-heading off line lvl) #f)
+                    ((or (org--keyword-line? line) (org--comment-line? line))
+                     (org--span off lend "org-meta") #f)
+                    ((org--drawer-line? line)
+                     (org--span off lend "org-drawer") #f)
+                    ((org--table-line? line)
+                     (org--span off lend "org-table") #f)
+                    (else
+                     (org--fontify-plain off line) #f))))))
       (org--flush-spans)
       (org--apply-indent all-lines))))
 
@@ -519,34 +519,17 @@
           ((and (> (car (car hs)) H) (<= (nth (car hs) 1) L)) (- (car (car hs)) 1))
           (else (loop (cdr hs))))))
 
-;; Per-buffer local fold state: an alist buffer → (list (heading-line . state)),
+;; Per-buffer local fold state: per buffer, a list of (heading-line . state),
 ;; state ∈ 'folded | 'children. A heading absent from the list is 'subtree (fully
 ;; shown). This drives the three-state TAB cycle (subtree→folded→children→…).
-(define *org-fold-state* '())
-;; Each folded line's text anchor, so the line numbers can be relocated when
-;; edits above them shift the buffer (see fold-anchors-capture, folding.scm).
-(define *org-fold-anchors* '())
-(define (org--fold-state-get) (buffer-state-get *org-fold-state* '()))
-(define (org--fold-state-set v)
-  (set! *org-fold-state* (buffer-state-set *org-fold-state* v))
-  (set! *org-fold-anchors*
-        (buffer-state-set *org-fold-anchors*
-                          (if (null? v) '() (fold-anchors-capture (org--lines) (map car v))))))
+;; Each folded line's text anchor is kept too, so the line numbers can be
+;; relocated when edits above them shift the buffer (make-fold-store, folding.scm).
+(define *org-fold-store* (make-fold-store car (lambda (p n) (cons n (cdr p)))))
+(define (org--fold-state-get) (fold-store-get *org-fold-store*))
+(define (org--fold-state-set v) (fold-store-set *org-fold-store* v))
 ;; Relocate every recorded fold to its heading/drawer's current line (dropping
 ;; ones whose line is gone), so a toggle never re-folds a stale line number.
-(define (org--fold-state-resync)
-  (let ((v (org--fold-state-get)))
-    (when (not (null? v))
-      (let ((anchors (buffer-state-get *org-fold-anchors* '()))
-            (lines (org--lines)))
-        (org--fold-state-set
-         (fold--dedupe
-          (filter (lambda (p) p)
-                  (map (lambda (p)
-                         (let ((n (fold-anchor-remap anchors lines (car p))))
-                           (if n (cons n (cdr p)) #f)))
-                       v))
-          car))))))
+(define (org--fold-state-resync) (fold-store-resync *org-fold-store*))
 (define (org--heading-state H)
   (let loop ((ps (org--fold-state-get)))
     (cond ((null? ps) 'subtree)
@@ -1795,17 +1778,13 @@
 (define (org--dow-name days) (nth *org-dow-names* (modulo (+ days 4) 7)))
 
 ;; "YYYY-MM-DD" (anywhere in `s`) → (y m d), or #f.
-(define (org--parse-date s)
-  (let ((c (regexp-captures "([0-9]{4})-([0-9]{2})-([0-9]{2})" s)))
-    (if (null? c) #f
-        (list (string->number (nth c 1)) (string->number (nth c 2)) (string->number (nth c 3))))))
-(define (org--date-str->days s)
-  (let ((ymd (org--parse-date s)))
-    (if ymd (ymd->days (nth ymd 0) (nth ymd 1) (nth ymd 2)) #f)))
+;; (The ISO parse/format itself — parse-iso-date, iso-date->days,
+;; days->iso-date — is in core.scm, shared with org-roam.)
+(define org--parse-date parse-iso-date)
+(define org--date-str->days iso-date->days)
+;; "YYYY-MM-DD Dow", the Org timestamp body.
 (define (org--days->date-str days)
-  (let ((ymd (days->ymd days)))
-    (string-append (number->string (nth ymd 0)) "-" (pad2 (nth ymd 1)) "-"
-                   (pad2 (nth ymd 2)) " " (org--dow-name days))))
+  (string-append (days->iso-date days) " " (org--dow-name days)))
 (define (org--today-days) (org--date-str->days (current-time "%Y-%m-%d")))
 
 (define (org--leap? y) (and (= 0 (modulo y 4)) (or (not (= 0 (modulo y 100))) (= 0 (modulo y 400)))))

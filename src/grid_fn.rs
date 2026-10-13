@@ -14,7 +14,7 @@
 //! only knows what was explicitly shared with it — the reason grid functions
 //! see nothing but their arguments.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -50,6 +50,32 @@ pub enum GridFnOutcome {
     },
 }
 
+/// The call the interpreter is running now, as the watchdog sees it.
+struct RunningCall {
+    started: Instant,
+    /// The watchdog interrupted it.
+    stopped: bool,
+}
+
+/// What the interpreter thread shares with its watchdog.
+#[derive(Default)]
+struct Watch {
+    running: Mutex<Option<RunningCall>>,
+    /// The interpreter thread has exited (its handle was dropped): the
+    /// watchdog stops too.
+    shutdown: AtomicBool,
+}
+
+/// Sets [`Watch::shutdown`] when the interpreter thread ends, however it
+/// ends.
+struct ShutdownOnDrop(Arc<Watch>);
+
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        self.0.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Handle to the grid-function interpreter. All state lives on its thread.
 pub struct GridFnEngine {
     jobs: Sender<Job>,
@@ -62,13 +88,12 @@ impl GridFnEngine {
         let (outcomes, outcomes_rx) = unbounded::<GridFnOutcome>();
         let timeout_secs = Arc::new(AtomicU64::new(DEFAULT_TIMEOUT_SECS));
         let controller = Arc::new(Mutex::new(ThreadStateController::default()));
-        // `(started, interrupted-by-watchdog)` of the call running now.
-        let running: Arc<Mutex<Option<(Instant, bool)>>> = Arc::new(Mutex::new(None));
+        let watch = Arc::new(Watch::default());
         let (ready_tx, ready_rx) = channel::<()>();
         {
             let controller = controller.clone();
-            let running = running.clone();
-            std::thread::spawn(move || run(jobs_rx, outcomes, controller, running, ready_tx));
+            let watch = watch.clone();
+            std::thread::spawn(move || run(jobs_rx, outcomes, controller, watch, ready_tx));
         }
         let _ = ready_rx.recv();
         // The watchdog: interrupt a call that has run past the timeout.
@@ -78,16 +103,16 @@ impl GridFnEngine {
                 loop {
                     std::thread::sleep(Duration::from_millis(200));
                     // The interpreter thread is gone (handle dropped): stop.
-                    if Arc::strong_count(&running) == 1 {
+                    if watch.shutdown.load(Ordering::Relaxed) {
                         break;
                     }
                     let limit = Duration::from_secs(timeout.load(Ordering::Relaxed));
-                    let mut slot = running.lock().unwrap();
-                    if let Some((started, stopped)) = slot.as_mut()
-                        && !*stopped
-                        && started.elapsed() > limit
+                    let mut slot = watch.running.lock().unwrap();
+                    if let Some(call) = slot.as_mut()
+                        && !call.stopped
+                        && call.started.elapsed() > limit
                     {
-                        *stopped = true;
+                        call.stopped = true;
                         controller.lock().unwrap().interrupt();
                     }
                 }
@@ -169,9 +194,10 @@ fn run(
     jobs: Receiver<Job>,
     outcomes: UnboundedSender<GridFnOutcome>,
     controller: Arc<Mutex<ThreadStateController>>,
-    running: Arc<Mutex<Option<(Instant, bool)>>>,
+    watch: Arc<Watch>,
     ready: Sender<()>,
 ) {
+    let _shutdown = ShutdownOnDrop(watch.clone());
     let mut engine = Engine::new();
     *controller.lock().unwrap() = engine.get_thread_state_controller();
     let _ = ready.send(());
@@ -187,13 +213,17 @@ fn run(
             }
             Job::Call { id, expr } => {
                 controller.lock().unwrap().resume();
-                *running.lock().unwrap() = Some((Instant::now(), false));
+                *watch.running.lock().unwrap() = Some(RunningCall {
+                    started: Instant::now(),
+                    stopped: false,
+                });
                 let result = engine.run(expr);
-                let timed_out = running
+                let timed_out = watch
+                    .running
                     .lock()
                     .unwrap()
                     .take()
-                    .is_some_and(|(_, stopped)| stopped);
+                    .is_some_and(|call| call.stopped);
                 controller.lock().unwrap().resume();
                 let result = match result {
                     Ok(vals) => Ok(vals.last().map_or(Value::Empty, to_value)),

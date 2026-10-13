@@ -177,6 +177,17 @@ pub enum Op {
 }
 
 impl Op {
+    /// The operators a criterion can start with, two-character ones first
+    /// (so `<=` isn't read as `<`).
+    const PREFIXES: [(&'static str, Op); 6] = [
+        ("<=", Op::Le),
+        (">=", Op::Ge),
+        ("<>", Op::Ne),
+        ("<", Op::Lt),
+        (">", Op::Gt),
+        ("=", Op::Eq),
+    ];
+
     fn test(self, o: Ordering) -> bool {
         match self {
             Op::Eq => o == Ordering::Equal,
@@ -226,21 +237,10 @@ impl Criterion {
             Value::Bool(b) => (Op::Eq, Operand::Bool(*b)),
             Value::Error(e) => (Op::Eq, Operand::Error(*e)),
             Value::Text(s) => {
-                let (op, rest) = if let Some(r) = s.strip_prefix("<=") {
-                    (Op::Le, r)
-                } else if let Some(r) = s.strip_prefix(">=") {
-                    (Op::Ge, r)
-                } else if let Some(r) = s.strip_prefix("<>") {
-                    (Op::Ne, r)
-                } else if let Some(r) = s.strip_prefix('<') {
-                    (Op::Lt, r)
-                } else if let Some(r) = s.strip_prefix('>') {
-                    (Op::Gt, r)
-                } else if let Some(r) = s.strip_prefix('=') {
-                    (Op::Eq, r)
-                } else {
-                    (Op::Eq, &s[..])
-                };
+                let (op, rest) = Op::PREFIXES
+                    .iter()
+                    .find_map(|&(p, op)| s.strip_prefix(p).map(|r| (op, r)))
+                    .unwrap_or((Op::Eq, &s[..]));
                 let explicit_eq = s.starts_with('=');
                 let operand = if rest.is_empty() {
                     if explicit_eq {

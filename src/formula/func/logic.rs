@@ -1,17 +1,17 @@
 //! Logical functions. `IF`, `IFS`, `IFERROR`, `IFNA`, `SWITCH` (and
 //! `CHOOSE`) short-circuit, so the evaluator implements them itself.
 
-use super::args::{MANY, area, def};
+use super::args::{MANY, def, fold_args};
 use super::{Arg, Ctx, FuncDef, scalar};
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("AND", 1, MANY, and),
-    def("OR", 1, MANY, or),
-    def("XOR", 1, MANY, xor),
-    def("NOT", 1, 1, not),
-    def("TRUE", 0, 0, true_),
-    def("FALSE", 0, 0, false_),
+    def!("AND", 1, MANY, and, "logical1, [logical2], …"),
+    def!("OR", 1, MANY, or, "logical1, [logical2], …"),
+    def!("XOR", 1, MANY, xor, "logical1, [logical2], …"),
+    def!("NOT", 1, 1, not, "logical"),
+    def!("TRUE", 0, 0, true_, ""),
+    def!("FALSE", 0, 0, false_, ""),
 ];
 
 /// The logical values of the arguments, as Excel's `AND`/`OR`/`XOR` read
@@ -20,63 +20,56 @@ pub(super) const FUNCS: &[FuncDef] = &[
 /// text and empty cells are skipped. Errors propagate. No values at all is
 /// `#VALUE!`.
 fn logicals(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<bool>, ErrorKind> {
-    let mut out = Vec::new();
-    for arg in args {
-        match arg {
-            Arg::Omitted | Arg::Value(Value::Empty) => {}
-            Arg::Value(v) => out.push(v.to_bool()?),
-            _ => {
-                let ar = area(arg, ctx)?;
-                let (r, c) = ar.data_dims(ctx);
-                for v in ar.window(ctx, r, c) {
-                    match v {
-                        Value::Bool(b) => out.push(b),
-                        Value::Number(n) => out.push(n != 0.0),
-                        Value::Error(e) => return Err(e),
-                        Value::Text(_) | Value::Empty => {}
-                    }
-                }
+    let out = fold_args(
+        args,
+        ctx,
+        Vec::new(),
+        |out, v| {
+            out.push(v.to_bool()?);
+            Ok(())
+        },
+        |out, v| {
+            match v {
+                Value::Bool(b) => out.push(*b),
+                Value::Number(n) => out.push(*n != 0.0),
+                Value::Error(e) => return Err(*e),
+                Value::Text(_) | Value::Empty => {}
             }
-        }
-    }
+            Ok(())
+        },
+    )?;
     if out.is_empty() {
         return Err(ErrorKind::Value);
     }
     Ok(out)
 }
 
-fn logical(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&[bool]) -> bool) -> Value {
-    match logicals(args, ctx) {
-        Ok(bs) => Value::Bool(f(&bs)),
-        Err(e) => Value::Error(e),
-    }
+fn logical(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&[bool]) -> bool) -> Result<bool, ErrorKind> {
+    Ok(f(&logicals(args, ctx)?))
 }
 
-fn and(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn and(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     logical(args, ctx, |bs| bs.iter().all(|b| *b))
 }
 
-fn or(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn or(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     logical(args, ctx, |bs| bs.iter().any(|b| *b))
 }
 
-fn xor(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn xor(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     logical(args, ctx, |bs| bs.iter().filter(|b| **b).count() % 2 == 1)
 }
 
-fn not(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match scalar(&args[0], ctx).to_bool() {
-        Ok(b) => Value::Bool(!b),
-        Err(e) => Value::Error(e),
-    }
+fn not(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
+    Ok(!scalar(&args[0], ctx).to_bool()?)
 }
 
-fn true_(_: &[Arg], _: &mut dyn Ctx) -> Value {
-    Value::Bool(true)
+fn true_(_: &[Arg], _: &mut dyn Ctx) -> bool {
+    true
 }
 
-fn false_(_: &[Arg], _: &mut dyn Ctx) -> Value {
-    Value::Bool(false)
+fn false_(_: &[Arg], _: &mut dyn Ctx) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -112,6 +105,7 @@ mod tests {
                 ("OR(A1:A3)", "TRUE"),
                 ("OR(B1:B2)", "#VALUE!"),
                 ("OR(#DIV/0!, TRUE)", "#DIV/0!"),
+                ("OR(Nope!A1, TRUE)", "#REF!"),
                 ("XOR(TRUE, 1)", "FALSE"),
                 ("XOR(TRUE, FALSE)", "TRUE"),
                 ("XOR(TRUE, TRUE, TRUE)", "TRUE"),

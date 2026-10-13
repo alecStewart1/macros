@@ -23,9 +23,38 @@ use crate::formula::engine::{
 use crate::formula::refs::{self, Axis};
 use crate::formula::value::Value;
 use crate::grid::model::{Change, Workbook};
+use crate::grid::view::{CellRange, Pos};
 
 /// How long one recalculation slice may run before yielding a frame.
 const SLICE: Duration = Duration::from_millis(8);
+
+/// The interpreter for Scheme functions called from formulas (started the
+/// first time one is defined), and the calls in flight.
+pub(super) struct GridFnState {
+    pub engine: Option<crate::grid_fn::GridFnEngine>,
+    /// Drains the interpreter's outcomes.
+    pub task: Option<gpui::Task<()>>,
+    /// Formula name (upper case) → the Scheme function's own name.
+    pub names: HashMap<String, String>,
+    /// In-flight calls: id → (the grid's epoch, the call).
+    pub calls: HashMap<u64, (u64, crate::formula::engine::ExternalCall)>,
+    pub next_id: u64,
+    /// `grid-function-timeout`, in seconds.
+    pub timeout: u64,
+}
+
+impl Default for GridFnState {
+    fn default() -> Self {
+        Self {
+            engine: None,
+            task: None,
+            names: HashMap::new(),
+            calls: HashMap::new(),
+            next_id: 0,
+            timeout: crate::grid_fn::DEFAULT_TIMEOUT_SECS,
+        }
+    }
+}
 
 /// The engine's view of a workbook sheet.
 pub(super) struct WbSource<'a> {
@@ -100,38 +129,79 @@ fn unclosed_parens(text: &str) -> usize {
     depth.max(0) as usize
 }
 
-/// Where row/column `i` lands after a change, or `None` if it was deleted.
-fn map_index(i: usize, change: &Change, axis: Axis) -> Option<usize> {
-    match (change, axis) {
-        (Change::RowsInserted { at, n }, Axis::Rows)
-        | (Change::ColsInserted { at, n }, Axis::Cols) => Some(if i >= *at { i + n } else { i }),
-        (Change::RowsDeleted { at, n }, Axis::Rows)
-        | (Change::ColsDeleted { at, n }, Axis::Cols) => {
-            if i >= at + n {
-                Some(i - n)
-            } else if i >= *at {
-                None
+/// `n` rows or columns inserted (`insert`) or deleted at `at`, if that is
+/// what `change` did.
+fn lines_changed(change: &Change) -> Option<(Axis, usize, usize, bool)> {
+    match *change {
+        Change::RowsInserted { at, n } => Some((Axis::Rows, at, n, true)),
+        Change::ColsInserted { at, n } => Some((Axis::Cols, at, n, true)),
+        Change::RowsDeleted { at, n } => Some((Axis::Rows, at, n, false)),
+        Change::ColsDeleted { at, n } => Some((Axis::Cols, at, n, false)),
+        _ => None,
+    }
+}
+
+/// Where each row and column lands after one change. Built once per
+/// change: a sort's permutation is inverted up front, so following every
+/// formula and format through it is linear rather than a search per index.
+struct IndexMap<'a> {
+    change: &'a Change,
+    /// For a sort or row move: `inverse[old - start]` is the old row's new
+    /// row (`usize::MAX` where none).
+    inverse: Vec<usize>,
+}
+
+impl<'a> IndexMap<'a> {
+    fn new(change: &'a Change) -> Self {
+        let inverse = match change {
+            Change::Sorted { start, perm } | Change::RowsMoved { start, perm } => {
+                // perm[k] = old row of new row start+k.
+                let mut inverse = vec![usize::MAX; perm.len()];
+                for (k, &old) in perm.iter().enumerate() {
+                    if let Some(slot) = old.checked_sub(*start).and_then(|o| inverse.get_mut(o))
+                        && *slot == usize::MAX
+                    {
+                        *slot = start + k;
+                    }
+                }
+                inverse
+            }
+            _ => Vec::new(),
+        };
+        Self { change, inverse }
+    }
+
+    /// Where row/column `i` lands, or `None` if it was deleted.
+    fn map(&self, i: usize, axis: Axis) -> Option<usize> {
+        if let Some((along, at, n, insert)) = lines_changed(self.change) {
+            return Some(if along != axis || i < at {
+                i
+            } else if insert {
+                i + n
+            } else if i >= at + n {
+                i - n
             } else {
-                Some(i)
-            }
+                return None;
+            });
         }
-        (Change::Sorted { start, perm } | Change::RowsMoved { start, perm }, Axis::Rows) => {
-            if i < *start || i >= start + perm.len() {
-                return Some(i);
+        match (self.change, axis) {
+            (Change::Sorted { start, .. } | Change::RowsMoved { start, .. }, Axis::Rows) => {
+                if i < *start || i >= start + self.inverse.len() {
+                    return Some(i);
+                }
+                Some(self.inverse[i - start]).filter(|&new| new != usize::MAX)
             }
-            // perm[k] = old row of new row start+k.
-            perm.iter().position(|&old| old == i).map(|k| start + k)
+            (Change::ColMoved { from, to }, Axis::Cols) => Some(if i == *from {
+                *to
+            } else if from < to && i > *from && i <= *to {
+                i - 1
+            } else if from > to && i >= *to && i < *from {
+                i + 1
+            } else {
+                i
+            }),
+            _ => Some(i),
         }
-        (Change::ColMoved { from, to }, Axis::Cols) => Some(if i == *from {
-            *to
-        } else if from < to && i > *from && i <= *to {
-            i - 1
-        } else if from > to && i >= *to && i < *from {
-            i + 1
-        } else {
-            i
-        }),
-        _ => Some(i),
     }
 }
 
@@ -219,7 +289,7 @@ impl GridDoc {
     }
 
     /// Every formula's position and parsed form, before a structural edit.
-    pub(super) fn formula_snapshot(&self) -> Option<Vec<((usize, usize), Expr)>> {
+    pub(super) fn formula_snapshot(&self) -> Option<Vec<(Pos, Expr)>> {
         (self.formulas.formula_count() > 0).then(|| {
             self.formulas
                 .positions()
@@ -230,66 +300,64 @@ impl GridDoc {
 
     /// After a structural edit: rewrite every formula the edit affected, in
     /// place, as a cell edit (so it undoes with the structural one).
-    pub(super) fn rewrite_after(&mut self, changes: &[Change], snap: Vec<((usize, usize), Expr)>) {
-        let mut items: Vec<((usize, usize), Expr, bool)> =
-            snap.into_iter().map(|(p, e)| (p, e, false)).collect();
+    pub(super) fn rewrite_after(&mut self, changes: &[Change], snap: Vec<(Pos, Expr)>) {
+        /// One formula followed through the edit.
+        struct Item {
+            pos: Pos,
+            expr: Expr,
+            /// Its references changed: write it back.
+            dirty: bool,
+        }
+        let mut items: Vec<Item> = snap
+            .into_iter()
+            .map(|(pos, expr)| Item {
+                pos,
+                expr,
+                dirty: false,
+            })
+            .collect();
         // References to other sheets are left alone: their cells didn't move.
         let sheet = self.wb.sheet(SHEET).name.clone();
         for change in changes {
-            match change {
-                Change::Cells(_) | Change::Reshaped => continue,
-                Change::RowsInserted { at, n } => {
-                    for it in &mut items {
-                        it.2 |= refs::insert(&mut it.1, &sheet, Axis::Rows, *at, *n);
+            if matches!(change, Change::Cells(_) | Change::Reshaped) {
+                continue;
+            }
+            let map = IndexMap::new(change);
+            if let Some((axis, at, n, insert)) = lines_changed(change) {
+                for it in &mut items {
+                    it.dirty |= if insert {
+                        refs::insert(&mut it.expr, &sheet, axis, at, n)
+                    } else {
+                        refs::delete(&mut it.expr, &sheet, axis, at, n)
+                    };
+                }
+            } else if let Change::Sorted { .. } = change {
+                // A sort moves formulas like a copy: their relative
+                // references follow them (Excel's sort behaviour).
+                for it in &mut items {
+                    if let Some(new) = map.map(it.pos.0, Axis::Rows)
+                        && new != it.pos.0
+                    {
+                        it.dirty |=
+                            refs::translate(&mut it.expr, new as isize - it.pos.0 as isize, 0);
                     }
                 }
-                Change::ColsInserted { at, n } => {
-                    for it in &mut items {
-                        it.2 |= refs::insert(&mut it.1, &sheet, Axis::Cols, *at, *n);
-                    }
-                }
-                Change::RowsDeleted { at, n } => {
-                    for it in &mut items {
-                        it.2 |= refs::delete(&mut it.1, &sheet, Axis::Rows, *at, *n);
-                    }
-                }
-                Change::ColsDeleted { at, n } => {
-                    for it in &mut items {
-                        it.2 |= refs::delete(&mut it.1, &sheet, Axis::Cols, *at, *n);
-                    }
-                }
-                Change::Sorted { .. } => {
-                    // A sort moves formulas like a copy: their relative
-                    // references follow them (Excel's sort behaviour).
-                    for it in &mut items {
-                        if let Some(new) = map_index(it.0.0, change, Axis::Rows)
-                            && new != it.0.0
-                        {
-                            it.2 |= refs::translate(&mut it.1, new as isize - it.0.0 as isize, 0);
-                        }
-                    }
-                }
-                Change::RowsMoved { .. } => {
-                    let map = |i: usize| map_index(i, change, Axis::Rows).unwrap_or(i);
-                    for it in &mut items {
-                        it.2 |= refs::remap(&mut it.1, &sheet, Axis::Rows, &map);
-                    }
-                }
-                Change::ColMoved { .. } => {
-                    let map = |i: usize| map_index(i, change, Axis::Cols).unwrap_or(i);
-                    for it in &mut items {
-                        it.2 |= refs::remap(&mut it.1, &sheet, Axis::Cols, &map);
-                    }
+            } else {
+                // Rows or a column moved as cells: references to them follow.
+                let axis = match change {
+                    Change::ColMoved { .. } => Axis::Cols,
+                    _ => Axis::Rows,
+                };
+                let follow = |i: usize| map.map(i, axis).unwrap_or(i);
+                for it in &mut items {
+                    it.dirty |= refs::remap(&mut it.expr, &sheet, axis, &follow);
                 }
             }
             // Positions move with the edit; deleted formulas are gone.
             items.retain_mut(|it| {
-                match (
-                    map_index(it.0.0, change, Axis::Rows),
-                    map_index(it.0.1, change, Axis::Cols),
-                ) {
+                match (map.map(it.pos.0, Axis::Rows), map.map(it.pos.1, Axis::Cols)) {
                     (Some(r), Some(c)) => {
-                        it.0 = (r, c);
+                        it.pos = (r, c);
                         true
                     }
                     _ => false,
@@ -298,8 +366,11 @@ impl GridDoc {
         }
         let writes: Vec<(usize, usize, String)> = items
             .into_iter()
-            .filter(|it| it.2)
-            .map(|((r, c), e, _)| (r, c, store_formula(&crate::formula::print::print(&e))))
+            .filter(|it| it.dirty)
+            .map(|it| {
+                let (r, c) = it.pos;
+                (r, c, store_formula(&crate::formula::print::print(&it.expr)))
+            })
             .collect();
         if !writes.is_empty() {
             self.wb.set_cells(SHEET, &writes);
@@ -314,12 +385,13 @@ impl GridDoc {
             if matches!(change, Change::Cells(_) | Change::Reshaped) {
                 continue;
             }
-            let rows = |r| map_index(r, change, Axis::Rows);
-            let cols = |c| map_index(c, change, Axis::Cols);
+            let map = IndexMap::new(change);
+            let rows = |r| map.map(r, Axis::Rows);
+            let cols = |c| map.map(c, Axis::Cols);
             self.formats.remap(rows, cols);
             self.view.rows.remap(rows);
             self.view.cols.remap(cols);
-            self.xlsx_text = std::mem::take(&mut self.xlsx_text)
+            self.xlsx.text = std::mem::take(&mut self.xlsx.text)
                 .into_iter()
                 .filter_map(|((r, c), t)| Some(((rows(r)?, cols(c)?), t)))
                 .collect();
@@ -334,7 +406,7 @@ impl GridDoc {
             let structural = changes.iter().any(|c| !matches!(c, Change::Cells(_)));
             let src = WbSource {
                 wb: &self.wb,
-                others: &self.other_sheets,
+                others: &self.xlsx.other_sheets,
             };
             if structural {
                 // Positions shifted: re-index from the cells (only once a
@@ -362,7 +434,7 @@ impl GridDoc {
         self.wb.take_changes();
         let src = WbSource {
             wb: &self.wb,
-            others: &self.other_sheets,
+            others: &self.xlsx.other_sheets,
         };
         self.formulas = Engine::new();
         self.formulas.rebuild(&src);
@@ -377,7 +449,7 @@ impl GridDoc {
         }
         let src = WbSource {
             wb: &self.wb,
-            others: &self.other_sheets,
+            others: &self.xlsx.other_sheets,
         };
         !self.formulas.recalc(&src, Some(Instant::now() + SLICE))
     }
@@ -388,20 +460,20 @@ impl Editor {
     /// large recalculation didn't finish in one slice, keep it going on later
     /// frames (stale results draw until then).
     pub(super) fn grid_formulas_after(&mut self, cx: &mut Context<Self>) {
-        if !self.grid_fn_names.is_empty()
+        if !self.grid_fns.names.is_empty()
             && let Some(g) = self.active.grid.as_deref_mut()
         {
             // A grid opened since the functions were defined learns them here.
             g.formulas
-                .set_externals(self.grid_fn_names.keys().cloned().collect());
+                .set_externals(self.grid_fns.names.keys().cloned().collect());
         }
         let busy = self
             .active
             .grid
             .as_deref_mut()
             .is_some_and(|g| g.absorb_changes());
-        if busy && !self.grid_recalc_scheduled {
-            self.grid_recalc_scheduled = true;
+        if busy && !self.grid_ui.recalc_scheduled {
+            self.grid_ui.recalc_scheduled = true;
             cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -444,7 +516,7 @@ impl Editor {
                                 editor.grid_sync_sheets_from(done, cx);
                             }
                             if !more {
-                                editor.grid_recalc_scheduled = false;
+                                editor.grid_ui.recalc_scheduled = false;
                             }
                             more
                         })
@@ -529,7 +601,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.ensure_grid_fns(cx);
-        if let Some(fns) = &self.grid_fns {
+        if let Some(fns) = &self.grid_fns.engine {
             fns.define(source);
         }
         if !helper {
@@ -545,12 +617,12 @@ impl Editor {
                 );
                 return;
             }
-            self.grid_fn_names.insert(upper, name);
+            self.grid_fns.names.insert(upper, name);
         }
         // A (re)definition — of a function, or of a helper one calls —
         // changes what calls return: recompute everything that might call
         // one.
-        let names: HashSet<String> = self.grid_fn_names.keys().cloned().collect();
+        let names: HashSet<String> = self.grid_fns.names.keys().cloned().collect();
         for doc in std::iter::once(&mut self.active).chain(self.inactive.iter_mut()) {
             if let Some(g) = doc.grid.as_deref_mut() {
                 g.formulas.functions_redefined(names.clone());
@@ -562,13 +634,13 @@ impl Editor {
     }
 
     fn ensure_grid_fns(&mut self, cx: &mut Context<Self>) {
-        if self.grid_fns.is_some() {
+        if self.grid_fns.engine.is_some() {
             return;
         }
         let (fns, mut outcomes) = crate::grid_fn::GridFnEngine::new();
-        fns.set_timeout(self.grid_fn_timeout);
-        self.grid_fns = Some(fns);
-        self.grid_fn_task = Some(cx.spawn(async move |this, cx| {
+        fns.set_timeout(self.grid_fns.timeout);
+        self.grid_fns.engine = Some(fns);
+        self.grid_fns.task = Some(cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             while let Some(outcome) = outcomes.next().await {
                 if this
@@ -582,15 +654,15 @@ impl Editor {
     }
 
     pub(super) fn grid_set_function_timeout(&mut self, secs: u64) {
-        self.grid_fn_timeout = secs;
-        if let Some(fns) = &self.grid_fns {
+        self.grid_fns.timeout = secs;
+        if let Some(fns) = &self.grid_fns.engine {
             fns.set_timeout(secs);
         }
     }
 
     /// Send every grid's queued Scheme calls to the interpreter.
     pub(super) fn grid_dispatch_calls(&mut self) {
-        let Some(fns) = &self.grid_fns else {
+        let Some(fns) = &self.grid_fns.engine else {
             return;
         };
         for doc in std::iter::once(&mut self.active).chain(self.inactive.iter_mut()) {
@@ -598,17 +670,18 @@ impl Editor {
                 continue;
             };
             for call in g.formulas.take_requests() {
-                self.grid_fn_next_id += 1;
-                let id = self.grid_fn_next_id;
+                self.grid_fns.next_id += 1;
+                let id = self.grid_fns.next_id;
                 let symbol = self
-                    .grid_fn_names
+                    .grid_fns
+                    .names
                     .get(&call.name)
                     .cloned()
                     .unwrap_or_else(|| call.name.clone());
                 fns.call(id, &symbol, &call.args);
                 // By the grid's epoch, not the buffer's name: Save As renames
                 // the buffer while the call runs.
-                self.grid_fn_calls.insert(id, (g.epoch, call));
+                self.grid_fns.calls.insert(id, (g.epoch, call));
             }
         }
     }
@@ -629,13 +702,13 @@ impl Editor {
                 result,
                 timed_out,
             } => {
-                let Some((epoch, call)) = self.grid_fn_calls.remove(&id) else {
+                let Some((epoch, call)) = self.grid_fns.calls.remove(&id) else {
                     return;
                 };
                 let value = match result {
                     Ok(v) => v,
                     Err(_) if timed_out => {
-                        let secs = self.grid_fn_timeout;
+                        let secs = self.grid_fns.timeout;
                         self.echo(format!("{} timed out after {secs} s", call.name), cx);
                         Value::Error(ErrorKind::Calc)
                     }
@@ -674,7 +747,7 @@ impl Editor {
         };
         let (r, c) = g.view.cursor;
         let (rows, cols) = g.used();
-        let rects: Vec<(usize, usize, usize, usize)> = if precedents {
+        let rects: Vec<CellRange> = if precedents {
             let Some(e) = g.formulas.expr(r, c) else {
                 self.echo("Not a formula", cx);
                 return;
@@ -684,20 +757,18 @@ impl Editor {
             refs.iter()
                 .filter(|rf| rf.sheet.is_none())
                 .map(|rf| {
-                    let (r0, c0, r1, c1) = rf.area.bounds();
-                    (
-                        r0,
-                        c0,
-                        r1.min(rows.max(r0 + 1) - 1),
-                        c1.min(cols.max(c0 + 1) - 1),
-                    )
+                    // Whole rows/columns stop at the data.
+                    let mut a = CellRange::from_bounds(rf.area.bounds());
+                    a.r1 = a.r1.min(rows.max(a.r0 + 1) - 1);
+                    a.c1 = a.c1.min(cols.max(a.c0 + 1) - 1);
+                    a
                 })
                 .collect()
         } else {
             g.formulas
                 .dependents(r, c)
                 .into_iter()
-                .map(|(r, c)| (r, c, r, c))
+                .map(CellRange::cell)
                 .collect()
         };
         let n = rects.len();
@@ -748,13 +819,10 @@ impl Editor {
             _ => ((e.row, e.col), (e.row, e.col)),
         };
         // Step over hidden columns and filtered rows, as the cursor does.
-        let step = |i: usize, d: isize, f: &dyn Fn(usize, bool) -> usize| {
-            (0..d.unsigned_abs()).fold(i, |i, _| f(i, d > 0))
+        let step = |i: usize, d: isize, axis: Axis| {
+            (0..d.unsigned_abs()).fold(i, |i, _| g.step(axis, i, d > 0))
         };
-        let at = (
-            step(at.0, dr, &|r, down| g.row_step(r, down)),
-            step(at.1, dc, &|c, right| g.col_step(c, right)),
-        );
+        let at = (step(at.0, dr, Axis::Rows), step(at.1, dc, Axis::Cols));
         let Some(e) = g.view.edit.as_mut() else {
             return false;
         };
@@ -778,7 +846,7 @@ impl Editor {
                     .iter()
                     .map(|s| s.0.to_string()),
             )
-            .chain(self.grid_fn_names.keys().cloned())
+            .chain(self.grid_fns.names.keys().cloned())
             .collect();
         names.sort();
         names.dedup();
@@ -953,7 +1021,8 @@ impl Editor {
         }
         let (name, arg) = crate::formula::parse::call_context(&e.text, e.caret)?;
         crate::formula::func::sigs::hint(&name, arg).or_else(|| {
-            self.grid_fn_names
+            self.grid_fns
+                .names
                 .contains_key(&name)
                 .then(|| format!("{name}(…)   (a Scheme function)"))
         })
@@ -1001,7 +1070,7 @@ impl GridDoc {
     /// them: shown rows only).
     pub(super) fn copied_formulas(
         &self,
-        sel: &crate::grid::view::CellRange,
+        sel: &CellRange,
     ) -> Vec<(usize, usize, usize, usize, String)> {
         let (rows, cols) = self.used();
         let mut out = Vec::new();
@@ -1053,22 +1122,28 @@ mod tests {
     #[test]
     fn index_mapping() {
         let ins = Change::RowsInserted { at: 2, n: 3 };
-        assert_eq!(map_index(1, &ins, Axis::Rows), Some(1));
-        assert_eq!(map_index(2, &ins, Axis::Rows), Some(5));
-        assert_eq!(map_index(2, &ins, Axis::Cols), Some(2));
+        assert_eq!(IndexMap::new(&ins).map(1, Axis::Rows), Some(1));
+        assert_eq!(IndexMap::new(&ins).map(2, Axis::Rows), Some(5));
+        assert_eq!(IndexMap::new(&ins).map(2, Axis::Cols), Some(2));
         let del = Change::ColsDeleted { at: 1, n: 2 };
-        assert_eq!(map_index(1, &del, Axis::Cols), None);
-        assert_eq!(map_index(4, &del, Axis::Cols), Some(2));
+        assert_eq!(IndexMap::new(&del).map(1, Axis::Cols), None);
+        assert_eq!(IndexMap::new(&del).map(4, Axis::Cols), Some(2));
         let sort = Change::Sorted {
             start: 1,
             perm: vec![3, 1, 2],
         };
-        assert_eq!(map_index(3, &sort, Axis::Rows), Some(1));
-        assert_eq!(map_index(1, &sort, Axis::Rows), Some(2));
-        assert_eq!(map_index(0, &sort, Axis::Rows), Some(0));
+        assert_eq!(IndexMap::new(&sort).map(3, Axis::Rows), Some(1));
+        assert_eq!(IndexMap::new(&sort).map(1, Axis::Rows), Some(2));
+        assert_eq!(IndexMap::new(&sort).map(0, Axis::Rows), Some(0));
+        assert_eq!(IndexMap::new(&sort).map(4, Axis::Rows), Some(4));
+        assert_eq!(IndexMap::new(&sort).map(3, Axis::Cols), Some(3));
+        let del_rows = Change::RowsDeleted { at: 2, n: 2 };
+        assert_eq!(IndexMap::new(&del_rows).map(1, Axis::Rows), Some(1));
+        assert_eq!(IndexMap::new(&del_rows).map(3, Axis::Rows), None);
+        assert_eq!(IndexMap::new(&del_rows).map(4, Axis::Rows), Some(2));
         let mv = Change::ColMoved { from: 0, to: 2 };
-        assert_eq!(map_index(0, &mv, Axis::Cols), Some(2));
-        assert_eq!(map_index(2, &mv, Axis::Cols), Some(1));
+        assert_eq!(IndexMap::new(&mv).map(0, Axis::Cols), Some(2));
+        assert_eq!(IndexMap::new(&mv).map(2, Axis::Cols), Some(1));
     }
 
     #[test]
@@ -1079,7 +1154,8 @@ mod tests {
             perm: vec![2, 1],
         };
         let mut e = crate::formula::parse::parse("=SUM(A1:A3)").unwrap();
-        let map = |i: usize| map_index(i, &change, Axis::Rows).unwrap_or(i);
+        let moved = IndexMap::new(&change);
+        let map = |i: usize| moved.map(i, Axis::Rows).unwrap_or(i);
         refs::remap(&mut e, "Sheet1", Axis::Rows, &map);
         assert_eq!(crate::formula::print::print(&e), "=SUM(A1:A3)");
     }

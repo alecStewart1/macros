@@ -13,10 +13,7 @@
 
 ;; Fetch the value following `key` in a quoted-symbol plist (the `lsp-language`
 ;; convention), or #f if absent. e.g. (pkg--opt '('ref "v1" 'entry "x.scm") 'ref).
-(define (pkg--opt opts key)
-  (cond ((or (null? opts) (null? (cdr opts))) #f)
-        ((equal? (car opts) key) (car (cdr opts)))
-        (else (pkg--opt (cdr (cdr opts)) key))))
+(define (pkg--opt opts key) (plist-get opts key))
 
 ;; Derive a package name from its git URL: the final path segment with any
 ;; trailing slash and ".git" suffix removed.

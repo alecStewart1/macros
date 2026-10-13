@@ -145,6 +145,25 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
+    /// The next child element of the element whose start tag was read last
+    /// (text between children is passed over), or `None` once its end tag
+    /// is reached. Each child returned must be consumed in full ([`skip`],
+    /// [`text`], or its own `next_child` loop) before asking for the next.
+    /// The end of the document first is an error.
+    ///
+    /// [`skip`]: Reader::skip
+    /// [`text`]: Reader::text
+    pub fn next_child(&mut self) -> Result<Option<Tag<'a>>> {
+        loop {
+            match self.next()? {
+                Some(Event::Start(t)) => return Ok(Some(t)),
+                Some(Event::End(_)) => return Ok(None),
+                Some(Event::Text(_)) => {}
+                None => return Err(self.err("unexpected end of document")),
+            }
+        }
+    }
+
     /// All text inside the element whose start tag was just read, consuming
     /// through its end tag.
     pub fn text(&mut self) -> Result<String> {

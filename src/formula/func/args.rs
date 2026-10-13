@@ -7,11 +7,6 @@ use super::{Arg, Array, Ctx, RangeRef};
 use crate::formula::date;
 use crate::formula::value::{ErrorKind, Value};
 
-/// Excel's sheet size, for the dimensions of open-ended references
-/// (`ROWS(A:A)` is 1,048,576).
-pub const SHEET_ROWS: usize = 1_048_576;
-pub const SHEET_COLS: usize = 16_384;
-
 /// A rectangular argument: a (clamped) range, an array, or a lone value
 /// standing in as a 1×1 area.
 #[derive(Clone, Debug)]
@@ -158,33 +153,80 @@ impl Area<'_> {
 /// `max_args` for variadic functions.
 pub const MANY: usize = usize::MAX;
 
-type Impl = fn(&[Arg], &mut dyn Ctx) -> Value;
-
-/// A non-volatile function definition.
-pub const fn def(name: &'static str, min_args: usize, max_args: usize, f: Impl) -> super::FuncDef {
-    super::FuncDef {
-        name,
-        min_args,
-        max_args,
-        f,
-        volatile: false,
-    }
+/// A function definition for a category's `FUNCS` table:
+/// `def!("NAME", min_args, max_args, body, "signature")`, or
+/// `def!(volatile "NOW", …)` for one re-run on every recalculation. `body`
+/// is any
+/// `fn(&[Arg], &mut dyn Ctx) -> R` where `R:` [`IntoValue`](super::IntoValue);
+/// the result is converted to a cell value here, once.
+macro_rules! def {
+    (volatile $name:literal, $min:expr, $max:expr, $f:path, $sig:literal) => {
+        $crate::formula::func::args::def!(@ $name, $min, $max, $f, $sig, true)
+    };
+    ($name:literal, $min:expr, $max:expr, $f:path, $sig:literal) => {
+        $crate::formula::func::args::def!(@ $name, $min, $max, $f, $sig, false)
+    };
+    (@ $name:literal, $min:expr, $max:expr, $f:path, $sig:literal, $volatile:expr) => {
+        $crate::formula::func::FuncDef {
+            name: $name,
+            min_args: $min,
+            max_args: $max,
+            sig: $sig,
+            f: |args: &[$crate::formula::func::Arg], ctx: &mut dyn $crate::formula::func::Ctx| {
+                $crate::formula::func::IntoValue::into_value($f(args, ctx))
+            },
+            volatile: $volatile,
+        }
+    };
 }
+pub(crate) use def;
 
-/// A volatile function definition (`NOW`, `RAND`).
-pub const fn volatile(
-    name: &'static str,
-    min_args: usize,
-    max_args: usize,
-    f: Impl,
-) -> super::FuncDef {
-    super::FuncDef {
-        name,
-        min_args,
-        max_args,
-        f,
-        volatile: true,
+/// Fold every value of every argument into `acc`, the way Excel's
+/// aggregates read them: a value given directly goes to `direct`, each
+/// value inside a range or array to `element` (row-major, reading only the
+/// used part of a range, so `A:A` is one pass over the data). Omitted
+/// arguments and empty values are skipped. A reference to a missing sheet
+/// is one `#REF!` element, as Excel reads a deleted sheet's reference. The
+/// first error a callback returns ends the fold.
+pub fn fold_args<A>(
+    args: &[Arg],
+    ctx: &mut dyn Ctx,
+    mut acc: A,
+    direct: impl Fn(&mut A, &Value) -> Result<(), ErrorKind>,
+    element: impl Fn(&mut A, &Value) -> Result<(), ErrorKind>,
+) -> Result<A, ErrorKind> {
+    for arg in args {
+        match arg {
+            Arg::Omitted | Arg::Value(Value::Empty) => {}
+            Arg::Value(v) => direct(&mut acc, v)?,
+            Arg::Array(a) => {
+                for v in &a.data {
+                    if *v != Value::Empty {
+                        element(&mut acc, v)?;
+                    }
+                }
+            }
+            Arg::Range(r) => {
+                if ctx.extent(r.sheet.as_deref()).is_none() {
+                    element(&mut acc, &Value::Error(ErrorKind::Ref))?;
+                    continue;
+                }
+                let Some(r) = ctx.data_part(r) else {
+                    continue;
+                };
+                let mut err = None;
+                ctx.for_each(&r, &mut |_, _, v| {
+                    if err.is_none() && v != Value::Empty {
+                        err = element(&mut acc, &v).err();
+                    }
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+            }
+        }
     }
+    Ok(acc)
 }
 
 /// Every value of an argument, row-major (a lone value as itself; omitted
@@ -197,11 +239,17 @@ pub fn arg_values(arg: &Arg, ctx: &dyn Ctx) -> Result<Vec<Value>, ErrorKind> {
     }
 }
 
+/// An optional argument that was given: `None` when it's left out, past
+/// the end of the list or as an empty slot (`ROUND(2.5,)`).
+pub fn given(arg: Option<&Arg>) -> Option<&Arg> {
+    arg.filter(|a| !matches!(a, Arg::Omitted))
+}
+
 /// An optional numeric argument: its default when left out. (An empty cell
 /// passed explicitly is 0, as in Excel.)
 pub fn opt_num(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: f64) -> Result<f64, ErrorKind> {
-    match arg {
-        None | Some(Arg::Omitted) => Ok(default),
+    match given(arg) {
+        None => Ok(default),
         Some(a) => super::num(a, ctx),
     }
 }
@@ -215,18 +263,49 @@ pub fn trunc_i64(x: f64) -> Result<i64, ErrorKind> {
     Ok(x.trunc() as i64)
 }
 
+/// An integer argument: the number truncated ([`trunc_i64`]).
+pub fn int(arg: &Arg, ctx: &mut dyn Ctx) -> Result<i64, ErrorKind> {
+    trunc_i64(super::num(arg, ctx)?)
+}
+
+/// A 1-based position (`MID`'s start, `VLOOKUP`'s column): below 1 is
+/// `#VALUE!`.
+pub fn positive(n: i64) -> Result<usize, ErrorKind> {
+    if n < 1 {
+        Err(ErrorKind::Value)
+    } else {
+        Ok(n as usize)
+    }
+}
+
+/// A 1-based position argument ([`int`], then [`positive`]).
+pub fn pos_int(arg: &Arg, ctx: &mut dyn Ctx) -> Result<usize, ErrorKind> {
+    positive(int(arg, ctx)?)
+}
+
 /// An optional integer argument (truncated).
 pub fn opt_int(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: i64) -> Result<i64, ErrorKind> {
-    match arg {
-        None | Some(Arg::Omitted) => Ok(default),
-        Some(a) => trunc_i64(super::num(a, ctx)?),
+    match given(arg) {
+        None => Ok(default),
+        Some(a) => int(a, ctx),
+    }
+}
+
+/// An optional count argument (`LEFT`'s `num_chars`): truncated, negative
+/// is `#VALUE!`.
+pub fn count_arg(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: i64) -> Result<usize, ErrorKind> {
+    let n = opt_int(arg, ctx, default)?;
+    if n < 0 {
+        Err(ErrorKind::Value)
+    } else {
+        Ok(n as usize)
     }
 }
 
 /// An optional boolean argument.
 pub fn opt_bool(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: bool) -> Result<bool, ErrorKind> {
-    match arg {
-        None | Some(Arg::Omitted) => Ok(default),
+    match given(arg) {
+        None => Ok(default),
         Some(a) => super::scalar(a, ctx).to_bool(),
     }
 }

@@ -103,11 +103,7 @@
 (define (rainbow--skip?)
   ;; The visited path, not the (possibly uniquified `x.md<dir>`) buffer name;
   ;; fall back to the name for fileless buffers.
-  (let ((b (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f))))
-    (let loop ((es *rainbow-skip-extensions*))
-      (cond ((null? es) #f)
-            ((ends-with? b (car es)) #t)
-            (else (loop (cdr es)))))))
+  (ends-with-any? (buffer-path-or-name) *rainbow-skip-extensions*))
 
 ;; Recolor now (no-op while disabled): fire the query; the callback paints when
 ;; the result arrives.

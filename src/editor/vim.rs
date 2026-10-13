@@ -31,7 +31,24 @@ pub(super) struct OpPending {
     /// The count typed before the operator (`2` in `2d3w`).
     pub count: Option<usize>,
     /// `v` / `V` typed after the operator: force charwise / linewise.
-    pub force: Option<&'static str>,
+    pub force: Option<Force>,
+}
+
+/// An operator's forced motion type (`dv…` / `dV…`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Force {
+    Char,
+    Line,
+}
+
+impl Force {
+    /// The key that forces it — also how `evil-operate` receives it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Force::Char => "v",
+            Force::Line => "V",
+        }
+    }
 }
 
 /// A binding waiting for its one-key argument (`%c`).
@@ -170,6 +187,19 @@ pub(super) fn shift_pos(pos: usize, start: usize, old_end: usize, new_len: usize
     }
 }
 
+/// `` ` `` and `'` name the same mark (the previous context).
+pub(super) fn normalize_mark(c: char) -> char {
+    if c == '`' { '\'' } else { c }
+}
+
+/// Why [`Editor::resolve_mark`] has no position to jump to.
+enum MarkErr {
+    /// Unset, or its buffer is gone (already echoed).
+    Missing,
+    /// The mark's file is still opening; the jump lands once it is open.
+    Deferred,
+}
+
 /// Whether `c` names a settable / jumpable mark.
 pub(super) fn is_mark(c: char) -> bool {
     c.is_ascii_alphabetic() || matches!(c, '\'' | '`' | '[' | ']' | '<' | '>' | '.' | '^')
@@ -218,6 +248,19 @@ pub(super) struct DotRec {
     pub unrepeatable: bool,
 }
 
+impl DotRec {
+    /// An empty recording of a command starting now in the active buffer.
+    fn new(ed: &Editor, prefix_only: bool, unrepeatable: bool) -> Self {
+        Self {
+            events: Vec::new(),
+            buffer: ed.active.name.clone(),
+            tick: ed.active.buffer.tick(),
+            prefix_only,
+            unrepeatable,
+        }
+    }
+}
+
 /// Recorded events replayed one at a time: each async (Scheme) command must
 /// apply before the next runs, or every command would read the same stale
 /// pre-replay snapshot.
@@ -229,16 +272,25 @@ pub(super) struct Replay {
     pub undo_base: Option<UndoBase>,
 }
 
-/// Commands that never count as "the last change", even though they edit.
-fn is_repeat_neutral(expr: &str) -> bool {
-    let name = expr
-        .trim()
+/// The command name a key-bound expression calls: the head symbol of
+/// `(name arg …)` (or a bare `name`).
+pub(super) fn expr_head(expr: &str) -> &str {
+    expr.trim()
         .trim_start_matches('(')
         .split(|c: char| c.is_whitespace() || c == ')')
         .next()
-        .unwrap_or("");
+        .unwrap_or("")
+}
+
+/// Whether `expr` is a `"x` register prefix rather than a command proper.
+fn is_register_prefix(expr: &str) -> bool {
+    expr_head(expr) == "evil-use-register"
+}
+
+/// Commands that never count as "the last change", even though they edit.
+fn is_repeat_neutral(expr: &str) -> bool {
     matches!(
-        name,
+        expr_head(expr),
         "undo"
             | "redo"
             | "undo-tree-undo"
@@ -253,26 +305,32 @@ fn is_repeat_neutral(expr: &str) -> bool {
     )
 }
 
+/// `(evil-operate "op" COUNT …)` (as [`compose_operate`] builds it) with
+/// COUNT replaced by `n`. `None` when `expr` isn't such a call.
+fn with_operate_count(expr: &str, n: usize) -> Option<String> {
+    const HEAD: &str = "(evil-operate ";
+    let args = expr.strip_prefix(HEAD)?;
+    // Past the operator name's closing quote.
+    let open = args.find('"')?;
+    let close = args[open + 1..].find('"')?;
+    let name_end = HEAD.len() + open + 1 + close + 1;
+    let rest = expr[name_end..].trim_start();
+    let tail = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    Some(format!("{} {n}{tail}", &expr[..name_end]))
+}
+
 /// `3.`: give the repeated command the new count. The operator call carries
 /// its count inline; anything else becomes a counted command.
 pub(super) fn override_count(events: &mut [MacroEvent], n: usize) {
     for ev in events.iter_mut() {
         match ev {
             // `"a` before the change: the register prefix, not the change.
-            MacroEvent::Command(expr) if expr.trim_start().starts_with("(evil-use-register ") => {}
+            MacroEvent::Command(expr) if is_register_prefix(expr) => {}
             MacroEvent::Command(expr) | MacroEvent::Counted(expr, _)
                 if expr.starts_with("(evil-operate ") =>
             {
-                // (evil-operate "op" COUNT …): swap the first integer.
-                let head_end = expr["(evil-operate ".len()..].find('"').and_then(|q| {
-                    let after = "(evil-operate ".len() + q + 1;
-                    expr[after..].find('"').map(|q2| after + q2 + 1)
-                });
-                if let Some(i) = head_end {
-                    let rest = expr[i..].trim_start();
-                    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-                    let tail = &rest[digits..];
-                    *ev = MacroEvent::Command(format!("{} {n}{tail}", &expr[..i]));
+                if let Some(recounted) = with_operate_count(expr, n) {
+                    *ev = MacroEvent::Command(recounted);
                 }
                 return;
             }
@@ -361,7 +419,7 @@ pub(super) fn compose_operate(op: &OpPending, motion_count: Option<usize>, motio
         "(evil-operate {} {} {} (lambda () {motion}))",
         steel_quote(&op.op),
         combined_count(op.count, motion_count),
-        steel_quote(op.force.unwrap_or("")),
+        steel_quote(op.force.map_or("", Force::key)),
     )
 }
 
@@ -397,7 +455,7 @@ impl Editor {
 
     /// The register the next kill/paste targets (consumed), under evil only.
     pub(super) fn take_kill_register(&mut self) -> Option<char> {
-        if self.evil == EvilState::Disabled || self.modal_helix {
+        if !self.vim_active() {
             return None;
         }
         self.vim.register_armed = false;
@@ -411,7 +469,7 @@ impl Editor {
         reg: Option<char>,
         text: &str,
     ) {
-        if self.evil == EvilState::Disabled || self.modal_helix {
+        if !self.vim_active() {
             return;
         }
         if self.kill_append {
@@ -425,7 +483,7 @@ impl Editor {
     /// A Normal-state command boundary: a register prefix lives for exactly
     /// the one command after it.
     pub(super) fn register_boundary(&mut self, expr: &str) {
-        if expr.trim_start().starts_with("(evil-use-register") {
+        if is_register_prefix(expr) {
             return;
         }
         if expr.trim() == "(keyboard-quit)" {
@@ -546,14 +604,23 @@ impl Editor {
                 lines.push(format!("  m  @{c}   <keyboard macro: {n} commands>"));
             }
         }
+        self.show_listing("*registers*", &lines, cx);
+    }
+
+    /// Show `lines` in the read-only `help-mode` buffer `name` (the
+    /// `:registers` / `:marks` / `:jumps` / `:g…p` listings).
+    pub(super) fn show_listing(&mut self, name: &str, lines: &[String], cx: &mut Context<Self>) {
         let text = lines.join("\n") + "\n";
-        self.render_buffer(
-            "*registers*".into(),
-            "help-mode".into(),
-            text,
-            Vec::new(),
-            cx,
-        );
+        self.render_buffer(name.into(), "help-mode".into(), text, Vec::new(), cx);
+    }
+
+    /// The LSP-style `(line, column)` of `pos` in the active buffer (clamped),
+    /// and that line's text, trimmed — a `:marks` / `:jumps` row.
+    fn line_text_at(&self, pos: usize) -> (usize, usize, String) {
+        let buf = &self.active.buffer;
+        let (line, col) = buf.byte_to_position(pos.min(buf.len()));
+        let text = buf.slice_to_string(buf.line_range(line));
+        (line, col, text.trim().to_string())
     }
 
     // --- marks & jumps ------------------------------------------------------
@@ -643,7 +710,7 @@ impl Editor {
 
     /// Set an automatic mark in the active buffer (no-op unless evil is on).
     pub(super) fn set_auto_mark(&mut self, c: char, pos: usize) {
-        if self.evil == EvilState::Disabled || self.modal_helix {
+        if !self.vim_active() {
             return;
         }
         // Runs on every edit: avoid cloning the buffer name once its map exists.
@@ -682,7 +749,7 @@ impl Editor {
             return;
         };
         let pos = self.point();
-        let c = if c == '`' { '\'' } else { c };
+        let c = normalize_mark(c);
         if c.is_ascii_uppercase() {
             self.vim.global_marks.insert(
                 c,
@@ -763,29 +830,47 @@ impl Editor {
         .detach();
     }
 
+    /// Where mark `c` (already normalized) is in the active buffer, without
+    /// switching buffers: a local mark, or a file mark pointing here.
+    pub(super) fn mark_pos_in_active(&self, c: char) -> Option<usize> {
+        if c.is_ascii_uppercase() {
+            self.vim
+                .global_marks
+                .get(&c)
+                .filter(|g| g.buffer == self.active.name)
+                .map(|g| g.pos)
+        } else {
+            self.vim
+                .marks
+                .get(&self.active.name)
+                .and_then(|m| m.get(&c))
+                .copied()
+        }
+    }
+
     /// Where mark `c` is, switching to its buffer first for a file mark in
-    /// another buffer. `Err(false)` (with an echo) when unset or gone;
-    /// `Err(true)` when the mark's file is still opening (the jump then lands
-    /// once it is open).
+    /// another buffer. [`MarkErr::Missing`] (with an echo) when unset or
+    /// gone; [`MarkErr::Deferred`] when the mark's file is still opening (the
+    /// jump then lands once it is open).
     fn resolve_mark(
         &mut self,
         c: char,
         exact: bool,
         cx: &mut Context<Self>,
-    ) -> Result<usize, bool> {
-        let c = if c == '`' { '\'' } else { c };
+    ) -> Result<usize, MarkErr> {
+        let c = normalize_mark(c);
         if c.is_ascii_uppercase() {
             let Some(g) = self.vim.global_marks.get(&c).cloned() else {
                 self.echo(format!("Mark not set: {c}"), cx);
-                return Err(false);
+                return Err(MarkErr::Missing);
             };
             if g.buffer != self.active.name {
                 match self.visit_position_buffer(&g.buffer, g.path.as_ref(), g.pos, exact, cx) {
                     Target::Here => {}
-                    Target::Deferred => return Err(true),
+                    Target::Deferred => return Err(MarkErr::Deferred),
                     Target::Gone => {
                         self.echo(format!("Mark {c}: buffer is gone"), cx);
-                        return Err(false);
+                        return Err(MarkErr::Missing);
                     }
                 }
                 // The buffer may have been reopened under a new name.
@@ -795,16 +880,11 @@ impl Editor {
             }
             return Ok(g.pos.min(self.active.buffer.len()));
         }
-        match self
-            .vim
-            .marks
-            .get(&self.active.name)
-            .and_then(|m| m.get(&c))
-        {
-            Some(&p) => Ok(p.min(self.active.buffer.len())),
+        match self.mark_pos_in_active(c) {
+            Some(p) => Ok(p.min(self.active.buffer.len())),
             None => {
                 self.echo(format!("Mark not set: {c}"), cx);
-                Err(false)
+                Err(MarkErr::Missing)
             }
         }
     }
@@ -819,17 +899,16 @@ impl Editor {
         let from = self.point();
         let pos = match self.resolve_mark(c, exact, cx) {
             Ok(pos) => pos,
-            Err(deferred) => {
-                if deferred {
-                    // Landing once its file opens: record where we were.
-                    self.push_jump(Jump {
-                        buffer: from_buffer,
-                        path: None,
-                        pos: from,
-                    });
-                }
+            Err(MarkErr::Deferred) => {
+                // Landing once its file opens: record where we were.
+                self.push_jump(Jump {
+                    buffer: from_buffer,
+                    path: None,
+                    pos: from,
+                });
                 return;
             }
+            Err(MarkErr::Missing) => return,
         };
         let target = if exact {
             pos
@@ -898,13 +977,7 @@ impl Editor {
 
     /// Whether `expr` runs a registered jump command.
     pub(super) fn is_jump_expr(&self, expr: &str) -> bool {
-        let name = expr
-            .trim()
-            .trim_start_matches('(')
-            .split(|c: char| c.is_whitespace() || c == ')')
-            .next()
-            .unwrap_or("");
-        self.vim.jump_commands.contains(name)
+        self.vim.jump_commands.contains(expr_head(expr))
     }
 
     /// C-o (`forward` false) / C-i, Tab (`forward` true): walk the jump list.
@@ -966,13 +1039,8 @@ impl Editor {
         for (i, j) in self.vim.jumps.iter().enumerate() {
             let dist = i.abs_diff(cur);
             let (line, col, what) = if j.buffer == self.active.name {
-                let p = j.pos.min(self.active.buffer.len());
-                let (l, c) = self.active.buffer.byte_to_position(p);
-                let text = self
-                    .active
-                    .buffer
-                    .slice_to_string(self.active.buffer.line_range(l));
-                (l + 1, c, text.trim().to_string())
+                let (l, c, text) = self.line_text_at(j.pos);
+                (l + 1, c, text)
             } else {
                 (0, 0, j.buffer.clone())
             };
@@ -981,8 +1049,7 @@ impl Editor {
         if cur >= self.vim.jumps.len() {
             lines.push(">".into());
         }
-        let text = lines.join("\n") + "\n";
-        self.render_buffer("*jumps*".into(), "help-mode".into(), text, Vec::new(), cx);
+        self.show_listing("*jumps*", &lines, cx);
     }
 
     /// `:marks [names]`.
@@ -991,13 +1058,8 @@ impl Editor {
         let mut rows: Vec<(char, String, usize, usize, String)> = Vec::new();
         if let Some(m) = self.vim.marks.get(&self.active.name) {
             for (&c, &p) in m {
-                let p = p.min(self.active.buffer.len());
-                let (line, col) = self.active.buffer.byte_to_position(p);
-                let text = self
-                    .active
-                    .buffer
-                    .slice_to_string(self.active.buffer.line_range(line));
-                rows.push((c, String::new(), line + 1, col, text.trim().to_string()));
+                let (line, col, text) = self.line_text_at(p);
+                rows.push((c, String::new(), line + 1, col, text));
             }
         }
         for (&c, g) in &self.vim.global_marks {
@@ -1026,8 +1088,7 @@ impl Editor {
             let what = if file.is_empty() { text } else { file };
             lines.push(format!(" {c} {line:>6} {col:>4} {what}"));
         }
-        let text = lines.join("\n") + "\n";
-        self.render_buffer("*marks*".into(), "help-mode".into(), text, Vec::new(), cx);
+        self.show_listing("*marks*", &lines, cx);
     }
 
     /// `:delmarks a b` / `:delm!` (all lowercase marks of this buffer).
@@ -1207,7 +1268,7 @@ impl Editor {
         if self.vim.replay.is_some() {
             return;
         }
-        let register_prefix = expr.trim_start().starts_with("(evil-use-register");
+        let register_prefix = is_register_prefix(expr);
         if let Some(rec) = self.vim.dot.as_mut()
             && rec.prefix_only
         {
@@ -1220,26 +1281,14 @@ impl Editor {
         if expr.trim() == "(evil-repeat)" {
             return; // `.` itself is never recorded
         }
-        self.vim.dot = Some(DotRec {
-            events: Vec::new(),
-            buffer: self.active.name.clone(),
-            tick: self.active.buffer.tick(),
-            prefix_only: register_prefix,
-            unrepeatable: false,
-        });
+        self.vim.dot = Some(DotRec::new(self, register_prefix, false));
     }
 
     /// The current command can't be repeated by replaying its keys (a mouse
     /// selection made it).
     pub(super) fn dot_unrepeatable(&mut self) {
         self.dot_finalize();
-        self.vim.dot = Some(DotRec {
-            events: Vec::new(),
-            buffer: self.active.name.clone(),
-            tick: self.active.buffer.tick(),
-            prefix_only: false,
-            unrepeatable: true,
-        });
+        self.vim.dot = Some(DotRec::new(self, false, true));
     }
 
     /// Escape out of Insert: the whole session (and the command that opened
@@ -1322,14 +1371,8 @@ impl Editor {
                 MacroEvent::Key(tok) => self.replay_key(&tok, cx),
                 MacroEvent::Command(expr) => self.run_script(&expr, cx),
                 MacroEvent::Counted(expr, n) => {
-                    let name = expr
-                        .trim()
-                        .trim_start_matches('(')
-                        .trim_end_matches(')')
-                        .split(char::is_whitespace)
-                        .next()
-                        .unwrap_or("");
-                    if self.count_aware.contains(name) || self.script.builtins_for(&expr).is_some()
+                    if self.count_aware.contains(expr_head(&expr))
+                        || self.script.builtins_for(&expr).is_some()
                     {
                         self.run_counted(&expr, n, cx);
                     } else {
@@ -1400,7 +1443,7 @@ impl Editor {
         if let Some(op) = &self.vim.op {
             let n = op.count.map(|n| n.to_string()).unwrap_or_default();
             let m = self.modal_count.map(|n| n.to_string()).unwrap_or_default();
-            let force = op.force.unwrap_or("");
+            let force = op.force.map_or("", Force::key);
             let pend = if self.pending_keys.is_empty() {
                 String::new()
             } else {
@@ -1463,7 +1506,11 @@ impl Editor {
             return Handled::No;
         };
         if self.pending_keys.is_empty() && (chord == "v" || chord == "shift-v") {
-            op.force = Some(if chord == "v" { "v" } else { "V" });
+            op.force = Some(if chord == "v" {
+                Force::Char
+            } else {
+                Force::Line
+            });
             self.vim.op = Some(op);
             self.echo_operator_pending(cx);
             return Handled::Yes;
@@ -1502,7 +1549,12 @@ impl Editor {
                 self.vim.op = Some(op);
                 self.vim.search_count = count;
                 let prompt = if forward { "/" } else { "?" };
-                self.open_minibuffer(prompt, MinibufferPurpose::OperatorSearch(forward), "", cx);
+                self.open_minibuffer(
+                    prompt,
+                    MinibufferPurpose::OperatorSearch(Direction::from_forward(forward)),
+                    "",
+                    cx,
+                );
             } else {
                 self.evil_run_operator(op, count, &expr, cx);
             }
@@ -1633,7 +1685,7 @@ mod tests {
         );
         let op = OpPending {
             count: None,
-            force: Some("V"),
+            force: Some(Force::Line),
             ..op
         };
         assert_eq!(
@@ -1665,6 +1717,17 @@ mod tests {
         let mut ev = vec![MacroEvent::Counted("(evil-join-line)".into(), 2)];
         override_count(&mut ev, 5);
         assert!(matches!(&ev[0], MacroEvent::Counted(_, 5)));
+        // The register prefix keeps its place; the operator after it is recounted.
+        let mut ev = vec![
+            MacroEvent::Command(r#"(evil-use-register "a")"#.into()),
+            MacroEvent::Counted(r#"(evil-operate "yank" 12 "V" (lambda () 1))"#.into(), 1),
+        ];
+        override_count(&mut ev, 7);
+        assert!(matches!(&ev[1], MacroEvent::Command(e)
+            if e == r#"(evil-operate "yank" 7 "V" (lambda () 1))"#));
+        assert_eq!(expr_head(r#"(evil-goto-mark "a")"#), "evil-goto-mark");
+        assert_eq!(expr_head("(undo)"), "undo");
+        assert_eq!(expr_head(" redo "), "redo");
         assert!(is_repeat_neutral("(undo)"));
         assert!(is_repeat_neutral("(evil-repeat)"));
         assert!(!is_repeat_neutral("(evil-delete-char)"));

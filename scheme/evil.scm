@@ -755,90 +755,120 @@
 
 ;; The motion table. Every motion computes from the snapshot (point, buffer)
 ;; and the motion count; #f means "fails" (Vim beeps; the operator is dropped).
+;; Built-ins live in their own hash, name → (lambda (p n raw) …) with p = point,
+;; n = the motion count (at least 1) and raw = the typed count (0 when none).
+;; They are consulted BEFORE `evil-define-motion` entries, so a user motion can
+;; add a name but not shadow a built-in one.
+(define *evil-builtin-motions* (hash))
+(define (evil-builtin-motion name proc)
+  (set! *evil-builtin-motions* (hash-insert *evil-builtin-motions* name proc)))
 (define (evil-motion name)
-  (let* ((p (point)) (n (evil-mcount)) (raw *evil-motion-count*))
-    (cond
-      ((equal? name "line")                    ; dd / cc / yy / >> …
-       (let ((ln (min (evil-last-line) (+ (line-of-pos p) (- n 1)))))
-         (list "line" p (pos-at-char-column ln 0))))
-      ((equal? name "h")
-       (let ((ls (line-start-pos p)))
-         (and (> p ls)
-              (evil-mres "exclusive"
-                         (evil-repeat-pos (lambda (q) (if (> q ls) (grapheme-backward q) q)) p n)))))
-      ((equal? name "l")
-       (let ((le (line-end-pos p)))
-         (and (< p le)
-              (evil-mres "exclusive"
-                         (evil-repeat-pos (lambda (q) (if (< q le) (grapheme-forward q) q)) p n)))))
-      ((equal? name "j")
-       (let ((ln (line-of-pos p)))
-         (and (< ln (evil-last-line)) (list "line" p (evil-vertical-target (+ ln n))))))
-      ((equal? name "k")
-       (let ((ln (line-of-pos p)))
-         (and (> ln 0) (list "line" p (evil-vertical-target (- ln n))))))
-      ((equal? name "+")
-       (let ((ln (line-of-pos p)))
-         (and (< ln (evil-last-line))
-              (list "line" p (evil-first-nonblank-pos (evil-vertical-target (+ ln n)))))))
-      ((equal? name "-")
-       (let ((ln (line-of-pos p)))
-         (and (> ln 0) (list "line" p (evil-first-nonblank-pos (evil-vertical-target (- ln n)))))))
-      ((equal? name "_")
-       (list "line" p (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0)))
-      ((equal? name "w")
-       (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
-           (evil-mres "exclusive!" (evil-change-word-target p n #f))
-           (evil-mres "exclusive" (evil-word-op-target p n word-forward-start))))
-      ((equal? name "W")
-       (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
-           (evil-mres "exclusive!" (evil-change-word-target p n #t))
-           (evil-mres "exclusive" (evil-word-op-target p n bigword-forward-start))))
-      ((equal? name "b")  (evil-mres "exclusive" (evil-repeat-pos word-backward-start p n)))
-      ((equal? name "B")  (evil-mres "exclusive" (evil-repeat-pos bigword-backward-start p n)))
-      ((equal? name "e")  (evil-mres "inclusive" (evil-repeat-pos word-forward-end p n)))
-      ((equal? name "E")  (evil-mres "inclusive" (evil-repeat-pos bigword-forward-end p n)))
-      ((equal? name "ge") (evil-mres "inclusive" (evil-repeat-pos word-backward-end p n)))
-      ((equal? name "gE") (evil-mres "inclusive" (evil-repeat-pos bigword-backward-end p n)))
-      ((equal? name "0")  (evil-mres "exclusive" (line-start-pos p)))
-      ((equal? name "^")  (evil-mres "exclusive" (evil-first-nonblank-pos p)))
-      ((equal? name "$")
-       (evil-mres "exclusive!"
-                  (line-end-pos (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))))
-      ((equal? name "g_")
-       (let* ((ls (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))
-              (le (line-end-pos ls))
-              (last (let loop ((i le))
-                      (if (and (> i ls) (evil-blank-pos? (- i 1))) (loop (- i 1)) i))))
-         (evil-mres "exclusive!" last)))
-      ((equal? name "|")
-       (evil-mres "exclusive" (evil-line-col-pos (line-of-pos p) (- n 1))))
-      ((equal? name "gg")
-       (list "line" p (evil-first-nonblank-pos
-                       (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) 0) 0))))
-      ((equal? name "G")
-       (list "line" p (evil-first-nonblank-pos
-                       (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) (evil-last-line)) 0))))
-      ((equal? name "}")  (evil-mres "exclusive" (evil-repeat-pos paragraph-forward-pos p n)))
-      ((equal? name "{")  (evil-mres "exclusive" (evil-repeat-pos paragraph-backward-pos p n)))
-      ((equal? name ")")  (evil-mres "exclusive" (evil-repeat-pos evil-sentence-forward-pos p n)))
-      ((equal? name "(")  (evil-mres "exclusive" (evil-repeat-pos evil-sentence-backward-pos p n)))
-      ((equal? name "%")
-       (if (> raw 0)
-           (let ((ln (min (evil-last-line) (quotient (+ (* raw (line-count)) 99) 100))))
-             (list "line" p (pos-at-char-column (max 0 (- ln 1)) 0)))
-           (let ((tg (evil-matchit-target))) (and tg (evil-mres "inclusive" tg)))))
-      ((or (equal? name "H") (equal? name "M") (equal? name "L"))
-       (list "line" p (evil-first-nonblank-pos (pos-at-char-column (evil-screen-line name n) 0))))
-      ((equal? name ";") (evil-find-motion *evil-find-forward* n))
-      ((equal? name ",") (evil-find-motion (not *evil-find-forward*) n))
-      ((equal? name "n") (evil-search-motion (search-query) (search-forward?) n))
-      ((equal? name "N") (evil-search-motion (search-query) (not (search-forward?)) n))
-      ((equal? name "*") (evil-search-word-motion #t n))
-      ((equal? name "#") (evil-search-word-motion #f n))
-      (else
-       (let ((user (hash-try-get *evil-user-motions* name)))
-         (and user (user)))))))
+  (let ((builtin (hash-try-get *evil-builtin-motions* name)))
+    (if builtin
+        (builtin (point) (evil-mcount) *evil-motion-count*)
+        (let ((user (hash-try-get *evil-user-motions* name)))
+          (and user (user))))))
+
+;; The n-th line below point (clamped to the last line), at column 0.
+(define (evil-motion-nth-line-start p n)
+  (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))
+
+;; Motions that just step a position function `n` times: (name type step).
+(for-each
+ (lambda (row)
+   (let ((type (cadr row)) (step (caddr row)))
+     (evil-builtin-motion (car row)
+                          (lambda (p n raw) (evil-mres type (evil-repeat-pos step p n))))))
+ (list (list "b"  "exclusive" word-backward-start)
+       (list "B"  "exclusive" bigword-backward-start)
+       (list "e"  "inclusive" word-forward-end)
+       (list "E"  "inclusive" bigword-forward-end)
+       (list "ge" "inclusive" word-backward-end)
+       (list "gE" "inclusive" bigword-backward-end)
+       (list "}"  "exclusive" paragraph-forward-pos)
+       (list "{"  "exclusive" paragraph-backward-pos)
+       (list ")"  "exclusive" evil-sentence-forward-pos)
+       (list "("  "exclusive" evil-sentence-backward-pos)))
+
+(evil-builtin-motion "line"                    ; dd / cc / yy / >> …
+  (lambda (p n raw) (list "line" p (evil-motion-nth-line-start p n))))
+(evil-builtin-motion "_"
+  (lambda (p n raw) (list "line" p (evil-motion-nth-line-start p n))))
+(evil-builtin-motion "h"
+  (lambda (p n raw)
+    (let ((ls (line-start-pos p)))
+      (and (> p ls)
+           (evil-mres "exclusive"
+                      (evil-repeat-pos (lambda (q) (if (> q ls) (grapheme-backward q) q)) p n))))))
+(evil-builtin-motion "l"
+  (lambda (p n raw)
+    (let ((le (line-end-pos p)))
+      (and (< p le)
+           (evil-mres "exclusive"
+                      (evil-repeat-pos (lambda (q) (if (< q le) (grapheme-forward q) q)) p n))))))
+(evil-builtin-motion "j"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (< ln (evil-last-line)) (list "line" p (evil-vertical-target (+ ln n)))))))
+(evil-builtin-motion "k"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (> ln 0) (list "line" p (evil-vertical-target (- ln n)))))))
+(evil-builtin-motion "+"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (< ln (evil-last-line))
+           (list "line" p (evil-first-nonblank-pos (evil-vertical-target (+ ln n))))))))
+(evil-builtin-motion "-"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (> ln 0) (list "line" p (evil-first-nonblank-pos (evil-vertical-target (- ln n))))))))
+;; w / W: under `c` on a non-blank, Vim's cw acts like ce.
+(define (evil-word-motion p n bigword)
+  (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
+      (evil-mres "exclusive!" (evil-change-word-target p n bigword))
+      (evil-mres "exclusive" (evil-word-op-target p n (if bigword bigword-forward-start word-forward-start)))))
+(evil-builtin-motion "w" (lambda (p n raw) (evil-word-motion p n #f)))
+(evil-builtin-motion "W" (lambda (p n raw) (evil-word-motion p n #t)))
+(evil-builtin-motion "0" (lambda (p n raw) (evil-mres "exclusive" (line-start-pos p))))
+(evil-builtin-motion "^" (lambda (p n raw) (evil-mres "exclusive" (evil-first-nonblank-pos p))))
+(evil-builtin-motion "$"
+  (lambda (p n raw) (evil-mres "exclusive!" (line-end-pos (evil-motion-nth-line-start p n)))))
+(evil-builtin-motion "g_"
+  (lambda (p n raw)
+    (let* ((ls (evil-motion-nth-line-start p n))
+           (le (line-end-pos ls))
+           (last (let loop ((i le))
+                   (if (and (> i ls) (evil-blank-pos? (- i 1))) (loop (- i 1)) i))))
+      (evil-mres "exclusive!" last))))
+(evil-builtin-motion "|"
+  (lambda (p n raw) (evil-mres "exclusive" (evil-line-col-pos (line-of-pos p) (- n 1)))))
+(evil-builtin-motion "gg"
+  (lambda (p n raw)
+    (list "line" p (evil-first-nonblank-pos
+                    (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) 0) 0)))))
+(evil-builtin-motion "G"
+  (lambda (p n raw)
+    (list "line" p (evil-first-nonblank-pos
+                    (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) (evil-last-line)) 0)))))
+(evil-builtin-motion "%"
+  (lambda (p n raw)
+    (if (> raw 0)
+        (let ((ln (min (evil-last-line) (quotient (+ (* raw (line-count)) 99) 100))))
+          (list "line" p (pos-at-char-column (max 0 (- ln 1)) 0)))
+        (let ((tg (evil-matchit-target))) (and tg (evil-mres "inclusive" tg))))))
+(for-each
+ (lambda (which)
+   (evil-builtin-motion which
+     (lambda (p n raw)
+       (list "line" p (evil-first-nonblank-pos (pos-at-char-column (evil-screen-line which n) 0))))))
+ (list "H" "M" "L"))
+(evil-builtin-motion ";" (lambda (p n raw) (evil-find-motion *evil-find-forward* n)))
+(evil-builtin-motion "," (lambda (p n raw) (evil-find-motion (not *evil-find-forward*) n)))
+(evil-builtin-motion "n" (lambda (p n raw) (evil-search-motion (search-query) (search-forward?) n)))
+(evil-builtin-motion "N" (lambda (p n raw) (evil-search-motion (search-query) (not (search-forward?)) n)))
+(evil-builtin-motion "*" (lambda (p n raw) (evil-search-word-motion #t n)))
+(evil-builtin-motion "#" (lambda (p n raw) (evil-search-word-motion #f n)))
 
 ;; f/F/t/T as operator motions: `(evil-motion-find "f" "x")` (the editor fills
 ;; in the char). f/t are inclusive, F/T exclusive — as in Vim.
@@ -976,45 +1006,62 @@
 (define (evil-define-operator name proc)
   (set! *evil-user-operators* (hash-insert *evil-user-operators* name proc)))
 
+;; Built-in operators: name → (lambda (line? s e p) …), where line? is whether
+;; the range is linewise and p is point before the operator ran. Consulted
+;; before `evil-define-operator` entries, like the built-in motions.
+(define *evil-builtin-operators* (hash))
+(define (evil-builtin-operator name proc)
+  (set! *evil-builtin-operators* (hash-insert *evil-builtin-operators* name proc)))
+
 ;; Apply operator `op` to [s, e) of kind "char"/"line".
 (define (evil-apply-operator op kind s e)
-  (let ((line (equal? kind "line")) (p (point)))
-    (cond
-      ((equal? op "delete")
-       (if line
-           (evil-delete-lines s e)
-           (when (< s e) (kill-region-between s e) (evil-set-charwise))))
-      ((equal? op "change")
-       (if line
-           (let* ((eof (and (= e (point-max))
-                            (or (= e s) (not (equal? (buffer-substring (- e 1) e) "\n")))))
-                  (e2 (if eof e (- e 1))))
-             (when (< s e2) (kill-region-between s e2) (evil-set-linewise))
-             (goto-char s))
-           (when (< s e) (kill-region-between s e) (evil-set-charwise)))
-       (evil-insert-state))
-      ((equal? op "yank")
-       (when (< s e)
-         (set-region s e) (kill-ring-save)
-         (if line (evil-set-linewise) (evil-set-charwise))
-         (goto-char (if (and line (= (line-of-pos p) (line-of-pos s))) p s))))
-      ((equal? op "indent")  (evil-shift-lines s e 1))
-      ((equal? op "outdent") (evil-shift-lines s e -1))
-      ((equal? op "reindent") (evil-reindent-lines s e))
-      ((equal? op "downcase") (evil-fold-range s e string-downcase (if line p s)))
-      ((equal? op "upcase")   (evil-fold-range s e string-upcase (if line p s)))
-      ((equal? op "togglecase") (evil-fold-range s e string-toggle-case (if line p s)))
-      ((equal? op "rot13")    (evil-fold-range s e evil-rot13 (if line p s)))
-      ((equal? op "fill")
-       (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #f))
-      ((equal? op "fill-keep")
-       (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #t))
-      ((equal? op "comment") (evil-comment-lines s e))
-      (else
-       (let ((user (hash-try-get *evil-user-operators* op)))
-         (if user
-             (user kind s e)
-             (message (string-append "Unknown operator: " op))))))))
+  (let ((builtin (hash-try-get *evil-builtin-operators* op)))
+    (if builtin
+        (builtin (equal? kind "line") s e (point))
+        (let ((user (hash-try-get *evil-user-operators* op)))
+          (if user
+              (user kind s e)
+              (message (string-append "Unknown operator: " op)))))))
+
+(evil-builtin-operator "delete"
+  (lambda (line s e p)
+    (if line
+        (evil-delete-lines s e)
+        (when (< s e) (kill-region-between s e) (evil-set-charwise)))))
+(evil-builtin-operator "change"
+  (lambda (line s e p)
+    (if line
+        (let* ((eof (and (= e (point-max))
+                         (or (= e s) (not (equal? (buffer-substring (- e 1) e) "\n")))))
+               (e2 (if eof e (- e 1))))
+          (when (< s e2) (kill-region-between s e2) (evil-set-linewise))
+          (goto-char s))
+        (when (< s e) (kill-region-between s e) (evil-set-charwise)))
+    (evil-insert-state)))
+(evil-builtin-operator "yank"
+  (lambda (line s e p)
+    (when (< s e)
+      (set-region s e) (kill-ring-save)
+      (if line (evil-set-linewise) (evil-set-charwise))
+      (goto-char (if (and line (= (line-of-pos p) (line-of-pos s))) p s)))))
+(evil-builtin-operator "indent"   (lambda (line s e p) (evil-shift-lines s e 1)))
+(evil-builtin-operator "outdent"  (lambda (line s e p) (evil-shift-lines s e -1)))
+(evil-builtin-operator "reindent" (lambda (line s e p) (evil-reindent-lines s e)))
+;; Case / rot13 folds: (name folder). Point stays put on a linewise range.
+(for-each
+ (lambda (row)
+   (let ((folder (cadr row)))
+     (evil-builtin-operator (car row)
+                            (lambda (line s e p) (evil-fold-range s e folder (if line p s))))))
+ (list (list "downcase" string-downcase)
+       (list "upcase" string-upcase)
+       (list "togglecase" string-toggle-case)
+       (list "rot13" evil-rot13)))
+(evil-builtin-operator "fill"
+  (lambda (line s e p) (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #f)))
+(evil-builtin-operator "fill-keep"
+  (lambda (line s e p) (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #t)))
+(evil-builtin-operator "comment" (lambda (line s e p) (evil-comment-lines s e)))
 
 ;; The entry point the editor dispatches for `{count}{op}{count}{motion}`.
 (define (evil-operate op count force thunk)
@@ -1099,12 +1146,13 @@
 (evil-bind-operator "g c" "comment")
 (for-each
  (lambda (km)
-   (define-key km "=" "evil-visual-operator \"reindent\"")
-   (define-key km "g u" "evil-visual-operator \"downcase\"")
-   (define-key km "g shift-u" "evil-visual-operator \"upcase\"")
-   (define-key km "g ~" "evil-visual-operator \"togglecase\"")
-   (define-key km "g ?" "evil-visual-operator \"rot13\"")
-   (define-key km "g c" "evil-visual-operator \"comment\""))
+   (define-keys km
+     '(("=" "evil-visual-operator \"reindent\"")
+       ("g u" "evil-visual-operator \"downcase\"")
+       ("g shift-u" "evil-visual-operator \"upcase\"")
+       ("g ~" "evil-visual-operator \"togglecase\"")
+       ("g ?" "evil-visual-operator \"rot13\"")
+       ("g c" "evil-visual-operator \"comment\""))))
  (list "evil-visual" "evil-visual-line"))
 
 ;; --- tree-sitter text objects and motions ---------------------------------------
@@ -1543,156 +1591,158 @@
   (let ((p (point)))
     (when (< (grapheme-forward p) (line-end-pos p)) (forward-char))))
 
+;; The three Visual keymaps (charwise, linewise, blockwise), for bindings they
+;; all share.
+(define *evil-visual-maps* '("evil-visual" "evil-visual-line" "evil-visual-block"))
+
 ;; --- normal state -----------------------------------------------------------
 ;; motion
-(define-key "evil-normal" "h" 'backward-char)
-(define-key "evil-normal" "l" 'forward-char)
-(define-key "evil-normal" "j" 'next-line)
-(define-key "evil-normal" "k" 'previous-line)
-(define-key "evil-normal" "w" 'forward-word-start)
-;; `b` is the exact mirror of `w` (class-aware), NOT Emacs `backward-word` —
-;; that one skips punctuation as a separator, so it disagreed with `w` about
-;; where a word starts and `b` could never land on a `).` run.
-(define-key "evil-normal" "b" 'backward-word-start)
-;; W / B / E — whitespace-delimited WORD motions (vim's shifted trio).
-(define-key "evil-normal" "shift-w" 'forward-bigword-start)
-(define-key "evil-normal" "shift-b" 'backward-bigword-start)
-(define-key "evil-normal" "shift-e" 'forward-bigword-end)
-(define-key "evil-normal" "0" 'move-beginning-of-line)
-;; macOS clears shift for non-letter keys and reports the produced char, so
-;; bind the literal symbol ($, :, ?) — NOT shift-4 / shift-; / shift-/.
-(define-key "evil-normal" "$" 'move-end-of-line)
-(define-key "evil-normal" "e" 'evil-forward-word-end)    ; e — end of word
-(define-key "evil-normal" "^" 'evil-first-non-blank)     ; ^ — first non-blank
-(define-key "evil-normal" "g g" 'evil-goto-first-line)   ; gg — first line, first non-blank
-(define-key "evil-normal" "shift-g" 'evil-goto-last-line); G  — last line, first non-blank
-(define-key "evil-normal" "{" 'evil-backward-paragraph)  ; { — previous paragraph boundary
-(define-key "evil-normal" "}" 'evil-forward-paragraph)   ; } — next paragraph boundary
-(define-key "evil-normal" "(" 'evil-backward-sentence)   ; ( — previous sentence start
-(define-key "evil-normal" ")" 'evil-forward-sentence)    ; ) — next sentence start
-(define-key "evil-normal" "%" 'evil-matchit)             ; % — matching bracket
-(define-key "evil-normal" "f" 'evil-find-char-forward)   ; f<char> — find char on line
-(define-key "evil-normal" "shift-f" 'evil-find-char-backward) ; F<char> — find backward
-(define-key "evil-normal" "t" 'evil-till-char-forward)   ; t<char> — till char
-(define-key "evil-normal" "shift-t" 'evil-till-char-backward) ; T<char>
-(define-key "evil-normal" ";" 'evil-find-repeat)         ; ; — repeat last f/t
-(define-key "evil-normal" "," 'evil-find-repeat-reverse) ; , — repeat, reversed
-(define-key "evil-normal" "*" 'evil-search-word-forward) ; * — search word under cursor
-(define-key "evil-normal" "#" 'evil-search-word-backward); # — same, backward
-;; enter insert
-(define-key "evil-normal" "i" 'evil-insert-state)
-(define-key "evil-normal" "shift-i" 'evil-insert-line)   ; I
-(define-key "evil-normal" "a" 'evil-append)
-(define-key "evil-normal" "shift-a" 'evil-append-line)   ; A
-(define-key "evil-normal" "o" 'evil-open-below)
-(define-key "evil-normal" "shift-o" 'evil-open-above)    ; O
-;; edit
-(define-key "evil-normal" "x" 'evil-delete-char)         ; x — delete char (into register)
-(define-key "evil-normal" "r" 'evil-replace-char)        ; r<char> — replace char under cursor
-(define-key "evil-normal" "s" 'evil-substitute-char)     ; s — substitute char
-(define-key "evil-normal" "shift-s" 'evil-change-line)   ; S — substitute line (= cc)
-(define-key "evil-normal" "~" 'evil-toggle-case)         ; ~ — toggle case of char
-(define-key "evil-normal" "shift-j" 'evil-join-line)     ; J — join next line up
-(define-key "evil-normal" "g shift-j" 'evil-join-line-no-space) ; gJ — join, no space
-(define-key "evil-normal" "g d" 'lsp-find-definition)    ; gd — go to definition (LSP)
-(define-key "evil-normal" "shift-k" 'lsp-hover)          ; K  — doc at point (LSP)
-(define-key "evil-normal" "q" 'evil-kbd-macro-toggle)    ; q — record macro (toggle)
-(define-key "evil-normal" "@" "evil-macro-play %c")     ; @a — replay macro a (@@ last, @: ex)
-;; "x — use register x for the next yank / delete / put ("_ black hole, "+ / "*
-;; clipboard, "0 last yank, "1-"9 deletes, "- small delete, ". : / read-only).
-(define-key "evil-normal" "\"" "evil-use-register %c")
-(define-key "evil-visual" "\"" "evil-use-register %c")
-(define-key "evil-visual-line" "\"" "evil-use-register %c")
-(define-key "evil-visual-block" "\"" "evil-use-register %c")
-(define-key "evil-normal" "shift-d" 'evil-delete-to-eol) ; D  (= d$)
-(define-key "evil-normal" "shift-c" 'evil-change-to-eol) ; C  (= c$)
-(define-key "evil-normal" "shift-y" 'evil-yank-line)     ; Y (= yy)
-(define-key "evil-normal" "p" 'evil-paste-after)        ; p  (line-wise → below)
-(define-key "evil-normal" "shift-p" 'evil-paste-before) ; P  (line-wise → above)
-;; marks: ma sets (mA = file mark), 'a jumps to its line, `a to the exact spot;
-;; '' / `` return to before the last jump. gv reselects the last Visual area.
-(define-key "evil-normal" "m" "evil-set-mark %c")
-(define-key "evil-normal" "'" "evil-goto-mark-line %c")
-(define-key "evil-normal" "`" "evil-goto-mark %c")
-(define-key "evil-normal" "g v" 'evil-reselect-visual)
-(define-key "evil-normal" "&" "evil-ex \"s\"")         ; & — repeat the last :s on this line
-(define-key "evil-normal" "g &" "evil-ex \"%&&\"")     ; g& — …on every line, same flags
-(define-key "evil-normal" "shift-h" 'evil-window-top)     ; H / M / L — screen lines
-(define-key "evil-normal" "shift-m" 'evil-window-middle)
-(define-key "evil-normal" "shift-l" 'evil-window-bottom)
-(define-key "evil-normal" "u" 'undo)
-(define-key "evil-normal" "." 'evil-repeat)              ; . — repeat the last change (3. = new count)
-(define-key "evil-normal" "ctrl-r" 'redo)               ; C-r — redo (else it falls
-                                                        ; through to isearch-backward)
-(define-key "evil-normal" "v" 'evil-visual-state)
-(define-key "evil-normal" "shift-v" 'evil-visual-line-state) ; V (line-wise visual)
-(define-key "evil-normal" "ctrl-v" 'evil-visual-block-state) ; C-v (block-wise)
-(define-key "evil-normal" ":" 'evil-ex-command)          ; :  (e.g. :%s/a/b/g)
+(define-keys "evil-normal"
+  '(("h" backward-char)
+    ("l" forward-char)
+    ("j" next-line)
+    ("k" previous-line)
+    ("w" forward-word-start)
+    ;; `b` is the exact mirror of `w` (class-aware), NOT Emacs `backward-word` —
+    ;; that one skips punctuation as a separator, so it disagreed with `w` about
+    ;; where a word starts and `b` could never land on a `).` run.
+    ("b" backward-word-start)
+    ;; W / B / E — whitespace-delimited WORD motions (vim's shifted trio).
+    ("shift-w" forward-bigword-start)
+    ("shift-b" backward-bigword-start)
+    ("shift-e" forward-bigword-end)
+    ("0" move-beginning-of-line)
+    ;; macOS clears shift for non-letter keys and reports the produced char, so
+    ;; bind the literal symbol ($, :, ?) — NOT shift-4 / shift-; / shift-/.
+    ("$" move-end-of-line)
+    ("e" evil-forward-word-end)            ; e — end of word
+    ("^" evil-first-non-blank)             ; ^ — first non-blank
+    ("g g" evil-goto-first-line)           ; gg — first line, first non-blank
+    ("shift-g" evil-goto-last-line)        ; G  — last line, first non-blank
+    ("{" evil-backward-paragraph)          ; { — previous paragraph boundary
+    ("}" evil-forward-paragraph)           ; } — next paragraph boundary
+    ("(" evil-backward-sentence)           ; ( — previous sentence start
+    (")" evil-forward-sentence)            ; ) — next sentence start
+    ("%" evil-matchit)                     ; % — matching bracket
+    ("f" evil-find-char-forward)           ; f<char> — find char on line
+    ("shift-f" evil-find-char-backward)    ; F<char> — find backward
+    ("t" evil-till-char-forward)           ; t<char> — till char
+    ("shift-t" evil-till-char-backward)    ; T<char>
+    (";" evil-find-repeat)                 ; ; — repeat last f/t
+    ("," evil-find-repeat-reverse)         ; , — repeat, reversed
+    ("*" evil-search-word-forward)         ; * — search word under cursor
+    ("#" evil-search-word-backward)        ; # — same, backward
+    ;; enter insert
+    ("i" evil-insert-state)
+    ("shift-i" evil-insert-line)           ; I
+    ("a" evil-append)
+    ("shift-a" evil-append-line)           ; A
+    ("o" evil-open-below)
+    ("shift-o" evil-open-above)            ; O
+    ;; edit
+    ("x" evil-delete-char)                 ; x — delete char (into register)
+    ("r" evil-replace-char)                ; r<char> — replace char under cursor
+    ("s" evil-substitute-char)             ; s — substitute char
+    ("shift-s" evil-change-line)           ; S — substitute line (= cc)
+    ("~" evil-toggle-case)                 ; ~ — toggle case of char
+    ("shift-j" evil-join-line)             ; J — join next line up
+    ("g shift-j" evil-join-line-no-space)  ; gJ — join, no space
+    ("g d" lsp-find-definition)            ; gd — go to definition (LSP)
+    ("shift-k" lsp-hover)                  ; K  — doc at point (LSP)
+    ("q" evil-kbd-macro-toggle)            ; q — record macro (toggle)
+    ("@" "evil-macro-play %c")             ; @a — replay macro a (@@ last, @: ex)
+    ;; "x — use register x for the next yank / delete / put ("_ black hole, "+ / "*
+    ;; clipboard, "0 last yank, "1-"9 deletes, "- small delete, ". : / read-only).
+    ("\"" "evil-use-register %c")))
+(define-keys-in *evil-visual-maps* '(("\"" "evil-use-register %c")))
+(define-keys "evil-normal"
+  '(("shift-d" evil-delete-to-eol)      ; D  (= d$)
+    ("shift-c" evil-change-to-eol)      ; C  (= c$)
+    ("shift-y" evil-yank-line)          ; Y (= yy)
+    ("p" evil-paste-after)              ; p  (line-wise → below)
+    ("shift-p" evil-paste-before)       ; P  (line-wise → above)
+    ;; marks: ma sets (mA = file mark), 'a jumps to its line, `a to the exact spot;
+    ;; '' / `` return to before the last jump. gv reselects the last Visual area.
+    ("m" "evil-set-mark %c")
+    ("'" "evil-goto-mark-line %c")
+    ("`" "evil-goto-mark %c")
+    ("g v" evil-reselect-visual)
+    ("&" "evil-ex \"s\"")               ; & — repeat the last :s on this line
+    ("g &" "evil-ex \"%&&\"")           ; g& — …on every line, same flags
+    ("shift-h" evil-window-top)         ; H / M / L — screen lines
+    ("shift-m" evil-window-middle)
+    ("shift-l" evil-window-bottom)
+    ("u" undo)
+    ("." evil-repeat)                   ; . — repeat the last change (3. = new count)
+    ("ctrl-r" redo)                     ; C-r — redo (else it falls
+    ; through to isearch-backward)
+    ("v" evil-visual-state)
+    ("shift-v" evil-visual-line-state)  ; V (line-wise visual)
+    ("ctrl-v" evil-visual-block-state)  ; C-v (block-wise)
+    (":" evil-ex-command)))             ; :  (e.g. :%s/a/b/g)
 ;; From Visual, `:` starts on the selected lines (`:'<,'>`).
-(define-key "evil-visual" ":" 'evil-ex-command)
-(define-key "evil-visual-line" ":" 'evil-ex-command)
-(define-key "evil-visual-block" ":" 'evil-ex-command)
-(define-key "evil-normal" "escape" 'keyboard-quit)
-;; search
-(define-key "evil-normal" "/" 'evil-search-forward)
-(define-key "evil-normal" "?" 'evil-search-backward)
-(define-key "evil-normal" "n" 'evil-search-next)
-(define-key "evil-normal" "shift-n" 'evil-search-previous) ; N
+(define-keys-in *evil-visual-maps* '((":" evil-ex-command)))
+(define-keys "evil-normal"
+  '(("escape" keyboard-quit)
+    ;; search
+    ("/" evil-search-forward)
+    ("?" evil-search-backward)
+    ("n" evil-search-next)
+    ("shift-n" evil-search-previous))) ; N
 
 ;; Scrolling — vanilla evil's half-page scroll on C-d / C-u. (No SPC leader by
 ;; default: that's a Spacemacs/Doom addition, not part of Emacs's evil-mode.
 ;; Define your own in init.scm, e.g. (define-key "evil-normal" "space space"
 ;; "helm-M-x").)
-(define-key "evil-normal" "ctrl-d" 'evil-scroll-down)   ; half page down
-(define-key "evil-normal" "ctrl-u" 'evil-scroll-up)     ; half page up
-(define-key "evil-normal" "ctrl-f" 'scroll-up)          ; full page forward
-(define-key "evil-normal" "ctrl-b" 'scroll-down)        ; full page back
-(define-key "evil-normal" "z z" 'recenter)              ; zz — center cursor line
-;; Folds (scheme/folding.scm; org/markdown use their own fold styles): za
-;; toggle, zc close, zo open, zM fold everything, zR open everything, zj / zk
-;; the next / previous fold header.
-(define-key "evil-normal" "z a" 'fold-toggle-at-point)
-(define-key "evil-normal" "z c" 'fold-close-at-point)
-(define-key "evil-normal" "z o" 'fold-open-at-point)
-(define-key "evil-normal" "z shift-m" 'fold-all)
-(define-key "evil-normal" "z shift-r" 'fold-show-all)
-(define-key "evil-normal" "z j" 'fold-next-header)
-(define-key "evil-normal" "z k" 'fold-previous-header)
+(define-keys "evil-normal"
+  '(("ctrl-d" evil-scroll-down)   ; half page down
+    ("ctrl-u" evil-scroll-up)     ; half page up
+    ("ctrl-f" scroll-up)          ; full page forward
+    ("ctrl-b" scroll-down)        ; full page back
+    ("z z" recenter)              ; zz — center cursor line
+    ;; Folds (scheme/folding.scm; org/markdown use their own fold styles): za
+    ;; toggle, zc close, zo open, zM fold everything, zR open everything, zj / zk
+    ;; the next / previous fold header.
+    ("z a" fold-toggle-at-point)
+    ("z c" fold-close-at-point)
+    ("z o" fold-open-at-point)
+    ("z shift-m" fold-all)
+    ("z shift-r" fold-show-all)
+    ("z j" fold-next-header)
+    ("z k" fold-previous-header)))
 
 ;; Structural motions (tree-sitter): ]m [m / ]f [f — next / previous function
 ;; start, ]M [M / ]F [F — function end; ]] [[ — next / previous class (section)
 ;; start, ][ [] — its end. ]d [d — next / previous diagnostic.
+;; Each row is (key category forward? end?); the command names follow from the
+;; row — `evil-{next,previous}-{category}-{start,end}` (+ `-visual`, defined
+;; above) — and the operator motion is `evil-ts-motion` on the same arguments.
+(define (evil-ts-motion-name category forward ends)
+  (string-append "evil-" (if forward "next" "previous") "-" category
+                 "-" (if ends "end" "start")))
+(define (evil-scheme-bool b) (if b "#t" "#f"))
 (for-each
  (lambda (b)
-   (define-key "evil-normal" (car b) (cadr b))
-   (define-key "evil-visual" (car b) (caddr b))
-   (define-key "evil-visual-line" (car b) (caddr b))
-   (define-key "evil-operator" (car b) (list-ref b 3)))
+   (let* ((key (car b)) (category (cadr b)) (forward (caddr b)) (ends (list-ref b 3))
+          (name (evil-ts-motion-name category forward ends)))
+     (define-key "evil-normal" key name)
+     (define-keys-in '("evil-visual" "evil-visual-line") (list (list key (string-append name "-visual"))))
+     (define-key "evil-operator" key
+                 (string-append "evil-ts-motion \"" category "\" "
+                                (evil-scheme-bool forward) " " (evil-scheme-bool ends)))))
  (list
-  (list "] m" "evil-next-function-start" "evil-next-function-start-visual"
-        "evil-ts-motion \"function\" #t #f")
-  (list "[ m" "evil-previous-function-start" "evil-previous-function-start-visual"
-        "evil-ts-motion \"function\" #f #f")
-  (list "] shift-m" "evil-next-function-end" "evil-next-function-end-visual"
-        "evil-ts-motion \"function\" #t #t")
-  (list "[ shift-m" "evil-previous-function-end" "evil-previous-function-end-visual"
-        "evil-ts-motion \"function\" #f #t")
-  (list "] f" "evil-next-function-start" "evil-next-function-start-visual"
-        "evil-ts-motion \"function\" #t #f")
-  (list "[ f" "evil-previous-function-start" "evil-previous-function-start-visual"
-        "evil-ts-motion \"function\" #f #f")
-  (list "] shift-f" "evil-next-function-end" "evil-next-function-end-visual"
-        "evil-ts-motion \"function\" #t #t")
-  (list "[ shift-f" "evil-previous-function-end" "evil-previous-function-end-visual"
-        "evil-ts-motion \"function\" #f #t")
-  (list "] ]" "evil-next-class-start" "evil-next-class-start-visual"
-        "evil-ts-motion \"class\" #t #f")
-  (list "[ [" "evil-previous-class-start" "evil-previous-class-start-visual"
-        "evil-ts-motion \"class\" #f #f")
-  (list "] [" "evil-next-class-end" "evil-next-class-end-visual"
-        "evil-ts-motion \"class\" #t #t")
-  (list "[ ]" "evil-previous-class-end" "evil-previous-class-end-visual"
-        "evil-ts-motion \"class\" #f #t")))
+  (list "] m"       "function" #t #f)
+  (list "[ m"       "function" #f #f)
+  (list "] shift-m" "function" #t #t)
+  (list "[ shift-m" "function" #f #t)
+  (list "] f"       "function" #t #f)
+  (list "[ f"       "function" #f #f)
+  (list "] shift-f" "function" #t #t)
+  (list "[ shift-f" "function" #f #t)
+  (list "] ]"       "class" #t #f)
+  (list "[ ["       "class" #f #f)
+  (list "] ["       "class" #t #t)
+  (list "[ ]"       "class" #f #t)))
 (define-key "evil-normal" "] d" 'evil-next-diagnostic)
 (define-key "evil-normal" "[ d" 'evil-previous-diagnostic)
 
@@ -1703,18 +1753,14 @@
 ;; on with (evil-enable-ctrl-x-decrement); `g -` decrements regardless.
 (define-key "evil-normal" "ctrl-a" 'evil-increment)
 (define-key "evil-normal" "g -" 'evil-decrement)
-(define-key "evil-visual" "ctrl-a" 'evil-visual-increment)
-(define-key "evil-visual" "g ctrl-a" 'evil-visual-increment-progressive)
-(define-key "evil-visual" "g ctrl-x" 'evil-visual-decrement-progressive)
-(define-key "evil-visual" "g -" 'evil-visual-decrement)
-(define-key "evil-visual-line" "ctrl-a" 'evil-visual-increment)
-(define-key "evil-visual-line" "g ctrl-a" 'evil-visual-increment-progressive)
-(define-key "evil-visual-line" "g ctrl-x" 'evil-visual-decrement-progressive)
-(define-key "evil-visual-line" "g -" 'evil-visual-decrement)
+(define-keys-in '("evil-visual" "evil-visual-line")
+  '(("ctrl-a" evil-visual-increment)
+    ("g ctrl-a" evil-visual-increment-progressive)
+    ("g ctrl-x" evil-visual-decrement-progressive)
+    ("g -" evil-visual-decrement)))
 (define (evil-enable-ctrl-x-decrement)
   (define-key "evil-normal" "ctrl-x" 'evil-decrement)
-  (define-key "evil-visual" "ctrl-x" 'evil-visual-decrement)
-  (define-key "evil-visual-line" "ctrl-x" 'evil-visual-decrement))
+  (define-keys-in '("evil-visual" "evil-visual-line") '(("ctrl-x" evil-visual-decrement))))
 
 ;; (`>>` / `<<` and every other operator + motion pair live in the operator
 ;; grammar above: `>` / `<` are operators, doubled for the current line.)
@@ -1775,137 +1821,107 @@
 (define-key "evil-insert" "escape" 'evil-normal-state)
 (define-key "evil-insert" "ctrl-r" "evil-insert-register %c") ; C-r x — insert register x
 
-;; --- visual state (motions extend; the mark is active) ----------------------
-(define-key "evil-visual" "h" 'backward-char)
-(define-key "evil-visual" "l" 'evil-visual-forward-char)
-(define-key "evil-visual" "j" 'next-line)
-(define-key "evil-visual" "k" 'previous-line)
-(define-key "evil-visual" "w" 'forward-word-start)
-(define-key "evil-visual" "b" 'backward-word-start)
-(define-key "evil-visual" "0" 'move-beginning-of-line)
-(define-key "evil-visual" "$" 'move-end-of-line)
-(define-key "evil-visual" "g g" 'beginning-of-buffer)
-(define-key "evil-visual" "shift-g" 'end-of-buffer)
-(define-key "evil-visual" "e" 'evil-forward-word-end)          ; e — end of word (extends)
-(define-key "evil-visual" "{" 'evil-backward-paragraph-visual) ; { / } — extend by paragraph
-(define-key "evil-visual" "}" 'evil-forward-paragraph-visual)
-(define-key "evil-visual" "(" 'evil-backward-sentence-visual)
-(define-key "evil-visual" ")" 'evil-forward-sentence-visual)
-(define-key "evil-visual" "f" 'evil-find-char-forward-visual)  ; f/F/t/T — extend to char
-(define-key "evil-visual" "shift-f" 'evil-find-char-backward-visual)
-(define-key "evil-visual" "t" 'evil-till-char-forward-visual)
-(define-key "evil-visual" "shift-t" 'evil-till-char-backward-visual)
-(define-key "evil-visual" ";" 'evil-find-repeat-visual)        ; ; , — repeat f/t (extends)
-(define-key "evil-visual" "," 'evil-find-repeat-reverse-visual)
-(define-key "evil-visual" "d" 'evil-visual-delete)
-(define-key "evil-visual" "x" 'evil-visual-delete)
-(define-key "evil-visual" "y" 'evil-visual-yank)
-(define-key "evil-visual" "p" 'evil-visual-paste)             ; p — paste over selection
-(define-key "evil-visual" "c" 'evil-visual-change)            ; c/s — change selection
-(define-key "evil-visual" "s" 'evil-visual-change)
-(define-key "evil-visual" "o" 'exchange-point-and-mark)       ; o — swap selection ends
-(define-key "evil-visual" "u" 'evil-visual-downcase)          ; u — lowercase selection
-(define-key "evil-visual" "shift-u" 'evil-visual-upcase)      ; U — uppercase selection
-(define-key "evil-visual" "~" 'evil-visual-toggle-case)       ; ~ — toggle case
-(define-key "evil-visual" "g q" 'evil-visual-fill)            ; gq — format selected lines
-(define-key "evil-visual" "g w" 'evil-visual-fill)
-(define-key "evil-visual" ">" 'evil-visual-indent)            ; > / < — shift selected lines
-(define-key "evil-visual" "<" 'evil-visual-outdent)
-(define-key "evil-visual" "shift-j" 'evil-visual-join)        ; J — join selected lines
-(define-key "evil-visual" "r" 'evil-visual-replace-char)      ; r<char> — replace every char
-(define-key "evil-visual" "shift-w" 'forward-bigword-start)   ; W / B / E — WORD motions
-(define-key "evil-visual" "shift-b" 'backward-bigword-start)
-(define-key "evil-visual" "shift-e" 'forward-bigword-end)
-(define-key "evil-visual" "%" 'evil-matchit-visual)           ; % — extend to matching bracket
-(define-key "evil-visual" "ctrl-d" 'evil-scroll-down)         ; half-page, extending
-(define-key "evil-visual" "ctrl-u" 'evil-scroll-up)
-(define-key "evil-visual" "v" 'evil-normal-state)             ; v again exits
-(define-key "evil-visual" "shift-v" 'evil-visual-line-state)  ; switch to line-wise
-(define-key "evil-visual" "ctrl-v" 'evil-visual-block-state)  ; switch to block-wise
-(define-key "evil-visual" "escape" 'evil-normal-state)
-(for-each
- (lambda (km)
-   (define-key km "'" "evil-goto-mark-line %c")
-   (define-key km "`" "evil-goto-mark %c")
-   (define-key km "shift-h" 'evil-window-top-visual)
-   (define-key km "shift-m" 'evil-window-middle-visual)
-   (define-key km "shift-l" 'evil-window-bottom-visual))
- (list "evil-visual" "evil-visual-line"))
+;; --- visual states (motions extend; the mark is active) ---------------------
+;; One motion table shared by all three Visual maps, then what charwise and
+;; linewise share, then each map's own keys. Charwise-only motions (e ( ) f t ;
+;; , B %) are not bound in the line / block maps, and the case / shift / join /
+;; fill / paragraph / mark / screen-line keys are not bound in the block map.
+(define-keys-in *evil-visual-maps*
+  '(("h" backward-char)
+    ("j" next-line)
+    ("k" previous-line)
+    ("w" forward-word-start)
+    ("b" backward-word-start)
+    ("0" move-beginning-of-line)
+    ("$" move-end-of-line)
+    ("g g" beginning-of-buffer)
+    ("shift-g" end-of-buffer)
+    ("o" exchange-point-and-mark)       ; o — swap selection ends / block corners
+    ("shift-w" forward-bigword-start)   ; W / E — WORD motions
+    ("shift-e" forward-bigword-end)
+    ("escape" evil-normal-state)))
+
+;; Charwise + linewise Visual.
+(define-keys-in '("evil-visual" "evil-visual-line")
+  '(("{" evil-backward-paragraph-visual) ; { / } — extend by paragraph
+    ("}" evil-forward-paragraph-visual)
+    ("p" evil-visual-paste)              ; p — paste over selection
+    ("u" evil-visual-downcase)           ; u — lowercase selection
+    ("shift-u" evil-visual-upcase)       ; U — uppercase selection
+    ("~" evil-visual-toggle-case)        ; ~ — toggle case
+    ("g q" evil-visual-fill)             ; gq — format selected lines
+    ("g w" evil-visual-fill)
+    (">" evil-visual-indent)             ; > / < — shift selected lines
+    ("<" evil-visual-outdent)
+    ("shift-j" evil-visual-join)         ; J — join selected lines
+    ("r" evil-visual-replace-char)       ; r<char> — replace every char
+    ("ctrl-d" evil-scroll-down)          ; half-page, extending
+    ("ctrl-u" evil-scroll-up)
+    ("'" "evil-goto-mark-line %c")
+    ("`" "evil-goto-mark %c")
+    ("shift-h" evil-window-top-visual)
+    ("shift-m" evil-window-middle-visual)
+    ("shift-l" evil-window-bottom-visual)))
+
+;; Charwise Visual (`v`).
+(define-keys "evil-visual"
+  '(("l" evil-visual-forward-char)
+    ("e" evil-forward-word-end)          ; e — end of word (extends)
+    ("(" evil-backward-sentence-visual)
+    (")" evil-forward-sentence-visual)
+    ("f" evil-find-char-forward-visual)  ; f/F/t/T — extend to char
+    ("shift-f" evil-find-char-backward-visual)
+    ("t" evil-till-char-forward-visual)
+    ("shift-t" evil-till-char-backward-visual)
+    (";" evil-find-repeat-visual)        ; ; , — repeat f/t (extends)
+    ("," evil-find-repeat-reverse-visual)
+    ("d" evil-visual-delete)
+    ("x" evil-visual-delete)
+    ("y" evil-visual-yank)
+    ("c" evil-visual-change)             ; c/s — change selection
+    ("s" evil-visual-change)
+    ("shift-b" backward-bigword-start)
+    ("%" evil-matchit-visual)            ; % — extend to matching bracket
+    ("v" evil-normal-state)              ; v again exits
+    ("shift-v" evil-visual-line-state)   ; switch to line-wise
+    ("ctrl-v" evil-visual-block-state))) ; switch to block-wise
 
 ;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
 ;; The selection is rounded out to whole lines in the core, so the motions here
 ;; just move point; `d`/`y` act line-wise. `I`/`A` are vim's blockwise insert /
 ;; append: they drop a cursor at the start / end of every selected line, so the
 ;; text you type (then Escape) lands on all of them at once.
-(define-key "evil-visual-line" "h" 'backward-char)
-(define-key "evil-visual-line" "l" 'forward-char)
-(define-key "evil-visual-line" "j" 'next-line)
-(define-key "evil-visual-line" "k" 'previous-line)
-(define-key "evil-visual-line" "w" 'forward-word-start)
-(define-key "evil-visual-line" "b" 'backward-word-start)
-(define-key "evil-visual-line" "0" 'move-beginning-of-line)
-(define-key "evil-visual-line" "$" 'move-end-of-line)
-(define-key "evil-visual-line" "g g" 'beginning-of-buffer)
-(define-key "evil-visual-line" "shift-g" 'end-of-buffer)
-(define-key "evil-visual-line" "d" 'evil-visual-line-delete)
-(define-key "evil-visual-line" "x" 'evil-visual-line-delete)
-(define-key "evil-visual-line" "y" 'evil-visual-line-yank)
-(define-key "evil-visual-line" "c" 'evil-visual-line-change)   ; c/s — change selected lines
-(define-key "evil-visual-line" "s" 'evil-visual-line-change)
-(define-key "evil-visual-line" "o" 'exchange-point-and-mark)   ; o — swap selection ends
-(define-key "evil-visual-line" "u" 'evil-visual-downcase)      ; u — lowercase selection
-(define-key "evil-visual-line" "shift-u" 'evil-visual-upcase)  ; U — uppercase selection
-(define-key "evil-visual-line" "~" 'evil-visual-toggle-case)   ; ~ — toggle case
-(define-key "evil-visual-line" "p" 'evil-visual-paste)         ; p — paste over selection
-(define-key "evil-visual-line" "{" 'evil-backward-paragraph-visual) ; { / } — by paragraph
-(define-key "evil-visual-line" "}" 'evil-forward-paragraph-visual)
-(define-key "evil-visual-line" "g q" 'evil-visual-fill)        ; gq — format selected lines
-(define-key "evil-visual-line" "g w" 'evil-visual-fill)
-(define-key "evil-visual-line" ">" 'evil-visual-indent)        ; > / < — shift selected lines
-(define-key "evil-visual-line" "<" 'evil-visual-outdent)
-(define-key "evil-visual-line" "shift-j" 'evil-visual-join)    ; J — join selected lines
-(define-key "evil-visual-line" "r" 'evil-visual-replace-char)  ; r<char> — replace every char
-(define-key "evil-visual-line" "shift-w" 'forward-bigword-start)
-(define-key "evil-visual-line" "shift-e" 'forward-bigword-end)
-(define-key "evil-visual-line" "ctrl-d" 'evil-scroll-down)
-(define-key "evil-visual-line" "ctrl-u" 'evil-scroll-up)
-(define-key "evil-visual-line" "shift-i" 'evil-visual-insert)  ; I — insert at each line start
-(define-key "evil-visual-line" "shift-a" 'evil-visual-append)  ; A — append at each line end
-(define-key "evil-visual-line" "v" 'evil-visual-state)         ; switch to charwise visual
-(define-key "evil-visual-line" "shift-v" 'evil-normal-state)   ; V again exits
-(define-key "evil-visual-line" "ctrl-v" 'evil-visual-block-state) ; switch to block-wise
-(define-key "evil-visual-line" "escape" 'evil-normal-state)
+(define-keys "evil-visual-line"
+  '(("l" forward-char)
+    ("d" evil-visual-line-delete)
+    ("x" evil-visual-line-delete)
+    ("y" evil-visual-line-yank)
+    ("c" evil-visual-line-change)        ; c/s — change selected lines
+    ("s" evil-visual-line-change)
+    ("shift-i" evil-visual-insert)       ; I — insert at each line start
+    ("shift-a" evil-visual-append)       ; A — append at each line end
+    ("v" evil-visual-state)              ; switch to charwise visual
+    ("shift-v" evil-normal-state)        ; V again exits
+    ("ctrl-v" evil-visual-block-state))) ; switch to block-wise
 
 ;; --- visual block state (`C-v`: rectangular column selection) ----------------
 ;; The selection is a rectangle between two corners; the renderer highlights only
 ;; the column strip (not whole lines). Motions move the cursor corner. `I`/`A`
 ;; insert/append down the block's left/right column on every row at once (vim's
 ;; block-insert); `d`/`x` delete the rectangle and `y` yanks it.
-(define-key "evil-visual-block" "h" 'backward-char)
-(define-key "evil-visual-block" "l" 'forward-char)
-(define-key "evil-visual-block" "j" 'next-line)
-(define-key "evil-visual-block" "k" 'previous-line)
-(define-key "evil-visual-block" "w" 'forward-word-start)
-(define-key "evil-visual-block" "b" 'backward-word-start)
-(define-key "evil-visual-block" "0" 'move-beginning-of-line)
-(define-key "evil-visual-block" "$" 'move-end-of-line)
-(define-key "evil-visual-block" "g g" 'beginning-of-buffer)
-(define-key "evil-visual-block" "shift-g" 'end-of-buffer)
-(define-key "evil-visual-block" "d" 'evil-block-delete)
-(define-key "evil-visual-block" "x" 'evil-block-delete)
-(define-key "evil-visual-block" "y" 'evil-block-yank)
-(define-key "evil-visual-block" "c" 'evil-block-change)        ; c — change the rectangle
-(define-key "evil-visual-block" "s" 'evil-block-change)
-(define-key "evil-visual-block" "o" 'exchange-point-and-mark)  ; o — swap block corners
-(define-key "evil-visual-block" "r" 'evil-block-replace-char)  ; r<char> — replace the rectangle
-(define-key "evil-visual-block" "shift-w" 'forward-bigword-start)
-(define-key "evil-visual-block" "shift-e" 'forward-bigword-end)
-(define-key "evil-visual-block" "shift-i" 'evil-block-insert)  ; I — insert down the left column
-(define-key "evil-visual-block" "shift-a" 'evil-block-append)  ; A — append down the right column
-(define-key "evil-visual-block" "v" 'evil-visual-state)        ; switch to charwise visual
-(define-key "evil-visual-block" "shift-v" 'evil-visual-line-state) ; switch to line-wise
-(define-key "evil-visual-block" "ctrl-v" 'evil-normal-state)   ; C-v again exits
-(define-key "evil-visual-block" "escape" 'evil-normal-state)
+(define-keys "evil-visual-block"
+  '(("l" forward-char)
+    ("d" evil-block-delete)
+    ("x" evil-block-delete)
+    ("y" evil-block-yank)
+    ("c" evil-block-change)              ; c — change the rectangle
+    ("s" evil-block-change)
+    ("r" evil-block-replace-char)        ; r<char> — replace the rectangle
+    ("shift-i" evil-block-insert)        ; I — insert down the left column
+    ("shift-a" evil-block-append)        ; A — append down the right column
+    ("v" evil-visual-state)              ; switch to charwise visual
+    ("shift-v" evil-visual-line-state)   ; switch to line-wise
+    ("ctrl-v" evil-normal-state)))       ; C-v again exits
 
 ;; --- binding commands by identity (not by name string) ----------------------
 ;; A keymap stores a NAME string and evals "(name)" on the keypress. To let you
@@ -2081,17 +2097,18 @@
 ;; buffers (magit/dired) already bind several of these keys (`b`, `l`, `$`, `^`).
 (define (modal-collection-bind-readonly-motion prefix mode)
   (let ((km (string-append prefix mode)))
-    (define-key km "h" 'backward-char)
-    (define-key km "l" 'forward-char)
-    (define-key km "w" 'forward-word-start)
-    (define-key km "b" 'backward-word-start)
-    (define-key km "e" 'evil-forward-word-end)
-    (define-key km "0" 'move-beginning-of-line)
-    (define-key km "$" 'move-end-of-line)
-    (define-key km "^" 'evil-first-non-blank)
-    (define-key km "shift-g" 'evil-goto-last-line)
-    (define-key km "ctrl-d" 'evil-scroll-down)
-    (define-key km "ctrl-u" 'evil-scroll-up)))
+    (define-keys km
+      '(("h" backward-char)
+        ("l" forward-char)
+        ("w" forward-word-start)
+        ("b" backward-word-start)
+        ("e" evil-forward-word-end)
+        ("0" move-beginning-of-line)
+        ("$" move-end-of-line)
+        ("^" evil-first-non-blank)
+        ("shift-g" evil-goto-last-line)
+        ("ctrl-d" evil-scroll-down)
+        ("ctrl-u" evil-scroll-up)))))
 (define (evil-collection-bind-readonly-motion mode)
   (modal-collection-bind-readonly-motion "evil-normal:" mode))
 

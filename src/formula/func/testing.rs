@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use super::lookup::LookupIndex;
 use super::{Arg, Array, Ctx, RangeRef};
+use crate::a1::{parse_col_name as col_index, parse_ref as cell};
 use crate::formula::value::{ErrorKind, Value, general_format, parse_number};
-use crate::xlsx::{parse_col_name as col_index, parse_ref as cell};
 
 /// A grid of cells on sheet `None` (and optionally `Sheet2`).
 pub struct Mock {

@@ -92,17 +92,17 @@ impl Editor {
     }
 
     pub(super) fn completion_next(&mut self, cx: &mut Context<Self>) {
-        self.completion_cycle(true, cx);
+        self.completion_cycle(Direction::Forward, cx);
     }
 
     pub(super) fn completion_previous(&mut self, cx: &mut Context<Self>) {
-        self.completion_cycle(false, cx);
+        self.completion_cycle(Direction::Backward, cx);
     }
 
-    fn completion_cycle(&mut self, forward: bool, cx: &mut Context<Self>) {
+    fn completion_cycle(&mut self, dir: Direction, cx: &mut Context<Self>) {
         let count = self.popup_filtered().len();
         if let Some(popup) = self.completion_popup.as_mut() {
-            popup.selected = wrap_index(popup.selected, count, forward);
+            popup.selected = wrap_index(popup.selected, count, dir);
         }
         self.completion_resolve_selected();
         cx.notify();
@@ -257,7 +257,8 @@ impl Editor {
             s.ready
                 && s.open.contains(&uri)
                 && (extra.contains(c)
-                    || s.completion_triggers
+                    || s.caps
+                        .completion_triggers
                         .iter()
                         .any(|t| t.starts_with(c) && t.chars().count() == 1))
         })
