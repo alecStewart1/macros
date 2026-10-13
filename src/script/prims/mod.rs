@@ -20,6 +20,7 @@ pub(super) mod modal;
 pub(super) mod options;
 pub(super) mod overlays;
 pub(super) mod plotting;
+pub(super) mod process;
 pub(super) mod prompts;
 pub(super) mod search;
 pub(super) mod special_buffers;
