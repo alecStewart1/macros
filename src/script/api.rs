@@ -209,6 +209,7 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ("script/registry.rs", include_str!("registry.rs")),
     ("script/session.rs", include_str!("session.rs")),
     ("authinfo.rs", include_str!("../authinfo.rs")),
+    ("script/prims/buffers.rs", include_str!("prims/buffers.rs")),
     ("script/prims/editing.rs", include_str!("prims/editing.rs")),
     ("script/prims/faces.rs", include_str!("prims/faces.rs")),
     ("script/prims/grid.rs", include_str!("prims/grid.rs")),

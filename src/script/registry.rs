@@ -221,8 +221,6 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
 pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     let EngineShared {
         queue,
-        buffers,
-        buffer_paths,
         snapshot,
         markers,
         ..
@@ -255,68 +253,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::tree_sitter::register(&mut reg, shared);
     prims::lsp::register(&mut reg, shared);
     prims::options::register(&mut reg, shared);
-    reg.section(Section::Buffers);
-    {
-        // Read-side bridge: Scheme can query the open buffers (for pickers).
-        let shared = buffers.clone();
-        reg.register_fn("buffer-names", move || -> Vec<String> {
-            shared.lock().unwrap().clone()
-        });
-    }
-    {
-        // `(buffer-file-name-of name)` → that buffer's absolute file path, or ""
-        // if the buffer has no file (or doesn't exist). Unlike `buffer-file-name`
-        // (active buffer only), this resolves any open buffer by name.
-        let shared = buffer_paths.clone();
-        reg.register_fn("buffer-file-name-of", move |name: String| -> String {
-            shared
-                .lock()
-                .unwrap()
-                .get(&name)
-                .cloned()
-                .unwrap_or_default()
-        });
-    }
-    reg.section(Section::Buffers);
-    register_unary(
-        &mut reg,
-        queue,
-        "switch-to-buffer",
-        EditorCommand::SwitchToBufferNamed,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "kill-buffer-named",
-        EditorCommand::KillBufferNamed,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "set-major-mode",
-        EditorCommand::SetMajorMode,
-    );
-    reg.section(Section::Buffers);
-    register_unary(&mut reg, queue, "open-file", EditorCommand::OpenFile);
-    reg.section(Section::Buffers);
-    register_unary(
-        &mut reg,
-        queue,
-        "open-file-other-window",
-        EditorCommand::OpenFileOtherWindow,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "select-window",
-        EditorCommand::SelectWindow,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "split-window-right-ratio",
-        EditorCommand::SplitWindowRightRatio,
-    );
+    prims::buffers::register(&mut reg, shared);
     reg.section(Section::Decorations);
     {
         // `(set-line-icon line col "folder")` attaches a bundled icon (asset
@@ -462,34 +399,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
             "ghost-text-accept",
             EditorCommand::GhostAccept,
         );
-    }
-    reg.section(Section::Buffers);
-    {
-        // `(window-list)` → pane ids in cycle order; `(selected-window)` → the
-        // focused pane id. Read bridges over the snapshot.
-        register_snapshot_read(&mut reg, snapshot, "window-list", |s| s.windows.clone());
-        register_snapshot_read(&mut reg, snapshot, "selected-window", |s| s.selected_window);
-        {
-            // `(get-buffer-window name)` → the pane id displaying buffer `name`,
-            // or -1 if it isn't shown in any window (Emacs's `get-buffer-window`).
-            let shared = snapshot.clone();
-            reg.register_fn("get-buffer-window", move |name: String| -> isize {
-                shared
-                    .load()
-                    .window_buffers
-                    .iter()
-                    .find(|(_, b)| *b == name)
-                    .map_or(-1, |(id, _)| *id as isize)
-            });
-        }
-        // `(visible-lines)` → (first-line last-line) currently on screen.
-        register_snapshot_read(&mut reg, snapshot, "visible-lines", |s| {
-            let (a, b) = s.visible_lines;
-            vec![a, b]
-        });
-        register_snapshot_read(&mut reg, snapshot, "window-cursor-row", |s| {
-            s.cursor_screen_row as i64
-        });
     }
     reg.section(Section::Files);
     // State bridges for dynamic sources (run on the engine thread — blocking
@@ -667,23 +576,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         "set-special-mode",
         EditorCommand::SetSpecialMode,
     );
-    reg.section(Section::Buffers);
-    register_binary(&mut reg, queue, "buffer-local-set", |key, value| {
-        EditorCommand::BufferLocalSet { key, value }
-    });
-    reg.section(Section::Buffers);
-    {
-        // Value of buffer-local `key` on the active buffer, or "".
-        let shared = snapshot.clone();
-        reg.register_fn("buffer-local-get", move |key: String| -> String {
-            let snap = shared.load();
-            snap.locals
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default()
-        });
-    }
     reg.section(Section::Decorations);
     register_unary(
         &mut reg,

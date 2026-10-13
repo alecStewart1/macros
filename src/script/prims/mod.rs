@@ -4,6 +4,7 @@
 
 use super::*;
 
+pub(super) mod buffers;
 pub(super) mod editing;
 pub(super) mod faces;
 pub(super) mod grid;
