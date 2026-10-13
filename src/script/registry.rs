@@ -242,10 +242,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     for (name, command) in nullary_commands() {
         register_nullary(&mut reg, queue, name, command.clone());
     }
-
-    reg.section(Section::Editing);
-    // Commands carrying a payload.
-    register_unary(&mut reg, queue, "insert", EditorCommand::Insert);
+    prims::editing::register(&mut reg, shared);
     prims::grid::register(&mut reg, shared);
     reg.section(Section::Prompts);
     // `message` accepts any value, not just strings: strings render verbatim,
@@ -528,13 +525,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         "spell-learn-word",
         EditorCommand::SpellLearnWord,
     );
-    reg.section(Section::Editing);
-    register_unary(
-        &mut reg,
-        queue,
-        "clipboard-set",
-        EditorCommand::ClipboardSet,
-    );
     reg.section(Section::Modal);
     {
         // `(set-count-aware! 'name)` — the modal count loop dispatches `name`
@@ -576,14 +566,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     );
     register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
     register_unary(&mut reg, queue, "evil-ex", EditorCommand::EvilEx);
-    reg.section(Section::Editing);
-    // `(reindent-lines first last)` — Vim `=` over 0-based lines.
-    register_binary(
-        &mut reg,
-        queue,
-        "reindent-lines",
-        EditorCommand::ReindentLines,
-    );
     reg.section(Section::Modal);
     register_unary(
         &mut reg,
@@ -1169,13 +1151,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     register_unary(&mut reg, queue, "buffer-clear-highlights", |name| {
         EditorCommand::BufferClearHighlights { name }
     });
-    reg.section(Section::Editing);
-    register_unary(
-        &mut reg,
-        queue,
-        "snippet-expand",
-        EditorCommand::SnippetExpand,
-    );
     reg.section(Section::Decorations);
     register_unary(
         &mut reg,
@@ -1237,47 +1212,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         "transient-quit",
         EditorCommand::TransientQuit,
     );
-    reg.section(Section::Editing);
-    register_unary(&mut reg, queue, "goto-char", |n: isize| {
-        EditorCommand::GotoChar(scheme_pos(n))
-    });
-    register_binary(
-        &mut reg,
-        queue,
-        "delete-region",
-        |start: isize, end: isize| EditorCommand::DeleteRegion {
-            start: scheme_pos(start),
-            end: scheme_pos(end),
-        },
-    );
-    register_binary(
-        &mut reg,
-        queue,
-        "kill-region-between",
-        |start: isize, end: isize| EditorCommand::KillRegionBetween {
-            start: scheme_pos(start),
-            end: scheme_pos(end),
-        },
-    );
-    register_binary(&mut reg, queue, "set-region", |start: isize, end: isize| {
-        EditorCommand::SetRegion {
-            start: scheme_pos(start),
-            end: scheme_pos(end),
-        }
-    });
-    {
-        // `(set-selections '(a0 h0 a1 h1 …))` — replace the whole selection set
-        // from a flat list of alternating anchor/head byte offsets (the first
-        // pair is the primary). The Scheme reader returns selections in the same
-        // flat shape (see the `selections` read), so a motion is read → map →
-        // set-selections. An odd trailing element is ignored.
-        let q = queue.clone();
-        reg.register_fn("set-selections", move |flat: SteelVal| {
-            let v = steel_usize_list(&flat);
-            let pairs = v.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect();
-            q.push(EditorCommand::SetSelections(pairs));
-        });
-    }
     reg.section(Section::Lsp);
     register_binary(
         &mut reg,
@@ -1291,23 +1225,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         "lsp-semantic-tokens",
         EditorCommand::LspSemanticTokens,
     );
-    reg.section(Section::Editing);
-    register_ternary(
-        &mut reg,
-        queue,
-        "replace-region",
-        |start: isize, end: isize, text| EditorCommand::ReplaceRegion {
-            start: scheme_pos(start),
-            end: scheme_pos(end),
-            text,
-        },
-    );
-    register_binary(&mut reg, queue, "insert-at", |pos: isize, text| {
-        EditorCommand::InsertAt {
-            pos: scheme_pos(pos),
-            text,
-        }
-    });
     reg.section(Section::Lsp);
     register_unary(
         &mut reg,
@@ -1340,27 +1257,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
             callback: callback.0,
         },
     );
-    reg.section(Section::Editing);
-    register_nullary(
-        &mut reg,
-        queue,
-        "undo-boundary",
-        EditorCommand::UndoBoundary,
-    );
-    // `(undo-amalgamate-begin)` … `(undo-amalgamate-end)` — fold every edit
-    // made between them, across any number of commands, into ONE undo step.
-    register_nullary(
-        &mut reg,
-        queue,
-        "undo-amalgamate-begin",
-        EditorCommand::UndoAmalgamateBegin,
-    );
-    register_nullary(
-        &mut reg,
-        queue,
-        "undo-amalgamate-end",
-        EditorCommand::UndoAmalgamateEnd,
-    );
     reg.section(Section::SpecialBuffers);
     // `(set-special-mode "occur-mode")` makes the active buffer a read-only
     // special buffer on that keymap; `(set-special-mode "")` makes it editable.
@@ -1369,13 +1265,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         queue,
         "set-special-mode",
         EditorCommand::SetSpecialMode,
-    );
-    reg.section(Section::Editing);
-    register_unary(
-        &mut reg,
-        queue,
-        "undo-tree-dump",
-        EditorCommand::UndoTreeDump,
     );
     reg.section(Section::Buffers);
     register_binary(&mut reg, queue, "buffer-local-set", |key, value| {
@@ -1498,10 +1387,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     // repeat it (evil `*`/`#`).
     register_binary(&mut reg, queue, "set-search-query", |query, forward| {
         EditorCommand::SetSearchQuery { query, forward }
-    });
-    reg.section(Section::Editing);
-    register_binary(&mut reg, queue, "append-to-buffer", |name, text| {
-        EditorCommand::AppendToBuffer { name, text }
     });
     reg.section(Section::Decorations);
     register_unary(
