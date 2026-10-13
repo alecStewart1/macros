@@ -474,8 +474,6 @@ impl Editor {
             SwitchToBufferNamed(name) => self.switch_to_buffer(&name, cx),
             KillBufferNamed(name) => self.kill_buffer_named(&name, cx),
             SetMajorMode(mode) => {
-                let mut modes = ModeStack::default();
-                modes.push(Mode::new("fundamental"));
                 // A mode whose name matches a bundled tree-sitter language carries
                 // that language, so highlighting AND the language server follow the
                 // mode — `M-x rust-mode` on any buffer colors it and (via the
@@ -487,8 +485,7 @@ impl Editor {
                 if language_highlighter.is_some() {
                     new_mode = new_mode.with_language(&mode);
                 }
-                modes.push(new_mode);
-                self.active.modes = modes;
+                self.active.modes = ModeStack::with_major(new_mode);
                 if let Some(h) = language_highlighter {
                     self.active.highlighter = Some(h);
                     self.parse_full();
@@ -520,10 +517,7 @@ impl Editor {
                 if mode.is_empty() {
                     self.active.special = None;
                 } else {
-                    let mut modes = ModeStack::default();
-                    modes.push(Mode::new("fundamental"));
-                    modes.push(Mode::new(&mode));
-                    self.active.modes = modes;
+                    self.active.modes = ModeStack::with_major(Mode::new(&mode));
                     self.active.special = Some(mode);
                     self.active.modified = false;
                 }
@@ -1219,10 +1213,7 @@ impl Editor {
                 if let Some(uri) = self.active_uri() {
                     self.diagnostics.remove(&uri);
                 }
-                let mut modes = ModeStack::default();
-                modes.push(Mode::new("fundamental"));
-                modes.push(Mode::new("macros-steel").with_language("macros-scheme"));
-                self.active.modes = modes;
+                self.active.modes = scheme_mode_stack(true);
                 // `macros-scheme` has no grammar of its own; it shares Scheme's,
                 // exactly as `make_document` wires it for auto-detected files.
                 self.active.highlighter = Highlighter::scheme();

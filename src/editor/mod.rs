@@ -1337,9 +1337,7 @@ impl Editor {
         // Keymaps are populated from Scheme at startup; the modes just need to
         // exist. `steel-mode` (the major mode) declares the highlighting
         // language and stacks on the always-present `fundamental` base.
-        let mut modes = ModeStack::default();
-        modes.push(Mode::new("fundamental"));
-        modes.push(Mode::new("steel").with_language("scheme"));
+        let modes = scheme_mode_stack(false);
 
         // The active highlighter follows the active mode's language.
         let highlighter = modes.active_language().and_then(Highlighter::for_language);
@@ -4453,14 +4451,15 @@ impl Editor {
         if let Some(commands) = self.script.builtins_for(source) {
             // One builtin: apply directly (motions/edits manage their own undo).
             // A sequence: group it so the compound binding undoes as one unit.
-            if commands.len() == 1 {
-                self.apply_command(commands.into_iter().next().unwrap(), cx);
-            } else {
-                self.begin_undo_group();
-                for command in commands {
-                    self.apply_command(command, cx);
+            match <[EditorCommand; 1]>::try_from(commands) {
+                Ok([command]) => self.apply_command(command, cx),
+                Err(commands) => {
+                    self.begin_undo_group();
+                    for command in commands {
+                        self.apply_command(command, cx);
+                    }
+                    self.end_undo_group();
                 }
-                self.end_undo_group();
             }
             self.evil_clamp_cursor();
         } else {
@@ -4822,34 +4821,36 @@ fn blank_document(
     }
 }
 
+/// The mode stack of a Scheme buffer. Scheme keeps the `steel` major mode
+/// (keymaps, hooks, built-in LSP); config / extension Scheme (`macros`: under
+/// the config dir, or `*.macros.scm`) instead gets the editor-aware
+/// `macros-steel` mode and `macros-scheme` server — completion/hover/
+/// diagnostics over the editor API. Both highlight with Scheme's grammar.
+fn scheme_mode_stack(macros: bool) -> ModeStack {
+    ModeStack::with_major(if macros {
+        Mode::new("macros-steel").with_language("macros-scheme")
+    } else {
+        Mode::new("steel").with_language("scheme")
+    })
+}
+
 /// Build a fresh document for `contents`, choosing modes/highlighter by file type.
 fn make_document(name: String, path: Option<PathBuf>, contents: &str) -> Document {
     let language = path.as_deref().and_then(language_for_path);
-    let mut modes = ModeStack::default();
-    modes.push(Mode::new("fundamental"));
-    let highlighter = match language {
-        // Scheme keeps the `steel` major mode (keymaps, hooks, built-in LSP).
-        // Config / extension Scheme (under the config dir, or `*.macros.scm`)
-        // instead gets the editor-aware `macros-steel` mode and `macros-scheme`
-        // server — completion/hover/diagnostics over the editor API.
+    let (modes, highlighter) = match language {
         Some("scheme") => {
-            if path
+            let macros = path
                 .as_deref()
-                .is_some_and(crate::runtime::is_macros_scheme_path)
-            {
-                modes.push(Mode::new("macros-steel").with_language("macros-scheme"));
-            } else {
-                modes.push(Mode::new("steel").with_language("scheme"));
-            }
-            Highlighter::scheme()
+                .is_some_and(crate::runtime::is_macros_scheme_path);
+            (scheme_mode_stack(macros), Highlighter::scheme())
         }
         // Other languages: a major mode named after the language, with its
         // bundled tree-sitter grammar (if any) for highlighting.
-        Some(lang) => {
-            modes.push(Mode::new(lang).with_language(lang));
-            Highlighter::for_language(lang)
-        }
-        None => None,
+        Some(lang) => (
+            ModeStack::with_major(Mode::new(lang).with_language(lang)),
+            Highlighter::for_language(lang),
+        ),
+        None => (ModeStack::fundamental(), None),
     };
     Document {
         highlighter,
@@ -4861,9 +4862,7 @@ fn make_document(name: String, path: Option<PathBuf>, contents: &str) -> Documen
 /// it can be edited/copied, `messages-mode` (no language) so no LSP/highlighter
 /// runs on it, `hooks_ran` so it never tries to start a server.
 fn make_log_document(name: String, contents: &str) -> Document {
-    let mut modes = ModeStack::default();
-    modes.push(Mode::new("fundamental"));
-    modes.push(Mode::new("messages-mode"));
+    let modes = ModeStack::with_major(Mode::new("messages-mode"));
     Document {
         hooks_ran: true,
         ..blank_document(name, None, contents, modes)
@@ -4874,9 +4873,7 @@ fn make_log_document(name: String, contents: &str) -> Document {
 /// highlighter, major mode `mode` stacked on `fundamental` so its keymap
 /// resolves. Hooks are marked run (these buffers don't take mode hooks).
 fn make_special_document(name: String, mode: &str, contents: &str) -> Document {
-    let mut modes = ModeStack::default();
-    modes.push(Mode::new("fundamental"));
-    modes.push(Mode::new(mode));
+    let modes = ModeStack::with_major(Mode::new(mode));
     Document {
         hooks_ran: true,
         special: Some(mode.to_string()),

@@ -32,6 +32,20 @@ pub struct ModeStack {
 }
 
 impl ModeStack {
+    /// Just the always-present `fundamental` base mode.
+    pub fn fundamental() -> Self {
+        Self {
+            modes: vec![Mode::new("fundamental")],
+        }
+    }
+
+    /// `major` stacked on the `fundamental` base — a buffer's usual shape.
+    pub fn with_major(major: Mode) -> Self {
+        let mut stack = Self::fundamental();
+        stack.push(major);
+        stack
+    }
+
     pub fn push(&mut self, mode: Mode) {
         self.modes.push(mode);
     }

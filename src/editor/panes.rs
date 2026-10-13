@@ -375,21 +375,15 @@ impl Editor {
         self.panes.iter().find(|p| p.id == id)
     }
 
-    /// Resolve a per-buffer value for pane `id`: the live value (via `live`) for
-    /// the selected/active buffer, else the pane's inactive [`Document`] (via
-    /// `pick`), falling back to `live` if the document can't be found. Works for
-    /// both borrowed (`&T`) and optional (`Option<&T>`) results.
-    fn pane_field<'a, R>(
-        &'a self,
-        id: usize,
-        live: impl Fn() -> R,
-        pick: impl Fn(&'a Document) -> R,
-    ) -> R {
+    /// The [`Document`] pane `id` displays: the live active buffer for the
+    /// selected pane (and any pane showing the active buffer), else the pane's
+    /// inactive document — falling back to the active one if it can't be found.
+    fn pane_doc(&self, id: usize) -> &Document {
         match self.pane(id) {
             Some(p) if p.buffer != self.active.name => {
-                self.inactive_doc(&p.buffer).map_or_else(live, pick)
+                self.inactive_doc(&p.buffer).unwrap_or(&self.active)
             }
-            _ => live(),
+            _ => &self.active,
         }
     }
 
@@ -401,17 +395,14 @@ impl Editor {
     /// The buffer a pane displays: the live active buffer for the selected pane
     /// (and any pane showing the active buffer), else the inactive [`Document`].
     pub fn pane_buffer(&self, id: usize) -> &Buffer {
-        self.pane_field(id, || &self.active.buffer, |d| &d.buffer)
+        &self.pane_doc(id).buffer
     }
 
     /// The pane's major (topmost) mode name, resolved like [`pane_buffer`] so an
     /// inactive pane reports its own buffer's mode. Drives per-major-mode display
     /// options such as line numbers (`Self::line_numbers_for`).
     pub fn pane_major_mode(&self, id: usize) -> Option<&str> {
-        self.pane_field(id, || &self.active.modes, |d| &d.modes)
-            .names()
-            .last()
-            .copied()
+        self.pane_doc(id).modes.names().last().copied()
     }
 
     pub fn pane_point(&self, id: usize) -> usize {
@@ -445,13 +436,9 @@ impl Editor {
     }
 
     pub fn pane_highlights(&self, id: usize, range: Range<usize>) -> Vec<HlSpan> {
-        let highlighter = self.pane_field(
-            id,
-            || self.active.highlighter.as_ref(),
-            |d| d.highlighter.as_ref(),
-        );
-        match highlighter {
-            Some(h) => h.spans_in(self.pane_buffer(id).rope(), range),
+        let doc = self.pane_doc(id);
+        match &doc.highlighter {
+            Some(h) => h.spans_in(doc.buffer.rope(), range),
             None => Vec::new(),
         }
     }
@@ -477,13 +464,13 @@ impl Editor {
     /// pane's inactive document (so a special buffer keeps its colors when it's
     /// not the focused window — e.g. a tree sidebar).
     pub(super) fn pane_line_faces(&self, id: usize) -> &HashMap<usize, SharedString> {
-        self.pane_field(id, || &self.active.line_faces, |d| &d.line_faces)
+        &self.pane_doc(id).line_faces
     }
 
     /// Per-line icon `(char_col, asset_name)` for pane `id`, if any — same
     /// active/inactive resolution as the faces.
     pub fn pane_line_icon(&self, id: usize, line: usize) -> Option<(usize, &str)> {
-        let icons = self.pane_field(id, || &self.active.line_icons, |d| &d.line_icons);
+        let icons = &self.pane_doc(id).line_icons;
         icons.get(&line).map(|(col, name)| (*col, name.as_ref()))
     }
 
@@ -491,14 +478,14 @@ impl Editor {
     /// same active/inactive resolution as the faces, so a source file keeps
     /// its breakpoint dots in an unfocused window.
     pub fn pane_gutter_dots(&self, id: usize) -> &HashMap<usize, SharedString> {
-        self.pane_field(id, || &self.active.gutter_dots, |d| &d.gutter_dots)
+        &self.pane_doc(id).gutter_dots
     }
 
     /// Working-tree-vs-HEAD gutter marks for pane `id` (git-gutter / diff-hl),
     /// resolved active/inactive like the line faces so an unfocused window keeps
     /// its file's marks.
     pub fn pane_diff_marks(&self, id: usize) -> &HashMap<usize, DiffMark> {
-        self.pane_field(id, || &self.active.diff_marks, |d| &d.diff_marks)
+        &self.pane_doc(id).diff_marks
     }
 
     pub fn pane_diagnostics(&self, id: usize) -> Vec<Diagnostic> {
