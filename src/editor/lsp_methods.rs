@@ -34,8 +34,12 @@ pub(super) struct LspCommand {
 }
 
 /// One pending `textDocument/didChange`: the server's language plus the
-/// pre-edit `(line, character)` bounds of the range being replaced.
-pub(super) type LspChange = (String, (usize, usize), (usize, usize));
+/// pre-edit bounds of the range being replaced.
+pub(super) struct LspChange {
+    pub(super) language: String,
+    pub(super) start: lsp::Position,
+    pub(super) end: lsp::Position,
+}
 
 /// Cap on the `*lsp-log*` scrollback ring (captured server stderr).
 const LSP_LOG_CAP: usize = 2000;
@@ -179,20 +183,23 @@ impl Editor {
         end_byte: usize,
     ) -> Option<LspChange> {
         let language = self.active_language()?;
-        let start = self.active.buffer.byte_to_position(start_byte);
-        let end = self.active.buffer.byte_to_position(end_byte);
-        Some((language, start, end))
+        Some(LspChange {
+            language,
+            start: self.active.buffer.byte_to_position(start_byte).into(),
+            end: self.active.buffer.byte_to_position(end_byte).into(),
+        })
     }
 
-    /// Notify the active buffer's server of an edit. `start`/`end` are the
-    /// pre-edit LSP positions of the replaced range; `text` is the new content.
-    pub(super) fn lsp_did_change(
-        &mut self,
-        language: &str,
-        start: (usize, usize),
-        end: (usize, usize),
-        text: &str,
-    ) {
+    /// Notify the active buffer's server of an edit: `change` (from
+    /// [`lsp_change_positions`](Self::lsp_change_positions)) was replaced by
+    /// `text`.
+    pub(super) fn lsp_did_change(&mut self, change: LspChange, text: &str) {
+        let LspChange {
+            language,
+            start,
+            end,
+        } = change;
+        let language = language.as_str();
         let Some(uri) = self.active_uri() else {
             return;
         };
@@ -297,11 +304,11 @@ impl Editor {
         let completion =
             self.servers
                 .get_mut(&language)
-                .and_then(|server| match server.pending_completion {
-                    Some((pending, _)) if pending == id => server.pending_completion.take(),
+                .and_then(|server| match &server.pending_completion {
+                    Some(pending) if pending.id == id => server.pending_completion.take(),
                     _ => None,
                 });
-        if let Some((_, range)) = completion {
+        if let Some(PendingCompletion { range, .. }) = completion {
             // Typing (or a buffer switch) since the request makes the reply's
             // range stale; drop it rather than slice text that moved.
             let Some(range) = self.completion_reply_range(range.start, range.end) else {
@@ -724,21 +731,28 @@ impl Editor {
                     SemanticKind::Range => lsp::semantic_data(result),
                     SemanticKind::Full => {
                         let data = lsp::semantic_data(result);
-                        server
-                            .semantic_state
-                            .insert(uri.clone(), (lsp::semantic_result_id(result), data.clone()));
+                        server.semantic_state.insert(
+                            uri.clone(),
+                            SemanticCache {
+                                result_id: lsp::semantic_result_id(result),
+                                data: data.clone(),
+                            },
+                        );
                         data
                     }
                     SemanticKind::Delta => {
                         let prev = server
                             .semantic_state
                             .get(&uri)
-                            .map(|(_, d)| d.clone())
+                            .map(|cache| cache.data.clone())
                             .unwrap_or_default();
                         let merged = lsp::apply_semantic_delta(&prev, result);
                         server.semantic_state.insert(
                             uri.clone(),
-                            (lsp::semantic_result_id(result), merged.clone()),
+                            SemanticCache {
+                                result_id: lsp::semantic_result_id(result),
+                                data: merged.clone(),
+                            },
                         );
                         merged
                     }
@@ -762,8 +776,8 @@ impl Editor {
                 Some(prep) => {
                     let placeholder = prep.placeholder.unwrap_or_else(|| match prep.range {
                         Some((s, e)) => {
-                            let sb = self.active.buffer.position_to_byte(s.0, s.1);
-                            let eb = self.active.buffer.position_to_byte(e.0, e.1);
+                            let sb = self.active.buffer.position_to_byte(s.line, s.character);
+                            let eb = self.active.buffer.position_to_byte(e.line, e.character);
                             self.active.buffer.slice_to_string(sb..eb)
                         }
                         None => self.identifier_at_point(),
@@ -805,8 +819,8 @@ impl Editor {
                 for (name, loc) in &calls {
                     let short = lsp::uri_to_path(&loc.uri);
                     let short = basename(&short);
-                    rows.push(format!("{name}  —  {short}:{}", loc.start.0 + 1));
-                    targets.push((loc.uri.clone(), loc.start.0, loc.start.1));
+                    rows.push(format!("{name}  —  {short}:{}", loc.start.line + 1));
+                    targets.push((loc.uri.clone(), loc.start.line, loc.start.character));
                 }
                 self.xref_targets = targets;
                 let text = format!(
@@ -889,7 +903,7 @@ impl Editor {
             .active_language()
             .and_then(|l| self.servers.get(&l))
             .and_then(|s| s.semantic_state.get(&uri))
-            .and_then(|(id, _)| id.clone());
+            .and_then(|cache| cache.result_id.clone());
         match prev_id {
             Some(id) => {
                 let params = json!({
@@ -1034,8 +1048,8 @@ impl Editor {
     ) {
         let full = self.active.buffer.full_text();
         let main = lsp::TextEdit {
-            start: self.active.buffer.byte_to_position(anchor),
-            end: self.active.buffer.byte_to_position(point),
+            start: self.active.buffer.byte_to_position(anchor).into(),
+            end: self.active.buffer.byte_to_position(point).into(),
             new_text: choice.insert_text.clone(),
         };
         let mut edits = choice.additional_edits.clone();
@@ -1045,8 +1059,14 @@ impl Editor {
         // edits that fall entirely before the anchor (e.g. an import at the top).
         let mut shift: isize = 0;
         for e in &choice.additional_edits {
-            let s = self.active.buffer.position_to_byte(e.start.0, e.start.1);
-            let en = self.active.buffer.position_to_byte(e.end.0, e.end.1);
+            let s = self
+                .active
+                .buffer
+                .position_to_byte(e.start.line, e.start.character);
+            let en = self
+                .active
+                .buffer
+                .position_to_byte(e.end.line, e.end.character);
             if en <= anchor {
                 shift += e.new_text.len() as isize - (en as isize - s as isize);
             }
@@ -1302,8 +1322,8 @@ impl Editor {
             .into_iter()
             .flatten()
             .filter(|d| {
-                let s = buffer.position_to_byte(d.start.0, d.start.1);
-                let e = buffer.position_to_byte(d.end.0, d.end.1).max(s);
+                let s = buffer.position_to_byte(d.start.line, d.start.character);
+                let e = buffer.position_to_byte(d.end.line, d.end.character).max(s);
                 s < end && e > start || s == start
             })
             .map(|d| d.raw.clone())
@@ -1339,7 +1359,7 @@ impl Editor {
             0 => self.echo(format!("No {what} found"), cx),
             1 => {
                 let loc = &locations[0];
-                self.goto_file_position(loc.uri.clone(), loc.start.0, loc.start.1, cx);
+                self.goto_file_position(loc.uri.clone(), loc.start.line, loc.start.character, cx);
             }
             _ => self.helm_locations(what, locations, cx),
         }
@@ -1366,11 +1386,11 @@ impl Editor {
                     .collect()
             });
             let short = basename(&path);
-            let text = lines.get(loc.start.0).map_or("", |s| s.trim());
+            let text = lines.get(loc.start.line).map_or("", |s| s.trim());
             candidates.push(format!(
                 "{short}:{}:{}: {text}",
-                loc.start.0 + 1,
-                loc.start.1 + 1
+                loc.start.line + 1,
+                loc.start.character + 1
             ));
         }
         let source = HelmSource {
@@ -1391,7 +1411,7 @@ impl Editor {
         let path = lsp::uri_to_path(&loc.uri);
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let lines: Vec<&str> = content.lines().collect();
-        let target = loc.start.0;
+        let target = loc.start.line;
         const CONTEXT: usize = 8;
         let start = target.saturating_sub(CONTEXT);
         let end = (target + CONTEXT + 1).min(lines.len());
@@ -1602,7 +1622,7 @@ impl Editor {
                 format!("  ({})", sym.container)
             };
             rows.push(format!("{indent}{kind}  {}{container}", sym.name));
-            targets.push((sym.uri.clone(), sym.start.0, sym.start.1));
+            targets.push((sym.uri.clone(), sym.start.line, sym.start.character));
         }
         self.xref_targets = targets;
         let text = format!("Symbols ({})\n\n{}", symbols.len(), rows.join("\n"));
@@ -1881,7 +1901,7 @@ impl Editor {
                         } else {
                             new
                         };
-                        out.push(format!("  {}: {new}", e.start.0 + 1));
+                        out.push(format!("  {}: {new}", e.start.line + 1));
                     }
                 }
             }

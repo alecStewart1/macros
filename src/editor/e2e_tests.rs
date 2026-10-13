@@ -810,8 +810,8 @@ fn workspace_edit_matches_buffers_by_file_identity(cx: &mut TestAppContext) {
             changes: vec![(
                 lsp::path_to_uri(&real),
                 vec![lsp::TextEdit {
-                    start: (0, 0),
-                    end: (0, 3),
+                    start: lsp::Position::new(0, 0),
+                    end: lsp::Position::new(0, 3),
                     new_text: "new".into(),
                 }],
             )],

@@ -59,8 +59,8 @@ impl Editor {
             // out of step with the buffer for the rest of the session.
             let lsp_change = self.lsp_change_positions(record.at, old_end);
             self.active.buffer.replace(record.at..old_end, new);
-            if let Some((language, start, end)) = lsp_change {
-                self.lsp_did_change(&language, start, end, new);
+            if let Some(change) = lsp_change {
+                self.lsp_did_change(change, new);
             }
             // Overlays and markers track each replayed edit just like `edit()`
             // does — without this, org's hidden stars / faces / virtual indents

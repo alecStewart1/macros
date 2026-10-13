@@ -1316,16 +1316,32 @@ struct LspServer {
     /// URIs we've sent `didOpen` for to this server.
     open: HashSet<String>,
     versions: HashMap<String, i32>,
-    /// Pending completion request: (id, word range being completed).
-    pending_completion: Option<(i64, Range<usize>)>,
+    /// The in-flight completion request, if any.
+    pending_completion: Option<PendingCompletion>,
     /// In-flight non-completion requests (definition, references, rename, …),
     /// keyed by request id so the response can be routed to the right handler,
     /// with the document each was issued against.
     pending: HashMap<i64, (PendingRequest, RequestTarget)>,
-    /// Cached semantic tokens per URI: `(resultId, packed data)`, for deltas.
-    semantic_state: HashMap<String, (Option<String>, Vec<i64>)>,
+    /// Cached semantic tokens per URI, for deltas.
+    semantic_state: HashMap<String, SemanticCache>,
     /// The reader task forwarding this server's messages; dropped on removal.
     _task: Task<()>,
+}
+
+/// An in-flight completion request: its id, and the word range being
+/// completed (the popup anchor and live filter prefix).
+struct PendingCompletion {
+    id: i64,
+    range: Range<usize>,
+}
+
+/// A document's last semantic-tokens result, kept so a
+/// `semanticTokens/full/delta` reply can be spliced onto it.
+struct SemanticCache {
+    /// The `resultId` to send as `previousResultId`, if the server gave one.
+    result_id: Option<String>,
+    /// The packed token data (groups of five integers).
+    data: Vec<i64>,
 }
 
 /// The document an LSP request was issued against: its URI plus the buffer's
@@ -2356,8 +2372,8 @@ impl Editor {
             });
             highlighter.reparse(self.active.buffer.rope());
         }
-        if let Some((language, start, end)) = lsp_change {
-            self.lsp_did_change(&language, start, end, new_text);
+        if let Some(change) = lsp_change {
+            self.lsp_did_change(change, new_text);
         }
         // Move any markers tracking positions in this buffer.
         self.script
@@ -4356,11 +4372,14 @@ impl Editor {
         };
         raw.iter()
             .map(|d| {
-                let start = self.active.buffer.position_to_byte(d.start.0, d.start.1);
+                let start = self
+                    .active
+                    .buffer
+                    .position_to_byte(d.start.line, d.start.character);
                 let end = self
                     .active
                     .buffer
-                    .position_to_byte(d.end.0, d.end.1)
+                    .position_to_byte(d.end.line, d.end.character)
                     .max(start);
                 Diagnostic {
                     range: start..end,
@@ -4456,11 +4475,14 @@ impl Editor {
             if server.ready && server.open.contains(&uri) {
                 // A newer request supersedes the in-flight one: its response
                 // would be dropped anyway, so let the server stop working on it.
-                if let Some((old, _)) = server.pending_completion.take() {
-                    server.client.cancel(old);
+                if let Some(old) = server.pending_completion.take() {
+                    server.client.cancel(old.id);
                 }
                 let id = server.client.completion(&uri, line, character);
-                server.pending_completion = Some((id, word_range));
+                server.pending_completion = Some(PendingCompletion {
+                    id,
+                    range: word_range,
+                });
                 true
             } else {
                 false

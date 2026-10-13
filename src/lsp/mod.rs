@@ -210,13 +210,13 @@ impl LanguageServer for LspClient {
     }
 
     /// Incremental sync: one ranged change. `start`/`end` are pre-edit LSP
-    /// positions `(line, utf16_col)`; `text` is the replacement.
+    /// positions; `text` is the replacement.
     fn did_change_incremental(
         &mut self,
         uri: &str,
         version: i32,
-        start: (usize, usize),
-        end: (usize, usize),
+        start: Position,
+        end: Position,
         text: &str,
     ) {
         self.notify(
@@ -225,8 +225,8 @@ impl LanguageServer for LspClient {
                 "textDocument": { "uri": uri, "version": version },
                 "contentChanges": [ {
                     "range": {
-                        "start": { "line": start.0, "character": start.1 },
-                        "end": { "line": end.0, "character": end.1 },
+                        "start": { "line": start.line, "character": start.character },
+                        "end": { "line": end.line, "character": end.character },
                     },
                     "text": text,
                 } ]
@@ -401,8 +401,8 @@ pub fn progress_text(language: &str, title: &str, value: &Value) -> String {
 /// specific buffer's byte offsets.
 #[derive(Clone, Debug)]
 pub struct RawDiagnostic {
-    pub start: (usize, usize),
-    pub end: (usize, usize),
+    pub start: Position,
+    pub end: Position,
     pub severity: Severity,
     pub message: String,
     /// The diagnostic exactly as the server published it (`code`, `source`,
@@ -602,15 +602,29 @@ impl From<WireCapabilities> for ServerCapabilities {
     }
 }
 
-/// An LSP `Position` on the wire. Missing fields default to 0 (the same lossy
-/// behavior as the manual `as_u64().unwrap_or(0)` digs this replaces).
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct WirePos {
+/// An LSP `Position`: a line and a UTF-16 column. On the wire, missing
+/// fields default to 0 (the same lossy behavior as the manual
+/// `as_u64().unwrap_or(0)` digs this replaced).
+#[derive(serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Position {
     #[serde(default)]
-    line: usize,
+    pub line: usize,
     #[serde(default)]
-    character: usize,
+    pub character: usize,
+}
+
+impl Position {
+    pub const fn new(line: usize, character: usize) -> Self {
+        Position { line, character }
+    }
+}
+
+/// From a [`Buffer::byte_to_position`](crate::buffer::Buffer::byte_to_position)
+/// `(line, utf16_col)` pair.
+impl From<(usize, usize)> for Position {
+    fn from((line, character): (usize, usize)) -> Self {
+        Position { line, character }
+    }
 }
 
 /// An LSP `Range` on the wire. `start`/`end` default so a missing or malformed
@@ -618,20 +632,14 @@ struct WirePos {
 #[derive(serde::Deserialize, Default)]
 struct WireRange {
     #[serde(default)]
-    start: WirePos,
+    start: Position,
     #[serde(default)]
-    end: WirePos,
+    end: Position,
 }
 
-impl From<WireRange> for ((usize, usize), (usize, usize)) {
-    fn from(r: WireRange) -> ((usize, usize), (usize, usize)) {
-        (r.start.into(), r.end.into())
-    }
-}
-
-impl From<WirePos> for (usize, usize) {
-    fn from(p: WirePos) -> (usize, usize) {
-        (p.line, p.character)
+impl From<WireRange> for (Position, Position) {
+    fn from(r: WireRange) -> (Position, Position) {
+        (r.start, r.end)
     }
 }
 
@@ -818,7 +826,7 @@ pub fn parse_documentation(value: &Value) -> Option<String> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrepareRename {
     pub placeholder: Option<String>,
-    pub range: Option<((usize, usize), (usize, usize))>,
+    pub range: Option<(Position, Position)>,
 }
 
 /// A `prepareRename` result on the wire (`null` fails every variant).
@@ -835,9 +843,9 @@ enum WirePrepareRename {
     },
     /// A bare `Range`.
     Range {
-        start: WirePos,
+        start: Position,
         #[serde(default)]
-        end: WirePos,
+        end: Position,
     },
 }
 
@@ -857,7 +865,7 @@ pub fn parse_prepare_rename(result: &Value) -> Option<PrepareRename> {
         }),
         WirePrepareRename::Range { start, end } => Some(PrepareRename {
             placeholder: None,
-            range: Some((start.into(), end.into())),
+            range: Some((start, end)),
         }),
     }
 }
@@ -931,8 +939,8 @@ fn completion_kind(kind: u64) -> Option<&'static str> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Location {
     pub uri: String,
-    pub start: (usize, usize),
-    pub end: (usize, usize),
+    pub start: Position,
+    pub end: Position,
 }
 
 /// One definition/references/etc. target on the wire.
@@ -1026,7 +1034,7 @@ pub struct SymbolInfo {
     pub name: String,
     pub kind: u64,
     pub uri: String,
-    pub start: (usize, usize),
+    pub start: Position,
     pub container: String,
     /// Nesting depth (0 = top level) — for indentation in the list.
     pub depth: usize,
@@ -1075,7 +1083,7 @@ pub fn parse_symbols(result: &Value, fallback_uri: &str) -> Vec<SymbolInfo> {
                 name: item.name,
                 kind: item.kind,
                 uri: loc.uri.unwrap_or_else(|| fallback_uri.to_string()),
-                start: loc.range.start.into(),
+                start: loc.range.start,
                 container: item.container_name.unwrap_or_else(|| container.to_string()),
                 depth,
             });
@@ -1087,7 +1095,7 @@ pub fn parse_symbols(result: &Value, fallback_uri: &str) -> Vec<SymbolInfo> {
                 name: item.name.clone(),
                 kind: item.kind,
                 uri: fallback_uri.to_string(),
-                start: range.start.into(),
+                start: range.start,
                 container: container.to_string(),
                 depth,
             });
@@ -1137,8 +1145,8 @@ pub fn symbol_kind_name(kind: u64) -> &'static str {
 /// A single text edit in LSP `(line, utf16-col)` coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextEdit {
-    pub start: (usize, usize),
-    pub end: (usize, usize),
+    pub start: Position,
+    pub end: Position,
     pub new_text: String,
 }
 
@@ -1394,8 +1402,8 @@ pub fn parse_call_hierarchy(result: &Value, direction: CallDirection) -> Vec<(St
                 item.name.unwrap_or_else(|| "?".to_string()),
                 Location {
                     uri: item.uri,
-                    start: range.start.into(),
-                    end: range.end.into(),
+                    start: range.start,
+                    end: range.end,
                 },
             ))
         })
@@ -1422,8 +1430,8 @@ pub fn apply_edits_to_text(text: &str, edits: &[TextEdit]) -> String {
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let a = buf.position_to_byte(e.start.0, e.start.1);
-            let b = buf.position_to_byte(e.end.0, e.end.1);
+            let a = buf.position_to_byte(e.start.line, e.start.character);
+            let b = buf.position_to_byte(e.end.line, e.end.character);
             (a.min(b), a.max(b), i, e.new_text.as_str())
         })
         .collect();
@@ -1522,14 +1530,14 @@ pub trait LanguageServer {
     fn did_change(&mut self, uri: &str, version: i32, text: &str);
 
     /// Incremental sync: one ranged change. `start`/`end` are pre-edit LSP
-    /// positions `(line, utf16_col)`; `text` is the replacement. (The builtin
+    /// positions; `text` is the replacement. (The builtin
     /// advertises full sync, so it never gets these.)
     fn did_change_incremental(
         &mut self,
         _uri: &str,
         _version: i32,
-        _start: (usize, usize),
-        _end: (usize, usize),
+        _start: Position,
+        _end: Position,
         _text: &str,
     ) {
     }
@@ -1775,14 +1783,14 @@ mod tests {
         // A server's "end of line" (a large character) must clamp before the
         // terminator, not swallow it and join the next line.
         let edits = [TextEdit {
-            start: (0, 3),
-            end: (0, 999),
+            start: Position::new(0, 3),
+            end: Position::new(0, 999),
             new_text: "!".into(),
         }];
         assert_eq!(apply_edits_to_text("abc\r\ndef\n", &edits), "abc!\r\ndef\n");
         let past_eof = [TextEdit {
-            start: (9, 0),
-            end: (9, 0),
+            start: Position::new(9, 0),
+            end: Position::new(9, 0),
             new_text: "tail".into(),
         }];
         assert_eq!(apply_edits_to_text("ab\ncd", &past_eof), "ab\ncdtail");
@@ -1823,8 +1831,8 @@ mod tests {
             locs,
             vec![Location {
                 uri: "file:///a.rs".into(),
-                start: (3, 5),
-                end: (3, 8)
+                start: Position::new(3, 5),
+                end: Position::new(3, 8)
             }]
         );
 
@@ -1839,8 +1847,8 @@ mod tests {
             locs,
             vec![Location {
                 uri: "file:///b.rs".into(),
-                start: (1, 4),
-                end: (1, 7)
+                start: Position::new(1, 4),
+                end: Position::new(1, 7)
             }]
         );
 
@@ -1855,8 +1863,8 @@ mod tests {
             parse_locations(&mixed),
             vec![Location {
                 uri: "file:///c.rs".into(),
-                start: (2, 0),
-                end: (4, 1)
+                start: Position::new(2, 0),
+                end: Position::new(4, 1)
             }]
         );
 
@@ -1907,7 +1915,7 @@ mod tests {
         assert_eq!(syms.len(), 2);
         assert_eq!(
             (syms[0].name.as_str(), syms[0].depth, syms[0].start),
-            ("Foo", 0, (0, 7))
+            ("Foo", 0, Position::new(0, 7))
         );
         assert_eq!(
             (
@@ -1926,7 +1934,7 @@ mod tests {
         }]);
         let syms = parse_symbols(&flat, "file:///f.rs");
         assert_eq!(syms[0].uri, "file:///g.rs");
-        assert_eq!(syms[0].start, (9, 0));
+        assert_eq!(syms[0].start, Position::new(9, 0));
     }
 
     #[test]
@@ -1958,13 +1966,13 @@ mod tests {
         // Applying multiple edits to a line, last-first, stays correct.
         let edits = vec![
             TextEdit {
-                start: (0, 0),
-                end: (0, 3),
+                start: Position::new(0, 0),
+                end: Position::new(0, 3),
                 new_text: "X".into(),
             },
             TextEdit {
-                start: (0, 4),
-                end: (0, 7),
+                start: Position::new(0, 4),
+                end: Position::new(0, 7),
                 new_text: "Y".into(),
             },
         ];
@@ -2006,7 +2014,7 @@ mod tests {
         let calls = parse_call_hierarchy(&incoming, CallDirection::Incoming);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "caller");
-        assert_eq!(calls[0].1.start, (10, 3)); // prefers selectionRange
+        assert_eq!(calls[0].1.start, Position::new(10, 3)); // prefers selectionRange
         assert_eq!(calls[0].1.uri, "file:///c.rs");
         // Wrong key / empty → nothing.
         assert!(parse_call_hierarchy(&incoming, CallDirection::Outgoing).is_empty());
@@ -2060,7 +2068,7 @@ mod tests {
             parse_prepare_rename(&r),
             Some(PrepareRename {
                 placeholder: None,
-                range: Some(((2, 4), (2, 9)))
+                range: Some((Position::new(2, 4), Position::new(2, 9)))
             })
         );
         // {range, placeholder}.
@@ -2175,8 +2183,8 @@ mod tests {
     fn same_position_inserts_apply_in_array_order() {
         // LSP: inserts at one position appear in the result in array order.
         let ins = |t: &str| TextEdit {
-            start: (0, 3),
-            end: (0, 3),
+            start: Position::new(0, 3),
+            end: Position::new(0, 3),
             new_text: t.into(),
         };
         assert_eq!(
@@ -2188,8 +2196,8 @@ mod tests {
         let edits = [
             ins("<"),
             TextEdit {
-                start: (0, 3),
-                end: (0, 4),
+                start: Position::new(0, 3),
+                end: Position::new(0, 4),
                 new_text: "D".into(),
             },
         ];
