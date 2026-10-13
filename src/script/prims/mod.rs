@@ -29,6 +29,7 @@ pub(super) mod search;
 pub(super) mod sockets;
 pub(super) mod special_buffers;
 pub(super) mod spell;
+pub(super) mod sqlite;
 pub(super) mod text;
 pub(super) mod time;
 pub(super) mod tree_sitter;
