@@ -2251,8 +2251,7 @@ impl Editor {
             // Newlines inserted at column 0 push `start_line`'s own text down, so
             // its line overlays go with it — else Enter at the start of a heading
             // leaves the heading's scale/chevron on the now-empty line above.
-            let carry = insertion
-                && self.active.buffer.line_range(start_line).start == start;
+            let carry = insertion && self.active.buffer.line_range(start_line).start == start;
             let o = &mut self.active.overlays;
             shift_line_map(&mut o.indents, start_line, line_delta, carry);
             shift_line_map(&mut o.scales, start_line, line_delta, carry);
