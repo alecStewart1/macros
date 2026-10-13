@@ -425,6 +425,434 @@ struct Accum {
     fold_hitboxes: Vec<crate::editor::FoldHitbox>,
     fold_cursors: Vec<Hitbox>,
     virtual_text: Vec<(ShapedLine, Point<Pixels>)>,
+    lines: Vec<LineLayout>,
+    /// The primary cursor's quad (`None` when blinked off or not laid out).
+    cursor: Option<PaintQuad>,
+    hl_line: Option<PaintQuad>,
+    /// The primary cursor's origin (also the completion-popup anchor, tracked
+    /// even when blinked off).
+    cursor_px: Option<Point<Pixels>>,
+    images: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+}
+
+/// The theme colors a frame paints with, resolved once per prepaint (like
+/// [`DiagnosticColors`]), each with a fixed fallback for themes that don't
+/// define its face.
+#[derive(Clone, Copy)]
+struct FrameColors {
+    cursor: Hsla,
+    region: Hsla,
+    /// Helix multiple selections: each secondary selection paints a dimmer
+    /// span, and its caret a dimmer cursor, so the primary stays distinct.
+    secondary_region: Hsla,
+    secondary_cursor: Hsla,
+    search: Hsla,
+    paren: Hsla,
+    hl_line: Hsla,
+    line_number: Hsla,
+    git_added: Hsla,
+    git_modified: Hsla,
+    git_removed: Hsla,
+}
+
+impl FrameColors {
+    /// `text` is the frame's foreground, the line numbers' last fallback.
+    fn resolve(theme: &Theme, text: Hsla) -> Self {
+        let cursor = theme.color("cursor", rgb(0x528bff).into());
+        let region = theme.color("region", rgba(0x3a5fcd55).into());
+        // Themes can set the secondary colors explicitly; otherwise derive
+        // them from the primary region/cursor by knocking the alpha down.
+        let dimmed = |mut c: Hsla, by: f32| {
+            c.a *= by;
+            c
+        };
+        FrameColors {
+            cursor,
+            region,
+            secondary_region: theme.color("secondary-region", dimmed(region, 0.6)),
+            secondary_cursor: theme.color("secondary-cursor", dimmed(cursor, 0.7)),
+            search: theme.color("search", rgba(0xffc83d66).into()),
+            paren: theme.color("show-paren", rgba(0x5fafef66).into()),
+            hl_line: theme.color("hl-line", rgba(0xffffff10).into()),
+            line_number: theme.color("line-number", theme.color("dim", text)),
+            git_added: theme.color("magit-gutter-added", rgb(0x6cae3e).into()),
+            git_modified: theme.color("magit-gutter-modified", rgb(0xc7a23a).into()),
+            git_removed: theme.color("magit-gutter-removed", rgb(0xc1574b).into()),
+        }
+    }
+}
+
+/// Everything [`FrameCtx::layout_line`] needs about the frame being laid out,
+/// resolved once per prepaint: the editor state for this pane, fonts and
+/// geometry, colors, and the visible-range highlight data.
+struct FrameCtx<'a> {
+    editor: &'a Editor,
+    pane: usize,
+    selected: bool,
+    buffer: &'a crate::buffer::Buffer,
+    theme: &'a Theme,
+    colors: FrameColors,
+    text_color: Hsla,
+    font: Font,
+    font_size: Pixels,
+    /// One monospace character's advance.
+    em: Pixels,
+    line_height: Pixels,
+    bounds: Bounds<Pixels>,
+    text_left: Pixels,
+    /// `text_left` shifted by the horizontal scroll.
+    text_x: Pixels,
+    wrap_width: Option<Pixels>,
+    scales: bool,
+    images: bool,
+    line_numbers: bool,
+    hl_line: bool,
+    cursor: usize,
+    selection: Range<usize>,
+    block_sel: Option<(usize, usize, usize, usize)>,
+    extra_selections: Vec<(usize, usize)>,
+    extra_cursor_positions: Vec<usize>,
+    search: Vec<Range<usize>>,
+    paren: Vec<Range<usize>>,
+    highlights: Vec<HlSpan>,
+    overlay_faces: &'a [(Range<usize>, SharedString)],
+    ghost: Option<(usize, &'a str)>,
+    ghost_first: &'a str,
+    ghost_tail: Vec<&'a str>,
+    ghost_color: Hsla,
+    diagnostics: Vec<crate::lsp::Diagnostic>,
+    diff_marks: &'a std::collections::HashMap<usize, crate::editor::DiffMark>,
+    gutter_dots: &'a std::collections::HashMap<usize, SharedString>,
+    diag_colors: DiagnosticColors,
+    gutter: GutterCfg,
+    cursor_cfg: CursorCfg,
+}
+
+impl FrameCtx<'_> {
+    /// Lay out buffer line `i` with its top at `y` (advanced past the line,
+    /// its ghost continuation rows and its inline image): shape it and collect
+    /// its gutter, cursor, highlight and decoration output into `acc`.
+    fn layout_line(&self, i: usize, y: &mut Pixels, acc: &mut Accum, window: &mut Window) {
+        let lh = f32::from(self.line_height);
+        let (range, text) = self.buffer.line(i);
+        let top = *y;
+
+        // `overlay-hide` ranges intersecting this line, made line-relative and
+        // restricted to char boundaries; spliced out before shaping so the
+        // stars (etc.) collapse. Empty for almost every line. The line the
+        // cursor sits on is revealed in full (Emacs-style) so hidden markup —
+        // e.g. Org's leading stars — is visible and editable while point is
+        // there; moving off the line re-hides it on the next frame.
+        //
+        // Selected pane only: `overlay-hide` ranges live on the *active*
+        // buffer (`line_holes` reads `self.buffer`/`self.overlays`), so a
+        // non-selected pane must not consult them — its rows index a different,
+        // possibly longer buffer (e.g. a tall dired-sidebar tree beside a short
+        // file), which would index the active buffer past its end. Matches the
+        // `selected` gating on `overlay_faces` and the cursor-line reveal below.
+        let mut holes = if self.selected {
+            self.editor.line_holes(i)
+        } else {
+            Vec::new()
+        };
+        holes.retain(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e));
+        // The cursor's own line is revealed in full so hidden markup — e.g.
+        // Org's leading stars — is visible and editable while point is there.
+        // The width those stars reclaim is taken back out of the indent below,
+        // so the visible title stays put instead of jumping right as the
+        // cursor arrives. Moving off the line re-hides it next frame.
+        let revealed = self.selected && self.cursor >= range.start && self.cursor <= range.end;
+        let reveal_cols: usize = if revealed {
+            holes.iter().map(|&(s, e)| e - s).sum()
+        } else {
+            0
+        };
+        if revealed {
+            holes.clear();
+        }
+
+        // Virtual left indent (Org `org-indent-mode`): shift this line's text
+        // right by N columns. Display-only — the buffer text is untouched, so
+        // there is no real whitespace to navigate (matches Emacs).
+        let indent_px =
+            px(self.editor.line_indent(i).saturating_sub(reveal_cols) as f32 * f32::from(self.em));
+        let lx = self.text_x + indent_px;
+        // Whole-line scale (markdown/org headings rendered larger). A scaled
+        // line is shaped at `scale`× the base font and doesn't wrap; it
+        // reserves `1 + scale_rows_at` display rows (claimed above), so the
+        // bigger text sits in that taller block and the row math stays exact.
+        let scale = if self.scales {
+            self.editor.line_scale(i)
+        } else {
+            1.0
+        };
+        let line_font_size = self.font_size * scale;
+        // Narrow the wrap width by the indent so wrapped rows stay in the pane.
+        // Scaled heading lines never wrap (keeps them a single, taller block).
+        let line_wrap_width = if scale > 1.0 {
+            None
+        } else {
+            self.wrap_width
+                .map(|w| px((f32::from(w) - f32::from(indent_px)).max(1.0)))
+        };
+
+        // Compute the styled runs, then shape once (the branches only
+        // differ in which spans and base color tile the line).
+        let runs = if text.is_empty() {
+            Vec::new()
+        } else if let Some(face) = self.editor.pane_line_face(self.pane, i) {
+            // Special buffers (magit-style) paint whole lines by face name —
+            // but sub-line overlay accents (magit's status labels, diff +/-
+            // markers) still override their byte range, layered on top of the
+            // whole-line color as the base (no syntax spans here). The face's
+            // bold attribute rides along as the line's base weight.
+            let color = self.theme.color(face, self.text_color);
+            line_runs(
+                &[],
+                self.overlay_faces,
+                range.clone(),
+                &self.font,
+                color,
+                self.theme.is_bold(face),
+                self.theme,
+                Some(text.as_str()),
+            )
+        } else {
+            line_runs(
+                &self.highlights,
+                self.overlay_faces,
+                range.clone(),
+                &self.font,
+                self.text_color,
+                false,
+                self.theme,
+                Some(text.as_str()),
+            )
+        };
+        // Ghost anchored on this line (point's line): splice the
+        // suggestion's first line into the display text at point — the
+        // inverse of the `holes` splice-out — so the rest of the real line
+        // is pushed right and soft-wrap measures the suggestion like real
+        // text. Point's line is `revealed` above, so `holes` is empty here
+        // and display indices equal line-relative buffer offsets.
+        let ghost_here = self
+            .ghost
+            .filter(|(at, _)| *at >= range.start && *at <= range.end);
+        let line_ghost = ghost_here
+            .filter(|_| !self.ghost_first.is_empty())
+            .map(|(at, _)| (to_display(at - range.start, &holes), self.ghost_first.len()));
+        let mut display_text = remove_holes(&text, &holes);
+        let mut display_runs = punch_runs(runs, &holes);
+        if let Some((at, len)) = line_ghost {
+            display_text.insert_str(at, self.ghost_first);
+            display_runs = inject_ghost_run(
+                display_runs,
+                at,
+                ghost_run(len, &self.font, self.ghost_color),
+            );
+        }
+        let wrapped = window.text_system().shape_text(
+            SharedString::from(display_text),
+            line_font_size,
+            &display_runs,
+            line_wrap_width,
+            None,
+        );
+        let wrapped = wrapped.ok().and_then(|mut v| v.pop()).unwrap_or_default();
+        // A scaled line occupies the whole reserved block (its claimed rows ×
+        // line height) so `y` advances by the rows it reserved above; an
+        // unscaled line is just its shaped (possibly wrapped) height.
+        let line_h = if scale > 1.0 {
+            px((1 + self.editor.scale_rows_at(i)) as f32 * lh)
+        } else {
+            wrapped.size(self.line_height).height
+        };
+
+        // A scaled (heading) line reserves whole rows (`ceil(scale)`), taller
+        // than the one base row a line normally occupies. `WrappedLine::paint`
+        // vertically centers the glyph run within the `line_height` it's given
+        // (here the base `lh`), so the glyphs' center sits one half-row below
+        // `content_top`. To center them in the reserved block, offset the whole
+        // line's content (glyphs, cursor, selection, inlays — and the line
+        // number) down by half the slack: `(block − one base row) / 2`. Zero for
+        // ordinary lines, which keeps wrapped multi-row lines top-aligned.
+        let content_dy = if scale > 1.0 {
+            (line_h - px(lh)) / 2.0
+        } else {
+            px(0.)
+        };
+        let content_top = self.bounds.top() + top + content_dy;
+        let line_origin = point(lx, content_top);
+        let lc = LineCtx {
+            i,
+            range: range.clone(),
+            wrapped: &wrapped,
+            holes: &holes,
+            top,
+            line_h,
+            line_origin,
+            line_height: self.line_height,
+            ghost: line_ghost,
+        };
+
+        // Gutter: line number, fold chevron, diagnostic dot, git bar.
+        if self.line_numbers {
+            layout_gutter(
+                &lc,
+                &self.gutter,
+                self.editor,
+                self.theme,
+                &self.diagnostics,
+                self.diff_marks,
+                self.gutter_dots,
+                window,
+                acc,
+            );
+        }
+
+        if self.hl_line
+            && self.cursor >= range.start
+            && self.cursor <= range.end
+            && acc.hl_line.is_none()
+        {
+            // Span the full pane width (gutter included), one line tall.
+            let origin = point(self.bounds.left(), self.bounds.top() + top);
+            acc.hl_line = Some(fill(
+                Bounds::new(origin, size(self.bounds.size.width, line_h)),
+                self.colors.hl_line,
+            ));
+        }
+
+        // Cursors: the primary caret (also the completion-popup anchor,
+        // tracked even when blinked off) and any secondary carets.
+        if self.selected {
+            if let Some((origin, quad)) =
+                layout_cursor(&lc, self.buffer, self.cursor, &self.cursor_cfg)
+            {
+                acc.cursor_px = Some(origin);
+                acc.cursor = quad;
+            }
+            layout_extra_cursors(
+                &lc,
+                &self.extra_cursor_positions,
+                &self.cursor_cfg,
+                &mut acc.extra_cursors,
+            );
+        }
+
+        // Range highlights, all through the same per-row quad helper.
+        if let Some((top_row, bottom_row, left_col, right_col)) = self.block_sel {
+            // Block-wise Visual: highlight only the `[left_col, right_col]`
+            // column strip on each row within the rectangle (rows shorter
+            // than the strip contribute nothing).
+            if i >= top_row && i <= bottom_row {
+                let s = char_col_byte_in(&text, left_col);
+                let e = char_col_byte_in(&text, right_col + 1);
+                if e > s {
+                    lc.push_range(
+                        &mut acc.selections,
+                        range.start + s,
+                        range.start + e,
+                        self.colors.region,
+                        px(0.),
+                    );
+                }
+            }
+        } else if !self.selection.is_empty() {
+            lc.push_range(
+                &mut acc.selections,
+                self.selection.start,
+                self.selection.end,
+                self.colors.region,
+                px(0.),
+            );
+        }
+        // Secondary selections (Helix multiple selections): one dimmer span
+        // per selection that overlaps this line. Each carries its own color,
+        // so they coexist with the primary highlight in the same quad list.
+        for &(ss, se) in &self.extra_selections {
+            if se > ss {
+                lc.push_range(
+                    &mut acc.selections,
+                    ss,
+                    se,
+                    self.colors.secondary_region,
+                    px(0.),
+                );
+            }
+        }
+        // Search matches: a translucent background highlight per match.
+        for m in &self.search {
+            lc.push_range(&mut acc.search, m.start, m.end, self.colors.search, px(0.));
+        }
+        // Matching-delimiter highlight: the bracket pair (each one char).
+        for m in &self.paren {
+            lc.push_range(&mut acc.paren, m.start, m.end, self.colors.paren, px(0.));
+        }
+
+        // Decorations: file-tree icon, diagnostic underlines, virtual
+        // suffix text, avy hints.
+        layout_decorations(
+            &lc,
+            self.editor,
+            self.pane,
+            self.selected,
+            self.theme,
+            self.text_color,
+            &self.font,
+            self.font_size,
+            self.em,
+            &self.diagnostics,
+            self.diag_colors,
+            window,
+            acc,
+        );
+
+        acc.lines.push(LineLayout {
+            wrapped,
+            top,
+            range,
+            holes,
+            indent: indent_px,
+            height: line_h,
+            content_dy,
+            ghost: line_ghost,
+        });
+        *y += line_h;
+
+        // Ghost continuation lines: painted on the display rows reserved
+        // below point's line (the inline-image pattern), one per `\n` in
+        // the suggestion. Not hit-testable — a click below the anchor line
+        // maps to the following buffer line, and moving point dismisses
+        // the ghost anyway.
+        if ghost_here.is_some() {
+            for t in &self.ghost_tail {
+                if !t.is_empty() {
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(t.to_string()),
+                        self.font_size,
+                        &[ghost_run(t.len(), &self.font, self.ghost_color)],
+                        None,
+                    );
+                    acc.virtual_text
+                        .push((shaped, point(lx, self.bounds.top() + *y)));
+                }
+                *y += px(lh);
+            }
+        }
+
+        // Inline image: paint it in the rows reserved below this line, and
+        // advance past them. `image_rows_at` and the displayed size agree on
+        // the fixed max width, so the reserved height matches the bitmap.
+        if self.images
+            && let Some((data, disp_w, disp_h)) = self.editor.line_image_at(i)
+        {
+            let img_origin = point(self.text_left + indent_px, self.bounds.top() + *y);
+            acc.images
+                .push((Bounds::new(img_origin, size(px(disp_w), px(disp_h))), data));
+            *y += px(self.editor.image_rows_at(i) as f32 * lh);
+        }
+    }
 }
 
 /// Gutter configuration resolved once per frame: geometry, colors, and which
@@ -834,25 +1262,6 @@ impl Element for EditorElement {
         let selected = editor.pane_is_selected(pane);
         let buffer = editor.pane_buffer(pane);
         let theme = cx.global::<Theme>();
-        let cursor_color = theme.color("cursor", rgb(0x528bff).into());
-        let region_color = theme.color("region", rgba(0x3a5fcd55).into());
-        // Helix multiple selections: each secondary selection paints a dimmer
-        // span, and its caret a dimmer cursor, so the primary stays distinct.
-        // Themes can set these explicitly; otherwise derive them from the primary
-        // region/cursor by knocking the alpha down.
-        let secondary_region_color = theme.color("secondary-region", {
-            let mut c = region_color;
-            c.a *= 0.6;
-            c
-        });
-        let secondary_cursor_color = theme.color("secondary-cursor", {
-            let mut c = cursor_color;
-            c.a *= 0.7;
-            c
-        });
-        let search_color = theme.color("search", rgba(0xffc83d66).into());
-        let paren_color = theme.color("show-paren", rgba(0x5fafef66).into());
-        let hl_line_color = theme.color("hl-line", rgba(0xffffff10).into());
         let settings = cx.global::<crate::settings::Settings>();
         let popup_max_rows = settings.completion_max_rows();
         let popup_show_detail = settings.completion_show_detail();
@@ -873,6 +1282,7 @@ impl Element for EditorElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
         let text_color = style.color;
+        let colors = FrameColors::resolve(theme, text_color);
         // The custom element doesn't inherit the div's font_family, so resolve the
         // configured `font-family` ourselves (defaults to the bundled "Lilex"). A
         // family GPUI can't resolve falls back to the platform default at shape
@@ -932,7 +1342,6 @@ impl Element for EditorElement {
             px(0.)
         };
         let text_left = bounds.left() + gutter_width;
-        let line_number_color = theme.color("line-number", theme.color("dim", text_color));
         // Diagnostic gutter dots ride alongside the line numbers, so they need the
         // gutter to exist; gate on both the option and line numbers being shown.
         let diag_gutter = line_numbers && settings.diagnostics_gutter();
@@ -941,9 +1350,6 @@ impl Element for EditorElement {
         let git_gutter_on = line_numbers && settings.magit_gutter();
         let git_gutter_w = px(settings.magit_gutter_width());
         let git_gutter_del = settings.magit_gutter_deleted();
-        let gg_added = theme.color("magit-gutter-added", rgb(0x6cae3e).into());
-        let gg_modified = theme.color("magit-gutter-modified", rgb(0xc7a23a).into());
-        let gg_removed = theme.color("magit-gutter-removed", rgb(0xc1574b).into());
         // Diagnostic colors (gutter dots + underlines), resolved once per frame.
         let diag_colors = DiagnosticColors::resolve(theme);
 
@@ -1094,22 +1500,16 @@ impl Element for EditorElement {
         };
         let text_x = text_left - h_scroll;
 
-        let mut lines = Vec::new();
-        let mut cursor_quad = None;
-        let mut hl_line_quad: Option<PaintQuad> = None;
-        let mut cursor_px: Option<Point<Pixels>> = None;
         let mut acc = Accum::default();
         let extra_cursor_positions = editor.extra_cursor_positions();
         // Secondary selection spans (Helix multiple selections); selected pane
-        // only, like the carets. Each is highlighted with `secondary_region_color`.
+        // only, like the carets. Each is highlighted with `colors.secondary_region`.
         let extra_selections = if selected {
             editor.extra_selections()
         } else {
             Vec::new()
         };
-        let mut image_quads: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
-
-        let gutter_cfg = GutterCfg {
+        let gutter = GutterCfg {
             bounds,
             gutter_width,
             gutter_pad,
@@ -1120,10 +1520,10 @@ impl Element for EditorElement {
             git_gutter: git_gutter_on,
             git_gutter_w,
             git_gutter_del,
-            gg_added,
-            gg_modified,
-            gg_removed,
-            number_color: line_number_color,
+            gg_added: colors.git_added,
+            gg_modified: colors.git_modified,
+            gg_removed: colors.git_removed,
+            number_color: colors.line_number,
             font: editor_font.clone(),
             font_size,
             diag_colors,
@@ -1133,8 +1533,48 @@ impl Element for EditorElement {
             width: cursor_width,
             shown: cursor_shown,
             char_advance,
-            color: cursor_color,
-            secondary_color: secondary_cursor_color,
+            color: colors.cursor,
+            secondary_color: colors.secondary_cursor,
+        };
+        let frame = FrameCtx {
+            editor,
+            pane,
+            selected,
+            buffer,
+            theme,
+            colors,
+            text_color,
+            font: editor_font.clone(),
+            font_size,
+            em,
+            line_height,
+            bounds,
+            text_left,
+            text_x,
+            wrap_width,
+            scales,
+            images,
+            line_numbers,
+            hl_line,
+            cursor,
+            selection,
+            block_sel,
+            extra_selections,
+            extra_cursor_positions,
+            search,
+            paren,
+            highlights,
+            overlay_faces,
+            ghost,
+            ghost_first,
+            ghost_tail,
+            ghost_color,
+            diagnostics,
+            diff_marks,
+            gutter_dots,
+            diag_colors,
+            gutter,
+            cursor_cfg,
         };
 
         // Lines have variable height under wrapping (and under inline images), so
@@ -1144,7 +1584,6 @@ impl Element for EditorElement {
         let mut y = px(first_top_row as f32 * lh - scroll);
         let viewport_bottom = px(viewport_h);
         for &i in &rows {
-            let (range, text) = buffer.line(i);
             // Stop laying out once below the viewport — but keep going until the
             // cursor's own line has been laid out, so `reconcile_cursor_scroll`
             // learns its real (wrapped) pixel position and can follow it. Under
@@ -1155,304 +1594,15 @@ impl Element for EditorElement {
             // the cursor has been located — or in a non-selected pane, which has
             // no cursor to follow — the early-out stands. Off-screen lines laid
             // out in the interim are clipped to `bounds` anyway.
-            if y >= viewport_bottom && (!selected || cursor_px.is_some()) {
+            if y >= viewport_bottom && (!selected || acc.cursor_px.is_some()) {
                 break;
             }
-            let top = y;
-
-            // `overlay-hide` ranges intersecting this line, made line-relative and
-            // restricted to char boundaries; spliced out before shaping so the
-            // stars (etc.) collapse. Empty for almost every line. The line the
-            // cursor sits on is revealed in full (Emacs-style) so hidden markup —
-            // e.g. Org's leading stars — is visible and editable while point is
-            // there; moving off the line re-hides it on the next frame.
-            //
-            // Selected pane only: `overlay-hide` ranges live on the *active*
-            // buffer (`line_holes` reads `self.buffer`/`self.overlays`), so a
-            // non-selected pane must not consult them — its rows index a different,
-            // possibly longer buffer (e.g. a tall dired-sidebar tree beside a short
-            // file), which would index the active buffer past its end. Matches the
-            // `selected` gating on `overlay_faces` and the cursor-line reveal below.
-            let mut holes = if selected {
-                editor.line_holes(i)
-            } else {
-                Vec::new()
-            };
-            holes.retain(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e));
-            // The cursor's own line is revealed in full so hidden markup — e.g.
-            // Org's leading stars — is visible and editable while point is there.
-            // The width those stars reclaim is taken back out of the indent below,
-            // so the visible title stays put instead of jumping right as the
-            // cursor arrives. Moving off the line re-hides it next frame.
-            let revealed = selected && cursor >= range.start && cursor <= range.end;
-            let reveal_cols: usize = if revealed {
-                holes.iter().map(|&(s, e)| e - s).sum()
-            } else {
-                0
-            };
-            if revealed {
-                holes.clear();
-            }
-
-            // Virtual left indent (Org `org-indent-mode`): shift this line's text
-            // right by N columns. Display-only — the buffer text is untouched, so
-            // there is no real whitespace to navigate (matches Emacs).
-            let indent_px =
-                px(editor.line_indent(i).saturating_sub(reveal_cols) as f32 * f32::from(em));
-            let lx = text_x + indent_px;
-            // Whole-line scale (markdown/org headings rendered larger). A scaled
-            // line is shaped at `scale`× the base font and doesn't wrap; it
-            // reserves `1 + scale_rows_at` display rows (claimed above), so the
-            // bigger text sits in that taller block and the row math stays exact.
-            let scale = if scales { editor.line_scale(i) } else { 1.0 };
-            let line_font_size = font_size * scale;
-            // Narrow the wrap width by the indent so wrapped rows stay in the pane.
-            // Scaled heading lines never wrap (keeps them a single, taller block).
-            let line_wrap_width = if scale > 1.0 {
-                None
-            } else {
-                wrap_width.map(|w| px((f32::from(w) - f32::from(indent_px)).max(1.0)))
-            };
-
-            // Compute the styled runs, then shape once (the branches only
-            // differ in which spans and base color tile the line).
-            let runs = if text.is_empty() {
-                Vec::new()
-            } else if let Some(face) = editor.pane_line_face(pane, i) {
-                // Special buffers (magit-style) paint whole lines by face name —
-                // but sub-line overlay accents (magit's status labels, diff +/-
-                // markers) still override their byte range, layered on top of the
-                // whole-line color as the base (no syntax spans here). The face's
-                // bold attribute rides along as the line's base weight.
-                let color = theme.color(face, text_color);
-                line_runs(
-                    &[],
-                    overlay_faces,
-                    range.clone(),
-                    &editor_font,
-                    color,
-                    theme.is_bold(face),
-                    theme,
-                    Some(text.as_str()),
-                )
-            } else {
-                line_runs(
-                    &highlights,
-                    overlay_faces,
-                    range.clone(),
-                    &editor_font,
-                    text_color,
-                    false,
-                    theme,
-                    Some(text.as_str()),
-                )
-            };
-            // Ghost anchored on this line (point's line): splice the
-            // suggestion's first line into the display text at point — the
-            // inverse of the `holes` splice-out — so the rest of the real line
-            // is pushed right and soft-wrap measures the suggestion like real
-            // text. Point's line is `revealed` above, so `holes` is empty here
-            // and display indices equal line-relative buffer offsets.
-            let ghost_here = ghost.filter(|(at, _)| *at >= range.start && *at <= range.end);
-            let line_ghost = ghost_here
-                .filter(|_| !ghost_first.is_empty())
-                .map(|(at, _)| (to_display(at - range.start, &holes), ghost_first.len()));
-            let mut display_text = remove_holes(&text, &holes);
-            let mut display_runs = punch_runs(runs, &holes);
-            if let Some((at, len)) = line_ghost {
-                display_text.insert_str(at, ghost_first);
-                display_runs =
-                    inject_ghost_run(display_runs, at, ghost_run(len, &editor_font, ghost_color));
-            }
-            let wrapped = window.text_system().shape_text(
-                SharedString::from(display_text),
-                line_font_size,
-                &display_runs,
-                line_wrap_width,
-                None,
-            );
-            let wrapped = wrapped.ok().and_then(|mut v| v.pop()).unwrap_or_default();
-            // A scaled line occupies the whole reserved block (its claimed rows ×
-            // line height) so `y` advances by the rows it reserved above; an
-            // unscaled line is just its shaped (possibly wrapped) height.
-            let line_h = if scale > 1.0 {
-                px((1 + editor.scale_rows_at(i)) as f32 * lh)
-            } else {
-                wrapped.size(line_height).height
-            };
-
-            // A scaled (heading) line reserves whole rows (`ceil(scale)`), taller
-            // than the one base row a line normally occupies. `WrappedLine::paint`
-            // vertically centers the glyph run within the `line_height` it's given
-            // (here the base `lh`), so the glyphs' center sits one half-row below
-            // `content_top`. To center them in the reserved block, offset the whole
-            // line's content (glyphs, cursor, selection, inlays — and the line
-            // number) down by half the slack: `(block − one base row) / 2`. Zero for
-            // ordinary lines, which keeps wrapped multi-row lines top-aligned.
-            let content_dy = if scale > 1.0 {
-                (line_h - px(lh)) / 2.0
-            } else {
-                px(0.)
-            };
-            let content_top = bounds.top() + top + content_dy;
-            let line_origin = point(lx, content_top);
-            let lc = LineCtx {
-                i,
-                range: range.clone(),
-                wrapped: &wrapped,
-                holes: &holes,
-                top,
-                line_h,
-                line_origin,
-                line_height,
-                ghost: line_ghost,
-            };
-
-            // Gutter: line number, fold chevron, diagnostic dot, git bar.
-            if line_numbers {
-                layout_gutter(
-                    &lc,
-                    &gutter_cfg,
-                    editor,
-                    theme,
-                    &diagnostics,
-                    diff_marks,
-                    gutter_dots,
-                    window,
-                    &mut acc,
-                );
-            }
-
-            if hl_line && cursor >= range.start && cursor <= range.end && hl_line_quad.is_none() {
-                // Span the full pane width (gutter included), one line tall.
-                let origin = point(bounds.left(), bounds.top() + top);
-                hl_line_quad = Some(fill(
-                    Bounds::new(origin, size(bounds.size.width, line_h)),
-                    hl_line_color,
-                ));
-            }
-
-            // Cursors: the primary caret (also the completion-popup anchor,
-            // tracked even when blinked off) and any secondary carets.
-            if selected {
-                if let Some((origin, quad)) = layout_cursor(&lc, buffer, cursor, &cursor_cfg) {
-                    cursor_px = Some(origin);
-                    cursor_quad = quad;
-                }
-                layout_extra_cursors(
-                    &lc,
-                    &extra_cursor_positions,
-                    &cursor_cfg,
-                    &mut acc.extra_cursors,
-                );
-            }
-
-            // Range highlights, all through the same per-row quad helper.
-            if let Some((top_row, bottom_row, left_col, right_col)) = block_sel {
-                // Block-wise Visual: highlight only the `[left_col, right_col]`
-                // column strip on each row within the rectangle (rows shorter
-                // than the strip contribute nothing).
-                if i >= top_row && i <= bottom_row {
-                    let s = char_col_byte_in(&text, left_col);
-                    let e = char_col_byte_in(&text, right_col + 1);
-                    if e > s {
-                        lc.push_range(
-                            &mut acc.selections,
-                            range.start + s,
-                            range.start + e,
-                            region_color,
-                            px(0.),
-                        );
-                    }
-                }
-            } else if !selection.is_empty() {
-                lc.push_range(
-                    &mut acc.selections,
-                    selection.start,
-                    selection.end,
-                    region_color,
-                    px(0.),
-                );
-            }
-            // Secondary selections (Helix multiple selections): one dimmer span
-            // per selection that overlaps this line. Each carries its own color,
-            // so they coexist with the primary highlight in the same quad list.
-            for &(ss, se) in &extra_selections {
-                if se > ss {
-                    lc.push_range(&mut acc.selections, ss, se, secondary_region_color, px(0.));
-                }
-            }
-            // Search matches: a translucent background highlight per match.
-            for m in &search {
-                lc.push_range(&mut acc.search, m.start, m.end, search_color, px(0.));
-            }
-            // Matching-delimiter highlight: the bracket pair (each one char).
-            for m in &paren {
-                lc.push_range(&mut acc.paren, m.start, m.end, paren_color, px(0.));
-            }
-
-            // Decorations: file-tree icon, diagnostic underlines, virtual
-            // suffix text, avy hints.
-            layout_decorations(
-                &lc,
-                editor,
-                pane,
-                selected,
-                theme,
-                text_color,
-                &editor_font,
-                font_size,
-                em,
-                &diagnostics,
-                diag_colors,
-                window,
-                &mut acc,
-            );
-
-            lines.push(LineLayout {
-                wrapped,
-                top,
-                range,
-                holes,
-                indent: indent_px,
-                height: line_h,
-                content_dy,
-                ghost: line_ghost,
-            });
-            y += line_h;
-
-            // Ghost continuation lines: painted on the display rows reserved
-            // below point's line (the inline-image pattern), one per `\n` in
-            // the suggestion. Not hit-testable — a click below the anchor line
-            // maps to the following buffer line, and moving point dismisses
-            // the ghost anyway.
-            if ghost_here.is_some() {
-                for t in &ghost_tail {
-                    if !t.is_empty() {
-                        let shaped = window.text_system().shape_line(
-                            SharedString::from(t.to_string()),
-                            font_size,
-                            &[ghost_run(t.len(), &editor_font, ghost_color)],
-                            None,
-                        );
-                        acc.virtual_text.push((shaped, point(lx, bounds.top() + y)));
-                    }
-                    y += px(lh);
-                }
-            }
-
-            // Inline image: paint it in the rows reserved below this line, and
-            // advance past them. `image_rows_at` and the displayed size agree on
-            // the fixed max width, so the reserved height matches the bitmap.
-            if images && let Some((data, disp_w, disp_h)) = editor.line_image_at(i) {
-                let img_origin = point(text_left + indent_px, bounds.top() + y);
-                image_quads.push((Bounds::new(img_origin, size(px(disp_w), px(disp_h))), data));
-                y += px(editor.image_rows_at(i) as f32 * lh);
-            }
+            frame.layout_line(i, &mut y, &mut acc, window);
         }
 
         // The completion popup, anchored just below the cursor.
-        let popup = cursor_px
+        let popup = acc
+            .cursor_px
             .zip(editor.completion_view())
             .map(|(anchor, view)| {
                 build_popup(
@@ -1503,15 +1653,15 @@ impl Element for EditorElement {
         }
 
         PrepaintState {
-            lines,
-            cursor: cursor_quad,
-            hl_line: hl_line_quad,
+            lines: acc.lines,
+            cursor: acc.cursor,
+            hl_line: acc.hl_line,
             selections: acc.selections,
             search: acc.search,
             paren: acc.paren,
             scrollbar,
             icons: acc.icons,
-            images: image_quads,
+            images: acc.images,
             diagnostics: acc.diagnostics,
             git_gutter: acc.git_gutter,
             popup,
@@ -1525,7 +1675,7 @@ impl Element for EditorElement {
             virtual_text: acc.virtual_text,
             avy: acc.avy,
             extra_cursors: acc.extra_cursors,
-            cursor_rel_y: cursor_px.map(|p| p.y - bounds.top()),
+            cursor_rel_y: acc.cursor_px.map(|p| p.y - bounds.top()),
         }
     }
 
