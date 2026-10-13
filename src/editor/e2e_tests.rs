@@ -680,11 +680,11 @@ fn isearch_backward_repeat_wraps_from_buffer_start(cx: &mut TestAppContext) {
     let ed = setup(cx, "foo bar foo\n");
     ed.update(cx, |e, cx| {
         e.collapse_to(0);
-        e.isearch_start(false, cx);
+        e.isearch_start(Direction::Backward, cx);
         e.minibuffer.as_mut().unwrap().input = "foo".into();
         e.isearch_update(cx);
         assert_eq!(e.point(), 0);
-        e.isearch_repeat(false, cx);
+        e.isearch_repeat(Direction::Backward, cx);
         assert_eq!(e.point(), 8, "wrapped to the last match");
     });
 }
@@ -977,7 +977,7 @@ fn marks_and_jumps_into_gone_buffers(cx: &mut TestAppContext) {
 fn read_passwd_masks_and_skips_history(cx: &mut TestAppContext) {
     let ed = setup(cx, "\n");
     ed.update(cx, |e, cx| {
-        e.push_minibuffer_history("older entry");
+        e.minibuffer_history.push("older entry");
         e.script
             .eval("(define got-pw #f) (define (take-pw pw) (set! got-pw pw))")
             .unwrap();
@@ -998,7 +998,7 @@ fn read_passwd_masks_and_skips_history(cx: &mut TestAppContext) {
         assert_eq!(e.minibuffer.as_ref().unwrap().input, " pä ss ");
         e.mb_submit(cx);
         assert!(e.minibuffer.is_none());
-        assert_eq!(e.minibuffer_history, vec!["older entry".to_string()]);
+        assert_eq!(e.minibuffer_history.entries(), ["older entry".to_string()]);
         // The engine is FIFO: this sync eval runs after the dispatched call.
         assert_eq!(
             e.script.eval("got-pw").unwrap().value.as_deref(),

@@ -2650,13 +2650,18 @@ impl Editor {
                 return;
             }
             SearchForward => {
-                self.open_minibuffer("Search cells: ", MinibufferPurpose::GridSearch, "", cx);
+                self.open_minibuffer(
+                    "Search cells: ",
+                    MinibufferPurpose::GridSearch(Direction::Forward),
+                    "",
+                    cx,
+                );
                 return;
             }
             SearchBackward => {
                 self.open_minibuffer(
                     "Search cells backward: ",
-                    MinibufferPurpose::GridSearchBackward,
+                    MinibufferPurpose::GridSearch(Direction::Backward),
                     "",
                     cx,
                 );

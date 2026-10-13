@@ -933,8 +933,8 @@ impl Editor {
                 let initial = if visual { "'<,'>" } else { "" };
                 self.open_minibuffer(":", MinibufferPurpose::ExCommand, initial, cx);
             }
-            IsearchForward => self.isearch_start(true, cx),
-            IsearchBackward => self.isearch_start(false, cx),
+            IsearchForward => self.isearch_start(Direction::Forward, cx),
+            IsearchBackward => self.isearch_start(Direction::Backward, cx),
             other => return Err(other),
         }
         Ok(())

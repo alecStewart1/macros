@@ -8,6 +8,160 @@ use gpui::Context;
 
 use super::*;
 
+/// Whether a yes/no answer is affirmative (`yes` or `y`).
+pub(super) fn is_yes(answer: &str) -> bool {
+    matches!(answer, "yes" | "y")
+}
+
+/// The shared minibuffer input history (Emacs minibuffer history): entries
+/// most recent last, recalled with Up/Down or `M-p`/`M-n` while a read is open.
+#[derive(Default)]
+pub(super) struct MinibufferHistory {
+    entries: Vec<String>,
+    /// Position while browsing: `None` = editing a fresh input; `Some(i)` =
+    /// showing `entries[len-1-i]`. `stash` holds the fresh input so returning
+    /// past the newest entry restores it.
+    pos: Option<usize>,
+    stash: String,
+}
+
+impl MinibufferHistory {
+    /// The entries, oldest first.
+    pub(super) fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    /// Replace the entries wholesale (savehist's restore), ending any browse.
+    pub(super) fn replace(&mut self, entries: Vec<String>) {
+        self.entries = entries;
+        self.pos = None;
+    }
+
+    /// Record a submitted input (newest last, skipping blanks and consecutive
+    /// duplicates).
+    pub(super) fn push(&mut self, input: &str) {
+        if input.is_empty() || self.entries.last().map(String::as_str) == Some(input) {
+            return;
+        }
+        self.entries.push(input.to_string());
+    }
+
+    /// Start a fresh read: not browsing, nothing stashed.
+    fn reset_browse(&mut self) {
+        self.pos = None;
+        self.stash.clear();
+    }
+
+    /// Step through history from a read showing `current`: `delta < 0` recalls
+    /// older entries, `delta > 0` newer ones; stepping past the newest restores
+    /// the stashed in-progress input. `None` when there's nowhere to go.
+    fn step(&mut self, delta: isize, current: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let len = self.entries.len();
+        let next = if delta < 0 {
+            // Older. Entering history stashes the current (fresh) input.
+            match self.pos {
+                None => {
+                    self.stash = current.to_string();
+                    Some(0)
+                }
+                Some(i) => Some((i + 1).min(len - 1)),
+            }
+        } else {
+            // Newer.
+            match self.pos {
+                None => return None,
+                Some(0) => None,
+                Some(i) => Some(i - 1),
+            }
+        };
+        self.pos = next;
+        Some(match next {
+            Some(i) => self.entries[len - 1 - i].clone(),
+            None => std::mem::take(&mut self.stash),
+        })
+    }
+}
+
+impl Minibuffer {
+    fn new(prompt: &str, purpose: MinibufferPurpose, initial: &str) -> Self {
+        Minibuffer {
+            prompt: prompt.to_string(),
+            input: initial.to_string(),
+            cursor: initial.len(),
+            message: String::new(),
+            purpose,
+            sticky: false,
+            secret: None,
+            on_cancel: None,
+        }
+    }
+
+    /// Replace the input, leaving point at its end.
+    pub(super) fn set_input(&mut self, text: String) {
+        self.cursor = text.len();
+        self.input = text;
+    }
+
+    /// Insert `text` at point.
+    fn insert(&mut self, text: &str) {
+        self.input.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.message.clear();
+    }
+
+    /// Delete the grapheme before point. Returns whether anything changed.
+    fn backspace(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let prev = prev_grapheme(&self.input, self.cursor);
+        self.input.replace_range(prev..self.cursor, "");
+        self.cursor = prev;
+        self.message.clear();
+        true
+    }
+
+    /// Delete the grapheme after point. Returns whether anything changed.
+    fn delete(&mut self) -> bool {
+        let next = next_grapheme(&self.input, self.cursor);
+        if next <= self.cursor {
+            return false;
+        }
+        self.input.replace_range(self.cursor..next, "");
+        self.message.clear();
+        true
+    }
+
+    /// Move point to byte `to` (clamped to the input).
+    fn move_to(&mut self, to: usize) {
+        self.cursor = to.min(self.input.len());
+    }
+
+    /// TAB completion of the token after `head` (the kept part of the input;
+    /// the token currently typed is `token_len` bytes) against `candidates`: no
+    /// match, a sole completion, or extend to the longest common prefix and
+    /// list the candidates so the user can see what to disambiguate.
+    fn apply_completion(&mut self, head: &str, token_len: usize, candidates: &[String]) {
+        match candidates {
+            [] => self.message = "[No match]".into(),
+            [sole] => {
+                self.set_input(format!("{head}{sole}"));
+                self.message = "[Sole completion]".into();
+            }
+            _ => {
+                let lcp = longest_common_prefix(candidates);
+                if lcp.len() > token_len {
+                    self.set_input(format!("{head}{lcp}"));
+                }
+                self.message = format_candidates(candidates);
+            }
+        }
+    }
+}
+
 impl Editor {
     /// A render snapshot of the active minibuffer, split at the cursor.
     pub fn minibuffer_view(&self) -> Option<MinibufferView> {
@@ -50,18 +204,8 @@ impl Editor {
         // The in-buffer completion popup is consulted before the minibuffer
         // for Enter/Tab/arrows; left open, it would eat the read's keys.
         self.completion_popup = None;
-        self.minibuffer = Some(Minibuffer {
-            prompt: prompt.to_string(),
-            input: initial.to_string(),
-            cursor: initial.len(),
-            message: String::new(),
-            purpose,
-            sticky: false,
-            secret: None,
-            on_cancel: None,
-        });
-        self.minibuffer_history_pos = None;
-        self.minibuffer_stash = String::new();
+        self.minibuffer = Some(Minibuffer::new(prompt, purpose, initial));
+        self.minibuffer_history.reset_browse();
         self.mb_dynamic = None; // set afterward by a dynamic completing-read
         cx.notify();
     }
@@ -99,52 +243,18 @@ impl Editor {
         }
     }
 
-    /// Record a submitted minibuffer input in the shared history (newest last,
-    /// skipping blanks and consecutive duplicates).
-    pub(super) fn push_minibuffer_history(&mut self, input: &str) {
-        if input.is_empty() || self.minibuffer_history.last().map(String::as_str) == Some(input) {
-            return;
-        }
-        self.minibuffer_history.push(input.to_string());
-    }
-
-    /// Browse minibuffer history: `delta < 0` recalls older entries, `delta > 0`
-    /// newer ones; stepping past the newest restores the in-progress input.
+    /// Browse minibuffer history (see [`MinibufferHistory::step`]).
     pub(super) fn mb_history(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.minibuffer.is_none() || self.minibuffer_history.is_empty() || self.mb_is_secret() {
+        if self.mb_is_secret() {
             return;
         }
-        let len = self.minibuffer_history.len();
-        let pos = self.minibuffer_history_pos;
-        let next = if delta < 0 {
-            // Older. Entering history stashes the current (fresh) input.
-            match pos {
-                None => {
-                    if let Some(mb) = self.minibuffer.as_ref() {
-                        self.minibuffer_stash = mb.input.clone();
-                    }
-                    Some(0)
-                }
-                Some(i) => Some((i + 1).min(len - 1)),
-            }
-        } else {
-            // Newer.
-            match pos {
-                None => return,
-                Some(0) => None,
-                Some(i) => Some(i - 1),
-            }
+        let Some(mb) = self.minibuffer.as_mut() else {
+            return;
         };
-        let text = match next {
-            Some(i) => self.minibuffer_history[len - 1 - i].clone(),
-            None => std::mem::take(&mut self.minibuffer_stash),
-        };
-        self.minibuffer_history_pos = next;
-        if let Some(mb) = self.minibuffer.as_mut() {
-            mb.cursor = text.len();
-            mb.input = text;
+        if let Some(text) = self.minibuffer_history.step(delta, &mb.input) {
+            mb.set_input(text);
+            cx.notify();
         }
-        cx.notify();
     }
 
     // --- Buffers / files --------------------------------------------------
@@ -175,9 +285,7 @@ impl Editor {
 
     pub(super) fn mb_insert(&mut self, text: &str, cx: &mut Context<Self>) {
         if let Some(mb) = self.minibuffer.as_mut() {
-            mb.input.insert_str(mb.cursor, text);
-            mb.cursor += text.len();
-            mb.message.clear();
+            mb.insert(text);
             cx.notify();
         }
         if self.is_isearch() {
@@ -220,13 +328,7 @@ impl Editor {
     }
 
     pub(super) fn mb_backspace(&mut self, cx: &mut Context<Self>) {
-        if let Some(mb) = self.minibuffer.as_mut()
-            && mb.cursor > 0
-        {
-            let prev = prev_grapheme(&mb.input, mb.cursor);
-            mb.input.replace_range(prev..mb.cursor, "");
-            mb.cursor = prev;
-            mb.message.clear();
+        if self.minibuffer.as_mut().is_some_and(Minibuffer::backspace) {
             cx.notify();
         }
         if self.is_isearch() {
@@ -264,20 +366,15 @@ impl Editor {
     }
 
     pub(super) fn mb_delete(&mut self, cx: &mut Context<Self>) {
-        if let Some(mb) = self.minibuffer.as_mut() {
-            let next = next_grapheme(&mb.input, mb.cursor);
-            if next > mb.cursor {
-                mb.input.replace_range(mb.cursor..next, "");
-                mb.message.clear();
-                cx.notify();
-            }
+        if self.minibuffer.as_mut().is_some_and(Minibuffer::delete) {
+            cx.notify();
         }
         self.mb_dynamic_requery();
     }
 
     pub(super) fn mb_move(&mut self, to: usize, cx: &mut Context<Self>) {
         if let Some(mb) = self.minibuffer.as_mut() {
-            mb.cursor = to.min(mb.input.len());
+            mb.move_to(to);
             cx.notify();
         }
     }
@@ -336,7 +433,7 @@ impl Editor {
 
     /// Completion candidates for the active minibuffer's purpose and input.
     pub(super) fn mb_candidates(&self, input: &str) -> Vec<String> {
-        match self.minibuffer.as_ref().map(|mb| mb.purpose.clone()) {
+        match self.minibuffer.as_ref().map(|mb| &mb.purpose) {
             Some(MinibufferPurpose::ExecuteCommand) => self
                 .script
                 .command_names()
@@ -350,25 +447,23 @@ impl Editor {
                 .filter(|n| n.starts_with(input))
                 .collect(),
             Some(MinibufferPurpose::FindFile) => file_completions(input),
-            Some(MinibufferPurpose::Confirm(_))
-            | Some(MinibufferPurpose::QuitSave { .. })
-            | Some(MinibufferPurpose::ConfirmGrammarInstall) => ["yes", "no"]
+            Some(
+                MinibufferPurpose::Confirm(_)
+                | MinibufferPurpose::QuitSave { .. }
+                | MinibufferPurpose::ConfirmGrammarInstall
+                | MinibufferPurpose::SchemeYesNo(_),
+            ) => ["yes", "no"]
                 .iter()
                 .map(|s| s.to_string())
                 .filter(|c| c.starts_with(input))
                 .collect(),
-            Some(MinibufferPurpose::CompleteAtPoint) => self
-                .completion_items
-                .iter()
-                .filter(|c| c.starts_with(input))
-                .cloned()
-                .collect(),
-            Some(MinibufferPurpose::SchemeCompleting(_)) => self
-                .completing_candidates
-                .iter()
-                .filter(|c| c.starts_with(input))
-                .cloned()
-                .collect(),
+            Some(MinibufferPurpose::CompleteAtPoint | MinibufferPurpose::SchemeCompleting(_)) => {
+                self.completing_candidates
+                    .iter()
+                    .filter(|c| c.starts_with(input))
+                    .cloned()
+                    .collect()
+            }
             // Grid values and column names: any part, ignoring case.
             Some(MinibufferPurpose::GridComplete(..) | MinibufferPurpose::GridColumn) => {
                 let needle = input.to_lowercase();
@@ -383,23 +478,17 @@ impl Editor {
                 self.completing_candidates.clone()
             }
             Some(MinibufferPurpose::SchemeReadFile(_)) => file_completions(input),
-            Some(MinibufferPurpose::SchemeYesNo(_)) => ["yes", "no"]
-                .iter()
-                .map(|s| s.to_string())
-                .filter(|c| c.starts_with(input))
-                .collect(),
+
             // Free-form reads (regex search, ex command, read-string) have no
             // completions.
             Some(
-                MinibufferPurpose::SearchForward
-                | MinibufferPurpose::SearchBackward
+                MinibufferPurpose::Search(_)
                 | MinibufferPurpose::OperatorSearch(_)
                 | MinibufferPurpose::Isearch
                 | MinibufferPurpose::ExCommand
                 | MinibufferPurpose::GridGoto
-                | MinibufferPurpose::GridSearch
+                | MinibufferPurpose::GridSearch(_)
                 | MinibufferPurpose::GridSaveAsXlsx
-                | MinibufferPurpose::GridSearchBackward
                 | MinibufferPurpose::GridFilter(_)
                 | MinibufferPurpose::EvalExpression
                 | MinibufferPurpose::SchemeCallback(_),
@@ -410,38 +499,22 @@ impl Editor {
 
     /// `TAB`: complete the input against the candidate set for this read.
     pub(super) fn mb_complete(&mut self, cx: &mut Context<Self>) {
-        let Some((input, purpose)) = self
-            .minibuffer
-            .as_ref()
-            .map(|mb| (mb.input.clone(), mb.purpose.clone()))
-        else {
+        let Some((input, eval)) = self.minibuffer.as_ref().map(|mb| {
+            let eval = matches!(mb.purpose, MinibufferPurpose::EvalExpression);
+            (mb.input.clone(), eval)
+        }) else {
             return;
         };
         // The eval read holds a whole expression, so TAB completes the trailing
         // Scheme symbol token (e.g. `(set-o` → `(set-option`) rather than the
         // whole string — a dedicated, splice-in-place path.
-        if matches!(purpose, MinibufferPurpose::EvalExpression) {
+        if eval {
             self.mb_complete_symbol(&input, cx);
             return;
         }
         let matches = self.mb_candidates(&input);
-
         let mb = self.minibuffer.as_mut().unwrap();
-        if matches.is_empty() {
-            mb.message = "[No match]".into();
-        } else if matches.len() == 1 {
-            mb.input = matches[0].clone();
-            mb.cursor = mb.input.len();
-            mb.message = "[Sole completion]".into();
-        } else {
-            let prefix = longest_common_prefix(&matches);
-            if prefix.len() > mb.input.len() {
-                mb.input = prefix;
-                mb.cursor = mb.input.len();
-            }
-            // Show the candidates so the user can see what to disambiguate.
-            mb.message = format_candidates(&matches);
-        }
+        mb.apply_completion("", input.len(), &matches);
         cx.notify();
     }
 
@@ -469,24 +542,8 @@ impl Editor {
                 .filter(|s| s.starts_with(token))
                 .collect()
         };
-        let head = input[..start].to_string();
-        let token_len = token.len();
         let mb = self.minibuffer.as_mut().unwrap();
-        if candidates.is_empty() {
-            mb.message = "[No match]".into();
-        } else if candidates.len() == 1 {
-            mb.input = format!("{head}{}", candidates[0]);
-            mb.cursor = mb.input.len();
-            mb.message = "[Sole completion]".into();
-        } else {
-            let lcp = longest_common_prefix(&candidates);
-            if lcp.len() > token_len {
-                mb.input = format!("{head}{lcp}");
-                mb.cursor = mb.input.len();
-            }
-            // Show bare symbol names so the user can see what to disambiguate.
-            mb.message = format_candidates(&candidates);
-        }
+        mb.apply_completion(&input[..start], token.len(), &candidates);
         cx.notify();
     }
 
@@ -517,7 +574,7 @@ impl Editor {
                 | MinibufferPurpose::SchemeYesNo(_)
                 | MinibufferPurpose::ConfirmGrammarInstall
         ) {
-            self.push_minibuffer_history(&input);
+            self.minibuffer_history.push(&input);
         }
         match mb.purpose {
             MinibufferPurpose::ExecuteCommand => {
@@ -541,7 +598,7 @@ impl Editor {
                 }
             }
             MinibufferPurpose::Confirm(action) => {
-                if matches!(input.as_str(), "yes" | "y") {
+                if is_yes(&input) {
                     self.perform(action, cx);
                 } else {
                     self.echo("Cancelled", cx);
@@ -567,21 +624,13 @@ impl Editor {
                     cx.notify();
                 }
             }
-            MinibufferPurpose::SearchForward => {
+            MinibufferPurpose::Search(dir) => {
                 if !input.is_empty() {
                     self.note_search(&input);
                     self.search_query = Some(input);
                 }
-                self.evil_search_forward = true;
-                self.do_search(true, cx);
-            }
-            MinibufferPurpose::SearchBackward => {
-                if !input.is_empty() {
-                    self.note_search(&input);
-                    self.search_query = Some(input);
-                }
-                self.evil_search_forward = false;
-                self.do_search(false, cx);
+                self.evil_search_forward = dir.is_forward();
+                self.do_search(dir.is_forward(), cx);
             }
             MinibufferPurpose::Isearch => {
                 // RET ends the search, leaving point at the current match. Remember
@@ -597,34 +646,29 @@ impl Editor {
                 // The read is over; the transient state goes with it.
                 self.isearch = None;
             }
-            MinibufferPurpose::OperatorSearch(forward) => {
-                self.evil_operator_search_submit(forward, &input, cx)
+            MinibufferPurpose::OperatorSearch(dir) => {
+                self.evil_operator_search_submit(dir.is_forward(), &input, cx)
             }
             MinibufferPurpose::ExCommand => self.run_ex_command(&input, cx),
             MinibufferPurpose::GridGoto => {
-                if !input.trim().is_empty() {
-                    self.grid_goto_address(input.trim(), cx);
+                if !input.is_empty() {
+                    self.grid_goto_address(&input, cx);
                 }
             }
             MinibufferPurpose::GridSaveAsXlsx => {
-                if !input.trim().is_empty() {
-                    self.grid_save_as_xlsx(input.trim(), cx);
+                if !input.is_empty() {
+                    self.grid_save_as_xlsx(&input, cx);
                 }
             }
-            MinibufferPurpose::GridSearch => {
+            MinibufferPurpose::GridSearch(dir) => {
                 if !input.is_empty() {
-                    self.grid_search(&input, true, cx);
-                }
-            }
-            MinibufferPurpose::GridSearchBackward => {
-                if !input.is_empty() {
-                    self.grid_search(&input, false, cx);
+                    self.grid_search(&input, dir.is_forward(), cx);
                 }
             }
             MinibufferPurpose::GridFilter(col) => self.grid_filter_submit(col, &input, cx),
             MinibufferPurpose::GridComplete(r, c) => self.grid_complete_submit(r, c, &input, cx),
             MinibufferPurpose::GridColumn => {
-                if !input.trim().is_empty() {
+                if !input.is_empty() {
                     self.grid_jump_submit(&input, cx);
                 }
             }
@@ -646,16 +690,12 @@ impl Editor {
                     .dispatch_action(&callback, Some(&expand_path(&input)));
             }
             MinibufferPurpose::SchemeYesNo(callback) => {
-                let answer = if matches!(input.as_str(), "yes" | "y") {
-                    "yes"
-                } else {
-                    "no"
-                };
+                let answer = if is_yes(&input) { "yes" } else { "no" };
                 self.publish_point();
                 self.script.dispatch_action(&callback, Some(answer));
             }
             MinibufferPurpose::ConfirmGrammarInstall => {
-                let approved = matches!(input.as_str(), "yes" | "y");
+                let approved = is_yes(&input);
                 self.resolve_grammar_install_confirm(approved, cx);
             }
         }

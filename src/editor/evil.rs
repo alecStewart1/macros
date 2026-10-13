@@ -608,11 +608,11 @@ impl Editor {
     // --- evil search (`/` `?` `n` `N`) and ex commands (`:`) --------------
 
     pub(super) fn evil_search_forward(&mut self, cx: &mut Context<Self>) {
-        self.open_minibuffer("/", MinibufferPurpose::SearchForward, "", cx);
+        self.open_minibuffer("/", MinibufferPurpose::Search(Direction::Forward), "", cx);
     }
 
     pub(super) fn evil_search_backward(&mut self, cx: &mut Context<Self>) {
-        self.open_minibuffer("?", MinibufferPurpose::SearchBackward, "", cx);
+        self.open_minibuffer("?", MinibufferPurpose::Search(Direction::Backward), "", cx);
     }
 
     /// `n` — repeat the last search in its original direction (vim semantics:

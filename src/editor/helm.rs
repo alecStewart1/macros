@@ -146,12 +146,15 @@ pub(super) fn helm_candidate_index(
 }
 
 /// Cycle a selection index by one step with wraparound over `count` items.
-/// `forward` advances, otherwise it steps back. Returns 0 if `count` is 0.
-pub(super) fn wrap_index(selected: usize, count: usize, forward: bool) -> usize {
+/// `Forward` advances, `Backward` steps back. Returns 0 if `count` is 0.
+pub(super) fn wrap_index(selected: usize, count: usize, dir: Direction) -> usize {
     if count == 0 {
         return 0;
     }
-    let step = if forward { 1 } else { count - 1 };
+    let step = match dir {
+        Direction::Forward => 1,
+        Direction::Backward => count - 1,
+    };
     (selected + step) % count
 }
 
@@ -514,17 +517,17 @@ impl Editor {
     }
 
     pub(super) fn helm_next(&mut self, cx: &mut Context<Self>) {
-        self.helm_cycle(true, cx);
+        self.helm_cycle(Direction::Forward, cx);
     }
 
     pub(super) fn helm_previous(&mut self, cx: &mut Context<Self>) {
-        self.helm_cycle(false, cx);
+        self.helm_cycle(Direction::Backward, cx);
     }
 
-    fn helm_cycle(&mut self, forward: bool, cx: &mut Context<Self>) {
+    fn helm_cycle(&mut self, dir: Direction, cx: &mut Context<Self>) {
         let count = self.helm_matches().len();
         if let Some(helm) = self.helm.as_mut() {
-            helm.selected = wrap_index(helm.selected, count, forward);
+            helm.selected = wrap_index(helm.selected, count, dir);
         }
         self.helm_update_preview();
         cx.notify();
@@ -574,7 +577,7 @@ impl Editor {
             } else {
                 helm.marked.push(candidate);
             }
-            helm.selected = wrap_index(helm.selected, count, true);
+            helm.selected = wrap_index(helm.selected, count, Direction::Forward);
         }
         cx.notify();
     }

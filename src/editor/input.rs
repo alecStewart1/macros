@@ -298,11 +298,11 @@ impl Editor {
             cx.stop_propagation();
         } else if self.is_isearch() && ks.modifiers.control && ks.key == "s" {
             // C-s within isearch: repeat forward (Emacs).
-            self.isearch_repeat(true, cx);
+            self.isearch_repeat(Direction::Forward, cx);
             cx.stop_propagation();
         } else if self.is_isearch() && ks.modifiers.control && ks.key == "r" {
             // C-r within isearch: repeat backward.
-            self.isearch_repeat(false, cx);
+            self.isearch_repeat(Direction::Backward, cx);
             cx.stop_propagation();
         } else if ks.modifiers.platform
             && ks.key == "v"

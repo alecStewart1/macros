@@ -154,7 +154,7 @@ impl Editor {
             file_buffers.push((self.session_abs(path), self.cursor_offset()));
         }
         self.script.set_session(SessionState {
-            minibuffer_history: self.minibuffer_history.clone(),
+            minibuffer_history: self.minibuffer_history.entries().to_vec(),
             kill_ring: self.kill_ring.clone(),
             search_ring: self.session.search_ring.clone(),
             command_history: self.session.command_history.clone(),
@@ -189,8 +189,7 @@ impl Editor {
         let items: Vec<String> = items.into_iter().filter(|s| !s.is_empty()).collect();
         match ring {
             "minibuffer" => {
-                self.minibuffer_history = items;
-                self.minibuffer_history_pos = None;
+                self.minibuffer_history.replace(items);
             }
             "kill" => {
                 // The kill ring's own cap still applies (oldest evicted).

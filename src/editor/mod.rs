@@ -69,6 +69,7 @@ use helm::{HelmAction, HelmSession, HelmSource, helm_sources_from_specs, wrap_in
 use input::UargState;
 use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
+use minibuffer::MinibufferHistory;
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
 use panes::{Child, SplitAxis, WindowLayout, union_bounds};
 use terminal::{ProcessHandle, keystroke_to_bytes};
@@ -138,6 +139,29 @@ enum PendingAction {
     OpenLargeGrid(String),
 }
 
+/// Which way a search or a selection cycle moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Direction {
+    Forward,
+    Backward,
+}
+
+impl Direction {
+    /// `Forward` when `forward`, else `Backward` — for callers that still hold
+    /// a `bool` direction.
+    pub(super) fn from_forward(forward: bool) -> Self {
+        if forward {
+            Self::Forward
+        } else {
+            Self::Backward
+        }
+    }
+
+    pub(super) fn is_forward(self) -> bool {
+        self == Self::Forward
+    }
+}
+
 /// What a minibuffer read is for, deciding completion candidates and what
 /// happens on submit.
 #[derive(Clone)]
@@ -157,13 +181,10 @@ enum MinibufferPurpose {
     QuitSave { relaunch: bool },
     /// LSP completion: replace the word at `completion_range` with the choice.
     CompleteAtPoint,
-    /// evil `/` — regex search forward.
-    SearchForward,
-    /// evil `?` — regex search backward.
-    SearchBackward,
-    /// evil `d/pat` / `d?pat`: the search motion of a pending operator
-    /// (true = forward).
-    OperatorSearch(bool),
+    /// evil `/` (forward) / `?` (backward) — regex search.
+    Search(Direction),
+    /// evil `d/pat` / `d?pat`: the search motion of a pending operator.
+    OperatorSearch(Direction),
     /// Emacs `C-s` / `C-r` — incremental search. The query is read in the
     /// minibuffer and matched live on every keystroke (see `isearch_*`).
     Isearch,
@@ -171,12 +192,11 @@ enum MinibufferPurpose {
     ExCommand,
     /// Grid `gn` / `C-x g`: jump to a cell address (`C7`, `B2:D9`).
     GridGoto,
-    /// Grid `/`: search cell contents (regex).
-    GridSearch,
+    /// Grid `/` (forward) / `C-r` / `?` (backward): search cell contents
+    /// (regex).
+    GridSearch(Direction),
     /// Saving a CSV grid that holds formulas: the `.xlsx` path to save as.
     GridSaveAsXlsx,
-    /// Grid `C-r` / `?`: search cell contents backward.
-    GridSearchBackward,
     /// Grid `grid-filter`: a filter for column `.0`.
     GridFilter(usize),
     /// Grid `grid-complete-cell`: the new value of cell `(row, col)`,
@@ -557,16 +577,11 @@ pub struct Editor {
     modal_count: Option<usize>,
     /// The active minibuffer prompt, if a read is in progress.
     minibuffer: Option<Minibuffer>,
-    /// Candidates for an active `completing-read` minibuffer.
+    /// Candidates for an active completing minibuffer (`completing-read`, the
+    /// grid's cell/column reads, LSP `CompleteAtPoint`).
     completing_candidates: Vec<String>,
-    /// Shared minibuffer input history (most recent last), recalled with Up/Down
-    /// or `M-p`/`M-n` while a read is open (Emacs minibuffer history).
-    minibuffer_history: Vec<String>,
-    /// Position while browsing history: `None` = editing a fresh input; `Some(i)`
-    /// = showing `history[len-1-i]`. `minibuffer_stash` holds the fresh input so
-    /// returning past the newest entry restores it.
-    minibuffer_history_pos: Option<usize>,
-    minibuffer_stash: String,
+    /// Shared minibuffer input history — see [`MinibufferHistory`].
+    minibuffer_history: MinibufferHistory,
     /// For a dynamic `completing-read` (candidates from a Scheme fn): the fn name
     /// and the latest query id, re-dispatched per keystroke. `None` otherwise.
     mb_dynamic: Option<(String, u64)>,
@@ -650,8 +665,8 @@ pub struct Editor {
     /// In-flight `$/progress` reports, `(language:token, title, text)` in
     /// begin order; the newest is shown in the `lsp-progress` mode-line slot.
     lsp_progress: Vec<(String, String, String)>,
-    /// Candidates + replacement range for the active completion minibuffer.
-    completion_items: Vec<String>,
+    /// Replacement range for the active completion minibuffer (its candidates
+    /// are in `completing_candidates`).
     completion_range: Option<Range<usize>>,
     /// The in-buffer completion popup (corfu-style), when active.
     completion_popup: Option<CompletionPopup>,
@@ -1480,9 +1495,7 @@ impl Editor {
             pending_keys: Vec::new(),
             minibuffer: None,
             completing_candidates: Vec::new(),
-            minibuffer_history: Vec::new(),
-            minibuffer_history_pos: None,
-            minibuffer_stash: String::new(),
+            minibuffer_history: MinibufferHistory::default(),
             mb_dynamic: None,
             uarg: UargState::default(),
             modal_count: None,
@@ -1519,7 +1532,6 @@ impl Editor {
             formatting_for_save: HashMap::new(),
             format_save_seq: 0,
             lsp_progress: Vec::new(),
-            completion_items: Vec::new(),
             completion_range: None,
             completion_popup: None,
             completion_auto_pending: false,
@@ -4514,7 +4526,7 @@ impl Editor {
             .to_string();
         if style == "minibuffer" {
             let prefix = self.active.buffer.slice_to_string(word_range.clone());
-            self.completion_items = items.iter().map(|i| i.label.clone()).collect();
+            self.completing_candidates = items.iter().map(|i| i.label.clone()).collect();
             self.completion_range = Some(word_range);
             self.open_minibuffer(
                 "Complete: ",
