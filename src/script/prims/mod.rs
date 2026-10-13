@@ -4,4 +4,5 @@
 
 use super::*;
 
+pub(super) mod help;
 pub(super) mod keymaps;
