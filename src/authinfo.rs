@@ -21,6 +21,63 @@ use std::process::{Command, Stdio};
 
 use crate::util::HideConsole;
 
+/// The (host, user, port) a lookup, save or forget is about.
+#[derive(Clone, Copy, Debug)]
+struct Query<'a> {
+    host: &'a str,
+    user: &'a str,
+    port: &'a str,
+}
+
+impl<'a> Query<'a> {
+    fn new(host: &'a str, user: &'a str, port: &'a str) -> Self {
+        Self { host, user, port }
+    }
+}
+
+/// Why a store operation failed. The `Display` text is what Scheme sees — it
+/// never contains the passphrase or a password.
+#[derive(Debug)]
+enum AuthError {
+    /// An empty or multi-line passphrase.
+    BadPassphrase,
+    Locked,
+    WrongPassphrase,
+    /// gpg failed; its last stderr line, minus the `gpg: ` prefix.
+    Gpg(String),
+    /// The gpg binary couldn't be started.
+    Spawn(PathBuf, std::io::Error),
+    Io(std::io::Error),
+    NotUtf8,
+}
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadPassphrase => f.write_str("the passphrase must be one non-empty line"),
+            Self::Locked => f.write_str("authinfo is locked"),
+            Self::WrongPassphrase => f.write_str("wrong passphrase"),
+            Self::Gpg(msg) => f.write_str(msg),
+            Self::Spawn(gpg, e) => write!(f, "can't run {}: {e}", gpg.display()),
+            Self::Io(e) => write!(f, "{e}"),
+            Self::NotUtf8 => f.write_str("authinfo file is not UTF-8"),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {}
+
+impl From<std::io::Error> for AuthError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// A fallible primitive's Scheme result: "" on success, else the message.
+fn status<T>(result: Result<T, AuthError>) -> String {
+    result.err().map(|e| e.to_string()).unwrap_or_default()
+}
+
 /// One authinfo line: a parsed entry, or anything else kept as-is.
 #[derive(Clone, Debug, PartialEq)]
 enum Line {
@@ -39,15 +96,15 @@ impl Line {
         }
     }
 
-    /// Does this entry serve (host, user, port)? An empty `user` / `port` in
-    /// the query matches anything; an entry with no `port` matches any port.
-    fn matches(&self, host: &str, user: &str, port: &str) -> bool {
+    /// Does this entry serve `q`? An empty `user` / `port` in the query
+    /// matches anything; an entry with no `port` matches any port.
+    fn matches(&self, q: Query) -> bool {
         let Line::Entry(_) = self else { return false };
-        if self.get("machine") != Some(host) || self.get("password").is_none() {
+        if self.get("machine") != Some(q.host) || self.get("password").is_none() {
             return false;
         }
-        let user_ok = user.is_empty() || self.get("login") == Some(user);
-        let port_ok = port.is_empty() || self.get("port").is_none_or(|p| p == port);
+        let user_ok = q.user.is_empty() || self.get("login") == Some(q.user);
+        let port_ok = q.port.is_empty() || self.get("port").is_none_or(|p| p == q.port);
         user_ok && port_ok
     }
 }
@@ -163,7 +220,7 @@ fn run_gpg(
     passphrase: &str,
     data: &[u8],
     gnupg_home: Option<&Path>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, AuthError> {
     let mut cmd = Command::new(gpg);
     cmd.args([
         "--batch",
@@ -185,7 +242,7 @@ fn run_gpg(
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("can't run {}: {e}", gpg.display()))?;
+        .map_err(|e| AuthError::Spawn(gpg.to_path_buf(), e))?;
     let mut input = Vec::with_capacity(passphrase.len() + 1 + data.len());
     input.extend_from_slice(passphrase.as_bytes());
     input.push(b'\n');
@@ -196,7 +253,7 @@ fn run_gpg(
             let _ = stdin.write_all(&input);
         })
     });
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    let output = child.wait_with_output()?;
     if let Some(writer) = writer {
         let _ = writer.join();
     }
@@ -206,14 +263,16 @@ fn run_gpg(
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(
         if stderr.contains("Bad session key") || stderr.contains("decryption failed") {
-            "wrong passphrase".to_string()
+            AuthError::WrongPassphrase
         } else {
-            stderr
-                .lines()
-                .rfind(|l| !l.trim().is_empty())
-                .unwrap_or("gpg failed")
-                .trim_start_matches("gpg: ")
-                .to_string()
+            AuthError::Gpg(
+                stderr
+                    .lines()
+                    .rfind(|l| !l.trim().is_empty())
+                    .unwrap_or("gpg failed")
+                    .trim_start_matches("gpg: ")
+                    .to_string(),
+            )
         },
     )
 }
@@ -223,10 +282,10 @@ fn decrypt(
     path: &Path,
     passphrase: &str,
     home: Option<&Path>,
-) -> Result<String, String> {
+) -> Result<String, AuthError> {
     let path = path.to_string_lossy();
     let bytes = run_gpg(gpg, &["--decrypt", &path], passphrase, &[], home)?;
-    String::from_utf8(bytes).map_err(|_| "authinfo file is not UTF-8".to_string())
+    String::from_utf8(bytes).map_err(|_| AuthError::NotUtf8)
 }
 
 /// Encrypt `plaintext` to `path` atomically: gpg writes a sibling temp file
@@ -237,9 +296,9 @@ fn encrypt(
     passphrase: &str,
     plaintext: &str,
     home: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<(), AuthError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("gpg.tmp");
     let tmp_str = tmp.to_string_lossy();
@@ -260,10 +319,9 @@ fn encrypt(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         }
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        Ok(std::fs::rename(&tmp, path)?)
     });
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -281,7 +339,7 @@ struct Store {
 }
 
 impl Store {
-    fn write(&self) -> Result<(), String> {
+    fn write(&self) -> Result<(), AuthError> {
         encrypt(
             &self.gpg,
             &self.path,
@@ -302,25 +360,25 @@ thread_local! {
     static SESSION: RefCell<Vec<Line>> = const { RefCell::new(Vec::new()) };
 }
 
-fn new_entry(host: &str, user: &str, port: &str, password: &str) -> Line {
-    let mut fields = vec![("machine".to_string(), host.to_string())];
-    if !user.is_empty() {
-        fields.push(("login".into(), user.into()));
+fn new_entry(q: Query, password: &str) -> Line {
+    let mut fields = vec![("machine".to_string(), q.host.to_string())];
+    if !q.user.is_empty() {
+        fields.push(("login".into(), q.user.into()));
     }
-    if !port.is_empty() {
-        fields.push(("port".into(), port.into()));
+    if !q.port.is_empty() {
+        fields.push(("port".into(), q.port.into()));
     }
     fields.push(("password".into(), password.into()));
     Line::Entry(fields)
 }
 
 /// Replace the exact (host, user, port) entry in place, else append.
-fn upsert(lines: &mut Vec<Line>, host: &str, user: &str, port: &str, password: &str) {
-    let entry = new_entry(host, user, port, password);
+fn upsert(lines: &mut Vec<Line>, q: Query, password: &str) {
+    let entry = new_entry(q, password);
     let exact = lines.iter().position(|l| {
-        l.get("machine") == Some(host)
-            && l.get("login").unwrap_or("") == user
-            && l.get("port").unwrap_or("") == port
+        l.get("machine") == Some(q.host)
+            && l.get("login").unwrap_or("") == q.user
+            && l.get("port").unwrap_or("") == q.port
     });
     match exact {
         Some(i) => lines[i] = entry,
@@ -328,12 +386,20 @@ fn upsert(lines: &mut Vec<Line>, host: &str, user: &str, port: &str, password: &
     }
 }
 
-fn find_password(lines: &[Line], host: &str, user: &str, port: &str) -> Option<String> {
+fn find_password(lines: &[Line], q: Query) -> Option<String> {
     lines
         .iter()
-        .find(|l| l.matches(host, user, port))
+        .find(|l| l.matches(q))
         .and_then(|l| l.get("password"))
         .map(str::to_string)
+}
+
+/// Whether `passphrase` is usable: one non-empty line.
+fn check_passphrase(passphrase: &str) -> Result<(), AuthError> {
+    if passphrase.is_empty() || passphrase.contains('\n') {
+        return Err(AuthError::BadPassphrase);
+    }
+    Ok(())
 }
 
 /// Unlock `path` with `passphrase`. A missing file starts an empty store
@@ -343,10 +409,8 @@ fn unlock(
     gpg_command: &str,
     passphrase: &str,
     gnupg_home: Option<PathBuf>,
-) -> Result<(), String> {
-    if passphrase.is_empty() || passphrase.contains('\n') {
-        return Err("the passphrase must be one non-empty line".into());
-    }
+) -> Result<(), AuthError> {
+    check_passphrase(passphrase)?;
     let path = PathBuf::from(crate::util::expand_tilde(path));
     let gpg = resolve_gpg(gpg_command);
     let lines = if path.exists() {
@@ -366,42 +430,39 @@ fn unlock(
     Ok(())
 }
 
-/// The password for (host, user, port): the unlocked file first, then this
-/// session's unsaved passwords. #f when locked and never typed.
-pub(crate) fn lookup(host: &str, user: &str, port: &str) -> Option<String> {
+/// The password for `q`: the unlocked file first, then this session's unsaved
+/// passwords. #f when locked and never typed.
+fn lookup(q: Query) -> Option<String> {
     STORE
-        .with_borrow(|s| {
-            s.as_ref()
-                .and_then(|store| find_password(&store.lines, host, user, port))
-        })
-        .or_else(|| SESSION.with_borrow(|lines| find_password(lines, host, user, port)))
+        .with_borrow(|s| s.as_ref().and_then(|store| find_password(&store.lines, q)))
+        .or_else(|| SESSION.with_borrow(|lines| find_password(lines, q)))
 }
 
-/// Add or replace the entry for (host, user, port) and re-encrypt the file.
-/// On a failed write the in-memory store is left as it was.
-fn save(host: &str, user: &str, port: &str, password: &str) -> Result<(), String> {
+/// Add or replace the entry for `q` and re-encrypt the file. On a failed
+/// write the in-memory store is left as it was.
+fn save(q: Query, password: &str) -> Result<(), AuthError> {
     STORE.with_borrow_mut(|s| {
-        let store = s.as_mut().ok_or("authinfo is locked")?;
+        let store = s.as_mut().ok_or(AuthError::Locked)?;
         let before = store.lines.clone();
-        upsert(&mut store.lines, host, user, port, password);
+        upsert(&mut store.lines, q, password);
         store.write().inspect_err(|_| store.lines = before)
     })?;
-    SESSION.with_borrow_mut(|lines| lines.retain(|l| !l.matches(host, user, port)));
+    SESSION.with_borrow_mut(|lines| lines.retain(|l| !l.matches(q)));
     Ok(())
 }
 
 /// Remember an unsaved password for the rest of the session (memory only).
-fn remember(host: &str, user: &str, port: &str, password: &str) {
-    SESSION.with_borrow_mut(|lines| upsert(lines, host, user, port, password));
+fn remember(q: Query, password: &str) {
+    SESSION.with_borrow_mut(|lines| upsert(lines, q, password));
 }
 
 /// Delete matching entries — session memory, the unlocked store, and (if the
 /// store had one) the file: the service rejected the password, so it's gone
 /// and the next `secret-get` prompts. → Ok(true) if anything was dropped.
-fn forget(host: &str, user: &str, port: &str) -> Result<bool, String> {
+fn forget(q: Query) -> Result<bool, AuthError> {
     let from_session = SESSION.with_borrow_mut(|lines| {
         let before = lines.len();
-        lines.retain(|l| !l.matches(host, user, port));
+        lines.retain(|l| !l.matches(q));
         lines.len() != before
     });
     let from_store = STORE.with_borrow_mut(|s| {
@@ -409,7 +470,7 @@ fn forget(host: &str, user: &str, port: &str) -> Result<bool, String> {
             return Ok(false);
         };
         let before = store.lines.len();
-        store.lines.retain(|l| !l.matches(host, user, port));
+        store.lines.retain(|l| !l.matches(q));
         if store.lines.len() == before {
             return Ok(false);
         }
@@ -423,12 +484,10 @@ fn lock() {
     SESSION.with_borrow_mut(Vec::clear);
 }
 
-fn change_passphrase(new: &str) -> Result<(), String> {
-    if new.is_empty() || new.contains('\n') {
-        return Err("the passphrase must be one non-empty line".into());
-    }
+fn change_passphrase(new: &str) -> Result<(), AuthError> {
+    check_passphrase(new)?;
     STORE.with_borrow_mut(|s| {
-        let store = s.as_mut().ok_or("authinfo is locked")?;
+        let store = s.as_mut().ok_or(AuthError::Locked)?;
         let old = std::mem::replace(&mut store.passphrase, new.to_string());
         store.write().inspect_err(|_| store.passphrase = old)
     })
@@ -503,7 +562,7 @@ impl SecretRef {
 
     /// The secret, if the store (or this session) has it right now.
     pub fn resolve(&self) -> Option<String> {
-        lookup(&self.host, &self.user, &self.port)
+        lookup(Query::new(&self.host, &self.user, &self.port))
     }
 }
 
@@ -516,9 +575,7 @@ pub(crate) fn register(reg: &mut crate::script::Registrar) {
     reg.register_fn(
         "authinfo-unlock",
         |path: String, gpg: String, passphrase: String| -> String {
-            unlock(&path, &gpg, &passphrase, primitive_gnupg_home())
-                .err()
-                .unwrap_or_default()
+            status(unlock(&path, &gpg, &passphrase, primitive_gnupg_home()))
         },
     );
     // `(authinfo-secret-ref host user port)` → an opaque reference to that
@@ -540,15 +597,13 @@ pub(crate) fn register(reg: &mut crate::script::Registrar) {
     reg.register_fn(
         "authinfo-lookup",
         |host: String, user: String, port: String| -> Option<String> {
-            lookup(&host, &user, &port)
+            lookup(Query::new(&host, &user, &port))
         },
     );
     reg.register_fn(
         "authinfo-save",
         |host: String, user: String, port: String, password: String| -> String {
-            save(&host, &user, &port, &password)
-                .err()
-                .unwrap_or_default()
+            status(save(Query::new(&host, &user, &port), &password))
         },
     );
     // `(authinfo-remember host user port password)` — keep an unsaved password
@@ -556,18 +611,18 @@ pub(crate) fn register(reg: &mut crate::script::Registrar) {
     reg.register_fn(
         "authinfo-remember",
         |host: String, user: String, port: String, password: String| {
-            remember(&host, &user, &port, &password)
+            remember(Query::new(&host, &user, &port), &password)
         },
     );
     // `(authinfo-forget host user port)` → "" | error; deletes from the file too.
     reg.register_fn(
         "authinfo-forget",
         |host: String, user: String, port: String| -> String {
-            forget(&host, &user, &port).err().unwrap_or_default()
+            status(forget(Query::new(&host, &user, &port)))
         },
     );
     reg.register_fn("authinfo-change-passphrase", |new: String| -> String {
-        change_passphrase(&new).err().unwrap_or_default()
+        status(change_passphrase(&new))
     });
 }
 
@@ -600,7 +655,7 @@ mod tests {
         let find = |u: &str, p: &str| {
             lines
                 .iter()
-                .find(|l| l.matches("h", u, p))
+                .find(|l| l.matches(Query::new("h", u, p)))
                 .and_then(|l| l.get("password"))
         };
         assert_eq!(find("a", "1"), Some("one"));
@@ -611,7 +666,7 @@ mod tests {
             "portless entry matches any port"
         );
         assert_eq!(find("", ""), Some("one"), "empty user/port match the first");
-        assert!(!lines[0].matches("other", "a", "1"));
+        assert!(!lines[0].matches(Query::new("other", "a", "1")));
     }
 
     /// Full cycle through real gpg: create, save, re-unlock, wrong passphrase,
@@ -636,39 +691,37 @@ mod tests {
         let file = dir.join("authinfo.gpg");
         let path = file.to_string_lossy().to_string();
         let h = || Some(home.clone());
+        let q = Query::new;
 
         unlock(&path, "", "master", h()).unwrap();
         assert!(!file.exists(), "nothing written before the first save");
-        assert_eq!(lookup("db", "kyle", ""), None);
-        save("db", "kyle", "5432", "s3cret pw").unwrap();
-        save("mail", "", "", "m").unwrap();
-        save("db", "kyle", "5432", "newer").unwrap();
+        assert_eq!(lookup(q("db", "kyle", "")), None);
+        save(q("db", "kyle", "5432"), "s3cret pw").unwrap();
+        save(q("mail", "", ""), "m").unwrap();
+        save(q("db", "kyle", "5432"), "newer").unwrap();
 
         STORE.with_borrow_mut(|s| *s = None);
-        assert_eq!(
-            unlock(&path, "", "nope", h()),
-            Err("wrong passphrase".into())
-        );
+        assert_eq!(status(unlock(&path, "", "nope", h())), "wrong passphrase");
         unlock(&path, "", "master", h()).unwrap();
-        assert_eq!(lookup("db", "kyle", "5432").as_deref(), Some("newer"));
-        assert_eq!(lookup("mail", "", "").as_deref(), Some("m"));
+        assert_eq!(lookup(q("db", "kyle", "5432")).as_deref(), Some("newer"));
+        assert_eq!(lookup(q("mail", "", "")).as_deref(), Some("m"));
 
-        assert_eq!(forget("db", "kyle", "5432"), Ok(true));
-        assert_eq!(lookup("db", "kyle", "5432"), None);
+        assert!(forget(q("db", "kyle", "5432")).unwrap());
+        assert_eq!(lookup(q("db", "kyle", "5432")), None);
         STORE.with_borrow_mut(|s| *s = None);
         unlock(&path, "", "master", h()).unwrap();
         assert_eq!(
-            lookup("db", "kyle", "5432"),
+            lookup(q("db", "kyle", "5432")),
             None,
             "deleted from the file too"
         );
-        assert_eq!(forget("db", "kyle", "5432"), Ok(false));
+        assert!(!forget(q("db", "kyle", "5432")).unwrap());
 
         change_passphrase("master2").unwrap();
         STORE.with_borrow_mut(|s| *s = None);
         assert!(unlock(&path, "", "master", h()).is_err());
         unlock(&path, "", "master2", h()).unwrap();
-        assert_eq!(lookup("mail", "", "").as_deref(), Some("m"));
+        assert_eq!(lookup(q("mail", "", "")).as_deref(), Some("m"));
 
         STORE.with_borrow_mut(|s| *s = None);
         let _ = Command::new("gpgconf")
