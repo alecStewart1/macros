@@ -254,8 +254,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::spell::register(&mut reg, shared);
     prims::modal::register(&mut reg, shared);
     prims::tree_sitter::register(&mut reg, shared);
-    reg.section(Section::Lsp);
-    register_binary(&mut reg, queue, "set-lsp", EditorCommand::SetLsp);
+    prims::lsp::register(&mut reg, shared);
     reg.section(Section::Options);
     {
         // `set-option` accepts a number, boolean, or string; the value is coerced
@@ -349,49 +348,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     );
     reg.section(Section::Buffers);
     register_unary(&mut reg, queue, "open-file", EditorCommand::OpenFile);
-    reg.section(Section::Lsp);
-    register_unary(&mut reg, queue, "lsp-rename-to", EditorCommand::LspRename);
-    register_unary(
-        &mut reg,
-        queue,
-        "lsp-workspace-symbol-go",
-        EditorCommand::LspWorkspaceSymbol,
-    );
-    {
-        let q = queue.clone();
-        // (lsp-request method kind params callback) — the generic bridge.
-        reg.register_fn(
-            "lsp-request",
-            move |method: String, kind: String, params: String, callback: Callback| {
-                let callback = callback.0;
-                q.push(EditorCommand::LspRequest {
-                    method,
-                    kind,
-                    params,
-                    callback,
-                });
-            },
-        );
-    }
-    register_ternary(&mut reg, queue, "lsp-goto", |uri, line, character| {
-        EditorCommand::LspGoto {
-            uri,
-            line,
-            character,
-        }
-    });
-    register_unary(
-        &mut reg,
-        queue,
-        "lsp-apply-workspace-edit",
-        EditorCommand::LspApplyWorkspaceEdit,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "lsp-apply-text-edits",
-        EditorCommand::LspApplyTextEdits,
-    );
     reg.section(Section::Buffers);
     register_unary(
         &mut reg,
@@ -751,32 +707,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         queue,
         "transient-quit",
         EditorCommand::TransientQuit,
-    );
-    reg.section(Section::Lsp);
-    register_binary(
-        &mut reg,
-        queue,
-        "set-lsp-format-on-save",
-        EditorCommand::SetLspFormatOnSave,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "lsp-semantic-tokens",
-        EditorCommand::LspSemanticTokens,
-    );
-    reg.section(Section::Lsp);
-    register_unary(
-        &mut reg,
-        queue,
-        "lsp-semantic-tokens-range",
-        EditorCommand::LspSemanticTokensRange,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "lsp-semantic-tokens-delta",
-        EditorCommand::LspSemanticTokensDelta,
     );
     reg.section(Section::SpecialBuffers);
     // `(set-special-mode "occur-mode")` makes the active buffer a read-only
@@ -2258,10 +2188,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     }
     // `(lsp-server-ready?)` → #t if the active buffer has a ready LSP server.
     register_snapshot_read(&mut reg, snapshot, "lsp-server-ready?", |s| s.lsp_ready);
-    reg.section(Section::Lsp);
-    // `(diagnostics)` → the active buffer's LSP diagnostics, each a record
-    // "line\tcol\tseverity\tmessage" (line/col 0-based). The library splits it.
-    register_snapshot_read(&mut reg, snapshot, "diagnostics", |s| s.diagnostics.clone());
     reg.section(Section::BufferReads);
     {
         // `(line-bounds)` → `(start end)` byte offsets of the line at point
