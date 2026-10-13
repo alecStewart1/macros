@@ -115,6 +115,69 @@ pub(crate) fn steel_string(value: &SteelVal) -> Option<String> {
     }
 }
 
+// --- grid argument converters (the `grid-*` primitives) ---------------------
+
+/// A value Scheme writes into a cell, as the cell's text: a string as is,
+/// a number in its shortest form, a boolean as `TRUE`/`FALSE`; anything
+/// else can't go in a cell.
+pub(crate) fn steel_cell_text(v: &SteelVal) -> Option<String> {
+    match v {
+        SteelVal::StringV(s) => Some(s.to_string()),
+        SteelVal::IntV(i) => Some(i.to_string()),
+        SteelVal::NumV(n) if n.is_finite() => Some(n.to_string()),
+        SteelVal::BoolV(b) => Some((if *b { "TRUE" } else { "FALSE" }).to_string()),
+        _ => None,
+    }
+}
+
+/// A rule/filter value from Scheme as text: numbers print plainly, strings
+/// and symbols as themselves.
+pub(crate) fn steel_value_text(v: &SteelVal) -> String {
+    match v {
+        SteelVal::IntV(i) => i.to_string(),
+        SteelVal::NumV(n) => n.to_string(),
+        other => steel_name(other),
+    }
+}
+
+/// A 0-based row/column index from Scheme (a non-negative integer).
+pub(crate) fn steel_index(v: &SteelVal) -> Option<usize> {
+    match v {
+        SteelVal::IntV(i) if *i >= 0 => Some(*i as usize),
+        _ => None,
+    }
+}
+
+/// A column from Scheme: a 0-based index or a column name (`"C"`, `'AA`).
+/// `#f` (and anything else) is `None` — "every column" where that's allowed.
+pub(crate) fn steel_col(v: &SteelVal) -> Option<usize> {
+    match v {
+        SteelVal::StringV(s) | SteelVal::SymbolV(s) => crate::grid::view::parse_col_name(s),
+        other => steel_index(other),
+    }
+}
+
+/// A palette color argument: `#f`, `""` or `none` is no color; an unknown
+/// name comes back as the second value, to be reported.
+pub(crate) fn steel_palette_color(v: &SteelVal) -> (Option<u8>, Option<String>) {
+    if matches!(v, SteelVal::BoolV(false)) {
+        return (None, None);
+    }
+    let name = steel_name(v);
+    if name.is_empty() || name.eq_ignore_ascii_case("none") {
+        return (None, None);
+    }
+    match crate::grid::cellfmt::color_index(&name) {
+        Some(i) => (Some(i), None),
+        None => (None, Some(name)),
+    }
+}
+
+/// A face, operator, or function name given as a string or a symbol.
+pub(crate) fn steel_name(v: &SteelVal) -> String {
+    steel_string(v).unwrap_or_default()
+}
+
 /// Convert a value passed to `(set-option …)` into an untyped [`OptionValue`].
 /// Numbers, booleans, strings, and symbols map to the matching variant; lists
 /// and hashes are preserved structurally (recursing into their contents) so
