@@ -3396,7 +3396,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "buffer-regex-matches",
             move |pattern: String, start: usize, end: usize| -> Vec<usize> {
-                let Ok(re) = Regex::new(&pattern) else {
+                let Ok(re) = regex(&pattern) else {
                     return Vec::new();
                 };
                 let rope = shared.load().text.clone();
@@ -3419,7 +3419,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "regex-search-pos",
             move |pattern: String, from: usize, forward: bool| -> isize {
-                let Ok(re) = Regex::new(&pattern) else {
+                let Ok(re) = regex(&pattern) else {
                     return -1;
                 };
                 let text = shared.load().text.to_string();
@@ -3467,7 +3467,7 @@ pub(crate) fn build_engine(
     // --- Regexp (over strings, and over the buffer from point) ------------
     reg.section("regexp");
     reg.register_fn("string-match", move |pattern: String, s: String| -> isize {
-        Regex::new(&pattern)
+        regex(&pattern)
             .ok()
             .and_then(|re| re.find(&s).map(|m| m.start() as isize))
             .unwrap_or(-1)
@@ -3476,7 +3476,7 @@ pub(crate) fn build_engine(
         "regexp-captures",
         move |pattern: String, s: String| -> Vec<String> {
             // Group 0 = whole match, then each capture group (absent group = "").
-            match Regex::new(&pattern).ok().and_then(|re| re.captures(&s)) {
+            match regex(&pattern).ok().and_then(|re| re.captures(&s)) {
                 Some(caps) => caps
                     .iter()
                     .map(|g| g.map(|m| m.as_str().to_string()).unwrap_or_default())
@@ -3489,7 +3489,7 @@ pub(crate) fn build_engine(
         "replace-regexp-in-string",
         move |pattern: String, replacement: String, s: String| -> String {
             // `$1` / `${name}` expansion (regex-crate syntax).
-            match Regex::new(&pattern) {
+            match regex(&pattern) {
                 Ok(re) => re.replace_all(&s, replacement.as_str()).into_owned(),
                 Err(_) => s,
             }
@@ -3508,7 +3508,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "buffer-search-all",
             move |pattern: String, start: usize, end: usize| -> SteelVal {
-                let re = match regex::RegexBuilder::new(&pattern).multi_line(true).build() {
+                let re = match ml_regex(&pattern) {
                     Ok(re) => re,
                     Err(err) => return SteelVal::StringV(err.to_string().into()),
                 };
@@ -3524,10 +3524,7 @@ pub(crate) fn build_engine(
     reg.register_fn(
         "regexp-search-lines",
         |pattern: String, StringList(lines): StringList| -> SteelVal {
-            let re = regex::RegexBuilder::new(&pattern)
-                .multi_line(true)
-                .build()
-                .ok();
+            let re = ml_regex(&pattern).ok();
             let per_line: Vec<SteelVal> = lines
                 .iter()
                 .map(|line| {
@@ -3561,7 +3558,7 @@ pub(crate) fn build_engine(
                 (snap.text.clone(), snap.point)
             };
             let from = snap_byte(&rope, p);
-            match re_search_forward_in(&rope.to_string(), from, &pattern) {
+            match re_search_forward_rope(&rope, from, &pattern) {
                 Some((start, end)) => vec![start, end],
                 None => Vec::new(),
             }
@@ -3587,14 +3584,75 @@ pub(crate) fn re_search_forward_in(
     from: usize,
     pattern: &str,
 ) -> Option<(usize, usize)> {
-    let re = regex::RegexBuilder::new(pattern)
-        .multi_line(true)
-        .build()
-        .ok()?;
+    let re = ml_regex(pattern).ok()?;
     if from > text.len() || !text.is_char_boundary(from) {
         return None;
     }
     re.find_at(text, from).map(|m| (m.start(), m.end()))
+}
+
+/// [`re_search_forward_in`] over a rope, without materializing the text
+/// before point: only `[c, len)` is copied, `c` being the start of the
+/// codepoint just before `from`. That is exactly as much context as the whole
+/// text would give — every regex-crate look-around (`^`, `$`, `\b`, `\<`, …)
+/// inspects at most one codepoint on either side — and since `from` stays
+/// past the slice start, `\A` still can't match there (the whole-text search
+/// only allows it at byte 0). `from` must be a char boundary.
+pub(crate) fn re_search_forward_rope(
+    rope: &Rope,
+    from: usize,
+    pattern: &str,
+) -> Option<(usize, usize)> {
+    let base = match rope.byte_to_char(from) {
+        0 => 0,
+        c => rope.char_to_byte(c - 1),
+    };
+    let text = rope.byte_slice(base..).to_string();
+    re_search_forward_in(&text, from - base, pattern).map(|(s, e)| (base + s, base + e))
+}
+
+/// How many compiled regexes [`regex`] / [`ml_regex`] keep per thread.
+const REGEX_CACHE_SIZE: usize = 8;
+
+/// `pattern` compiled (with `^`/`$` as line anchors when `multi_line`),
+/// reusing a recent compile: Scheme calls the regex primitives with the same
+/// few patterns over and over (a search loop, a highlighter per keystroke), and
+/// compiling dominates a match on short text. A tiny most-recent-first list
+/// per thread; errors aren't cached.
+fn cached_regex(pattern: &str, multi_line: bool) -> Result<Regex, regex::Error> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<(String, bool, Regex)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(i) = cache
+            .iter()
+            .position(|(p, ml, _)| *ml == multi_line && p == pattern)
+        {
+            let hit = cache.remove(i);
+            let re = hit.2.clone();
+            cache.insert(0, hit);
+            return Ok(re);
+        }
+        let re = regex::RegexBuilder::new(pattern)
+            .multi_line(multi_line)
+            .build()?;
+        cache.truncate(REGEX_CACHE_SIZE - 1);
+        cache.insert(0, (pattern.to_string(), multi_line, re.clone()));
+        Ok(re)
+    })
+}
+
+/// `pattern` compiled with default flags (see [`cached_regex`]).
+pub(crate) fn regex(pattern: &str) -> Result<Regex, regex::Error> {
+    cached_regex(pattern, false)
+}
+
+/// `pattern` compiled with `^`/`$` matching at line boundaries, as in Emacs
+/// (see [`cached_regex`]).
+pub(crate) fn ml_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    cached_regex(pattern, true)
 }
 
 /// Registers Steel functions into the engine while recording every registered
@@ -4431,5 +4489,56 @@ fn textplot_op(canvas: &mut crate::textplot::Canvas, op: &SteelVal) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod regex_tests {
+    use super::*;
+
+    /// The rope search sees the same context as the whole-text one: line and
+    /// word anchors right at point, `\A` only at byte 0, multibyte text.
+    #[test]
+    fn rope_search_matches_whole_text_search() {
+        let text = "foo bar\nbaz qux\n\u{e9}t\u{e9} foo\n";
+        let rope = Rope::from_str(text);
+        let patterns = [
+            "^b",
+            r"\bar",
+            r"\Bar",
+            "foo",
+            r"\Afoo",
+            r"\A",
+            "$",
+            r"(?m)^\w+$",
+            "t\u{e9}",
+            r"\b",
+            "x*",
+            "^",
+            r"\z",
+            "(",
+        ];
+        for pattern in patterns {
+            for from in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+                assert_eq!(
+                    re_search_forward_rope(&rope, from, pattern),
+                    re_search_forward_in(text, from, pattern),
+                    "{pattern:?} from {from}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn regex_cache_keys_on_flags() {
+        let ml = ml_regex("^b").unwrap();
+        let plain = regex("^b").unwrap();
+        assert!(ml.is_match("a\nb"));
+        assert!(!plain.is_match("a\nb"));
+        assert!(regex("(").is_err());
+        for i in 0..20 {
+            assert!(regex(&format!("a{{{i}}}")).is_ok());
+        }
+        assert!(ml_regex("^b").unwrap().is_match("a\nb"));
     }
 }
