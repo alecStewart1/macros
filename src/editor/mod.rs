@@ -5692,16 +5692,6 @@ impl EntityInputHandler for Editor {
     }
 }
 
-/// Byte offset within `line` of character column `col`, clamped to the line's
-/// end (so a column past a short line lands at its end). Used by block-wise
-/// Visual to map a rectangle's columns to per-line byte ranges.
-fn char_col_byte(line: &str, col: usize) -> usize {
-    line.char_indices()
-        .nth(col)
-        .map(|(b, _)| b)
-        .unwrap_or(line.len())
-}
-
 /// Clamp a byte range to `[0, len]` and keep it well-ordered.
 fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
     let start = range.start.min(len);
@@ -5712,10 +5702,9 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
-        file_completions, is_repeatable, language_for_path, last_sexp, line_span, prefix_arg_value,
-        push_capped, scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at,
-        top_level_form_at,
+        Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, file_completions,
+        is_repeatable, language_for_path, last_sexp, line_span, prefix_arg_value, push_capped,
+        scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at, top_level_form_at,
     };
 
     #[test]
@@ -5740,21 +5729,6 @@ mod tests {
         assert_eq!(apply_trailing_rule(4, 2, step, "->", "", ""), 4);
     }
 
-    #[test]
-    fn char_col_byte_maps_columns_and_clamps() {
-        // ASCII: column == byte offset.
-        assert_eq!(char_col_byte("hello", 0), 0);
-        assert_eq!(char_col_byte("hello", 3), 3);
-        // Past the end clamps to the line length (a block column off a short row).
-        assert_eq!(char_col_byte("hi", 5), 2);
-        assert_eq!(char_col_byte("", 0), 0);
-        // Multi-byte chars: column 2 is the 'é' (2 bytes) + 1 ascii = byte 3.
-        let s = "aéb"; // a=1, é=2, b=1 bytes
-        assert_eq!(char_col_byte(s, 0), 0);
-        assert_eq!(char_col_byte(s, 1), 1); // start of 'é'
-        assert_eq!(char_col_byte(s, 2), 3); // start of 'b'
-        assert_eq!(char_col_byte(s, 3), 4); // end
-    }
     use std::collections::HashMap;
 
     #[test]

@@ -5,6 +5,22 @@ use regex::Regex;
 use super::ex::{ExCmd, parse_ex_line};
 use super::*;
 
+/// A block-wise Visual rectangle: rows `top..=bottom` (0-based lines) and
+/// character columns `left..=right` (inclusive, vim semantics).
+#[derive(Clone, Copy, Debug)]
+struct BlockRect {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+}
+
+impl BlockRect {
+    fn rows(self) -> std::ops::RangeInclusive<usize> {
+        self.top..=self.bottom
+    }
+}
+
 impl Editor {
     /// True in Normal/Visual, where plain keys are commands (not self-insert).
     pub(super) fn evil_intercepts(&self) -> bool {
@@ -205,18 +221,15 @@ impl Editor {
         let last_byte = region.end.saturating_sub(1).max(region.start);
         let last = self.active.buffer.line_index_at_byte(last_byte);
 
-        let target = |ed: &Self, line: usize| -> usize {
-            let lr = ed.active.buffer.line_range(line);
-            if at_eol { lr.end } else { lr.start }
-        };
         // Primary cursor on the first line; a secondary cursor on each of the
-        // rest. `collapse_to` clears the selection so the insert path replicates.
-        let primary = target(self, first);
-        self.collapse_to(primary);
-        for line in (first + 1)..=last {
-            let pos = target(self, line);
-            self.mc_add_cursor_at(pos);
-        }
+        // rest.
+        let positions: Vec<usize> = (first..=last)
+            .map(|line| {
+                let lr = self.active.buffer.line_range(line);
+                if at_eol { lr.end } else { lr.start }
+            })
+            .collect();
+        self.place_cursors(positions);
         self.evil_insert_state(cx);
     }
 
@@ -231,28 +244,87 @@ impl Editor {
         cx.notify();
     }
 
+    /// The block-wise Visual rectangle (see [`Self::visual_block_rect`]).
+    fn block_rect(&self) -> Option<BlockRect> {
+        let (top, bottom, left, right) = self.visual_block_rect()?;
+        Some(BlockRect {
+            top,
+            bottom,
+            left,
+            right,
+        })
+    }
+
+    /// The byte offset of character column `col` on each of the rectangle's
+    /// rows, top-down (clamped to each row's end).
+    fn block_column(&self, rect: BlockRect, col: usize) -> Vec<usize> {
+        rect.rows()
+            .map(|row| self.active.buffer.byte_at_char_column(row, col))
+            .collect()
+    }
+
+    /// The byte span of the rectangle's columns on each row, top-down — empty
+    /// on a row shorter than its left column.
+    fn block_row_spans(&self, rect: BlockRect) -> Vec<Range<usize>> {
+        let buf = &self.active.buffer;
+        rect.rows()
+            .map(|row| {
+                let s = buf.byte_at_char_column(row, rect.left);
+                let e = buf.byte_at_char_column(row, rect.right + 1);
+                s..e.max(s)
+            })
+            .collect()
+    }
+
+    /// Edit every row's span with `replacement(span)`, bottom-up so earlier
+    /// edits don't shift later rows' offsets, as one undo step.
+    fn block_edit_rows(
+        &mut self,
+        rect: BlockRect,
+        replacement: impl Fn(&Self, &Range<usize>) -> String,
+    ) {
+        self.begin_undo_group();
+        for span in self.block_row_spans(rect).into_iter().rev() {
+            if !span.is_empty() {
+                let new = replacement(self, &span);
+                self.edit(span, &new);
+            }
+        }
+        self.end_undo_group();
+    }
+
+    /// Back to Normal with the cursor at the block's top-left.
+    fn block_exit_to_top_left(&mut self, rect: BlockRect, cx: &mut Context<Self>) {
+        let cursor = self.active.buffer.byte_at_char_column(rect.top, rect.left);
+        self.collapse_to(cursor);
+        self.evil_normal_state(cx);
+    }
+
+    /// The primary cursor at the first of `positions` and a secondary cursor
+    /// at each of the rest. `collapse_to` clears the selection so the insert
+    /// path replicates.
+    fn place_cursors(&mut self, positions: impl IntoIterator<Item = usize>) {
+        let mut positions = positions.into_iter();
+        if let Some(first) = positions.next() {
+            self.collapse_to(first);
+            for p in positions {
+                self.mc_add_cursor_at(p);
+            }
+        }
+    }
+
     /// Block `I` (`append` false) / `A` (`append` true): drop a cursor at the
     /// block's left column (or just past its right column) on every row and
     /// switch to Insert, so typed text replicates down the column via the
     /// multiple-cursors machinery — vim's block-wise insert. Escape collapses the
     /// cursors back to one.
     pub(super) fn evil_block_insert(&mut self, append: bool, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let col = if append { right + 1 } else { left };
-        let mut positions = Vec::new();
-        for row in top..=bottom {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            positions.push(lr.start + char_col_byte(&line, col));
-        }
-        if let Some((&first, rest)) = positions.split_first() {
-            self.collapse_to(first);
-            for &p in rest {
-                self.mc_add_cursor_at(p);
-            }
-        }
+        let col = if append { rect.right + 1 } else { rect.left };
+        let positions = self.block_column(rect, col);
+        self.place_cursors(positions);
         self.evil_insert_state(cx);
     }
 
@@ -272,28 +344,13 @@ impl Editor {
     /// copy it to the kill ring + system clipboard, and return to Normal with the
     /// cursor at the block's top-left.
     pub(super) fn evil_block_delete(&mut self, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let killed = self.block_text(top, bottom, left, right);
+        let killed = self.block_text(rect);
         self.save_block_kill(super::registers::KillKind::Delete, killed, cx);
-        // Delete bottom-up so earlier edits don't shift later rows' offsets.
-        self.begin_undo_group();
-        for row in (top..=bottom).rev() {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            let s = char_col_byte(&line, left);
-            let e = char_col_byte(&line, right + 1);
-            if e > s {
-                self.edit(lr.start + s..lr.start + e, "");
-            }
-        }
-        self.end_undo_group();
-        let top_line = self.active.buffer.line_range(top);
-        let line = self.active.buffer.slice_to_string(top_line.clone());
-        let cursor = top_line.start + char_col_byte(&line, left);
-        self.collapse_to(cursor);
-        self.evil_normal_state(cx);
+        self.block_edit_rows(rect, |_, _| String::new());
+        self.block_exit_to_top_left(rect, cx);
     }
 
     /// Block `c`: delete the rectangle (like [`Self::evil_block_delete`]), then
@@ -301,78 +358,42 @@ impl Editor {
     /// Insert, so the replacement text lands on all rows at once — vim's
     /// block-wise change. Escape collapses the cursors back to one.
     pub(super) fn evil_block_change(&mut self, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let killed = self.block_text(top, bottom, left, right);
+        let killed = self.block_text(rect);
         self.save_block_kill(super::registers::KillKind::Delete, killed, cx);
-        self.begin_undo_group();
-        for row in (top..=bottom).rev() {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            let s = char_col_byte(&line, left);
-            let e = char_col_byte(&line, right + 1);
-            if e > s {
-                self.edit(lr.start + s..lr.start + e, "");
-            }
-        }
-        self.end_undo_group();
+        self.block_edit_rows(rect, |_, _| String::new());
         // Cursors are computed AFTER the deletes, so each row's left column is
         // its post-delete position.
-        let mut positions = Vec::new();
-        for row in top..=bottom {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            positions.push(lr.start + char_col_byte(&line, left));
-        }
-        if let Some((&first, rest)) = positions.split_first() {
-            self.collapse_to(first);
-            for &p in rest {
-                self.mc_add_cursor_at(p);
-            }
-        }
+        let positions = self.block_column(rect, rect.left);
+        self.place_cursors(positions);
         self.evil_insert_state(cx);
     }
 
     /// Block `y`: copy the rectangle to the kill ring + system clipboard without
     /// removing it; the cursor returns to the block's top-left.
     pub(super) fn evil_block_yank(&mut self, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        let text = self.block_text(top, bottom, left, right);
+        let text = self.block_text(rect);
         self.save_block_kill(super::registers::KillKind::Yank, text, cx);
-        let top_line = self.active.buffer.line_range(top);
-        let line = self.active.buffer.slice_to_string(top_line.clone());
-        let cursor = top_line.start + char_col_byte(&line, left);
-        self.collapse_to(cursor);
-        self.evil_normal_state(cx);
+        self.block_exit_to_top_left(rect, cx);
     }
 
     /// Block `r<char>`: overwrite every char inside the rectangle (only the
     /// `[left, right]` columns of each row, rows shorter than `left` untouched),
     /// then return to Normal at the block's top-left.
     pub(super) fn evil_block_replace(&mut self, ch: &str, cx: &mut Context<Self>) {
-        let Some((top, bottom, left, right)) = self.visual_block_rect() else {
+        let Some(rect) = self.block_rect() else {
             return;
         };
-        self.begin_undo_group();
-        for row in (top..=bottom).rev() {
-            let lr = self.active.buffer.line_range(row);
-            let line = self.active.buffer.slice_to_string(lr.clone());
-            let s = char_col_byte(&line, left);
-            let e = char_col_byte(&line, right + 1);
-            if e > s {
-                let n = line[s..e].chars().count();
-                self.edit(lr.start + s..lr.start + e, &ch.repeat(n));
-            }
-        }
-        self.end_undo_group();
-        let top_line = self.active.buffer.line_range(top);
-        let line = self.active.buffer.slice_to_string(top_line.clone());
-        let cursor = top_line.start + char_col_byte(&line, left);
-        self.collapse_to(cursor);
-        self.evil_normal_state(cx);
+        self.block_edit_rows(rect, |ed, span| {
+            let buf = &ed.active.buffer;
+            ch.repeat(buf.byte_to_char(span.end) - buf.byte_to_char(span.start))
+        });
+        self.block_exit_to_top_left(rect, cx);
     }
 
     /// Helix `p` (after) / `P` (before): paste the clipboard/kill-ring text at
@@ -458,17 +479,10 @@ impl Editor {
     /// The text inside a block rectangle: columns `[left, right]` of rows
     /// `[top, bottom]`, one buffer line per row joined by newlines (rows shorter
     /// than `left` contribute an empty string).
-    fn block_text(&self, top: usize, bottom: usize, left: usize, right: usize) -> String {
-        (top..=bottom)
-            .map(|row| {
-                let line = self
-                    .active
-                    .buffer
-                    .slice_to_string(self.active.buffer.line_range(row));
-                let s = char_col_byte(&line, left);
-                let e = char_col_byte(&line, right + 1).max(s);
-                line[s..e].to_string()
-            })
+    fn block_text(&self, rect: BlockRect) -> String {
+        self.block_row_spans(rect)
+            .into_iter()
+            .map(|span| self.active.buffer.slice_to_string(span))
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -650,6 +650,23 @@ mod tests {
     }
 
     #[test]
+    fn byte_at_char_column_maps_columns_and_clamps() {
+        // ASCII: column == byte offset within the line.
+        let b = Buffer::new("hello\nhi\n\naéb\r\nx");
+        assert_eq!(b.byte_at_char_column(0, 0), 0);
+        assert_eq!(b.byte_at_char_column(0, 3), 3);
+        // Past the end clamps to the line's end (a block column off a short row).
+        assert_eq!(b.byte_at_char_column(1, 5), 8);
+        assert_eq!(b.byte_at_char_column(2, 0), 9);
+        // Multi-byte chars: column 2 is the 'é' (2 bytes) + 1 ascii = byte 3.
+        assert_eq!(b.byte_at_char_column(3, 1), 11); // start of 'é'
+        assert_eq!(b.byte_at_char_column(3, 2), 13); // start of 'b'
+        assert_eq!(b.byte_at_char_column(3, 9), 14); // end, before the CRLF
+        // A line past the last clamps to the last line.
+        assert_eq!(b.byte_at_char_column(99, 0), 16);
+    }
+
+    #[test]
     fn word_range_at_selects_the_class_run_on_its_line() {
         let b = Buffer::new("foo.bar  baz\nqux");
         assert_eq!(b.word_range_at(1), 0..3); // foo
