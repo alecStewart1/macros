@@ -10,5 +10,6 @@ pub(super) mod grid;
 pub(super) mod help;
 pub(super) mod keymaps;
 pub(super) mod languages;
+pub(super) mod plotting;
 pub(super) mod prompts;
 pub(super) mod text;
