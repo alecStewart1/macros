@@ -646,8 +646,9 @@ impl Editor {
     ) -> Result<(), EditorCommand> {
         use EditorCommand::*;
         match command {
-            SetLsp(language, command) => {
-                self.lsp_commands.insert(language, command);
+            SetLsp(language, command, env) => {
+                self.lsp_commands
+                    .insert(language, super::lsp_methods::LspCommand { command, env });
             }
             SetLanguageId(ext, language_id) => {
                 self.language_ids.insert(ext, language_id);
@@ -665,8 +666,12 @@ impl Editor {
             LspCodeAction => self.lsp_code_action(cx),
             LspFormatBuffer => self.lsp_format(cx),
             LspRestart => self.lsp_restart(cx),
-            LspCallHierarchyIncoming => self.lsp_call_hierarchy(true, cx),
-            LspCallHierarchyOutgoing => self.lsp_call_hierarchy(false, cx),
+            LspCallHierarchyIncoming => {
+                self.lsp_call_hierarchy(crate::lsp::CallDirection::Incoming, cx)
+            }
+            LspCallHierarchyOutgoing => {
+                self.lsp_call_hierarchy(crate::lsp::CallDirection::Outgoing, cx)
+            }
             LspPrepareRename => self.lsp_prepare_rename(cx),
             LspCodeLens => self.lsp_code_lens(cx),
             LspXrefVisit => self.lsp_xref_visit(cx),

@@ -952,7 +952,7 @@ mod engine_tests {
         for src in crate::runtime::startup_scripts() {
             let out = engine.eval(src).expect("a startup script failed to load");
             for c in out.commands {
-                if let EditorCommand::SetLsp(lang, _) = c {
+                if let EditorCommand::SetLsp(lang, ..) = c {
                     configured.push(lang);
                 }
             }
@@ -11389,7 +11389,8 @@ mod secrets_primitives {
                      (lambda ()
                        (make-process-env "psql" (list) "on-line" "" (list "B=explicit"))
                        (make-terminal "*t*" "" (list) "")
-                       (dap-start "dlv" (list) "" "on-msg" "")))"#,
+                       (dap-start "dlv" (list) "" "on-msg" "")
+                       (set-lsp "go" "gopls")))"#,
             )
             .unwrap()
             .commands;
@@ -11415,10 +11416,16 @@ mod secrets_primitives {
                     assert_eq!(pairs(&a.env), dyn_then);
                     seen += 1;
                 }
+                // The language server is spawned much later (on first visit
+                // of a Go file), but with the env of the configuring extent.
+                EditorCommand::SetLsp(_, _, env) => {
+                    assert_eq!(pairs(env), dyn_then);
+                    seen += 1;
+                }
                 _ => {}
             }
         }
-        assert_eq!(seen, 3, "{cmds:?}");
+        assert_eq!(seen, 4, "{cmds:?}");
         // Debug never shows the values.
         assert!(!format!("{cmds:?}").contains("explicit"));
     }

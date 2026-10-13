@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gpui::{Global, Hsla, rgb, rgba};
 
-/// A color theme: a palette mapping face names to colors.
+/// A color theme: a palette mapping face names to their display attributes.
 ///
 /// "Faces" are the Emacs unit of styling — named display attributes that both
 /// UI chrome (`background`, `cursor`, `region`, `mode-line-bg`, …) and syntax
@@ -15,35 +15,57 @@ use gpui::{Global, Hsla, rgb, rgba};
 /// global (`cx.global::<Theme>()`), the same way Zed does theming.
 #[derive(Default)]
 pub struct Theme {
-    faces: HashMap<String, Hsla>,
-    /// Face names that should render with an underline. A separate set (rather
-    /// than a per-face attribute struct) keeps `color()` and every caller of it
-    /// unchanged; the paint path additionally consults `is_underlined`.
-    underlined: HashSet<String>,
-    /// Face names that should render bold, same model as `underlined`. A face
-    /// may appear here without a color entry — `color()` then falls back to the
-    /// caller's default, giving "default foreground, bold weight".
-    bold: HashSet<String>,
-    /// Face names whose underline renders wavy (spellcheck squiggles), same
-    /// model as `underlined`. A face here underlines even without an
-    /// `underlined` entry — wavy implies underline.
-    wavy: HashSet<String>,
-    /// Face background colors (`set-face-background`). Painted behind overlay
-    /// text that uses the face; a face with ONLY a background leaves the text
-    /// color it lands on unchanged (so it can layer under a foreground face).
-    backgrounds: HashMap<String, Hsla>,
-    /// Face font families (`set-face-font`): text under the face shapes with
-    /// this family instead of the editor font — the plot faces use the bundled
+    faces: HashMap<String, Face>,
+}
+
+/// One face's attributes. Every attribute is independent: a face may have
+/// only a background, or only bold, and each `set-face-*` primitive touches
+/// just its own field. Like colors, all of it is wiped by `load-theme` (a
+/// fresh palette).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Face {
+    /// Foreground color (`set-face`). Without one, `color()` falls back to the
+    /// caller's default — so a bold-only face is "default foreground, bold".
+    fg: Option<Hsla>,
+    /// Background color (`set-face-background`), painted behind overlay text
+    /// that uses the face; a face with ONLY a background leaves the text color
+    /// it lands on unchanged (so it can layer under a foreground face).
+    bg: Option<Hsla>,
+    /// Font family (`set-face-font`): text under the face shapes with this
+    /// family instead of the editor font — the plot faces use the bundled
     /// "Macros Plot" glyph font so chart columns stay on the editor's grid.
-    fonts: HashMap<String, String>,
+    font: Option<String>,
+    bold: bool,
+    /// `set-face-underline`.
+    underline: bool,
+    /// `set-face-wavy` (spellcheck squiggles). Kept apart from `underline`
+    /// because the two toggle independently: wavy implies an underline, and
+    /// turning wavy back off leaves a straight one if that was also set.
+    wavy: bool,
+}
+
+/// How a face's text is underlined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Underline {
+    Straight,
+    /// A squiggle (spellcheck).
+    Wavy,
 }
 
 impl Global for Theme {}
 
 impl Theme {
+    fn face(&self, name: &str) -> Option<&Face> {
+        self.faces.get(name)
+    }
+
+    fn face_mut(&mut self, name: impl Into<String>) -> &mut Face {
+        self.faces.entry(name.into()).or_default()
+    }
+
     /// Look up a face color, falling back when the face is undefined.
     pub fn color(&self, name: &str, fallback: Hsla) -> Hsla {
-        self.faces.get(name).copied().unwrap_or(fallback)
+        self.face(name).and_then(|f| f.fg).unwrap_or(fallback)
     }
 
     pub fn background(&self) -> Hsla {
@@ -68,81 +90,62 @@ impl Theme {
 
     /// Set (or override) a face color — drives `set-face` from Steel.
     pub fn set(&mut self, name: impl Into<String>, color: Hsla) {
-        self.faces.insert(name.into(), color);
+        self.face_mut(name).fg = Some(color);
     }
 
     /// Whether `name` has a foreground color of its own (vs. a caller default).
     pub fn has_color(&self, name: &str) -> bool {
-        self.faces.contains_key(name)
+        self.face(name).is_some_and(|f| f.fg.is_some())
     }
 
     pub fn set_background(&mut self, name: impl Into<String>, color: Hsla) {
-        self.backgrounds.insert(name.into(), color);
+        self.face_mut(name).bg = Some(color);
     }
 
     /// The face's background color, if one was set.
     pub fn background_of(&self, name: &str) -> Option<Hsla> {
-        self.backgrounds.get(name).copied()
+        self.face(name).and_then(|f| f.bg)
     }
 
     pub fn set_font(&mut self, name: impl Into<String>, family: impl Into<String>) {
-        self.fonts.insert(name.into(), family.into());
+        self.face_mut(name).font = Some(family.into());
     }
 
     /// The face's font family, if one was set.
     pub fn font_of(&self, name: &str) -> Option<&str> {
-        self.fonts.get(name).map(String::as_str)
+        self.face(name).and_then(|f| f.font.as_deref())
     }
 
     /// Turn a face's underline attribute on or off — drives `set-face-underline`
-    /// from Steel. Like colors, this is wiped by `load-theme` (a fresh palette).
+    /// from Steel.
     pub fn set_underline(&mut self, name: impl Into<String>, on: bool) {
-        let name = name.into();
-        if on {
-            self.underlined.insert(name);
-        } else {
-            self.underlined.remove(&name);
-        }
+        self.face_mut(name).underline = on;
     }
 
-    /// The underline style for `name`: `None` for no underline, `Some(false)`
-    /// for a straight line, `Some(true)` for wavy (squiggle).
-    pub fn underline(&self, name: &str) -> Option<bool> {
-        if self.wavy.contains(name) {
-            Some(true)
-        } else if self.underlined.contains(name) {
-            Some(false)
-        } else {
-            None
+    /// The underline style for `name`, if it's underlined at all.
+    pub fn underline(&self, name: &str) -> Option<Underline> {
+        match self.face(name) {
+            Some(f) if f.wavy => Some(Underline::Wavy),
+            Some(f) if f.underline => Some(Underline::Straight),
+            _ => None,
         }
     }
 
     /// Turn a face's wavy-underline attribute on or off — drives
-    /// `set-face-wavy` from Steel. Like colors, this is wiped by `load-theme`
-    /// (a fresh palette).
+    /// `set-face-wavy` from Steel.
     pub fn set_wavy(&mut self, name: impl Into<String>, on: bool) {
-        let name = name.into();
-        if on {
-            self.wavy.insert(name);
-        } else {
-            self.wavy.remove(&name);
-        }
+        self.face_mut(name).wavy = on;
     }
 
     /// Whether text in `name` should be bold.
     pub fn is_bold(&self, name: &str) -> bool {
-        self.bold.contains(name)
+        self.face(name).is_some_and(|f| f.bold)
     }
 
     /// Turn a face's bold attribute on or off — drives `set-face-bold` from
-    /// Steel. Like colors, this is wiped by `load-theme` (a fresh palette).
+    /// Steel.
     pub fn set_bold(&mut self, name: impl Into<String>, on: bool) {
-        let name = name.into();
-        if on {
-            self.bold.insert(name);
-        } else {
-            self.bold.remove(&name);
-        }
+        self.face_mut(name).bold = on;
     }
 }
 
@@ -153,5 +156,44 @@ pub fn parse_color(s: &str) -> Option<Hsla> {
         6 => u32::from_str_radix(hex, 16).ok().map(|v| rgb(v).into()),
         8 => u32::from_str_radix(hex, 16).ok().map(|v| rgba(v).into()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn face_attributes_are_independent() {
+        let mut theme = Theme::default();
+        let red: Hsla = rgb(0xff0000).into();
+        let fallback: Hsla = rgb(0x00ff00).into();
+        theme.set_bold("b", true);
+        // A bold-only face has no color of its own.
+        assert!(theme.is_bold("b") && !theme.has_color("b"));
+        assert_eq!(theme.color("b", fallback), fallback);
+        theme.set("b", red);
+        assert_eq!(theme.color("b", fallback), red);
+        assert!(theme.is_bold("b"));
+        assert_eq!(theme.background_of("b"), None);
+        assert_eq!(theme.font_of("missing"), None);
+    }
+
+    #[test]
+    fn wavy_and_straight_underlines_toggle_independently() {
+        let mut theme = Theme::default();
+        assert_eq!(theme.underline("u"), None);
+        theme.set_underline("u", true);
+        assert_eq!(theme.underline("u"), Some(Underline::Straight));
+        theme.set_wavy("u", true);
+        assert_eq!(theme.underline("u"), Some(Underline::Wavy));
+        // Turning wavy off again leaves the straight underline.
+        theme.set_wavy("u", false);
+        assert_eq!(theme.underline("u"), Some(Underline::Straight));
+        theme.set_underline("u", false);
+        assert_eq!(theme.underline("u"), None);
+        // Wavy alone still underlines.
+        theme.set_wavy("w", true);
+        assert_eq!(theme.underline("w"), Some(Underline::Wavy));
     }
 }

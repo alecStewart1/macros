@@ -21,7 +21,7 @@ use crate::buffer::Buffer;
 use crate::element::{EditorElement, LineLayout};
 use crate::highlight::{Edit, Highlighter, HlSpan};
 use crate::lsp::{
-    self, CompletionItem, Diagnostic, LspBackend, LspClient, RawDiagnostic, SteelLsp,
+    self, CompletionItem, Diagnostic, LanguageServer, LspClient, RawDiagnostic, SteelLsp,
 };
 use crate::mode::{Keymap, Mode, ModeStack};
 use crate::script::{EditorCommand, ScriptEngine, ScriptOutcome};
@@ -31,6 +31,7 @@ use crate::theme::Theme;
 mod buffers;
 mod commands;
 mod completion;
+mod dap;
 #[cfg(test)]
 mod e2e_tests;
 mod editing_extras;
@@ -56,8 +57,10 @@ mod lsp_methods;
 mod mcp;
 mod minibuffer;
 mod modeline;
+mod net;
 mod overlays;
 mod panes;
+mod process;
 mod registers;
 mod session;
 mod terminal;
@@ -73,8 +76,9 @@ use minibuffer::MinibufferHistory;
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
 use overlays::{Overlays, shift_line_map};
 use panes::{Child, SplitAxis, WindowLayout, union_bounds};
+use process::ProcessHandle;
 use session::BoundedRing;
-use terminal::{ProcessHandle, keystroke_to_bytes};
+use terminal::keystroke_to_bytes;
 use undo::{UndoGrouping, UndoRecord, UndoTree};
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
@@ -586,7 +590,7 @@ pub struct Editor {
 
     // --- LSP (one server per language, many at once) ---
     /// Configured servers: LSP language id -> launch command (from `set-lsp`).
-    lsp_commands: HashMap<String, String>,
+    lsp_commands: HashMap<String, lsp_methods::LspCommand>,
     /// File extension -> server key / config language (from `set-extension`).
     extensions: HashMap<String, String>,
     /// File extension -> wire `languageId` sent in `didOpen` (from
@@ -756,7 +760,7 @@ pub struct Editor {
     /// Command senders for live async sockets (`socket-connect-async`) and
     /// WebSockets (`ws-connect`), by id. Each worker thread owns its stream and
     /// drains this channel for outbound sends and a close request.
-    async_sockets: HashMap<u64, std::sync::mpsc::Sender<crate::editor::terminal::SockCmd>>,
+    async_sockets: HashMap<u64, std::sync::mpsc::Sender<crate::net::SockCmd>>,
     /// Live embedded terminals, by id. A `term-mode` buffer's name maps to one
     /// of these via [`Terminal::buffer_name`].
     terminals: HashMap<u64, Terminal>,
@@ -1144,41 +1148,47 @@ impl EvilState {
 
 /// A single running language server and the per-server state we track for it.
 struct LspServer {
-    client: LspBackend,
+    /// Both backends are boxed: an `LspClient` holds a subprocess handle +
+    /// channels, and a `SteelLsp` embeds a whole Steel engine.
+    client: Box<dyn LanguageServer>,
     /// True once the `initialize` response has arrived.
     ready: bool,
-    /// Server's preferred sync kind (full, incremental, or none).
-    sync_kind: lsp::SyncKind,
+    /// What the server advertised in its `initialize` result (defaults until
+    /// then).
+    caps: lsp::ServerCapabilities,
     /// The process is gone (stdout closed). Kept in the map — not ready, no
     /// open documents — until the next `maybe_start_lsp` / `lsp-restart`
     /// replaces it with a fresh spawn.
     exited: bool,
-    /// Whether the server wants `textDocument/didSave` (`Some(include_text)`).
-    save: Option<bool>,
-    /// `codeActionProvider.resolveProvider`: edit-less code actions are
-    /// completed via `codeAction/resolve` before applying.
-    code_action_resolve: bool,
     /// URIs we've sent `didOpen` for to this server.
     open: HashSet<String>,
     versions: HashMap<String, i32>,
-    /// Pending completion request: (id, word range being completed).
-    pending_completion: Option<(i64, Range<usize>)>,
+    /// The in-flight completion request, if any.
+    pending_completion: Option<PendingCompletion>,
     /// In-flight non-completion requests (definition, references, rename, …),
     /// keyed by request id so the response can be routed to the right handler,
     /// with the document each was issued against.
     pending: HashMap<i64, (PendingRequest, RequestTarget)>,
-    /// `semanticTokens` legend (token-type names by id) from `initialize`.
-    semantic_legend: Vec<String>,
-    /// Whether the server supports `prepareRename` (gates the pre-check).
-    prepare_rename: bool,
-    /// `completionProvider.triggerCharacters` from `initialize`: single-char
-    /// strings (e.g. `.` for OCaml/Rust member access) that auto-open completion
-    /// even though they aren't word characters.
-    completion_triggers: Vec<String>,
-    /// Cached semantic tokens per URI: `(resultId, packed data)`, for deltas.
-    semantic_state: HashMap<String, (Option<String>, Vec<i64>)>,
+    /// Cached semantic tokens per URI, for deltas.
+    semantic_state: HashMap<String, SemanticCache>,
     /// The reader task forwarding this server's messages; dropped on removal.
     _task: Task<()>,
+}
+
+/// An in-flight completion request: its id, and the word range being
+/// completed (the popup anchor and live filter prefix).
+struct PendingCompletion {
+    id: i64,
+    range: Range<usize>,
+}
+
+/// A document's last semantic-tokens result, kept so a
+/// `semanticTokens/full/delta` reply can be spliced onto it.
+struct SemanticCache {
+    /// The `resultId` to send as `previousResultId`, if the server gave one.
+    result_id: Option<String>,
+    /// The packed token data (groups of five integers).
+    data: Vec<i64>,
 }
 
 /// The document an LSP request was issued against: its URI plus the buffer's
@@ -1224,10 +1234,10 @@ enum PendingRequest {
     /// server returns nothing usable, the original one as-is).
     ResolveCodeAction(Box<lsp::CodeAction>),
     /// `prepareCallHierarchy` done → send the incoming/outgoing-calls request
-    /// (true = incoming). The prepared item is echoed back verbatim.
-    CallHierarchyPrepare(bool),
+    /// in that direction. The prepared item is echoed back verbatim.
+    CallHierarchyPrepare(lsp::CallDirection),
     /// `incomingCalls`/`outgoingCalls` result → the `*lsp-xref*` buffer.
-    CallHierarchyCalls(bool),
+    CallHierarchyCalls(lsp::CallDirection),
     /// A semantic-tokens result (full / range / delta) → decode + deliver
     /// records to the named Steel callback.
     SemanticTokens {
@@ -2140,8 +2150,8 @@ impl Editor {
         let removed_newlines = self.active.buffer.line_index_at_byte(old_end)
             - self.active.buffer.line_index_at_byte(start);
         let cursor = self.active.buffer.replace(range, new_text);
-        if let Some((language, lsp_start, lsp_end)) = lsp_change {
-            self.lsp_did_change(&language, lsp_start, lsp_end, new_text);
+        if let Some(change) = lsp_change {
+            self.lsp_did_change(change, new_text);
         }
         // Move any markers tracking positions in this buffer, and the Vim
         // marks / jump list.
@@ -4072,11 +4082,14 @@ impl Editor {
         };
         raw.iter()
             .map(|d| {
-                let start = self.active.buffer.position_to_byte(d.start.0, d.start.1);
+                let start = self
+                    .active
+                    .buffer
+                    .position_to_byte(d.start.line, d.start.character);
                 let end = self
                     .active
                     .buffer
-                    .position_to_byte(d.end.0, d.end.1)
+                    .position_to_byte(d.end.line, d.end.character)
                     .max(start);
                 Diagnostic {
                     range: start..end,
@@ -4172,11 +4185,14 @@ impl Editor {
             if server.ready && server.open.contains(&uri) {
                 // A newer request supersedes the in-flight one: its response
                 // would be dropped anyway, so let the server stop working on it.
-                if let Some((old, _)) = server.pending_completion.take() {
-                    server.client.cancel(old);
+                if let Some(old) = server.pending_completion.take() {
+                    server.client.cancel(old.id);
                 }
                 let id = server.client.completion(&uri, line, character);
-                server.pending_completion = Some((id, word_range));
+                server.pending_completion = Some(PendingCompletion {
+                    id,
+                    range: word_range,
+                });
                 true
             } else {
                 false

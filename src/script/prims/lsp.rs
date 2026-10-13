@@ -8,7 +8,18 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         queue, snapshot, ..
     } = ctx;
     reg.section(Section::Lsp);
-    register_binary(reg, queue, "set-lsp", EditorCommand::SetLsp);
+    {
+        // Captures the `with-process-env` overrides now: the server is spawned
+        // later, on the editor thread, outside this extent.
+        let q = queue.clone();
+        reg.register_fn("set-lsp", move |language: String, command: String| {
+            q.push(EditorCommand::SetLsp(
+                language,
+                command,
+                crate::process::current(),
+            ));
+        });
+    }
     register_unary(reg, queue, "lsp-rename-to", EditorCommand::LspRename);
     register_unary(
         reg,
@@ -25,7 +36,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
                 let callback = callback.0;
                 q.push(EditorCommand::LspRequest {
                     method,
-                    kind,
+                    kind: crate::lsp::ParamsKind::parse(&kind),
                     params,
                     callback,
                 });

@@ -257,7 +257,8 @@ impl Editor {
             s.ready
                 && s.open.contains(&uri)
                 && (extra.contains(c)
-                    || s.completion_triggers
+                    || s.caps
+                        .completion_triggers
                         .iter()
                         .any(|t| t.starts_with(c) && t.chars().count() == 1))
         })

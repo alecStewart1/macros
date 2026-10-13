@@ -143,8 +143,8 @@ impl Editor {
         // An in-flight completion was for the buffer we just left; its answer
         // must not pop up (with that buffer's byte range) in this one.
         for server in self.servers.values_mut() {
-            if let Some((id, _)) = server.pending_completion.take() {
-                server.client.cancel(id);
+            if let Some(pending) = server.pending_completion.take() {
+                server.client.cancel(pending.id);
             }
         }
         // A buffer shown again after its server (re)started — or after it was

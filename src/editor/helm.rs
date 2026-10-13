@@ -705,7 +705,7 @@ impl Editor {
             }
             HelmAction::GotoLocation(locations) => {
                 if let Some(loc) = candidate_index.and_then(|i| locations.get(i)).cloned() {
-                    self.goto_file_position(loc.uri, loc.start.0, loc.start.1, cx);
+                    self.goto_file_position(loc.uri, loc.start.line, loc.start.character, cx);
                 }
             }
             HelmAction::ApplyCodeAction(actions) => {

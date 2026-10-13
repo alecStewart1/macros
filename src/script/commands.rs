@@ -363,12 +363,12 @@ pub enum EditorCommand {
     /// `workspace/symbol` for the given query (read via `read-string`).
     LspWorkspaceSymbol(String),
     /// Generic LSP bridge: send `method` with params built from `kind`
-    /// ("position"|"document"|"range"|"region"|"positions"|"raw") merged with
-    /// `params` (a JSON object string), delivering the result JSON to Steel fn
-    /// `callback`. This exposes the whole protocol to Scheme.
+    /// (parsed from "position"|"document"|"range"|"region"|"positions"|"raw")
+    /// merged with `params` (a JSON object string), delivering the result JSON
+    /// to Steel fn `callback`. This exposes the whole protocol to Scheme.
     LspRequest {
         method: String,
-        kind: String,
+        kind: crate::lsp::ParamsKind,
         params: String,
         callback: String,
     },
@@ -622,8 +622,10 @@ pub enum EditorCommand {
     /// anywhere in the subtree under a watched root fires `directory-changed-hook`
     /// with the changed root. For magit watching a whole repo. Replace semantics.
     WatchTree(String, Vec<String>),
-    /// Configure a language server: `(set-lsp "rust" "rust-analyzer")`.
-    SetLsp(String, String),
+    /// Configure a language server: `(set-lsp "rust" "rust-analyzer")`. The
+    /// env overrides in effect at the call (`with-process-env`) are captured
+    /// and applied whenever the server is spawned, like `dap-start`.
+    SetLsp(String, String, EnvOverrides),
     /// Map a file extension to a server key / config language:
     /// `(set-extension "rs" "rust")`.
     SetExtension(String, String),
