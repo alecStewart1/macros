@@ -1253,14 +1253,15 @@ fn show_formulas_and_trace(cx: &mut TestAppContext) {
     keys(&ed, cx, "g [");
     ed.read_with(cx, |e, _| {
         let g = e.active.grid.as_ref().unwrap();
-        assert_eq!(g.view.trace, vec![(1, 1, 1, 1), (2, 1, 2, 1)]);
+        let cell = crate::grid::view::CellRange::cell;
+        assert_eq!(g.view.trace, vec![cell((1, 1)), cell((2, 1))]);
     });
     ed.update(cx, |e, cx| e.grid_goto_address("B3", cx));
     keys(&ed, cx, "g ]");
     ed.read_with(cx, |e, _| {
         assert_eq!(
             e.active.grid.as_ref().unwrap().view.trace,
-            vec![(1, 3, 1, 3)]
+            vec![crate::grid::view::CellRange::cell((1, 3))]
         );
     });
 }

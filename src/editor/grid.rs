@@ -30,7 +30,7 @@ use crate::grid::model::{CellsSnapshot, Change, Workbook};
 use crate::grid::sidecar::Sidecar;
 use crate::grid::style::RuleTest;
 use crate::grid::view::{
-    self, CellEdit, CellRange, GridView, SelKind, cell_name, parse_address, range_name,
+    self, CellEdit, CellRange, GridView, Pos, SelKind, cell_name, parse_address, range_name,
 };
 
 /// The grid has a single sheet until `.xlsx` support lands.
@@ -159,7 +159,7 @@ impl RowFilter {
 
 /// Cursor, anchor and selection kind: what `grid-selection-changed-hook`
 /// compares to decide whether to fire.
-type SelState = ((usize, usize), Option<(usize, usize)>, SelKind);
+type SelState = (Pos, Option<Pos>, SelKind);
 /// A cached cell copy and the `(epoch, generation)` it was made at.
 type PublishedCells = Option<((u64, u64), Arc<CellsSnapshot>)>;
 
@@ -171,8 +171,8 @@ pub(super) struct YankState {
     /// Grid history depth right after the paste.
     pub depth: usize,
     /// Cursor and anchor before the paste.
-    pub cursor: (usize, usize),
-    pub anchor: Option<(usize, usize)>,
+    pub cursor: Pos,
+    pub anchor: Option<Pos>,
 }
 
 /// One changed cell: `(row, col, old, new)`.
@@ -189,8 +189,8 @@ enum Hist {
         steps: usize,
         layout: Option<Box<(Layout, Layout)>>,
     },
-    /// Formatting set by hand: `(row, col, before, after)` per cell.
-    Format(Vec<(usize, usize, CellFmt, CellFmt)>),
+    /// Formatting set by hand: `(cell, before, after)` per cell.
+    Format(Vec<(Pos, CellFmt, CellFmt)>),
     /// A column's width or a row's height set.
     Resize {
         axis: Axis,
@@ -568,20 +568,13 @@ impl GridDoc {
     }
 
     /// The cells of `sel` inside the data, skipping filtered-out rows.
-    pub(super) fn visible_cells(&self, sel: &CellRange) -> Vec<(usize, usize)> {
+    pub(super) fn visible_cells(&self, sel: &CellRange) -> Vec<Pos> {
         let (rows, cols) = self.used();
-        let mut out = Vec::new();
-        for r in sel.r0..=sel.r1.min(rows.saturating_sub(1)) {
-            if r >= rows || !self.row_shown(r) {
-                continue;
-            }
-            for c in sel.c0..=sel.c1.min(cols.saturating_sub(1)) {
-                if c < cols {
-                    out.push((r, c));
-                }
-            }
-        }
-        out
+        let cols = sel.c0..sel.c1.saturating_add(1).min(cols);
+        (sel.r0..sel.r1.saturating_add(1).min(rows))
+            .filter(|&r| self.row_shown(r))
+            .flat_map(|r| cols.clone().map(move |c| (r, c)))
+            .collect()
     }
 
     /// The selection's shown rows as a block of text (empty past the data).
@@ -761,7 +754,7 @@ impl GridDoc {
 
     /// Undo (`undo`) or redo one history entry. Returns the cell to put the
     /// cursor on, and whether column/row layout changed (to persist it).
-    fn replay(&mut self, entry: &Hist, undo: bool) -> (Option<(usize, usize)>, bool) {
+    fn replay(&mut self, entry: &Hist, undo: bool) -> (Option<Pos>, bool) {
         match entry {
             Hist::Model { steps, layout } => {
                 let mut pos = None;
@@ -775,15 +768,15 @@ impl GridDoc {
             }
             Hist::Format(cells) => {
                 if undo {
-                    for &(r, c, before, _) in cells.iter().rev() {
+                    for &((r, c), before, _) in cells.iter().rev() {
                         self.formats.set(r, c, before);
                     }
                 } else {
-                    for &(r, c, _, after) in cells {
+                    for &((r, c), _, after) in cells {
                         self.formats.set(r, c, after);
                     }
                 }
-                (cells.first().map(|&(r, c, ..)| (r, c)), false)
+                (cells.first().map(|&(pos, ..)| pos), false)
             }
             Hist::Resize {
                 axis,
@@ -848,7 +841,7 @@ impl GridDoc {
     /// changed.
     pub(super) fn format_cells(
         &mut self,
-        cells: impl IntoIterator<Item = (usize, usize)>,
+        cells: impl IntoIterator<Item = Pos>,
         f: impl Fn(CellFmt) -> CellFmt,
     ) -> usize {
         let mut changed = Vec::new();
@@ -857,7 +850,7 @@ impl GridDoc {
             let after = f(before);
             if after != before {
                 self.formats.set(r, c, after);
-                changed.push((r, c, before, after));
+                changed.push(((r, c), before, after));
             }
         }
         let n = changed.len();
@@ -1062,7 +1055,7 @@ impl GridDoc {
             return (self.name_box_for(e.row, e.col), e.text.clone());
         }
         let sel = self.selection();
-        if sel.rows() > 1 || sel.cols() > 1 {
+        if !sel.is_single() {
             return (range_name(&sel), String::new());
         }
         let (r, c) = self.view.cursor;
@@ -1083,7 +1076,7 @@ impl GridDoc {
     /// `24 cells · Sum 1,204 · Avg 50.2` for a multi-cell selection.
     pub fn range_summary(&self) -> String {
         let sel = self.selection();
-        if sel.rows() == 1 && sel.cols() == 1 {
+        if sel.is_single() {
             return String::new();
         }
         let (rows, cols) = self.used();
@@ -1203,7 +1196,7 @@ impl GridDoc {
     /// `C7 · int` (or `B2:D9`) for the mode line.
     pub fn cell_status(&self) -> String {
         let sel = self.selection();
-        if sel.rows() > 1 || sel.cols() > 1 {
+        if !sel.is_single() {
             return range_name(&sel);
         }
         let (r, c) = self.view.cursor;
@@ -3092,7 +3085,7 @@ impl Editor {
         let sel = g.selection();
         let single = block.len() == 1 && block[0].len() == 1;
         let mut edits = Vec::new();
-        if single && (sel.rows() > 1 || sel.cols() > 1) {
+        if single && !sel.is_single() {
             // One value pasted over a range fills the range (Excel) — the
             // cells shown, not the rows a filter hides.
             let v = block[0][0].clone();

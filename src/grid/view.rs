@@ -342,9 +342,9 @@ pub struct FormulaCompletion {
 pub struct PointRef {
     pub span: std::ops::Range<usize>,
     /// The fixed corner (moves with plain arrows; stays put with Shift).
-    pub anchor: (usize, usize),
+    pub anchor: Pos,
     /// The moving corner.
-    pub at: (usize, usize),
+    pub at: Pos,
 }
 
 impl CellEdit {
@@ -368,7 +368,7 @@ impl CellEdit {
     }
 
     /// Insert (or replace the pointed) reference text for `anchor`..`at`.
-    pub fn set_point(&mut self, anchor: (usize, usize), at: (usize, usize)) {
+    pub fn set_point(&mut self, anchor: Pos, at: Pos) {
         let text = if anchor == at {
             cell_name(at.0, at.1)
         } else {
@@ -516,9 +516,9 @@ impl CellEdit {
 #[derive(Debug, Clone)]
 pub struct GridView {
     /// `(row, col)` of the cursor cell.
-    pub cursor: (usize, usize),
+    pub cursor: Pos,
     /// The other corner of a range selection, when one is active.
-    pub anchor: Option<(usize, usize)>,
+    pub anchor: Option<Pos>,
     pub sel_kind: SelKind,
     /// Scroll offsets into the scrollable area (past frozen rows), unzoomed px.
     pub scroll_x: f64,
@@ -532,9 +532,9 @@ pub struct GridView {
     pub bar_visible: bool,
     /// Cells show formulas instead of their results (`grid-show-formulas`).
     pub show_formulas: bool,
-    /// Cells outlined by `grid-trace-precedents` / `-dependents`, as
-    /// `(r0, c0, r1, c1)` rectangles; cleared by the next command.
-    pub trace: Vec<(usize, usize, usize, usize)>,
+    /// Cells outlined by `grid-trace-precedents` / `-dependents`; cleared
+    /// by the next command.
+    pub trace: Vec<CellRange>,
     /// The cells-area viewport (excluding headers and the formula bar) in
     /// *screen* px, as last painted. Used to keep the cursor in view.
     pub viewport: (f64, f64),
@@ -571,6 +571,32 @@ pub struct CellRange {
 }
 
 impl CellRange {
+    /// Just the cell `(r, c)`.
+    pub fn cell((r, c): Pos) -> Self {
+        Self {
+            r0: r,
+            c0: c,
+            r1: r,
+            c1: c,
+        }
+    }
+
+    /// From `(r0, c0, r1, c1)` bounds (as [`crate::formula::ast::Area::bounds`]
+    /// gives them).
+    pub fn from_bounds((r0, c0, r1, c1): (usize, usize, usize, usize)) -> Self {
+        Self { r0, c0, r1, c1 }
+    }
+
+    /// One cell only.
+    pub fn is_single(&self) -> bool {
+        self.r0 == self.r1 && self.c0 == self.c1
+    }
+
+    /// Every cell, row by row.
+    pub fn cells(self) -> impl Iterator<Item = Pos> {
+        (self.r0..=self.r1).flat_map(move |r| (self.c0..=self.c1).map(move |c| (r, c)))
+    }
+
     pub fn contains(&self, r: usize, c: usize) -> bool {
         (self.r0..=self.r1).contains(&r) && (self.c0..=self.c1).contains(&c)
     }
@@ -796,7 +822,7 @@ pub fn parse_address(s: &str) -> Option<(Pos, Option<Pos>)> {
 
 /// Name of a range for the name box: `C7` alone, `B2:D9` for a rectangle.
 pub fn range_name(range: &CellRange) -> String {
-    if range.r0 == range.r1 && range.c0 == range.c1 {
+    if range.is_single() {
         cell_name(range.r0, range.c0)
     } else {
         format!(
@@ -1124,6 +1150,20 @@ mod tests {
             parse_clipboard_block("a,b\tc", b','),
             vec![vec!["a,b", "c"]]
         );
+    }
+
+    #[test]
+    fn cell_range_cells() {
+        let r = CellRange::from_bounds((1, 2, 2, 3));
+        assert!(!r.is_single());
+        assert_eq!(
+            r.cells().collect::<Vec<_>>(),
+            [(1, 2), (1, 3), (2, 2), (2, 3)]
+        );
+        let one = CellRange::cell((4, 5));
+        assert!(one.is_single());
+        assert_eq!(one.cells().collect::<Vec<_>>(), [(4, 5)]);
+        assert_eq!(range_name(&one), "F5");
     }
 
     #[test]

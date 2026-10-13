@@ -18,7 +18,7 @@ use gpui::{
 use super::Editor;
 use super::grid::{BAR_HEIGHT, GridDoc, GridDrag, GridGeom, NAME_BOX_WIDTH, SHEET};
 use crate::grid::cellfmt::{self, CellFmt};
-use crate::grid::view::{self, col_name};
+use crate::grid::view::{self, CellRange, col_name};
 use crate::theme::Theme;
 
 /// Horizontal padding inside a cell, unzoomed px.
@@ -359,7 +359,7 @@ impl Element for GridElement {
         };
 
         let sel = g.selection();
-        let has_range = sel.rows() > 1 || sel.cols() > 1;
+        let has_range = !sel.is_single();
         let editing = v.edit.as_ref();
         let blocks = zoom < view::BLOCK_ZOOM;
         let cell_lh = px(header_h.max(1.0));
@@ -609,14 +609,11 @@ impl Element for GridElement {
         // A formula being edited: each reference gets a colour, and the
         // cells it covers an outline in that colour.
         let ref_spans = editing.map_or_else(Vec::new, |e| formula_refs(&e.text, &pal));
-        for (_, area, color) in &ref_spans {
-            let (r0, c0, r1, c1) = *area;
-            let (rows, cols) = (used_rows.max(r0 + 1), used_cols.max(c0 + 1));
-            let (r1, c1) = (r1.min(rows - 1), c1.min(cols - 1));
-            let x0 = ox + v.col_x(c0) as f32;
-            let y0 = oy + v.row_y(r0) as f32;
-            let x1 = ox + (v.col_x(c1) + v.col_px(c1)) as f32;
-            let y1 = oy + (v.row_y(r1) + v.row_px(r1)) as f32;
+        let mut outline = |a: CellRange, color: Hsla| {
+            let x0 = ox + v.col_x(a.c0) as f32;
+            let y0 = oy + v.row_y(a.r0) as f32;
+            let x1 = ox + (v.col_x(a.c1) + v.col_px(a.c1)) as f32;
+            let y1 = oy + (v.row_y(a.r1) + v.row_px(a.r1)) as f32;
             if x1 > x0 && y1 > y0 {
                 push_border(
                     &mut p.outlines,
@@ -625,26 +622,19 @@ impl Element for GridElement {
                     x1 - x0 + 1.0,
                     y1 - y0 + 1.0,
                     1.5,
-                    *color,
+                    color,
                 );
             }
+        };
+        for rs in &ref_spans {
+            // Whole rows/columns stop at the data.
+            let mut a = rs.area;
+            a.r1 = a.r1.min(used_rows.max(a.r0 + 1) - 1);
+            a.c1 = a.c1.min(used_cols.max(a.c0 + 1) - 1);
+            outline(a, rs.color);
         }
-        for &(r0, c0, r1, c1) in &v.trace {
-            let x0 = ox + v.col_x(c0) as f32;
-            let y0 = oy + v.row_y(r0) as f32;
-            let x1 = ox + (v.col_x(c1) + v.col_px(c1)) as f32;
-            let y1 = oy + (v.row_y(r1) + v.row_px(r1)) as f32;
-            if x1 > x0 && y1 > y0 {
-                push_border(
-                    &mut p.outlines,
-                    x0 - 1.0,
-                    y0 - 1.0,
-                    x1 - x0 + 1.0,
-                    y1 - y0 + 1.0,
-                    1.5,
-                    pal.trace,
-                );
-            }
+        for &a in &v.trace {
+            outline(a, pal.trace);
         }
         if let Some(e) = editing {
             if let Some((x, y, w, h)) = cell_rect(e.row, e.col) {
@@ -1228,7 +1218,14 @@ fn fit_number(text: &str, width: usize) -> Option<String> {
 
 /// A coloured reference: its byte span in the text, the rectangle it
 /// covers, and its colour.
-type RefSpan = (std::ops::Range<usize>, (usize, usize, usize, usize), Hsla);
+/// A reference in a formula being edited.
+struct RefSpan {
+    /// Its byte span in the text.
+    span: std::ops::Range<usize>,
+    /// The cells it covers.
+    area: CellRange,
+    color: Hsla,
+}
 
 /// The references in edited formula `text`, each with its byte span, the
 /// rectangle it covers, and its colour. Empty for anything but a formula
@@ -1241,7 +1238,11 @@ fn formula_refs(text: &str, pal: &Palette) -> Vec<RefSpan> {
         .into_iter()
         .filter(|(_, r)| r.sheet.is_none())
         .enumerate()
-        .map(|(i, (span, r))| (span, r.area.bounds(), pal.refs[i % pal.refs.len()]))
+        .map(|(i, (span, r))| RefSpan {
+            span,
+            area: CellRange::from_bounds(r.area.bounds()),
+            color: pal.refs[i % pal.refs.len()],
+        })
         .collect()
 }
 
@@ -1249,7 +1250,7 @@ fn formula_refs(text: &str, pal: &Palette) -> Vec<RefSpan> {
 fn coloured_runs(text: &str, spans: &[RefSpan], font: &Font, default: Hsla) -> Vec<TextRun> {
     let mut runs = Vec::new();
     let mut at = 0;
-    for (span, _, color) in spans {
+    for RefSpan { span, color, .. } in spans {
         if span.start < at || span.end > text.len() {
             continue;
         }

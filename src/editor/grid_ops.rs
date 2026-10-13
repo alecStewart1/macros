@@ -14,7 +14,7 @@ use crate::grid::cmd::GridCmd;
 use crate::grid::export;
 use crate::grid::series::next_in_series;
 use crate::grid::style::RuleTest;
-use crate::grid::view::{self, CellRange, SelKind, cell_name, col_name};
+use crate::grid::view::{self, CellRange, Pos, SelKind, cell_name, col_name};
 
 /// Distinct values offered by `grid-complete-cell` when a column has no
 /// declared choices.
@@ -739,7 +739,7 @@ impl Editor {
         };
         let mut sel = g.selection();
         let (rows, cols) = g.used();
-        if sel.rows() == 1 && sel.cols() == 1 {
+        if sel.is_single() {
             sel = CellRange {
                 r0: 0,
                 c0: 0,
@@ -841,12 +841,7 @@ impl Editor {
         let sel = if g.view.anchor.is_some() {
             g.selection()
         } else {
-            CellRange {
-                r0: r,
-                c0: c,
-                r1: r,
-                c1: c,
-            }
+            CellRange::cell((r, c))
         };
         if sel.rows().saturating_mul(sel.cols()) > MAX_FORMAT_CELLS {
             self.echo(
@@ -884,13 +879,9 @@ impl Editor {
             }
             _ => None,
         };
-        let cells: Vec<(usize, usize)> = (sel.r0..=sel.r1)
-            .filter(|&r| g.view.rows.shown(r))
-            .flat_map(|r| {
-                (sel.c0..=sel.c1)
-                    .filter(|&c| g.view.cols.shown(c))
-                    .map(move |c| (r, c))
-            })
+        let cells: Vec<Pos> = sel
+            .cells()
+            .filter(|&(r, c)| g.view.rows.shown(r) && g.view.cols.shown(c))
             .collect();
         let n = cells.len();
         let color = |i: Option<u8>| i.map_or("none", cellfmt::color_name);
