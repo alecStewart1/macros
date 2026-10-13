@@ -20,9 +20,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::jsonrpc::{Message, error_response as rpc_error, response as rpc_result};
+use crate::jsonrpc::{Message, error_response as rpc_error, lenient, response as rpc_result};
 
 /// Protocol revisions we speak, newest first. A client asking for one of
 /// these gets it back; anything else gets the newest.
@@ -478,29 +480,43 @@ for the categorized reference of every primitive (signatures, types, docs) and t
 Scheme library; `describe` and `apropos` look up single names. Buffer and overlay positions \
 are BYTE offsets.";
 
-fn tool_definitions() -> Value {
-    json!([
-        {
-            "name": "eval",
-            "description": "Evaluate Steel Scheme code in the live editor and return the printed \
-                value of the last form, any error, and echo-area messages it produced. Editor \
-                commands it queues (insert, render-buffer, set-option, …) are applied. Can \
-                redefine functions in a running package — the main package-development loop.",
-            "inputSchema": {
+/// One MCP tool: what `tools/list` advertises and the handler `tools/call`
+/// runs. [`TOOLS`] is the single list of them.
+struct Tool {
+    name: &'static str,
+    description: &'static str,
+    input_schema: fn() -> Value,
+    /// Run with the call's `arguments`: `(text, is_error)`.
+    run: fn(&Value, &dyn Backend) -> (String, bool),
+}
+
+/// Every tool, in the order `tools/list` reports them.
+const TOOLS: &[Tool] = &[
+    Tool {
+        name: "eval",
+        description: "Evaluate Steel Scheme code in the live editor and return the printed \
+        value of the last form, any error, and echo-area messages it produced. Editor \
+        commands it queues (insert, render-buffer, set-option, …) are applied. Can \
+        redefine functions in a running package — the main package-development loop.",
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {"code": {"type": "string", "description": "Steel source; may hold several forms."}},
                 "required": ["code"]
-            }
+            })
         },
-        {
-            "name": "buffer_text",
-            "description": "A buffer's text plus its name, file, major mode, point and modified \
-                flag. Defaults to the current buffer. Optionally a line range and the overlay \
-                face spans (byte offsets) that color it. A grid (CSV/TSV/.xlsx) buffer shows its \
-                cells instead: tab-separated rows under column letters (the line range picks \
-                rows; 1000 by default; a row a filter hides is marked `(hidden)`), the cursor and \
-                sheet, then its formulas, and with `faces` its hand-set formatting.",
-            "inputSchema": {
+        run: eval_tool,
+    },
+    Tool {
+        name: "buffer_text",
+        description: "A buffer's text plus its name, file, major mode, point and modified \
+        flag. Defaults to the current buffer. Optionally a line range and the overlay \
+        face spans (byte offsets) that color it. A grid (CSV/TSV/.xlsx) buffer shows its \
+        cells instead: tab-separated rows under column letters (the line range picks \
+        rows; 1000 by default; a row a filter hides is marked `(hidden)`), the cursor and \
+        sheet, then its formulas, and with `faces` its hand-set formatting.",
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {
                     "buffer": {"type": "string", "description": "Buffer name; omit for the current buffer."},
@@ -508,126 +524,239 @@ fn tool_definitions() -> Value {
                     "end_line": {"type": "integer", "minimum": 0, "description": "End line, exclusive."},
                     "faces": {"type": "boolean", "description": "Include overlay face spans."}
                 }
-            }
+            })
         },
-        {
-            "name": "list_buffers",
-            "description": "Every open buffer with its major mode and file; the current buffer is marked with *.",
-            "inputSchema": {"type": "object", "properties": {}}
-        },
-        {
-            "name": "messages",
-            "description": "Recent echo-area messages (the *Messages* log), oldest first. Errors from \
-                async callbacks and hooks land here.",
-            "inputSchema": {
+        run: buffer_text_tool,
+    },
+    Tool {
+        name: "list_buffers",
+        description: "Every open buffer with its major mode and file; the current buffer is marked with *.",
+        input_schema: || json!({"type": "object", "properties": {}}),
+        run: list_buffers_tool,
+    },
+    Tool {
+        name: "messages",
+        description: "Recent echo-area messages (the *Messages* log), oldest first. Errors from \
+        async callbacks and hooks land here.",
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {"count": {"type": "integer", "minimum": 1, "description": "How many (default 50)."}}
-            }
+            })
         },
-        {
-            "name": "describe",
-            "description": "Documentation for a Scheme function, command, or editor option by name.",
-            "inputSchema": {
+        run: messages_tool,
+    },
+    Tool {
+        name: "describe",
+        description: "Documentation for a Scheme function, command, or editor option by name.",
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"]
-            }
+            })
         },
-        {
-            "name": "api",
-            "description": "The package-API reference. No arguments: an index of every Rust \
-                primitive category (buffers, overlays, processes, http, sockets, sqlite, git, …) \
-                and bundled Scheme library module. `category` (e.g. \"sockets\" or \"lib/core\"): \
-                each function's signature with argument/return types and its doc. `search`: words \
-                matched against names, signatures and docs (within `category` if given). Use it to \
-                find what to build a package on before reading source.",
-            "inputSchema": {
+        run: describe_tool,
+    },
+    Tool {
+        name: "api",
+        description: "The package-API reference. No arguments: an index of every Rust \
+        primitive category (buffers, overlays, processes, http, sockets, sqlite, git, …) \
+        and bundled Scheme library module. `category` (e.g. \"sockets\" or \"lib/core\"): \
+        each function's signature with argument/return types and its doc. `search`: words \
+        matched against names, signatures and docs (within `category` if given). Use it to \
+        find what to build a package on before reading source.",
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {
                     "category": {"type": "string", "description": "A category from the index; omit for the index or to search everything."},
                     "search": {"type": "string", "description": "Space-separated words; all must match."}
                 }
-            }
+            })
         },
-        {
-            "name": "apropos",
-            "description": "Search function, command, and option names and their documentation. \
-                Every space-separated word must match.",
-            "inputSchema": {
+        run: api_tool,
+    },
+    Tool {
+        name: "apropos",
+        description: "Search function, command, and option names and their documentation. \
+        Every space-separated word must match.",
+        input_schema: || {
+            json!({
                 "type": "object",
                 "properties": {"pattern": {"type": "string"}},
                 "required": ["pattern"]
-            }
-        }
-    ])
+            })
+        },
+        run: apropos_tool,
+    },
+];
+
+/// The tool names, in [`TOOLS`] order (for the `mcp-server-info` summary).
+pub fn tool_names() -> impl Iterator<Item = &'static str> {
+    TOOLS.iter().map(|t| t.name)
+}
+
+fn tool_definitions() -> Value {
+    TOOLS
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": (t.input_schema)(),
+            })
+        })
+        .collect()
 }
 
 /// Run a tool: `(text, is_error)`, or `None` for an unknown tool name.
 fn call_tool(name: &str, args: &Value, backend: &dyn Backend) -> Option<(String, bool)> {
-    let str_arg = |key: &str| args.get(key).and_then(Value::as_str);
-    let usize_arg = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n as usize);
-    let result = match name {
-        "eval" => {
-            let Some(code) = str_arg("code") else {
-                return Some(("missing argument: code".into(), true));
-            };
-            backend.log(format!("eval: {}", one_line(code, 120)));
-            let report = backend.eval(code);
-            return Some(format_eval(&report));
-        }
-        "buffer_text" => {
-            let lines = match (usize_arg("start_line"), usize_arg("end_line")) {
-                (None, None) => None,
-                (s, e) => Some((s.unwrap_or(0), e.unwrap_or(usize::MAX))),
-            };
-            let faces = args.get("faces").and_then(Value::as_bool).unwrap_or(false);
-            backend.buffer_text(str_arg("buffer"), lines, faces)
-        }
-        "list_buffers" => backend.list_buffers(),
-        "messages" => backend.messages(usize_arg("count").unwrap_or(50).clamp(1, 10_000)),
-        "describe" => {
-            let Some(n) = str_arg("name") else {
-                return Some(("missing argument: name".into(), true));
-            };
-            let s = scheme_string(n);
-            scheme_text(
-                backend,
-                &format!(
-                    "(if (member {s} (option-list))
-                         (string-append {s} \"\\n\\nEditor option. Current value: \"
-                                        (option-display (get-option {s})))
-                         (let ((doc (function-doc {s})))
-                           (string-append {s} \"\\n\\n\"
-                                          (if (equal? doc \"\") \"(no documentation)\" doc))))"
-                ),
-            )
-        }
-        "api" => scheme_text(
-            backend,
-            &format!(
-                "(api-reference {} {})",
-                scheme_string(str_arg("category").unwrap_or("")),
-                scheme_string(str_arg("search").unwrap_or(""))
-            ),
-        ),
-        "apropos" => {
-            let Some(p) = str_arg("pattern") else {
-                return Some(("missing argument: pattern".into(), true));
-            };
-            scheme_text(
-                backend,
-                &format!(
-                    "(let ((m (apropos-matches {}))) (if (null? m) \"no matches\" (join-lines (map apropos-row m))))",
-                    scheme_string(p)
-                ),
-            )
-        }
-        _ => return None,
-    };
-    Some(match result {
+    TOOLS
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| (t.run)(args, backend))
+}
+
+/// A tool's `arguments` as `T`. Lenient like the protocol's clients expect:
+/// a missing or ill-typed argument is just absent (see [`lenient`]), and
+/// anything but an object means no arguments at all.
+fn parse_args<T: DeserializeOwned + Default>(args: &Value) -> T {
+    if args.is_object() {
+        T::deserialize(args).unwrap_or_default()
+    } else {
+        T::default()
+    }
+}
+
+/// A backend result as a tool reply.
+fn reply(result: Result<String, String>) -> (String, bool) {
+    match result {
         Ok(text) => (text, false),
         Err(e) => (e, true),
-    })
+    }
+}
+
+fn missing(argument: &str) -> (String, bool) {
+    (format!("missing argument: {argument}"), true)
+}
+
+#[derive(Deserialize, Default)]
+struct EvalArgs {
+    #[serde(default, deserialize_with = "lenient")]
+    code: Option<String>,
+}
+
+fn eval_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
+    let Some(code) = parse_args::<EvalArgs>(args).code else {
+        return missing("code");
+    };
+    backend.log(format!("eval: {}", one_line(&code, 120)));
+    format_eval(&backend.eval(&code))
+}
+
+#[derive(Deserialize, Default)]
+struct BufferTextArgs {
+    #[serde(default, deserialize_with = "lenient")]
+    buffer: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    start_line: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    end_line: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
+    faces: Option<bool>,
+}
+
+fn buffer_text_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
+    let args: BufferTextArgs = parse_args(args);
+    let lines = match (args.start_line, args.end_line) {
+        (None, None) => None,
+        (s, e) => Some((
+            s.map_or(0, |n| n as usize),
+            e.map_or(usize::MAX, |n| n as usize),
+        )),
+    };
+    reply(backend.buffer_text(args.buffer.as_deref(), lines, args.faces.unwrap_or(false)))
+}
+
+fn list_buffers_tool(_args: &Value, backend: &dyn Backend) -> (String, bool) {
+    reply(backend.list_buffers())
+}
+
+#[derive(Deserialize, Default)]
+struct MessagesArgs {
+    #[serde(default, deserialize_with = "lenient")]
+    count: Option<u64>,
+}
+
+fn messages_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
+    let count = parse_args::<MessagesArgs>(args)
+        .count
+        .map_or(50, |n| n as usize);
+    reply(backend.messages(count.clamp(1, 10_000)))
+}
+
+#[derive(Deserialize, Default)]
+struct DescribeArgs {
+    #[serde(default, deserialize_with = "lenient")]
+    name: Option<String>,
+}
+
+fn describe_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
+    let Some(name) = parse_args::<DescribeArgs>(args).name else {
+        return missing("name");
+    };
+    let s = scheme_string(&name);
+    reply(scheme_text(
+        backend,
+        &format!(
+            "(if (member {s} (option-list))
+                 (string-append {s} \"\\n\\nEditor option. Current value: \"
+                                (option-display (get-option {s})))
+                 (let ((doc (function-doc {s})))
+                   (string-append {s} \"\\n\\n\"
+                                  (if (equal? doc \"\") \"(no documentation)\" doc))))"
+        ),
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct ApiArgs {
+    #[serde(default, deserialize_with = "lenient")]
+    category: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    search: Option<String>,
+}
+
+fn api_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
+    let args: ApiArgs = parse_args(args);
+    reply(scheme_text(
+        backend,
+        &format!(
+            "(api-reference {} {})",
+            scheme_string(args.category.as_deref().unwrap_or("")),
+            scheme_string(args.search.as_deref().unwrap_or(""))
+        ),
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct AproposArgs {
+    #[serde(default, deserialize_with = "lenient")]
+    pattern: Option<String>,
+}
+
+fn apropos_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
+    let Some(pattern) = parse_args::<AproposArgs>(args).pattern else {
+        return missing("pattern");
+    };
+    reply(scheme_text(
+        backend,
+        &format!(
+            "(let ((m (apropos-matches {}))) (if (null? m) \"no matches\" (join-lines (map apropos-row m))))",
+            scheme_string(&pattern)
+        ),
+    ))
 }
 
 /// Evaluate a Scheme expression that returns a string, and unquote it.

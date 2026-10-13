@@ -7,7 +7,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::jsonrpc;
+use crate::jsonrpc::{self, lenient};
 use crate::process::{EnvOverrides, ProcessGroup};
 use crate::transport;
 
@@ -421,17 +421,6 @@ pub enum SyncKind {
     Full,
     /// Sync kind 2: send only the changed range.
     Incremental,
-}
-
-/// A JSON value deserialized as `T`, or `None` when it doesn't fit — so one
-/// malformed capability leaves the others intact (each used to be dug out of
-/// the raw JSON separately, defaulting on its own).
-fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::de::DeserializeOwned,
-{
-    Ok(T::deserialize(Value::deserialize(d)?).ok())
 }
 
 /// `textDocumentSync`: a bare `TextDocumentSyncKind` number or an options

@@ -89,6 +89,19 @@ pub fn error_response(id: Value, code: i64, message: &str) -> Value {
     })
 }
 
+/// A `deserialize_with` for `Option<T>` fields of a JSON-RPC payload: the
+/// value as `T`, or `None` when it doesn't fit — so one malformed field leaves
+/// the others intact, matching the per-field `.as_str()`-style digs (each
+/// defaulting on its own) that typed payload structs replace.
+pub fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    use serde::Deserialize;
+    Ok(T::deserialize(Value::deserialize(d)?).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

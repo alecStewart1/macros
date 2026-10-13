@@ -396,11 +396,12 @@ impl Editor {
                      Connect Claude Code:\n\n  \
                      claude mcp add --transport http macros {url} \\\n    \
                      --header \"Authorization: Bearer {}\"\n\n\
-                     Tools: eval, buffer_text, list_buffers, messages, describe, api, apropos.\n\
+                     Tools: {}.\n\
                      `eval` runs code in this editor, so the token is required on every\n\
                      request and only local connections are accepted.\n\n\
                      Stop with M-x mcp-server-stop or (set-option \"mcp-server\" #f).\n",
-                    m.token
+                    m.token,
+                    crate::mcp::tool_names().collect::<Vec<_>>().join(", "),
                 ));
             }
             None => text.push_str(
