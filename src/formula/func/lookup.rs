@@ -78,11 +78,16 @@ pub enum Key {
 impl Key {
     pub fn of(v: &Value) -> Option<Key> {
         match v {
-            Value::Number(n) => Some(Key::Num(if *n == 0.0 { 0 } else { n.to_bits() })),
+            Value::Number(n) => Some(Key::num(*n)),
             Value::Text(s) => Some(Key::Text(s.chars().map(fold).collect())),
             Value::Bool(b) => Some(Key::Bool(*b)),
             Value::Empty | Value::Error(_) => None,
         }
+    }
+
+    /// A number's key (`-0` and `0` are one key).
+    pub fn num(n: f64) -> Key {
+        Key::Num(if n == 0.0 { 0 } else { n.to_bits() })
     }
 }
 

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use super::args::{Area, MANY, area, def, fold_args, given, opt_num};
+use super::lookup::Key;
 use super::{Arg, Ctx, FuncDef, num, numbers, scalar};
 use crate::formula::criteria::Criterion;
 use crate::formula::value::{ErrorKind, Value};
@@ -224,10 +225,9 @@ fn median(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
 /// repeats at all is `#N/A`.
 fn mode(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     numbers(args, ctx).and_then(|ns| {
-        let mut counts: HashMap<u64, (usize, usize)> = HashMap::new();
+        let mut counts: HashMap<Key, (usize, usize)> = HashMap::new();
         for (i, n) in ns.iter().enumerate() {
-            let key = if *n == 0.0 { 0 } else { n.to_bits() };
-            counts.entry(key).or_insert((0, i)).0 += 1;
+            counts.entry(Key::num(*n)).or_insert((0, i)).0 += 1;
         }
         let best = counts
             .values()
