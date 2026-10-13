@@ -316,7 +316,7 @@ pub(super) fn parse_ex_line(input: &str) -> ExLine {
 pub(super) struct SubSpec {
     pub pattern: String,
     pub replacement: String,
-    pub flags: String,
+    pub flags: SubFlags,
     pub count: Option<usize>,
     /// `:s` with no pattern part at all (repeat the last substitute).
     pub bare: bool,
@@ -352,14 +352,83 @@ pub(super) fn parse_sub(arg: &str) -> SubSpec {
     }
 }
 
-fn split_flags_count(s: &str) -> (String, Option<usize>) {
+/// Every character `:s` accepts as a flag.
+const SUB_FLAG_CHARS: &str = "&cegiInp#lr";
+
+/// A `:s` command's flags. Only the ones the engine acts on are kept; the
+/// rest (`p`, `#`, `l`, `r`) are accepted and ignored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct SubFlags {
+    /// A leading `&`: keep the last substitute's flags.
+    pub keep: bool,
+    /// `c`: confirm each replacement.
+    pub confirm: bool,
+    /// `e`: no error when nothing matches.
+    pub no_error: bool,
+    /// `g`: every match on the line, not just the first.
+    pub global: bool,
+    /// `i`: ignore case.
+    pub icase: bool,
+    /// `I`: don't ignore case (wins over `i`).
+    pub no_icase: bool,
+    /// `n`: count the matches, substitute nothing.
+    pub count_only: bool,
+}
+
+impl SubFlags {
+    /// Whether the pattern ignores case: `i` without `I`.
+    pub fn ignore_case(&self) -> bool {
+        self.icase && !self.no_icase
+    }
+
+    /// These flags added to `last`'s (`:&&`, `:s&`); the `&` is spent.
+    fn merged_into(self, last: SubFlags) -> Self {
+        Self {
+            keep: false,
+            confirm: last.confirm || self.confirm,
+            no_error: last.no_error || self.no_error,
+            global: last.global || self.global,
+            icase: last.icase || self.icase,
+            no_icase: last.no_icase || self.no_icase,
+            count_only: last.count_only || self.count_only,
+        }
+    }
+}
+
+impl std::str::FromStr for SubFlags {
+    /// The first character that isn't a `:s` flag.
+    type Err = char;
+
+    fn from_str(s: &str) -> Result<Self, char> {
+        let mut flags = Self {
+            keep: s.starts_with('&'),
+            ..Self::default()
+        };
+        for c in s.chars() {
+            match c {
+                'c' => flags.confirm = true,
+                'e' => flags.no_error = true,
+                'g' => flags.global = true,
+                'i' => flags.icase = true,
+                'I' => flags.no_icase = true,
+                'n' => flags.count_only = true,
+                c if SUB_FLAG_CHARS.contains(c) => {}
+                c => return Err(c),
+            }
+        }
+        Ok(flags)
+    }
+}
+
+fn split_flags_count(s: &str) -> (SubFlags, Option<usize>) {
     let s = s.trim();
-    let flags: String = s
+    // Flag characters are ASCII: the count is the byte length too.
+    let n = s
         .chars()
-        .take_while(|c| "&cegiInp#lr".contains(*c))
-        .collect();
-    let rest = s[flags.len()..].trim();
-    (flags, rest.parse().ok())
+        .take_while(|c| SUB_FLAG_CHARS.contains(*c))
+        .count();
+    let flags = s[..n].parse().unwrap_or_default();
+    (flags, s[n..].trim().parse().ok())
 }
 
 /// The Vim pattern dialect over Rust's regex syntax: `\<` / `\>` word
@@ -656,7 +725,8 @@ impl SubConfirm {
 pub(super) struct LastSub {
     pub pattern: String,
     pub replacement: String,
-    pub flags: String,
+    /// Never [`SubFlags::keep`].
+    pub flags: SubFlags,
 }
 
 impl Editor {
@@ -1073,7 +1143,7 @@ impl Editor {
         let (s, e) = self.ex_resolve_range(line.range.as_ref(), (cur, cur))?;
         let mut spec = parse_sub(&line.arg);
         // `:&&` / `:s&` keep the last flags.
-        let keep_flags = line.name == "&&" || spec.flags.starts_with('&');
+        let keep_flags = line.name == "&&" || spec.flags.keep;
         if amp || spec.bare {
             let last = self
                 .vim
@@ -1083,12 +1153,12 @@ impl Editor {
             spec.pattern = last.pattern;
             spec.replacement = last.replacement;
             if keep_flags {
-                spec.flags = format!("{}{}", last.flags, spec.flags.trim_start_matches('&'));
+                spec.flags = spec.flags.merged_into(last.flags);
             }
-        } else if spec.flags.starts_with('&')
+        } else if spec.flags.keep
             && let Some(last) = &self.vim.last_sub
         {
-            spec.flags = format!("{}{}", last.flags, &spec.flags[1..]);
+            spec.flags = spec.flags.merged_into(last.flags);
         }
         if spec.pattern.is_empty() {
             spec.pattern = self.search_query.clone().ok_or(ExError::NoPreviousRegex)?;
@@ -1096,7 +1166,10 @@ impl Editor {
         self.vim.last_sub = Some(LastSub {
             pattern: spec.pattern.clone(),
             replacement: spec.replacement.clone(),
-            flags: spec.flags.replace('&', ""),
+            flags: SubFlags {
+                keep: false,
+                ..spec.flags
+            },
         });
         // `n` and the search highlight compile it as a plain regex: store the
         // converted pattern (`\c` / `\<` resolved).
@@ -1113,12 +1186,12 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> Result<(), ExError> {
         let (s, e) = self.ex_apply_count(s, e, spec.count);
-        let icase = spec.flags.contains('i') && !spec.flags.contains('I');
+        let icase = spec.flags.ignore_case();
         let re = Regex::new(&vim_pattern(&spec.pattern, icase)).map_err(ExError::InvalidRegex)?;
         let rep = vim_replacement(&spec.replacement);
-        let global = spec.flags.contains('g');
+        let global = spec.flags.global;
         let lines = self.ex_lines(s, e);
-        if spec.flags.contains('n') {
+        if spec.flags.count_only {
             let n: usize = lines
                 .iter()
                 .map(|l| {
@@ -1129,12 +1202,12 @@ impl Editor {
             self.echo(format!("{n} match{}", if n == 1 { "" } else { "es" }), cx);
             return Ok(());
         }
-        if spec.flags.contains('c') {
+        if spec.flags.confirm {
             return self.ex_sub_confirm_start(s, e, &re, &rep, global, cx);
         }
         let (new, n) = substitute_lines(&lines, &re, &rep, global);
         if n == 0 {
-            if !spec.flags.contains('e') {
+            if !spec.flags.no_error {
                 return Err(ExError::PatternNotFound(Some(spec.pattern.clone())));
             }
             return Ok(());
@@ -1531,14 +1604,21 @@ mod tests {
         let s = parse_sub("/a\\/b/c/gi 3");
         assert_eq!(s.pattern, "a/b");
         assert_eq!(s.replacement, "c");
-        assert_eq!(s.flags, "gi");
+        assert_eq!(s.flags, "gi".parse().unwrap());
+        assert!(s.flags.global && s.flags.ignore_case());
+        assert_eq!(
+            "giI".parse::<SubFlags>().map(|f| f.ignore_case()),
+            Ok(false)
+        );
+        assert_eq!("&g".parse::<SubFlags>().map(|f| f.keep), Ok(true));
+        assert_eq!("gx".parse::<SubFlags>(), Err('x'));
         assert_eq!(s.count, Some(3));
         let s = parse_sub("#x#y#");
         assert_eq!((s.pattern.as_str(), s.replacement.as_str()), ("x", "y"));
         let s = parse_sub("");
         assert!(s.bare);
         let s = parse_sub("g");
-        assert!(s.bare && s.flags == "g");
+        assert!(s.bare && s.flags.global);
         assert_eq!(vim_replacement(r"<\1>&\&$"), "<${1}>${0}&$$");
         assert_eq!(vim_pattern(r"\<foo\>", false), r"\bfoo\b");
         assert_eq!(vim_pattern(r"\cFoo", false), "(?i)Foo");

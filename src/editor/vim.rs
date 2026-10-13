@@ -31,7 +31,24 @@ pub(super) struct OpPending {
     /// The count typed before the operator (`2` in `2d3w`).
     pub count: Option<usize>,
     /// `v` / `V` typed after the operator: force charwise / linewise.
-    pub force: Option<&'static str>,
+    pub force: Option<Force>,
+}
+
+/// An operator's forced motion type (`dv…` / `dV…`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Force {
+    Char,
+    Line,
+}
+
+impl Force {
+    /// The key that forces it — also how `evil-operate` receives it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Force::Char => "v",
+            Force::Line => "V",
+        }
+    }
 }
 
 /// A binding waiting for its one-key argument (`%c`).
@@ -387,7 +404,7 @@ pub(super) fn compose_operate(op: &OpPending, motion_count: Option<usize>, motio
         "(evil-operate {} {} {} (lambda () {motion}))",
         steel_quote(&op.op),
         combined_count(op.count, motion_count),
-        steel_quote(op.force.unwrap_or("")),
+        steel_quote(op.force.map_or("", Force::key)),
     )
 }
 
@@ -1423,7 +1440,7 @@ impl Editor {
         if let Some(op) = &self.vim.op {
             let n = op.count.map(|n| n.to_string()).unwrap_or_default();
             let m = self.modal_count.map(|n| n.to_string()).unwrap_or_default();
-            let force = op.force.unwrap_or("");
+            let force = op.force.map_or("", Force::key);
             let pend = if self.pending_keys.is_empty() {
                 String::new()
             } else {
@@ -1486,7 +1503,11 @@ impl Editor {
             return Handled::No;
         };
         if self.pending_keys.is_empty() && (chord == "v" || chord == "shift-v") {
-            op.force = Some(if chord == "v" { "v" } else { "V" });
+            op.force = Some(if chord == "v" {
+                Force::Char
+            } else {
+                Force::Line
+            });
             self.vim.op = Some(op);
             self.echo_operator_pending(cx);
             return Handled::Yes;
@@ -1656,7 +1677,7 @@ mod tests {
         );
         let op = OpPending {
             count: None,
-            force: Some("V"),
+            force: Some(Force::Line),
             ..op
         };
         assert_eq!(
