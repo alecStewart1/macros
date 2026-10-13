@@ -12,6 +12,7 @@ pub(super) mod keymaps;
 pub(super) mod languages;
 pub(super) mod lsp;
 pub(super) mod modal;
+pub(super) mod options;
 pub(super) mod plotting;
 pub(super) mod prompts;
 pub(super) mod spell;

@@ -220,6 +220,7 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ),
     ("script/prims/lsp.rs", include_str!("prims/lsp.rs")),
     ("script/prims/modal.rs", include_str!("prims/modal.rs")),
+    ("script/prims/options.rs", include_str!("prims/options.rs")),
     (
         "script/prims/plotting.rs",
         include_str!("prims/plotting.rs"),
