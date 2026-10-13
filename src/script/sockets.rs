@@ -151,18 +151,29 @@ fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
 
-/// Build a rustls client config trusting the platform certificate store. Shared
-/// by `tls-connect`, `tls-upgrade`, and the async/WebSocket socket workers.
+/// A rustls client config trusting the platform certificate store. Shared by
+/// `tls-connect`, `tls-upgrade`, and the async/WebSocket socket workers. The
+/// store is loaded once and cached; if it came back empty (loading failed),
+/// nothing is cached and the next connection tries again.
 pub(crate) fn tls_client_config() -> Arc<rustls::ClientConfig> {
+    static CACHED: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    if let Some(config) = CACHED.get() {
+        return config.clone();
+    }
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls_native_certs::load_native_certs().certs {
         let _ = roots.add(cert);
     }
-    Arc::new(
+    let loaded = !roots.is_empty();
+    let config = Arc::new(
         rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth(),
-    )
+    );
+    if loaded {
+        let _ = CACHED.set(config.clone());
+    }
+    config
 }
 
 /// Open a plain TCP connection with the given timeouts (0 = a sane default).
