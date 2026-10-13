@@ -2159,42 +2159,43 @@
 ;; --- keymaps ----------------------------------------------------------------
 ;; magit-status (matches magit's keys; uppercase = shift-, shown prettified in
 ;; transient menus via Rust pretty_key).
-(define-key "magit-status" "s" 'magit-stage)
-(define-key "magit-status" "shift-s" 'magit-stage-all)
-(define-key "magit-status" "u" 'magit-unstage)
-(define-key "magit-status" "shift-u" 'magit-unstage-all)
-(define-key "magit-status" "k" 'magit-discard)
-(define-key "magit-status" "c" 'magit-commit-popup)
-(define-key "magit-status" "b" 'magit-branch-popup)
-(define-key "magit-status" "shift-p" 'magit-push-popup)
-(define-key "magit-status" "shift-f" 'magit-pull-popup)
-(define-key "magit-status" "f" 'magit-fetch-popup)
-(define-key "magit-status" "z" 'magit-stash-popup)
-(define-key "magit-status" "l" 'magit-log-popup)
-(define-key "magit-status" "shift-x" 'magit-reset-popup)
-(define-key "magit-status" "shift-m" 'magit-remote-popup)
-(define-key "magit-status" "t" 'magit-tag-popup)
-(define-key "magit-status" "m" 'magit-merge-popup)
-(define-key "magit-status" "shift-b" 'magit-blame)
-(define-key "magit-status" "r" 'magit-rebase-popup)
-(define-key "magit-status" "y" 'magit-copy)
-(define-key "magit-status" "i" 'magit-gitignore)
-(define-key "magit-status" "$" 'magit-process-buffer)
-(define-key "magit-status" "shift-h" 'magit-toggle-history)
-(define-key "magit-status" "?" 'magit-dispatch)
-(define-key "magit-status" "g" 'magit-refresh)
-(define-key "magit-status" "v" 'magit-toggle-view)
-(define-key "magit-status" "n" 'next-line)
-(define-key "magit-status" "p" 'previous-line)
-(define-key "magit-status" "alt-n" 'magit-next-section)
-(define-key "magit-status" "alt-p" 'magit-prev-section)
-(define-key "magit-status" "q" 'magit-quit)
-(define-key "magit-status" "tab" 'magit-toggle-fold)
-(define-key "magit-status" "backtab" 'magit-cycle-all)
-(define-key "magit-status" "shift-tab" 'magit-cycle-all)
-(define-key "magit-status" "enter" 'magit-visit-file)
-;; Shadows fundamental's C-g inside magit so it can cancel a live push/pull.
-(define-key "magit-status" "ctrl-g" 'magit-keyboard-quit)
+(define-keys "magit-status"
+  '(("s" magit-stage)
+    ("shift-s" magit-stage-all)
+    ("u" magit-unstage)
+    ("shift-u" magit-unstage-all)
+    ("k" magit-discard)
+    ("c" magit-commit-popup)
+    ("b" magit-branch-popup)
+    ("shift-p" magit-push-popup)
+    ("shift-f" magit-pull-popup)
+    ("f" magit-fetch-popup)
+    ("z" magit-stash-popup)
+    ("l" magit-log-popup)
+    ("shift-x" magit-reset-popup)
+    ("shift-m" magit-remote-popup)
+    ("t" magit-tag-popup)
+    ("m" magit-merge-popup)
+    ("shift-b" magit-blame)
+    ("r" magit-rebase-popup)
+    ("y" magit-copy)
+    ("i" magit-gitignore)
+    ("$" magit-process-buffer)
+    ("shift-h" magit-toggle-history)
+    ("?" magit-dispatch)
+    ("g" magit-refresh)
+    ("v" magit-toggle-view)
+    ("n" next-line)
+    ("p" previous-line)
+    ("alt-n" magit-next-section)
+    ("alt-p" magit-prev-section)
+    ("q" magit-quit)
+    ("tab" magit-toggle-fold)
+    ("backtab" magit-cycle-all)
+    ("shift-tab" magit-cycle-all)
+    ("enter" magit-visit-file)
+    ;; Shadows fundamental's C-g inside magit so it can cancel a live push/pull.
+    ("ctrl-g" magit-keyboard-quit)))
 
 ;; Evil + Helix overlays (each consulted only under its own modal mode, before
 ;; the keymap above, so the Emacs defaults are untouched). The collection layer
@@ -2209,14 +2210,15 @@
 (for-each
  (lambda (prefix)
    (let ((km (string-append prefix "magit-status")))
-     (define-key km "x" 'magit-discard)
-     (define-key km "g g" 'evil-goto-first-line)
-     (define-key km "shift-g" 'evil-goto-last-line)
-     (define-key km "g r" 'magit-refresh)
-     (define-key km "0" 'move-beginning-of-line)
-     (define-key km "^" 'evil-first-non-blank)
-     ;; Escape = the modal C-g: cancels a live push/pull like C-g does.
-     (define-key km "escape" 'magit-keyboard-quit)))
+     (define-keys km
+       '(("x" magit-discard)
+         ("g g" evil-goto-first-line)
+         ("shift-g" evil-goto-last-line)
+         ("g r" magit-refresh)
+         ("0" move-beginning-of-line)
+         ("^" evil-first-non-blank)
+         ;; Escape = the modal C-g: cancels a live push/pull like C-g does.
+         ("escape" magit-keyboard-quit)))))
  (list "evil-normal:" "helix-normal:"))
 ;; Helix goes to the bottom with `g e`, not `G` (which is vim's). Both are bound
 ;; under Helix so either muscle memory works, matching dired-sidebar.
@@ -2237,10 +2239,11 @@
 (define-key "fundamental" "ctrl-x shift-m" 'helm-magit)
 
 ;; C-x v …: inline git-blame controls on the current file buffer (Emacs vc-prefix).
-(define-key "fundamental" "ctrl-x v b" 'magit-blame-toggle)        ; full-file blame
-(define-key "fundamental" "ctrl-x v shift-b" 'magit-blame-line-toggle) ; current-line blame
-(define-key "fundamental" "ctrl-x v enter" 'magit-blame-show)     ; show commit at point
-(define-key "fundamental" "ctrl-x v y" 'magit-blame-copy)         ; copy hash at point
+(define-keys "fundamental"
+  '(("ctrl-x v b" magit-blame-toggle)             ; full-file blame
+    ("ctrl-x v shift-b" magit-blame-line-toggle)  ; current-line blame
+    ("ctrl-x v enter" magit-blame-show)           ; show commit at point
+    ("ctrl-x v y" magit-blame-copy)))             ; copy hash at point
 
 ;; `magit` is the familiar alias for `magit-status`.
 (define-command (magit) (magit-status))
