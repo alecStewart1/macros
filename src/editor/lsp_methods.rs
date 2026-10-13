@@ -79,7 +79,7 @@ impl Editor {
                 &[]
             };
             let (server, rx) = SteelLsp::start(seed, globals);
-            Ok((LspBackend::Builtin(Box::new(server)), rx))
+            Ok((Box::new(server) as Box<dyn LanguageServer>, rx))
         } else {
             let root = self
                 .active
@@ -90,7 +90,7 @@ impl Editor {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_default();
             LspClient::start(&command, &root, &env)
-                .map(|(c, rx)| (LspBackend::External(Box::new(c)), rx))
+                .map(|(c, rx)| (Box::new(c) as Box<dyn LanguageServer>, rx))
         };
         let (client, mut rx) = match started {
             Ok(v) => v,

@@ -21,7 +21,7 @@ use crate::buffer::Buffer;
 use crate::element::{EditorElement, LineLayout};
 use crate::highlight::{Edit, Highlighter, HlSpan};
 use crate::lsp::{
-    self, CompletionItem, Diagnostic, LspBackend, LspClient, RawDiagnostic, SteelLsp,
+    self, CompletionItem, Diagnostic, LanguageServer, LspClient, RawDiagnostic, SteelLsp,
 };
 use crate::mode::{Keymap, Mode, ModeStack};
 use crate::script::{EditorCommand, ScriptEngine, ScriptOutcome};
@@ -1297,7 +1297,9 @@ enum EvilState {
 
 /// A single running language server and the per-server state we track for it.
 struct LspServer {
-    client: LspBackend,
+    /// Both backends are boxed: an `LspClient` holds a subprocess handle +
+    /// channels, and a `SteelLsp` embeds a whole Steel engine.
+    client: Box<dyn LanguageServer>,
     /// True once the `initialize` response has arrived.
     ready: bool,
     /// What the server advertised in its `initialize` result (defaults until
