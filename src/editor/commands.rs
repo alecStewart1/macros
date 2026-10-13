@@ -660,16 +660,18 @@ impl Editor {
                 sticky,
             } => self.open_transient(title, columns, sticky, cx),
             TransientQuit => self.transient_quit(cx),
-            SplitWindowBelow => self.split_window(true, cx),
-            SplitWindowRight => self.split_window(false, cx),
-            SplitWindowRightRatio(ratio) => self.split_window_ratio(false, ratio as f32, cx),
+            SplitWindowBelow => self.split_window(SplitAxis::Vertical, cx),
+            SplitWindowRight => self.split_window(SplitAxis::Horizontal, cx),
+            SplitWindowRightRatio(ratio) => {
+                self.split_window_ratio(SplitAxis::Horizontal, ratio as f32, cx)
+            }
             OtherWindow => self.other_window(cx),
             DeleteWindow => self.delete_window(cx),
             DeleteOtherWindows => self.delete_other_windows(cx),
-            EnlargeWindow => self.resize_window(true, 0.05, cx),
-            ShrinkWindow => self.resize_window(true, -0.05, cx),
-            EnlargeWindowHorizontally => self.resize_window(false, 0.05, cx),
-            ShrinkWindowHorizontally => self.resize_window(false, -0.05, cx),
+            EnlargeWindow => self.resize_window(SplitAxis::Vertical, 0.05, cx),
+            ShrinkWindow => self.resize_window(SplitAxis::Vertical, -0.05, cx),
+            EnlargeWindowHorizontally => self.resize_window(SplitAxis::Horizontal, 0.05, cx),
+            ShrinkWindowHorizontally => self.resize_window(SplitAxis::Horizontal, -0.05, cx),
             other => return Err(other),
         }
         Ok(())
@@ -909,8 +911,8 @@ impl Editor {
             TopLeftWindow => self.window_corner(false, cx),
             BottomRightWindow => self.window_corner(true, cx),
             BalanceWindows => self.balance_windows(cx),
-            MaximizeWindowHeight => self.maximize_window(true, cx),
-            MaximizeWindowWidth => self.maximize_window(false, cx),
+            MaximizeWindowHeight => self.maximize_window(SplitAxis::Vertical, cx),
+            MaximizeWindowWidth => self.maximize_window(SplitAxis::Horizontal, cx),
             MoveWindowFarLeft => self.move_window_far(panes::Dir::Left, cx),
             MoveWindowFarDown => self.move_window_far(panes::Dir::Down, cx),
             MoveWindowFarUp => self.move_window_far(panes::Dir::Up, cx),
@@ -918,8 +920,8 @@ impl Editor {
             ExchangeWindow => self.exchange_window(cx),
             RotateWindowsDown => self.rotate_windows(true, cx),
             RotateWindowsUp => self.rotate_windows(false, cx),
-            NewWindowBelow => self.new_window_buffer(true, cx),
-            NewWindowRight => self.new_window_buffer(false, cx),
+            NewWindowBelow => self.new_window_buffer(SplitAxis::Vertical, cx),
+            NewWindowRight => self.new_window_buffer(SplitAxis::Horizontal, cx),
             EvilExCommand => {
                 // From Visual, the command line starts on the selected lines
                 // (`:'<,'>`), and Visual ends — as in Vim.

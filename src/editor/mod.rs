@@ -70,7 +70,7 @@ use input::UargState;
 use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
-use panes::{WindowLayout, layout_leaves, node_at, set_ratio_at, union_bounds};
+use panes::{Child, SplitAxis, WindowLayout, union_bounds};
 use terminal::{ProcessHandle, keystroke_to_bytes};
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
@@ -1093,11 +1093,12 @@ fn coalesce_inserts(commands: Vec<EditorCommand>) -> Vec<EditorCommand> {
 }
 
 /// An in-progress divider drag: which split (by path from the layout root) and
-/// its axis (`vertical` = the divider is horizontal / stacked split).
+/// its axis ([`SplitAxis::Vertical`] = the divider is horizontal / stacked
+/// split).
 #[derive(Clone)]
 struct ResizeDrag {
-    path: Vec<bool>,
-    vertical: bool,
+    path: Vec<Child>,
+    axis: SplitAxis,
 }
 
 /// One window pane: a view onto a buffer with its own point and scroll. The
@@ -3609,7 +3610,7 @@ impl Editor {
         const LSP_LOG_SPLIT_RATIO: f32 = 0.75;
         let origin = self.selected_pane;
         let new_id = self.next_pane_id;
-        self.split_window_ratio(true, LSP_LOG_SPLIT_RATIO, cx);
+        self.split_window_ratio(SplitAxis::Vertical, LSP_LOG_SPLIT_RATIO, cx);
         self.select_pane(new_id, cx);
         self.list_lsp_log(cx); // render into the new (selected) pane
         self.select_pane(origin, cx); // hand focus back to the file
@@ -3689,6 +3690,7 @@ impl Editor {
                 format!("{line}\t{col}\t{sev}\t{msg}")
             })
             .collect();
+        let windows = self.layout.leaves();
         self.script.set_snapshot(crate::script::EditorSnapshot {
             name: self.active.name.clone(),
             line: self.active.buffer.line_index_at_byte(point),
@@ -3708,31 +3710,23 @@ impl Editor {
             props,
             locals,
             diagnostics,
-            windows: {
-                let mut leaves = Vec::new();
-                layout_leaves(&self.layout, &mut leaves);
-                leaves
-            },
-            window_buffers: {
-                let mut leaves = Vec::new();
-                layout_leaves(&self.layout, &mut leaves);
-                leaves
-                    .into_iter()
-                    .map(|id| {
-                        // The selected pane shows the live active buffer; others
-                        // show whatever their `pane.buffer` records.
-                        let name = if id == self.selected_pane {
-                            self.active.name.clone()
-                        } else {
-                            self.panes
-                                .iter()
-                                .find(|p| p.id == id)
-                                .map_or_else(|| self.active.name.clone(), |p| p.buffer.clone())
-                        };
-                        (id, name)
-                    })
-                    .collect()
-            },
+            window_buffers: windows
+                .iter()
+                .map(|&id| {
+                    // The selected pane shows the live active buffer; others
+                    // show whatever their `pane.buffer` records.
+                    let name = if id == self.selected_pane {
+                        self.active.name.clone()
+                    } else {
+                        self.panes
+                            .iter()
+                            .find(|p| p.id == id)
+                            .map_or_else(|| self.active.name.clone(), |p| p.buffer.clone())
+                    };
+                    (id, name)
+                })
+                .collect(),
+            windows,
             selected_window: self.selected_pane,
             lsp_ready: self.active_lsp_ready(),
             visible_lines: self.visible_line_range(),

@@ -524,16 +524,18 @@ impl Editor {
     /// file in the main editor. Uses the first other pane, or splits if the
     /// selected pane is the only one. Focus moves to the file's window.
     pub(super) fn open_file_other_window(&mut self, path: String, cx: &mut Context<Self>) {
-        let mut leaves = Vec::new();
-        layout_leaves(&self.layout, &mut leaves);
-        let other = leaves.iter().copied().find(|&id| id != self.selected_pane);
+        let other = self
+            .layout
+            .leaves()
+            .into_iter()
+            .find(|&id| id != self.selected_pane);
         let target = match other {
             Some(id) => id,
             None => {
                 // Narrow split: the sidebar (the current pane) keeps this share.
                 const SIDEBAR_SPLIT_RATIO: f32 = 0.22;
                 let new_id = self.next_pane_id; // split assigns this id to the new pane
-                self.split_window_ratio(false, SIDEBAR_SPLIT_RATIO, cx);
+                self.split_window_ratio(SplitAxis::Horizontal, SIDEBAR_SPLIT_RATIO, cx);
                 new_id
             }
         };
@@ -1806,7 +1808,7 @@ mod editor_state_tests {
         let ed = editor_with(cx, &["a", "b"]);
         ed.update(cx, |e, cx| {
             // Two windows on "b".
-            e.split_window(true, cx);
+            e.split_window(SplitAxis::Vertical, cx);
             assert_eq!(e.panes.len(), 2);
             assert!(e.panes.iter().all(|p| p.buffer == "b"));
             e.kill_active_buffer(cx);
@@ -1835,7 +1837,7 @@ mod editor_state_tests {
     fn selecting_a_pane_snaps_its_saved_point_to_a_char_boundary(cx: &mut TestAppContext) {
         let ed = editor_with(cx, &["a"]);
         ed.update(cx, |e, cx| {
-            e.split_window(true, cx);
+            e.split_window(SplitAxis::Vertical, cx);
             let other = e.panes.iter().find(|p| p.id != e.selected_pane).unwrap().id;
             // Byte 2 is inside "é" (bytes 1..3 of "aéb").
             e.panes.iter_mut().find(|p| p.id == other).unwrap().point = 2;

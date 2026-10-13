@@ -179,8 +179,7 @@ fn marks_jumps_and_windows(cx: &mut TestAppContext) {
     // Windows: C-w v splits, C-w l / C-w h move between them.
     let first = ed.read_with(cx, |e, _| e.selected_pane);
     keys(&ed, cx, "ctrl-w v");
-    let mut leaves = Vec::new();
-    ed.read_with(cx, |e, _| layout_leaves(&e.layout, &mut leaves));
+    let leaves = ed.read_with(cx, |e, _| e.layout.leaves());
     assert_eq!(leaves.len(), 2);
     keys(&ed, cx, "ctrl-w l");
     let right = ed.read_with(cx, |e, _| e.selected_pane);
@@ -188,8 +187,7 @@ fn marks_jumps_and_windows(cx: &mut TestAppContext) {
     keys(&ed, cx, "ctrl-w h");
     assert_eq!(ed.read_with(cx, |e, _| e.selected_pane), first);
     keys(&ed, cx, "ctrl-w o");
-    let mut leaves = Vec::new();
-    ed.read_with(cx, |e, _| layout_leaves(&e.layout, &mut leaves));
+    let leaves = ed.read_with(cx, |e, _| e.layout.leaves());
     assert_eq!(leaves.len(), 1);
 }
 

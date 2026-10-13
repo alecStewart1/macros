@@ -128,13 +128,8 @@ impl Editor {
                     selected: *id == self.selected_pane,
                 }
             }
-            WindowLayout::Split {
-                vertical,
-                ratio,
-                a,
-                b,
-            } => LayoutSpec::Split {
-                vertical: *vertical,
+            WindowLayout::Split { axis, ratio, a, b } => LayoutSpec::Split {
+                vertical: axis.is_vertical(),
                 ratio: *ratio,
                 a: Box::new(self.session_layout(a)),
                 b: Box::new(self.session_layout(b)),
@@ -334,7 +329,7 @@ impl Editor {
                 let a = self.build_layout(a, panes, selected);
                 let b = self.build_layout(b, panes, selected);
                 WindowLayout::Split {
-                    vertical: *vertical,
+                    axis: SplitAxis::from_vertical(*vertical),
                     ratio: ratio.clamp(0.1, 0.9),
                     a: Box::new(a),
                     b: Box::new(b),
