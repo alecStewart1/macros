@@ -258,58 +258,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::files::register(&mut reg, shared);
     prims::hooks::register(&mut reg, shared);
     prims::special_buffers::register(&mut reg, shared);
-    reg.section(Section::Ui);
-    register_unary(
-        &mut reg,
-        queue,
-        "set-modeline-project",
-        EditorCommand::SetModelineProject,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "set-modeline-git",
-        EditorCommand::SetModelineGit,
-    );
-    // `(set-mode-line-slot key value)` → write/clear a named mode-line register
-    // (empty value clears). The general form behind project/git indicators.
-    register_binary(
-        &mut reg,
-        queue,
-        "set-mode-line-slot",
-        EditorCommand::SetModeLineSlot,
-    );
-    reg.section(Section::Ui);
-    {
-        // `(set-mode-line-format segs)` — replace the mode-line layout. `segs` is
-        // a list of segment tokens (bare strings = literals, or `ml-field`/
-        // `ml-slot`/`ml-text` tab-encoded tokens). Defined from scheme/modeline.scm.
-        let q = queue.clone();
-        reg.register_fn(
-            "set-mode-line-format",
-            move |StringList(segs): StringList| {
-                q.push(EditorCommand::SetModeLineFormat(segs));
-            },
-        );
-    }
-    {
-        // `(set-titlebar-dropdown items active callback)` — publish the
-        // title-bar dropdown (the perspectives switcher). `items` is a list of
-        // display labels, `active` the one shown in the bar; clicking an item
-        // calls `(callback label)`. An empty list removes the control. Driven
-        // from scheme/perspectives.scm.
-        let q = queue.clone();
-        reg.register_fn(
-            "set-titlebar-dropdown",
-            move |StringList(items): StringList, active: String, callback: Callback| {
-                q.push(EditorCommand::SetTitlebarDropdown {
-                    items,
-                    active,
-                    callback: callback.0,
-                });
-            },
-        );
-    }
+    prims::ui::register(&mut reg, shared);
     // --- Overlays / text properties / folds -------------------------------
     reg.section(Section::Overlays);
     register_ternary(&mut reg, queue, "overlay-set-face", |start, end, face| {

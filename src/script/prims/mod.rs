@@ -23,3 +23,4 @@ pub(super) mod special_buffers;
 pub(super) mod spell;
 pub(super) mod text;
 pub(super) mod tree_sitter;
+pub(super) mod ui;
