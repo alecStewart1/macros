@@ -31,17 +31,22 @@ pub enum Mode {
     HalfBlock,
 }
 
-impl Mode {
-    pub fn parse(s: &str) -> Option<Mode> {
+/// A mode by its Scheme name (`"braille"`, `"half-block"`, …).
+impl std::str::FromStr for Mode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Mode, ()> {
         match s {
-            "braille" => Some(Mode::Braille),
-            "block" => Some(Mode::Block),
-            "quadrant" => Some(Mode::Quadrant),
-            "half" | "half-block" | "halfblock" => Some(Mode::HalfBlock),
-            _ => None,
+            "braille" => Ok(Mode::Braille),
+            "block" => Ok(Mode::Block),
+            "quadrant" => Ok(Mode::Quadrant),
+            "half" | "half-block" | "halfblock" => Ok(Mode::HalfBlock),
+            _ => Err(()),
         }
     }
+}
 
+impl Mode {
     /// Dots per cell, `(columns, rows)`.
     pub fn dots(self) -> (usize, usize) {
         match self {

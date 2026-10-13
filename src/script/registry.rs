@@ -562,7 +562,7 @@ pub(crate) fn build_engine(
             "textplot-render",
             |width: usize, height: usize, mode: SteelVal, ops: SteelVal| -> SteelVal {
                 let mode = steel_string(&mode)
-                    .and_then(|m| crate::textplot::Mode::parse(&m))
+                    .and_then(|m| m.parse::<crate::textplot::Mode>().ok())
                     .unwrap_or(crate::textplot::Mode::Braille);
                 // Cap the grid so a bad call can't allocate gigabytes.
                 let mut canvas =
