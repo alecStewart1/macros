@@ -12,8 +12,20 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     {
         // `(set-line-icon line col "folder")` attaches a bundled icon (asset
         // `icons/<name>.svg`) at character column `col` of `line` in the active
-        // buffer; `(clear-line-icons)` removes them all. Used by the file tree.
+        // buffer, replacing any icons on that line; `(clear-line-icons)` removes
+        // them all. `(add-line-icon line col name face)` appends another icon to
+        // the line instead, tinted by theme face `face` ("" = the line's face).
+        // Used by the file tree (chevron + file-type icon on one row).
         register_ternary(reg, queue, "set-line-icon", EditorCommand::SetLineIcon);
+        {
+            let q = queue.clone();
+            reg.register_fn(
+                "add-line-icon",
+                move |line: usize, col: usize, name: String, face: String| {
+                    q.push(EditorCommand::AddLineIcon(line, col, name, face));
+                },
+            );
+        }
         register_nullary(
             reg,
             queue,

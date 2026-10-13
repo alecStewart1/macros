@@ -21,20 +21,22 @@
 ;; mv / cp / mkdir via call-process), but addressed at the entry under point in the
 ;; tree rather than a single flat directory.
 ;;
-;; No new Rust support: built entirely on existing primitives (list-directory,
-;; render-buffer / render-buffer-quiet, set-line-icon, overlays, window splitting,
-;; call-process). Live refresh rides the same "notify" path dired uses —
+;; Built on general primitives (list-directory, render-buffer /
+;; render-buffer-quiet, add-line-icon, overlays, window splitting, call-process,
+;; the per-mode cursor-visible / hl-line options). Live refresh rides the same "notify" path dired uses —
 ;; watch-directories declares the root + every expanded subdir, and
 ;; directory-changed-hook re-renders when one changes on disk, in place (never
 ;; stealing focus from the editing pane).
 ;;
 ;; Colors come from faces the active theme already defines, so the tree tracks the
 ;; current theme (and any `load-theme` switch) instead of hardcoding hex:
-;;   directories  -> "keyword" (the theme's primary accent)
-;;   dotfiles     -> "comment" (the theme's muted color)
-;;   indent rails -> "dim"     (the theme's faint UI color)
-;; A whole-line face also tints that line's icon (the renderer reuses it); the
-;; renderer falls back to the foreground if a theme omits one of these names.
+;;   folder icons          -> "keyword" (the theme's primary accent; names stay
+;;                            the default foreground)
+;;   dotfiles, gitignored  -> "comment" (the theme's muted color, whole line)
+;;   chevrons              -> "comment"
+;;   indent rails          -> "dim"     (the theme's faint UI color)
+;; An icon added with face "" takes its line's face; the renderer falls back to
+;; the foreground if a theme omits one of these names.
 
 ;; ===========================================================================
 ;; dired-subtree engine — pure builder + painter, no state, no keymap.
@@ -45,16 +47,44 @@
 (define (dired-subtree-strip-slash p)
   (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
 
-;; Vertical indent guides: one "│ " per ancestor level. Each is 2 columns wide so
-;; the icon/name columns line up under the 3 reserved icon columns below.
+;; Vertical indent guides: one "│ " per ancestor level below the top. Each is 2
+;; columns wide — the width of the chevron column — so a rail sits under its
+;; parent directory's chevron. Top-level entries (depth 0) get none.
 (define (dired-subtree-rails depth) (string-repeat "│ " depth))
 
 ;; Whole-line face for an entry, or #f to leave it the default foreground.
-;; Dotfiles dim regardless of kind; other directories take the accent.
-(define (dired-subtree-face name is-dir)
-  (cond ((starts-with? name ".") "comment")
-        (is-dir "keyword")
-        (else #f)))
+;; Dotfiles and gitignored paths (IGNORED?) dim; everything else — directories
+;; included — keeps the foreground (directories are told apart by their
+;; chevron and accent-tinted icon, not a colored name).
+(define (dired-subtree-face name ignored?)
+  (if (or ignored? (starts-with? name ".")) "comment" #f))
+
+;; The gitignored subset of PATHS (full paths under ROOT, dirs with a trailing
+;; "/"), as a hash keyed by slash-stripped full path. One `git check-ignore
+;; --stdin` call per render; outside a git repo (or without git) it reports
+;; nothing, so nothing dims. Paths are fed relative to ROOT and mapped back.
+(define (dired-subtree-ignored root paths)
+  (let* ((prefix (string-append root "/"))
+         (plen (string-length prefix))
+         (rel (lambda (p) (if (starts-with? p prefix)
+                              (substring p plen (string-length p))
+                              p))))
+    (if (null? paths)
+        (hash)
+        (let ((out (nth (call-process-full
+                          "git"
+                          (list "-C" root "-c" "core.quotePath=false"
+                                "check-ignore" "--stdin")
+                          (string-append (join-lines (map rel paths)) "\n"))
+                        1)))
+          (let loop ((ls (non-empty-lines out)) (acc (hash)))
+            (if (null? ls)
+                acc
+                (loop (cdr ls)
+                      (hash-insert acc
+                                   (string-append prefix
+                                                  (dired-subtree-strip-slash (car ls)))
+                                   #t))))))))
 
 ;; Extension → Lucide icon (assets/icons/<name>.svg). Customize freely.
 (define (dired-subtree-icon name)
@@ -80,54 +110,74 @@
 
 ;; Build the tree for ROOT with EXPANDED (a list of directory paths, no trailing
 ;; slash, currently open) and MARKS (a list of full paths, as they appear in the
-;; entry map, flagged for deletion). Returns a list of five lists, top-to-bottom:
-;;   0 lines   — (string …)                 rendered text rows
-;;   1 entries — ((line path is-dir) …)     hit-test map for the caller's keys
-;;   2 icons   — ((line byte-col icon) …)   per-row icon placements
-;;   3 faces   — ((line face) …)            whole-line color overrides
+;; entry map, flagged for deletion). ROOT's own row is not shown — its children
+;; are the top level (the mode line already names the project). Returns a list
+;; of five lists, top-to-bottom:
+;;   0 lines   — (string …)                      rendered text rows
+;;   1 entries — ((line path is-dir) …)          hit-test map for the caller's keys
+;;   2 icons   — ((line byte-col icon face) …)   per-row icon placements; face ""
+;;                                               takes the line's face
+;;   3 faces   — ((line face) …)                 whole-line color overrides
 ;;   4 guides  — ((start-byte end-byte face) …)  indent-rail overlay accents
-;; Pure: no globals, no buffer side effects — the caller paints the result with
-;; dired-subtree-paint. Each row opens with a 2-column mark gutter ("D " when the
-;; path is marked, "  " otherwise), so icon and guide BYTE offsets are shifted by
-;; that gutter width. Icons/guides are addressed by BYTE offset (a "│" is 3 bytes),
-;; so the rail prefix is measured with utf8-length, not assumed 1 byte/column.
+;; No buffer side effects — the caller paints the result with dired-subtree-paint
+;; (it reads the filesystem and asks git which paths are ignored). Each row is:
+;;   [mark gutter] [rails] [chevron: 2 cols] [icon: 3 cols] name
+;; The 2-column mark gutter ("D " / "  ") only exists while some path is marked,
+;; so an unmarked tree starts flush left. Icons/guides are addressed by BYTE
+;; offset (a "│" is 3 bytes), so the rail prefix is measured with utf8-length.
 (define dired-subtree-mark-width 2)   ; bytes in the "D "/"  " gutter (ASCII)
+(define dired-subtree-chevron-width 2) ; reserved columns for the chevron
 (define (dired-subtree-build root expanded marks)
-  (let ((lines '()) (entries '()) (icons '()) (faces '())
-        (guides '()) (byte 0) (n 0))
-    ;; Emit one row at DEPTH: mark gutter, indent rails, 3 reserved icon columns,
-    ;; then NAME.
-    (define (emit name path is-dir icon depth)
-      (let* ((rails (dired-subtree-rails depth))
-             (gb (utf8-length rails))                 ; byte width of the rail region
-             (mark (if (member path marks) "D " "  "))
-             (text (string-append mark rails "   " name))  ; icon in the 3 reserved cols
-             ;; Byte offset of the rails (and so the icon) past the mark gutter.
-             (rail-start (+ byte dired-subtree-mark-width))
-             (face (dired-subtree-face name is-dir)))
-        (set! lines (cons text lines))
-        (set! entries (cons (list n path is-dir) entries))
-        (set! icons (cons (list n (+ dired-subtree-mark-width gb) icon) icons))
-        (when face (set! faces (cons (list n face) faces)))
-        (when (> gb 0)
-          (set! guides (cons (list rail-start (+ rail-start gb) "dim") guides)))
-        (set! n (+ n 1))
-        (set! byte (+ byte (utf8-length text) 1))))   ; +1 = newline
-    ;; Walk one directory level; recurse into expanded subdirectories.
-    (define (walk dir depth)
-      (for-each
-        (lambda (full)
-          (let* ((is-dir (ends-with? full "/"))
-                 (clean (dired-subtree-strip-slash full))
-                 (name (basename clean))
-                 (open (and is-dir (member clean expanded)))
-                 (icon (if is-dir (if open "folder-open" "folder")
-                           (dired-subtree-icon name))))
-            (emit name full is-dir icon depth)
-            (when open (walk clean (+ depth 1)))))
-        (dired-subtree-sort (list-directory dir))))
-    (emit (basename root) root #t "folder-open" 0)
-    (walk root 1)
+  ;; Pass 1: walk the visible tree into (name full is-dir open depth) rows.
+  (define (walk dir depth acc)
+    (foldl (lambda (full acc)
+             (let* ((is-dir (ends-with? full "/"))
+                    (clean (dired-subtree-strip-slash full))
+                    (open (and is-dir (member clean expanded)))
+                    (acc (cons (list (basename clean) full is-dir open depth) acc)))
+               (if open (walk clean (+ depth 1) acc) acc)))
+           acc
+           (dired-subtree-sort (list-directory dir))))
+  (let* ((rows (reverse (walk root 0 '())))
+         (ignored (dired-subtree-ignored root (map (lambda (r) (nth r 1)) rows)))
+         (mw (if (null? marks) 0 dired-subtree-mark-width))
+         (lines '()) (entries '()) (icons '()) (faces '()) (guides '())
+         (byte 0) (n 0))
+    ;; Pass 2: emit each row's text, icons, face and rail overlay.
+    (for-each
+      (lambda (row)
+        (let* ((name (nth row 0)) (path (nth row 1)) (is-dir (nth row 2))
+               (open (nth row 3)) (depth (nth row 4))
+               (rails (dired-subtree-rails depth))
+               (gb (utf8-length rails))                 ; byte width of the rail region
+               (mark (cond ((= mw 0) "")
+                           ((member path marks) "D ")
+                           (else "  ")))
+               ;; Chevron + icon in their reserved columns, then the name.
+               (text (string-append mark rails "     " name))
+               (chev-col (+ mw gb))
+               (icon-col (+ chev-col dired-subtree-chevron-width))
+               (face (dired-subtree-face
+                       name (hash-contains? ignored (dired-subtree-strip-slash path)))))
+          (set! lines (cons text lines))
+          (set! entries (cons (list n path is-dir) entries))
+          (if is-dir
+              (begin
+                (set! icons (cons (list n chev-col
+                                        (if open "chevron-down" "chevron-right")
+                                        "comment")
+                                  icons))
+                ;; A dimmed folder keeps its dim icon; others take the accent.
+                (set! icons (cons (list n icon-col (if open "folder-open" "folder")
+                                        (if face "" "keyword"))
+                                  icons)))
+              (set! icons (cons (list n icon-col (dired-subtree-icon name) "") icons)))
+          (when face (set! faces (cons (list n face) faces)))
+          (when (> gb 0)
+            (set! guides (cons (list (+ byte mw) (+ byte mw gb) "dim") guides)))
+          (set! n (+ n 1))
+          (set! byte (+ byte (utf8-length text) 1))))   ; +1 = newline
+      rows)
     (list (reverse lines) (reverse entries) (reverse icons)
           (reverse faces) (reverse guides))))
 
@@ -144,7 +194,8 @@
     (if quiet?
         (render-buffer-quiet buffer mode (join-lines lines) faces)
         (render-buffer buffer mode (join-lines lines) faces))
-    (for-each (lambda (ic) (set-line-icon (nth ic 0) (nth ic 1) (nth ic 2))) icons)
+    (for-each (lambda (ic) (add-line-icon (nth ic 0) (nth ic 1) (nth ic 2) (nth ic 3)))
+              icons)
     (clear-overlays)
     (overlay-set-faces guides)))  ; already (start end face) triples — one call
 
@@ -401,10 +452,14 @@
 (define-key "helix-normal:dired-sidebar-mode" "g e" 'evil-goto-last-line)
 
 ;; The tree is a listing, not code — no line-number gutter (on by default for
-;; every other major mode); highlight the current row; truncate long names at the
+;; every other major mode); highlight the current row instead of drawing a
+;; cursor; truncate long names at the
 ;; pane edge instead of wrapping (ordinary buffers still soft-wrap).
 (set-option "line-numbers:dired-sidebar-mode" "false")
 (set-option "hl-line:dired-sidebar-mode" "true")
+;; The hl-line band marks the row, so don't also paint a cursor block in the
+;; (empty) leading column.
+(set-option "cursor-visible:dired-sidebar-mode" "false")
 (set-option "word-wrap:dired-sidebar-mode" "false")
 
 (define-key "fundamental" "ctrl-c t" 'dired-sidebar)

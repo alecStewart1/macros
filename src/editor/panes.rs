@@ -467,11 +467,20 @@ impl Editor {
         &self.pane_doc(id).line_faces
     }
 
-    /// Per-line icon `(char_col, asset_name)` for pane `id`, if any — same
-    /// active/inactive resolution as the faces.
-    pub fn pane_line_icon(&self, id: usize, line: usize) -> Option<(usize, &str)> {
+    /// Per-line icons `(char_col, asset_name, tint_face)` for pane `id` — same
+    /// active/inactive resolution as the faces. A `None` face means "use the
+    /// line's face".
+    pub fn pane_line_icons(
+        &self,
+        id: usize,
+        line: usize,
+    ) -> impl Iterator<Item = (usize, &str, Option<&str>)> {
         let icons = &self.pane_doc(id).line_icons;
-        icons.get(&line).map(|(col, name)| (*col, name.as_ref()))
+        icons
+            .get(&line)
+            .into_iter()
+            .flatten()
+            .map(|(col, name, face)| (*col, name.as_ref(), face.as_ref().map(SharedString::as_ref)))
     }
 
     /// Gutter dot faces (breakpoint signs, `set-gutter-dot`) for pane `id` —

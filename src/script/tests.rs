@@ -8212,6 +8212,12 @@ mod icons {
                 .unwrap()
                 .is_some()
         );
+        // `add-line-icon` appends with an explicit tint face.
+        let (engine2, _rx2) = ScriptEngine::new();
+        assert!(matches!(
+            engine2.eval(r#"(add-line-icon 1 2 "chevron-down" "comment")"#).unwrap().commands.as_slice(),
+            [EditorCommand::AddLineIcon(1, 2, n, f)] if n == "chevron-down" && f == "comment"
+        ));
         // The primitive enqueues a SetLineIcon with the parsed args.
         let (engine, _rx) = ScriptEngine::new();
         assert!(matches!(
@@ -8364,18 +8370,25 @@ mod dired_subtree_lib {
             v(r#"(if (member "dired-sidebar" *interactive-commands*) "y" "n")"#),
             "\"y\""
         );
-        // Indent rails: two columns ("│ ") per ancestor depth.
+        // Indent rails: two columns ("│ ") per depth below the top level.
         assert_eq!(v(r"(dired-subtree-rails 0)"), "\"\"");
         assert_eq!(v(r"(dired-subtree-rails 2)"), "\"│ │ \"");
         // Whole-line faces reuse theme faces so colors track the active theme:
-        // dotfiles -> comment (file or dir), other dirs -> keyword accent, plain
-        // files take the default foreground (#f).
-        assert_eq!(v(r#"(dired-subtree-face ".git" #t)"#), "\"comment\"");
-        assert_eq!(v(r#"(dired-subtree-face "src" #t)"#), "\"keyword\"");
+        // dotfiles and gitignored paths dim to comment; everything else —
+        // directories included — keeps the default foreground (#f).
+        assert_eq!(v(r#"(dired-subtree-face ".git" #f)"#), "\"comment\"");
+        assert_eq!(v(r#"(dired-subtree-face "target" #t)"#), "\"comment\"");
+        assert_eq!(v(r#"(if (dired-subtree-face "src" #f) "y" "n")"#), "\"n\"");
+        // The crate's own target/ is gitignored, src/ is not.
         assert_eq!(
-            v(r#"(if (dired-subtree-face "main.rs" #f) "y" "n")"#),
-            "\"n\""
+            v(
+                r#"(let ((ig (dired-subtree-ignored "." (list "./target/" "./src/"))))
+                   (list (hash-contains? ig "./target") (hash-contains? ig "./src")))"#
+            ),
+            "(#true #false)"
         );
+        // Outside any listed paths git isn't consulted at all.
+        assert_eq!(v(r#"(hash-length (dired-subtree-ignored "." '()))"#), "0");
 
         // The pure builder lists a real directory (the crate root): more than one
         // row (root + children), and the entry map resolves the root at line 0.
@@ -8389,20 +8402,49 @@ mod dired_subtree_lib {
                    (if (dired-subtree-entry-at (nth b 1) 0) "y" "n"))"#),
             "\"y\""
         );
-        // Unmarked rows open with the "  " mark gutter; marking a row's path
-        // (taken from the entry map) re-renders that row with the "D " gutter.
+        // The root's own row is omitted: the first row is a top-level child
+        // (dirs sort first, so the crate's first directory), with no mark
+        // gutter and no rails — just the 5 reserved chevron+icon columns.
         assert_eq!(
-            v(
-                r#"(if (starts-with? (car (nth (dired-subtree-build "." '() '()) 0)) "  ") "y" "n")"#
-            ),
-            "\"y\""
+            v(r#"(let* ((b (dired-subtree-build "." '() '()))
+                        (row (car (nth b 0))))
+                   (list (starts-with? row "     ")
+                         (starts-with? row "      ")
+                         (car (cdr (dired-subtree-entry-at (nth b 1) 0)))))"#),
+            "(#true #false #true)"
         );
+        // A top-level dir row carries a chevron at byte 0 and an accent folder
+        // icon after it, with no line face (the name keeps the foreground);
+        // gitignored target/ dims its whole line, and its icon follows the line.
+        // `row` → (icons-without-line-number line-face-or-#f) for PATH's row.
+        let row = |path: &str| {
+            v(&format!(
+                r#"(let* ((b (dired-subtree-build "." '() '()))
+                          (line (car (car (filter (lambda (e) (equal? (nth e 1) "{path}"))
+                                                  (nth b 1)))))
+                          (f (assoc line (nth b 3))))
+                     (list (map cdr (filter (lambda (ic) (= (car ic) line)) (nth b 2)))
+                           (if f (nth f 1) #f)))"#
+            ))
+        };
+        assert_eq!(
+            row("./src/"),
+            r#"(((0 "chevron-right" "comment") (2 "folder" "keyword")) #false)"#
+        );
+        assert_eq!(
+            row("./target/"),
+            r#"(((0 "chevron-right" "comment") (2 "folder" "")) "comment")"#
+        );
+        assert_eq!(row("./Cargo.toml"), r#"(((2 "settings-2" "")) #false)"#);
+        // Marking a row's path (taken from the entry map) re-renders that row
+        // with the "D " gutter and gives every other row a blank one.
         assert_eq!(
             v(r#"(let* ((b (dired-subtree-build "." '() '()))
                         (p (car (dired-subtree-entry-at (nth b 1) 1)))
                         (m (dired-subtree-build "." '() (list p))))
-                   (if (starts-with? (nth (nth m 0) 1) "D ") "y" "n"))"#),
-            "\"y\""
+                   (list (starts-with? (nth (nth m 0) 1) "D ")
+                         (starts-with? (nth (nth m 0) 0) "       ")))"#),
+            "(#true #true)"
         );
     }
 

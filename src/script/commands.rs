@@ -277,6 +277,10 @@ pub enum EditorCommand {
     SelectWindow(usize),
     OpenFileOtherWindow(String),
     SetLineIcon(usize, usize, String),
+    /// `(add-line-icon line col name face)`: like `SetLineIcon` but appends
+    /// (several icons per row) and tints by theme face `face` ("" = the
+    /// line's face).
+    AddLineIcon(usize, usize, String, String),
     ClearLineIcons,
     /// Put a colored dot (the diagnostic-dot shape) in the gutter of 0-based
     /// `line` of the active buffer, tinted by theme face `String` — breakpoint
