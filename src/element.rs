@@ -868,9 +868,9 @@ impl Element for EditorElement {
         // Cursor shape: "bar" (cursor-width px), "block" (char width), or "auto"
         // (block in evil Normal/Visual, otherwise a bar).
         let block_cursor = match settings.cursor_style() {
-            "block" => true,
-            "bar" => false,
-            _ => editor.wants_block_cursor(),
+            crate::settings::CursorStyle::Block => true,
+            crate::settings::CursorStyle::Bar => false,
+            crate::settings::CursorStyle::Auto => editor.wants_block_cursor(),
         };
         let cursor_width = px(settings.cursor_width());
         // When blinking is on, only paint the cursor in the "shown" half of the

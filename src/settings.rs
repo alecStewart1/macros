@@ -72,6 +72,26 @@ impl OptionValue {
     }
 }
 
+/// The `cursor-style` option: the cursor's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorStyle {
+    /// A character-wide block (Zed-style).
+    Block,
+    /// A `cursor-width`-px bar.
+    Bar,
+    /// A block in evil Normal/Visual, otherwise a bar.
+    Auto,
+}
+
+/// The `completion-style` option: where completion candidates are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionStyle {
+    /// An in-buffer popup (corfu-style overlay).
+    Popup,
+    /// The minibuffer.
+    Minibuffer,
+}
+
 /// The declared type of an option (the family it belongs to). Per-mode options
 /// like `line-numbers:dired-sidebar-mode` take their type from the base name.
 #[derive(Clone, Copy)]
@@ -82,73 +102,152 @@ enum Kind {
     Str,
 }
 
-/// One known option: its user-facing name, declared type, and (for numbers)
-/// the bounds enforced at write time. The single source of truth —
-/// [`KNOWN_OPTIONS`] and [`option_kind`] both derive from it.
+/// An option's default — the value its getter returns while it is unset (or
+/// was set to something that couldn't be coerced). Its variant is also the
+/// option's declared type.
+#[derive(Clone, Copy)]
+enum DefaultValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(&'static str),
+}
+
+/// One known option: its user-facing name, default (and so declared type),
+/// and (for numbers) the bounds enforced at write time. The single source of
+/// truth — [`KNOWN_OPTIONS`], [`option_kind`] and the [`Settings`] getters'
+/// defaults all derive from it.
 struct OptionSpec {
     name: &'static str,
-    kind: Kind,
+    default: DefaultValue,
     min: Option<f64>,
     max: Option<f64>,
 }
 
-const fn opt(name: &'static str, kind: Kind, min: Option<f64>, max: Option<f64>) -> OptionSpec {
+impl OptionSpec {
+    fn kind(&self) -> Kind {
+        match self.default {
+            DefaultValue::Bool(_) => Kind::Bool,
+            DefaultValue::Int(_) => Kind::Int,
+            DefaultValue::Float(_) => Kind::Float,
+            DefaultValue::Str(_) => Kind::Str,
+        }
+    }
+}
+
+const fn flag(name: &'static str, default: bool) -> OptionSpec {
     OptionSpec {
         name,
-        kind,
+        default: DefaultValue::Bool(default),
+        min: None,
+        max: None,
+    }
+}
+
+const fn int(name: &'static str, default: i64, min: Option<f64>, max: Option<f64>) -> OptionSpec {
+    OptionSpec {
+        name,
+        default: DefaultValue::Int(default),
         min,
         max,
     }
 }
 
-/// Every option key Rust knows about, with its type and bounds. Scheme-only
-/// options (stored verbatim) aren't listed — Rust doesn't know their names
-/// ahead of time.
+const fn float(name: &'static str, default: f64, min: Option<f64>, max: Option<f64>) -> OptionSpec {
+    OptionSpec {
+        name,
+        default: DefaultValue::Float(default),
+        min,
+        max,
+    }
+}
+
+const fn text(name: &'static str, default: &'static str) -> OptionSpec {
+    OptionSpec {
+        name,
+        default: DefaultValue::Str(default),
+        min: None,
+        max: None,
+    }
+}
+
+/// Every option key Rust knows about, with its default, type and bounds.
+/// Scheme-only options (stored verbatim) aren't listed — Rust doesn't know
+/// their names ahead of time.
 const OPTIONS: &[OptionSpec] = &[
     // Zero/negative sizes would divide by zero in the renderer's row math.
-    opt("font-size", Kind::Float, Some(4.0), None),
-    opt("line-height", Kind::Float, Some(4.0), None),
-    opt("helm-height", Kind::Float, Some(0.1), Some(0.95)),
-    opt("cursor-width", Kind::Float, Some(1.0), None),
-    opt("divider-width", Kind::Float, Some(1.0), None),
-    opt("cursor-blink-interval", Kind::Float, Some(60.0), None),
-    opt("helm-bevel-top", Kind::Float, Some(0.0), None),
-    opt("helm-bevel-right", Kind::Float, Some(0.0), None),
-    opt("helm-bevel-bottom", Kind::Float, Some(0.0), None),
-    opt("helm-bevel-left", Kind::Float, Some(0.0), None),
-    opt("tab-width", Kind::Int, Some(0.0), None),
-    opt("completion-auto-prefix", Kind::Int, Some(0.0), None),
-    opt("completion-max-rows", Kind::Int, Some(1.0), None),
-    opt("completion-style", Kind::Str, None, None),
-    opt("completion-trigger-chars", Kind::Str, None, None),
-    opt("indent-after", Kind::Str, None, None),
-    opt("align-after", Kind::Str, None, None),
-    opt("cursor-style", Kind::Str, None, None),
-    opt("font-family", Kind::Str, None, None),
-    opt("terminal-passthrough-keys", Kind::Str, None, None),
-    opt("completion-auto", Kind::Bool, None, None),
-    opt("completion-show-detail", Kind::Bool, None, None),
-    opt("completion-show-kind", Kind::Bool, None, None),
-    opt("completion-capf", Kind::Bool, None, None),
-    opt("cursor-blink", Kind::Bool, None, None),
-    opt("scroll-bar", Kind::Bool, None, None),
-    opt("diagnostics-gutter", Kind::Bool, None, None),
-    opt("magit-gutter", Kind::Bool, None, None),
-    opt("magit-gutter-width", Kind::Float, Some(1.0), Some(8.0)),
-    opt("magit-gutter-deleted", Kind::Bool, None, None),
-    opt("lsp-log-on-start", Kind::Bool, None, None),
-    opt("auto-update", Kind::Bool, None, None),
-    opt("helm-fuzzy", Kind::Bool, None, None),
-    opt("line-numbers", Kind::Bool, None, None),
-    opt("hl-line", Kind::Bool, None, None),
-    opt("word-wrap", Kind::Bool, None, None),
-    opt("auto-revert", Kind::Bool, None, None),
-    opt("electric-indent", Kind::Bool, None, None),
-    opt("show-paren", Kind::Bool, None, None),
-    opt("mcp-server", Kind::Bool, None, None),
-    opt("mcp-server-port", Kind::Int, Some(1.0), Some(65535.0)),
-    opt("mcp-server-token", Kind::Str, None, None),
+    float("font-size", 15.0, Some(4.0), None),
+    float("line-height", 22.0, Some(4.0), None),
+    float("helm-height", 0.5, Some(0.1), Some(0.95)),
+    float("cursor-width", 2.0, Some(1.0), None),
+    float("divider-width", 1.0, Some(1.0), None),
+    float("cursor-blink-interval", 530.0, Some(60.0), None),
+    float("helm-bevel-top", 1.0, Some(0.0), None),
+    float("helm-bevel-right", 1.0, Some(0.0), None),
+    float("helm-bevel-bottom", 1.0, Some(0.0), None),
+    float("helm-bevel-left", 1.0, Some(0.0), None),
+    int("tab-width", 4, Some(0.0), None),
+    int("completion-auto-prefix", 1, Some(0.0), None),
+    int("completion-max-rows", 10, Some(1.0), None),
+    text("completion-style", "popup"),
+    text("completion-trigger-chars", "."),
+    text("indent-after", ""),
+    text("align-after", ""),
+    text("cursor-style", "block"),
+    text("font-family", "Lilex"),
+    text("terminal-passthrough-keys", ""),
+    flag("completion-auto", true),
+    flag("completion-show-detail", true),
+    flag("completion-show-kind", true),
+    flag("completion-capf", true),
+    flag("cursor-blink", true),
+    flag("scroll-bar", true),
+    flag("diagnostics-gutter", true),
+    flag("magit-gutter", true),
+    float("magit-gutter-width", 2.0, Some(1.0), Some(8.0)),
+    flag("magit-gutter-deleted", true),
+    flag("lsp-log-on-start", false),
+    flag("auto-update", true),
+    flag("helm-fuzzy", true),
+    flag("line-numbers", true),
+    flag("hl-line", false),
+    flag("word-wrap", true),
+    flag("auto-revert", false),
+    flag("electric-indent", true),
+    flag("show-paren", true),
+    flag("mcp-server", false),
+    int("mcp-server-port", 7811, Some(1.0), Some(65535.0)),
+    text("mcp-server-token", ""),
 ];
+
+/// `a == b`, usable in a `const` context.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The [`OPTIONS`] entry for `name`. The getters resolve theirs in a `const`
+/// block, so a getter naming an unknown option fails to compile.
+const fn spec(name: &str) -> &'static OptionSpec {
+    let mut i = 0;
+    while i < OPTIONS.len() {
+        if str_eq(OPTIONS[i].name, name) {
+            return &OPTIONS[i];
+        }
+        i += 1;
+    }
+    panic!("not in OPTIONS")
+}
 
 /// The names in [`OPTIONS`], as a const array so [`KNOWN_OPTIONS`] keeps its
 /// `&[&str]` shape without a second hand-maintained list.
@@ -177,18 +276,22 @@ fn option_kind(key: &str) -> Option<(Kind, Option<f64>, Option<f64>)> {
     OPTIONS
         .iter()
         .find(|spec| spec.name == base)
-        .map(|spec| (spec.kind, spec.min, spec.max))
+        .map(|spec| (spec.kind(), spec.min, spec.max))
 }
 
-/// Best-effort read of an [`OptionValue`] as a non-negative `usize`, tolerating
-/// the string form (so a value stored uncoerced — an unregistered per-mode key —
-/// still parses).
-fn opt_usize(v: &OptionValue) -> Option<usize> {
-    match v {
-        OptionValue::Int(i) if *i >= 0 => Some(*i as usize),
-        OptionValue::Float(f) if *f >= 0.0 => Some(*f as usize),
-        OptionValue::Str(s) => s.trim().parse::<usize>().ok(),
-        _ => None,
+/// `spec`'s default as a `usize` (an integer option).
+fn spec_usize(spec: &OptionSpec) -> usize {
+    match spec.default {
+        DefaultValue::Int(i) => i as usize,
+        _ => unreachable!("{} is not an integer option", spec.name),
+    }
+}
+
+/// `spec`'s default as a `bool` (a boolean option).
+fn spec_bool(spec: &OptionSpec) -> bool {
+    match spec.default {
+        DefaultValue::Bool(b) => b,
+        _ => unreachable!("{} is not a boolean option", spec.name),
     }
 }
 
@@ -253,8 +356,8 @@ fn coerce(
 /// type when it is set ([`Settings::set`]) and stored typed, so the read-side
 /// getters are plain lookups. Unknown option names are stored verbatim.
 ///
-/// Held as a GPUI global (like [`crate::theme::Theme`]); defaults live in the
-/// typed getters so an unset option still has a sensible value.
+/// Held as a GPUI global (like [`crate::theme::Theme`]); the typed getters fall
+/// back to each option's [`OPTIONS`] default while it is unset.
 #[derive(Default)]
 pub struct Settings {
     values: HashMap<String, OptionValue>,
@@ -283,84 +386,102 @@ impl Settings {
         self.values.insert(key, stored);
     }
 
-    fn f32_or(&self, key: &str, default: f32) -> f32 {
-        match self.values.get(key) {
+    fn f32_of(&self, spec: &OptionSpec) -> f32 {
+        match self.values.get(spec.name) {
             Some(OptionValue::Float(f)) => *f as f32,
             Some(OptionValue::Int(i)) => *i as f32,
-            _ => default,
+            _ => match spec.default {
+                DefaultValue::Float(f) => f as f32,
+                _ => unreachable!("{} is not a float option", spec.name),
+            },
         }
     }
 
-    fn usize_or(&self, key: &str, default: usize) -> usize {
-        match self.values.get(key) {
-            Some(OptionValue::Int(i)) if *i >= 0 => *i as usize,
-            Some(OptionValue::Float(f)) if *f >= 0.0 => *f as usize,
-            _ => default,
+    fn usize_of(&self, spec: &OptionSpec) -> usize {
+        self.values
+            .get(spec.name)
+            .and_then(Self::stored_usize)
+            .unwrap_or_else(|| spec_usize(spec))
+    }
+
+    /// A stored number as a `usize` (coercion stores numbers natively).
+    fn stored_usize(v: &OptionValue) -> Option<usize> {
+        match v {
+            OptionValue::Int(i) if *i >= 0 => Some(*i as usize),
+            OptionValue::Float(f) if *f >= 0.0 => Some(*f as usize),
+            _ => None,
         }
     }
 
-    fn bool_or(&self, key: &str, default: bool) -> bool {
-        match self.values.get(key) {
+    fn bool_of(&self, spec: &OptionSpec) -> bool {
+        match self.values.get(spec.name) {
             Some(OptionValue::Bool(b)) => *b,
-            _ => default,
+            _ => spec_bool(spec),
         }
     }
 
-    fn str_or<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
-        match self.values.get(key) {
+    fn str_of(&self, spec: &OptionSpec) -> &str {
+        match self.values.get(spec.name) {
             Some(OptionValue::Str(s)) => s.as_str(),
-            _ => default,
+            _ => match spec.default {
+                DefaultValue::Str(s) => s,
+                _ => unreachable!("{} is not a string option", spec.name),
+            },
         }
     }
 
     /// Resolve a *per-major-mode* boolean option: a `base:<mode>` value, if set,
-    /// overrides the global `base` default. Used for options like line numbers
-    /// and hl-line that a specific mode can flip without changing the default.
-    fn bool_per_mode(&self, base: &str, mode: Option<&str>, default: bool) -> bool {
-        mode.and_then(|m| match self.values.get(&format!("{base}:{m}")) {
+    /// overrides the global `base`, whose own fallback is `default`. Used for
+    /// options like line numbers and hl-line that a specific mode can flip
+    /// without changing the default.
+    fn bool_per_mode(&self, base: &OptionSpec, mode: Option<&str>, default: bool) -> bool {
+        mode.and_then(|m| match self.values.get(&format!("{}:{m}", base.name)) {
             Some(OptionValue::Bool(b)) => Some(*b),
             _ => None,
         })
-        .unwrap_or_else(|| self.bool_or(base, default))
+        .unwrap_or_else(|| match self.values.get(base.name) {
+            Some(OptionValue::Bool(b)) => *b,
+            _ => default,
+        })
     }
 
     /// Resolve a *per-major-mode* unsigned-int option: a `base:<mode>` value, if
     /// set, overrides the global `base`. `Settings::set` coerces `base:<mode>` to
     /// the base's declared type (via [`option_kind`], which strips the `:mode`
     /// suffix), so for a registered base like `tab-width` the value is already an
-    /// `Int`; `opt_usize` still accepts the string form defensively for any
-    /// unregistered base.
-    fn usize_per_mode(&self, base: &str, mode: Option<&str>, default: usize) -> usize {
-        mode.and_then(|m| self.values.get(&format!("{base}:{m}")))
-            .and_then(opt_usize)
-            .unwrap_or_else(|| self.usize_or(base, default))
+    /// `Int`; [`OptionValue::as_usize`] still accepts the string form
+    /// defensively.
+    fn usize_per_mode(&self, base: &OptionSpec, mode: Option<&str>) -> usize {
+        mode.and_then(|m| self.values.get(&format!("{}:{m}", base.name)))
+            .and_then(OptionValue::as_usize)
+            .unwrap_or_else(|| self.usize_of(base))
     }
 
     /// Resolve a *per-major-mode* string option: a `base:<mode>` value, if set,
     /// overrides the global `base`. Returns an owned `String` since it may come
     /// from either the mode key or the base.
-    fn str_per_mode(&self, base: &str, mode: Option<&str>, default: &str) -> String {
-        mode.and_then(|m| match self.values.get(&format!("{base}:{m}")) {
+    fn str_per_mode(&self, base: &OptionSpec, mode: Option<&str>) -> String {
+        mode.and_then(|m| match self.values.get(&format!("{}:{m}", base.name)) {
             Some(OptionValue::Str(s)) => Some(s.clone()),
             _ => None,
         })
-        .unwrap_or_else(|| self.str_or(base, default).to_string())
+        .unwrap_or_else(|| self.str_of(base).to_string())
     }
 
     /// Editor font family. A single family name (not a fallback list); the
     /// named font must be installed or GPUI falls back to its own default.
     pub fn font_family(&self) -> &str {
-        self.str_or("font-family", "Lilex")
+        self.str_of(const { spec("font-family") })
     }
 
     /// Editor font size in pixels.
     pub fn font_size(&self) -> f32 {
-        self.f32_or("font-size", 15.0)
+        self.f32_of(const { spec("font-size") })
     }
 
     /// Line height in pixels.
     pub fn line_height(&self) -> f32 {
-        self.f32_or("line-height", 22.0)
+        self.f32_of(const { spec("line-height") })
     }
 
     /// Spaces per indentation step, used by auto-indent across all languages:
@@ -368,7 +489,7 @@ impl Settings {
     /// special form indents its body `tab-width` past the opener. Set from Scheme
     /// with `(set-option "tab-width" N)`; default 4.
     pub fn tab_width(&self) -> usize {
-        self.usize_or("tab-width", 4)
+        self.usize_of(const { spec("tab-width") })
     }
 
     /// The indent step for a specific language: a `tab-width:<mode>` override, if
@@ -376,7 +497,7 @@ impl Settings {
     /// per-language conventions (OCaml/Ruby → 2, …); `(set-option "tab-width:ocaml"
     /// N)` in `init.scm` (loaded last) overrides them.
     pub fn tab_width_for(&self, mode: Option<&str>) -> usize {
-        self.usize_per_mode("tab-width", mode, 4)
+        self.usize_per_mode(const { spec("tab-width") }, mode)
     }
 
     /// Extra completion trigger characters for a language, *added to* whatever the
@@ -385,7 +506,7 @@ impl Settings {
     /// ocamllsp, which doesn't list `.`). Override globally or per language with
     /// `(set-option "completion-trigger-chars[:<lang>]" "…")` ("" disables).
     pub fn completion_trigger_chars(&self, mode: Option<&str>) -> String {
-        self.str_per_mode("completion-trigger-chars", mode, ".")
+        self.str_per_mode(const { spec("completion-trigger-chars") }, mode)
     }
 
     /// Trailing-token indent rules for a language (a token-level layer on top of
@@ -396,18 +517,18 @@ impl Settings {
     /// a whitespace-separated token list, set per language, e.g.
     /// `(set-option "indent-after:ocaml" "->")`.
     pub fn indent_after(&self, mode: Option<&str>) -> String {
-        self.str_per_mode("indent-after", mode, "")
+        self.str_per_mode(const { spec("indent-after") }, mode)
     }
 
     pub fn align_after(&self, mode: Option<&str>) -> String {
-        self.str_per_mode("align-after", mode, "")
+        self.str_per_mode(const { spec("align-after") }, mode)
     }
 
     /// Whether RET keeps the current indentation (and, in Lisp buffers, indents
     /// to the enclosing form) and TAB reindents the current Lisp line. Emacs
     /// `electric-indent-mode`. Set `electric-indent` to `#f` to disable.
     pub fn electric_indent(&self) -> bool {
-        self.bool_or("electric-indent", true)
+        self.bool_of(const { spec("electric-indent") })
     }
 
     /// Whether the bracket at (or just before) point and its match are
@@ -417,51 +538,56 @@ impl Settings {
     /// `show-paren` / `show-paren:<mode>` option overrides — e.g.
     /// `(set-option "show-paren:markdown" #t)` to re-enable it there.
     pub fn show_paren_for(&self, mode: Option<&str>) -> bool {
-        let default = !matches!(
-            mode,
-            None | Some("markdown" | "toml" | "fundamental" | "text")
-        );
-        self.bool_per_mode("show-paren", mode, default)
+        const SHOW_PAREN: &OptionSpec = spec("show-paren");
+        let default = spec_bool(SHOW_PAREN)
+            && !matches!(
+                mode,
+                None | Some("markdown" | "toml" | "fundamental" | "text")
+            );
+        self.bool_per_mode(SHOW_PAREN, mode, default)
     }
 
-    /// How completion candidates are presented: `"popup"` (corfu-style overlay)
-    /// or `"minibuffer"`.
     /// Chords (whitespace-separated, e.g. `"ctrl-] alt-o"`) that a focused
     /// terminal hands to the editor instead of the shell — an escape hatch for
     /// window/buffer keys beyond the built-in `C-x` prefix and the alt leader.
     pub fn terminal_passthrough_keys(&self) -> &str {
-        self.str_or("terminal-passthrough-keys", "")
+        self.str_of(const { spec("terminal-passthrough-keys") })
     }
 
-    pub fn completion_style(&self) -> &str {
-        self.str_or("completion-style", "popup")
+    /// How completion candidates are presented: `"popup"` (corfu-style overlay,
+    /// the default) or `"minibuffer"`. Any other value is a popup.
+    pub fn completion_style(&self) -> CompletionStyle {
+        match self.str_of(const { spec("completion-style") }) {
+            "minibuffer" => CompletionStyle::Minibuffer,
+            _ => CompletionStyle::Popup,
+        }
     }
 
     /// Whether the popup appears automatically as you type (corfu `corfu-auto`).
     pub fn completion_auto(&self) -> bool {
-        self.bool_or("completion-auto", true)
+        self.bool_of(const { spec("completion-auto") })
     }
 
     /// Minimum prefix length before auto-completion triggers
     /// (corfu `corfu-auto-prefix`): the first word character typed.
     pub fn completion_auto_prefix(&self) -> usize {
-        self.usize_or("completion-auto-prefix", 1)
+        self.usize_of(const { spec("completion-auto-prefix") })
     }
 
     /// Maximum candidate rows shown in the popup (corfu `corfu-count`). The
     /// minimum of 1 is enforced when the option is set.
     pub fn completion_max_rows(&self) -> usize {
-        self.usize_or("completion-max-rows", 10)
+        self.usize_of(const { spec("completion-max-rows") })
     }
 
     /// Show the signature / type detail next to each candidate.
     pub fn completion_show_detail(&self) -> bool {
-        self.bool_or("completion-show-detail", true)
+        self.bool_of(const { spec("completion-show-detail") })
     }
 
     /// Show the kind tag (`fn`, `var`, …) for each candidate.
     pub fn completion_show_kind(&self) -> bool {
-        self.bool_or("completion-show-kind", true)
+        self.bool_of(const { spec("completion-show-kind") })
     }
 
     /// Whether `completion-at-point` consults the registered Scheme
@@ -469,37 +595,41 @@ impl Settings {
     /// On by default; set `(set-option "completion-capf" #f)` for strictly
     /// LSP-driven completion (skipping CAPFs and their engine round-trip).
     pub fn completion_capf(&self) -> bool {
-        self.bool_or("completion-capf", true)
+        self.bool_of(const { spec("completion-capf") })
     }
 
     /// Height of the Helm panel as a fraction of the window (default 0.5). The
     /// 0.1–0.95 range is enforced when the option is set.
     pub fn helm_height(&self) -> f32 {
-        self.f32_or("helm-height", 0.5)
+        self.f32_of(const { spec("helm-height") })
     }
 
     /// Cursor shape: `"block"` (default, Zed-style), `"bar"`, or `"auto"`
-    /// (block, but a bar in evil insert mode).
-    pub fn cursor_style(&self) -> &str {
-        self.str_or("cursor-style", "block")
+    /// (block, but a bar in evil insert mode). Any other value means auto.
+    pub fn cursor_style(&self) -> CursorStyle {
+        match self.str_of(const { spec("cursor-style") }) {
+            "block" => CursorStyle::Block,
+            "bar" => CursorStyle::Bar,
+            _ => CursorStyle::Auto,
+        }
     }
 
     /// Bar-cursor width in pixels (default 2; minimum 1 enforced on set).
     pub fn cursor_width(&self) -> f32 {
-        self.f32_or("cursor-width", 2.0)
+        self.f32_of(const { spec("cursor-width") })
     }
 
     /// Whether the cursor blinks. On by default (Zed-style blinking block); set
     /// `(set-option "cursor-blink" #f)` for a steady cursor (no idle redraw).
     pub fn cursor_blink(&self) -> bool {
-        self.bool_or("cursor-blink", true)
+        self.bool_of(const { spec("cursor-blink") })
     }
 
     /// Cursor blink half-period in milliseconds (time the cursor stays shown,
     /// then hidden). Default 530, matching Emacs `blink-cursor-interval` (0.53s).
     /// The 60ms minimum is enforced when the option is set.
     pub fn cursor_blink_interval(&self) -> u64 {
-        self.f32_or("cursor-blink-interval", 530.0) as u64
+        self.f32_of(const { spec("cursor-blink-interval") }) as u64
     }
 
     /// Whether to show the line-number gutter for a buffer whose major mode is
@@ -508,7 +638,8 @@ impl Settings {
     /// default, which is on for every mode unless a mode (e.g. dired-sidebar) turns
     /// it off.
     pub fn line_numbers_for(&self, mode: Option<&str>) -> bool {
-        self.bool_per_mode("line-numbers", mode, true)
+        const LINE_NUMBERS: &OptionSpec = spec("line-numbers");
+        self.bool_per_mode(LINE_NUMBERS, mode, spec_bool(LINE_NUMBERS))
     }
 
     /// Highlight the line the cursor is on (Emacs `hl-line-mode`). A *per-major-
@@ -516,12 +647,13 @@ impl Settings {
     /// default, which is off everywhere unless a mode (e.g. magit-status) turns
     /// it on. Painted as a subtle full-width background band behind the text.
     pub fn hl_line_for(&self, mode: Option<&str>) -> bool {
-        self.bool_per_mode("hl-line", mode, false)
+        const HL_LINE: &OptionSpec = spec("hl-line");
+        self.bool_per_mode(HL_LINE, mode, spec_bool(HL_LINE))
     }
 
     /// Show a scroll bar on the right edge of each pane (Emacs `scroll-bar-mode`).
     pub fn scroll_bar(&self) -> bool {
-        self.bool_or("scroll-bar", true)
+        self.bool_of(const { spec("scroll-bar") })
     }
 
     /// Soft-wrap long lines at the window edge (Emacs `visual-line-mode` /
@@ -531,7 +663,8 @@ impl Settings {
     /// default, so a mode (e.g. the dired-sidebar tree) can truncate long lines
     /// while ordinary buffers keep wrapping.
     pub fn word_wrap_for(&self, mode: Option<&str>) -> bool {
-        self.bool_per_mode("word-wrap", mode, true)
+        const WORD_WRAP: &OptionSpec = spec("word-wrap");
+        self.bool_per_mode(WORD_WRAP, mode, spec_bool(WORD_WRAP))
     }
 
     /// Show a colored dot in the line-number gutter on lines that carry an LSP
@@ -540,7 +673,7 @@ impl Settings {
     /// `(set-option "diagnostics-gutter" #f)` to hide the dots. Only drawn when
     /// the line-number gutter itself is shown.
     pub fn diagnostics_gutter(&self) -> bool {
-        self.bool_or("diagnostics-gutter", true)
+        self.bool_of(const { spec("diagnostics-gutter") })
     }
 
     /// Show working-tree-vs-HEAD change bars in the line-number gutter (the
@@ -549,19 +682,19 @@ impl Settings {
     /// hides it (or toggle with `M-x magit-gutter-mode`). Like the diagnostic
     /// dots, only drawn when the line-number gutter itself is shown.
     pub fn magit_gutter(&self) -> bool {
-        self.bool_or("magit-gutter", true)
+        self.bool_of(const { spec("magit-gutter") })
     }
 
     /// Width (px) of a git-gutter change bar. Default 2; `(set-option
     /// "magit-gutter-width" N)`, clamped to 1–8.
     pub fn magit_gutter_width(&self) -> f32 {
-        self.f32_or("magit-gutter-width", 2.0)
+        self.f32_of(const { spec("magit-gutter-width") })
     }
 
     /// Whether the git-gutter draws a wedge for deleted lines. On by default;
     /// `(set-option "magit-gutter-deleted" #f)` shows only added/modified bars.
     pub fn magit_gutter_deleted(&self) -> bool {
-        self.bool_or("magit-gutter-deleted", true)
+        self.bool_of(const { spec("magit-gutter-deleted") })
     }
 
     /// Pop open `*lsp-log*` in a split when an external language server starts,
@@ -569,7 +702,7 @@ impl Settings {
     /// log is always captured; open it with `C-h l` (`M-x list-lsp-log`). Only
     /// fires on an actual server spawn (once per language/session).
     pub fn lsp_log_on_start(&self) -> bool {
-        self.bool_or("lsp-log-on-start", false)
+        self.bool_of(const { spec("lsp-log-on-start") })
     }
 
     /// Whether Macros checks macros.dev for a newer release at launch (once a
@@ -577,19 +710,19 @@ impl Settings {
     /// notice can offer a one-click relaunch. On by default; the Scheme
     /// `(set-auto-update #f)` flips this off (no network check, no notice).
     pub fn auto_update(&self) -> bool {
-        self.bool_or("auto-update", true)
+        self.bool_of(const { spec("auto-update") })
     }
 
     /// Width (px) of the line dividing split windows. Also its drag-to-resize
     /// hit area, so bump it if the divider is hard to grab with the mouse. The
     /// 1px minimum is enforced when the option is set.
     pub fn divider_width(&self) -> f32 {
-        self.f32_or("divider-width", 1.0)
+        self.f32_of(const { spec("divider-width") })
     }
 
     /// Helm matching: fuzzy (nucleo, fzf-style ranking) vs plain substring.
     pub fn helm_fuzzy(&self) -> bool {
-        self.bool_or("helm-fuzzy", true)
+        self.bool_of(const { spec("helm-fuzzy") })
     }
 
     /// Auto-revert (Emacs `global-auto-revert-mode`): when a file-visiting buffer
@@ -598,48 +731,112 @@ impl Settings {
     /// changes are never clobbered (a warning is echoed instead). Independent of the
     /// always-on dired-sidebar/dired directory refresh, which watches dirs, not buffers.
     pub fn auto_revert(&self) -> bool {
-        self.bool_or("auto-revert", false)
+        self.bool_of(const { spec("auto-revert") })
     }
 
     /// The MCP server (src/mcp.rs) for debugging and package development: lets
     /// an AI assistant eval Steel in the live editor. OFF by default — enable
     /// with `(set-option "mcp-server" #t)` or `M-x mcp-server-start`.
     pub fn mcp_server(&self) -> bool {
-        self.bool_or("mcp-server", false)
+        self.bool_of(const { spec("mcp-server") })
     }
 
     /// Loopback port for the MCP server (default 7811).
     pub fn mcp_server_port(&self) -> u16 {
-        u16::try_from(self.usize_or("mcp-server-port", 7811)).unwrap_or(7811)
+        const PORT: &OptionSpec = spec("mcp-server-port");
+        u16::try_from(self.usize_of(PORT)).unwrap_or(spec_usize(PORT) as u16)
     }
 
     /// A fixed bearer token for the MCP server; `None` (the default) means a
     /// random one generated once and kept in the config dir's `mcp-token`.
     pub fn mcp_server_token(&self) -> Option<&str> {
-        Some(self.str_or("mcp-server-token", "").trim()).filter(|t| !t.is_empty())
+        Some(self.str_of(const { spec("mcp-server-token") }).trim()).filter(|t| !t.is_empty())
     }
 
-    /// Bevel edge width (px) for one side, default 1 (minimum 0 enforced on set).
-    fn helm_bevel(&self, side: &str) -> f32 {
-        self.f32_or(&format!("helm-bevel-{side}"), 1.0)
-    }
+    /// Bevel edge widths (px) per side, default 1 (minimum 0 enforced on set).
     pub fn helm_bevel_top(&self) -> f32 {
-        self.helm_bevel("top")
+        self.f32_of(const { spec("helm-bevel-top") })
     }
     pub fn helm_bevel_right(&self) -> f32 {
-        self.helm_bevel("right")
+        self.f32_of(const { spec("helm-bevel-right") })
     }
     pub fn helm_bevel_bottom(&self) -> f32 {
-        self.helm_bevel("bottom")
+        self.f32_of(const { spec("helm-bevel-bottom") })
     }
     pub fn helm_bevel_left(&self) -> f32 {
-        self.helm_bevel("left")
+        self.f32_of(const { spec("helm-bevel-left") })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{KNOWN_OPTIONS, OptionValue, Settings, option_kind};
+    use super::{CompletionStyle, CursorStyle, KNOWN_OPTIONS, OptionValue, Settings, option_kind};
+
+    /// Every getter's default comes from `OPTIONS` with the type the getter
+    /// expects (a mismatch would panic here), and the defaults are unchanged.
+    #[test]
+    fn getter_defaults() {
+        let s = Settings::default();
+        assert_eq!(s.font_family(), "Lilex");
+        assert_eq!(s.font_size(), 15.0);
+        assert_eq!(s.line_height(), 22.0);
+        assert_eq!(s.tab_width(), 4);
+        assert_eq!(s.tab_width_for(Some("rust")), 4);
+        assert_eq!(s.completion_trigger_chars(None), ".");
+        assert_eq!(s.indent_after(None), "");
+        assert_eq!(s.align_after(None), "");
+        assert!(s.electric_indent());
+        assert!(s.show_paren_for(Some("rust")));
+        assert_eq!(s.terminal_passthrough_keys(), "");
+        assert_eq!(s.completion_style(), CompletionStyle::Popup);
+        assert!(s.completion_auto());
+        assert_eq!(s.completion_auto_prefix(), 1);
+        assert_eq!(s.completion_max_rows(), 10);
+        assert!(s.completion_show_detail());
+        assert!(s.completion_show_kind());
+        assert!(s.completion_capf());
+        assert_eq!(s.helm_height(), 0.5);
+        assert_eq!(s.cursor_style(), CursorStyle::Block);
+        assert_eq!(s.cursor_width(), 2.0);
+        assert!(s.cursor_blink());
+        assert_eq!(s.cursor_blink_interval(), 530);
+        assert!(s.line_numbers_for(None));
+        assert!(!s.hl_line_for(None));
+        assert!(s.scroll_bar());
+        assert!(s.word_wrap_for(None));
+        assert!(s.diagnostics_gutter());
+        assert!(s.magit_gutter());
+        assert_eq!(s.magit_gutter_width(), 2.0);
+        assert!(s.magit_gutter_deleted());
+        assert!(!s.lsp_log_on_start());
+        assert!(s.auto_update());
+        assert_eq!(s.divider_width(), 1.0);
+        assert!(s.helm_fuzzy());
+        assert!(!s.auto_revert());
+        assert!(!s.mcp_server());
+        assert_eq!(s.mcp_server_port(), 7811);
+        assert_eq!(s.mcp_server_token(), None);
+        assert_eq!(s.helm_bevel_top(), 1.0);
+        assert_eq!(s.helm_bevel_right(), 1.0);
+        assert_eq!(s.helm_bevel_bottom(), 1.0);
+        assert_eq!(s.helm_bevel_left(), 1.0);
+    }
+
+    #[test]
+    fn style_options_parse_to_enums() {
+        let mut s = Settings::default();
+        s.set("cursor-style".into(), OptionValue::Str("auto".into()));
+        assert_eq!(s.cursor_style(), CursorStyle::Auto);
+        s.set("cursor-style".into(), OptionValue::Str("bogus".into()));
+        assert_eq!(s.cursor_style(), CursorStyle::Auto);
+        s.set(
+            "completion-style".into(),
+            OptionValue::Str("minibuffer".into()),
+        );
+        assert_eq!(s.completion_style(), CompletionStyle::Minibuffer);
+        s.set("completion-style".into(), OptionValue::Str("bogus".into()));
+        assert_eq!(s.completion_style(), CompletionStyle::Popup);
+    }
 
     /// Every advertised option must actually be a known Rust option — guards the
     /// `KNOWN_OPTIONS` list from drifting out of sync with `option_kind`.
@@ -692,7 +889,7 @@ mod tests {
         assert!(s.completion_auto());
         // String-typed option.
         s.set("cursor-style".into(), OptionValue::Str("bar".into()));
-        assert_eq!(s.cursor_style(), "bar");
+        assert_eq!(s.cursor_style(), CursorStyle::Bar);
     }
 
     #[test]

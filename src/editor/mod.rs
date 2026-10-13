@@ -4545,11 +4545,8 @@ impl Editor {
         }
         // Presentation is Scheme-configurable: an in-buffer popup (default) or
         // the minibuffer.
-        let style = cx
-            .global::<crate::settings::Settings>()
-            .completion_style()
-            .to_string();
-        if style == "minibuffer" {
+        let style = cx.global::<crate::settings::Settings>().completion_style();
+        if style == crate::settings::CompletionStyle::Minibuffer {
             let prefix = self.active.buffer.slice_to_string(word_range.clone());
             self.completion_items = items.iter().map(|i| i.label.clone()).collect();
             self.completion_range = Some(word_range);
