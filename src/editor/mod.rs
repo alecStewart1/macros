@@ -1012,10 +1012,22 @@ struct Overlays {
 /// (positive) or removed (negative) starting just after `start_line`. Entries on
 /// or before `start_line` keep their line; later ones shift; any that would land
 /// at/before `start_line` (deleted out) are dropped.
-fn shift_line_map<V>(map: &mut HashMap<usize, V>, start_line: usize, line_delta: isize) {
+fn shift_line_map<V>(
+    map: &mut HashMap<usize, V>,
+    start_line: usize,
+    line_delta: isize,
+    carry_start_line: bool,
+) {
     if line_delta == 0 {
         return;
     }
+    // Lines inserted at column 0 of `start_line`: its entry moves with its text.
+    // No entry can sit in the freshly inserted lines, so this can't collide.
+    let carried = if carry_start_line && line_delta > 0 {
+        map.remove(&start_line)
+    } else {
+        None
+    };
     // Re-key only the entries past the edit, in place. Process in an order that
     // never overwrites an entry we haven't moved yet: highest-first when shifting
     // up, lowest-first when shifting down. Entries shifted to at/before
@@ -1032,6 +1044,9 @@ fn shift_line_map<V>(map: &mut HashMap<usize, V>, start_line: usize, line_delta:
         if shifted > start_line as isize {
             map.insert(shifted as usize, v);
         }
+    }
+    if let Some(v) = carried {
+        map.insert(start_line + line_delta as usize, v);
     }
 }
 
@@ -2196,6 +2211,7 @@ impl Editor {
         start_line: usize,
     ) {
         let delta = new_len as isize - (old_end - start) as isize;
+        let insertion = old_end == start;
         // A byte offset, mapped past the edit: before it is fixed, inside it
         // collapses to its start, after it shifts by the size delta.
         let shift = |pos: usize| -> usize {
@@ -2212,8 +2228,18 @@ impl Editor {
                 *r = shift(r.start)..shift(r.end);
                 r.end > r.start
             });
+            // A pure insertion exactly at a hide's start lands BEFORE it: the
+            // hide is concealment of the text that was there (a heading's `## `),
+            // not of whatever is typed in front of it. Anchoring the start would
+            // stretch the hide over the new text — typing at column 0 of a
+            // heading, or pressing Enter there, made the whole line vanish.
             self.active.overlays.hidden.retain_mut(|r| {
-                *r = shift(r.start)..shift(r.end);
+                let s = if insertion && r.start == start {
+                    start + new_len
+                } else {
+                    shift(r.start)
+                };
+                *r = s..shift(r.end);
                 r.end > r.start
             });
             self.active.overlays.props.retain_mut(|(r, _, _)| {
@@ -2222,14 +2248,15 @@ impl Editor {
             });
         }
         if line_delta != 0 {
-            shift_line_map(&mut self.active.overlays.indents, start_line, line_delta);
-            shift_line_map(&mut self.active.overlays.scales, start_line, line_delta);
-            shift_line_map(&mut self.active.overlays.suffixes, start_line, line_delta);
-            shift_line_map(
-                &mut self.active.overlays.fold_markers,
-                start_line,
-                line_delta,
-            );
+            // Newlines inserted at column 0 push `start_line`'s own text down, so
+            // its line overlays go with it — else Enter at the start of a heading
+            // leaves the heading's scale/chevron on the now-empty line above.
+            let carry = insertion && self.active.buffer.line_range(start_line).start == start;
+            let o = &mut self.active.overlays;
+            shift_line_map(&mut o.indents, start_line, line_delta, carry);
+            shift_line_map(&mut o.scales, start_line, line_delta, carry);
+            shift_line_map(&mut o.suffixes, start_line, line_delta, carry);
+            shift_line_map(&mut o.fold_markers, start_line, line_delta, carry);
             // Folded line ranges shift too, else editing above a folded subtree
             // (e.g. pressing RET to push an Org heading down) leaves the fold
             // hiding stale line numbers — the content lands on lines the fold no
@@ -5792,20 +5819,20 @@ mod tests {
         let base: HashMap<usize, usize> = [(0, 10), (3, 20), (5, 30)].into_iter().collect();
         // Insert 2 lines after line 3: keys <=3 stay, keys >3 shift by +2.
         let mut ins = base.clone();
-        shift_line_map(&mut ins, 3, 2);
+        shift_line_map(&mut ins, 3, 2, false);
         assert_eq!(ins.get(&0), Some(&10));
         assert_eq!(ins.get(&3), Some(&20));
         assert_eq!(ins.get(&7), Some(&30)); // 5 -> 7
         assert_eq!(ins.get(&5), None);
         // Delete 2 lines after line 0: key 3 -> 1, key 5 -> 3.
         let mut del = base.clone();
-        shift_line_map(&mut del, 0, -2);
+        shift_line_map(&mut del, 0, -2, false);
         assert_eq!(del.get(&0), Some(&10));
         assert_eq!(del.get(&1), Some(&20));
         assert_eq!(del.get(&3), Some(&30));
         // A key that would collapse into the deleted region is dropped.
         let mut collapse = base.clone();
-        shift_line_map(&mut collapse, 0, -4);
+        shift_line_map(&mut collapse, 0, -4, false);
         assert_eq!(collapse.get(&0), Some(&10)); // 0 stays
         assert!(!collapse.values().any(|&v| v == 20)); // 3 -> -1 -> dropped
     }
