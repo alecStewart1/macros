@@ -5,6 +5,7 @@
 //!   * [`gix`] — pure git backends (log/diff/status/…) with no Steel coupling.
 //!   * [`engine`] — the [`ScriptEngine`] handle and its dedicated thread.
 //!   * [`registry`] — `build_engine`: every registered Scheme bridge function.
+//!   * [`search`] — ripgrep-library file walking for the search primitives.
 //!   * [`convert`] — SteelVal parsing/formatting helpers.
 //!   * [`session`] — session-persistence primitives (savehist / desktop).
 //!   * [`sockets`] — socket / SQLite / DNS backends and their handle tables.
@@ -16,6 +17,7 @@ mod convert;
 mod engine;
 mod gix;
 mod registry;
+mod search;
 mod session;
 mod sockets;
 mod state;
@@ -26,6 +28,7 @@ pub(crate) use convert::*;
 pub use engine::*;
 pub(crate) use gix::*;
 pub(crate) use registry::*;
+pub(crate) use search::*;
 pub(crate) use session::*;
 pub(crate) use sockets::*;
 pub use state::*;
