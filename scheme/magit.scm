@@ -89,7 +89,7 @@
 ;; so git operations get real pathspecs rather than the literal arrow string.
 (define (entry-status e) (substring e 0 2))
 (define (entry-path e) (substring e 3 (string-length e)))
-(define (char-at s i) (substring s i (+ i 1)))
+(define (magit-char-at s i) (substring s i (+ i 1)))
 
 ;; The pathspecs a "OLD -> NEW" (or plain) section path covers — used for `add` /
 ;; `reset` / `checkout`, which must name every side of a rename.
@@ -177,16 +177,16 @@
 ;; (passed in as `entries`) rather than each re-running `git status`.
 ;; Staged / unstaged carry their status label: (label path).
 (define (magit-staged entries)
-  (map (lambda (e) (list (magit-label (char-at e 0)) (entry-path e)))
+  (map (lambda (e) (list (magit-label (magit-char-at e 0)) (entry-path e)))
        (filter (lambda (e)
-                 (let ((x (char-at e 0)))
+                 (let ((x (magit-char-at e 0)))
                    (and (not (equal? x " ")) (not (equal? x "?")))))
                entries)))
 
 (define (magit-unstaged entries)
-  (map (lambda (e) (list (magit-label (char-at e 1)) (entry-path e)))
+  (map (lambda (e) (list (magit-label (magit-char-at e 1)) (entry-path e)))
        (filter (lambda (e)
-                 (let ((y (char-at e 1)))
+                 (let ((y (magit-char-at e 1)))
                    (and (not (equal? y " ")) (not (equal? y "?")))))
                entries)))
 
@@ -466,7 +466,7 @@
 ;; Split a `git diff` into (header . hunks): the file header (lines before the
 ;; first @@) and each @@-hunk as its own string. The header + one hunk form a
 ;; valid patch for `git apply` (hunk-level staging).
-(define (parse-diff raw)
+(define (magit-parse-diff raw)
   (let loop ((lines (split-many raw "\n")) (header '()) (hunks '()) (cur '()) (in #f))
     (cond
       ((null? lines)
@@ -482,7 +482,7 @@
 ;; --- bulk diff (one git call per section, not per file) ---------------------
 ;; A single `git diff` lists every changed file; splitting it per file lets one
 ;; invocation replace N. Each file's slice is byte-identical to what
-;; `git diff -- <path>` prints, so parse-diff and hunk-apply are unaffected.
+;; `git diff -- <path>` prints, so magit-parse-diff and hunk-apply are unaffected.
 
 ;; Split bulk diff lines into per-file line-lists (each starts at "diff --git").
 (define (split-diff-files lines)
@@ -626,7 +626,7 @@
     (magit-emit-file-heading label path)
     (let ((body-start (section-point-line)))
       (when (member (cons type path) *magit-expanded*)
-        (let* ((parsed (parse-diff diff-text))
+        (let* ((parsed (magit-parse-diff diff-text))
                (header (car parsed))
                (hunks (cdr parsed)))
           (if (magit-structural?)
@@ -1816,14 +1816,7 @@
 ;; record is unambiguous: a 40-hex SHA header line, key/value lines, then the
 ;; source line (prefixed with a tab). Parse into `(final-line sha author epoch
 ;; summary)` records, in file order.
-(define (magit-blame-hex40? line)
-  (and (>= (string-length line) 41)
-       (equal? (substring line 40 41) " ")
-       (let loop ((i 0))
-         (cond ((>= i 40) #t)
-               ((string-contains? "0123456789abcdef" (substring line i (+ i 1)))
-                (loop (+ i 1)))
-               (else #f)))))
+(define (magit-blame-hex40? line) (= (string-match "^[0-9a-f]{40} " line) 0))
 (define (magit-blame-parse lines)
   (let loop ((ls lines) (sha "") (author "") (epoch 0) (summary "") (fline 0) (acc '()))
     (cond
