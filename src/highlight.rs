@@ -35,29 +35,69 @@ mod racket {
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_racket) };
 }
 
-/// The capture names we recognize, in the order tree-sitter assigns highlight
-/// indices. Each maps 1:1 to a theme face of the same name. Dotted captures in
-/// the grammar's query (e.g. `constant.builtin`) resolve to their prefix here.
-pub const FACE_NAMES: &[&str] = &[
-    "comment",
-    "string",
-    "keyword",
-    "function",
-    "number",
-    "constant",
-    "type",
-    "operator",
-    "punctuation",
-    "variable",
-    // Brackets/parens. Distinct from `punctuation` so themes can render the
-    // structural delimiters a touch dimmer than ordinary punctuation. Fed by
-    // the `@punctuation.bracket` capture (see `face_for_capture`).
-    "bracket",
-];
+/// The syntax faces captures resolve to. Each maps 1:1 to a theme face of the
+/// same name ([`Face::name`]). Dotted captures in a grammar's query (e.g.
+/// `constant.builtin`) resolve to their prefix (see `face_for_capture`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Face {
+    Comment,
+    String,
+    Keyword,
+    Function,
+    Number,
+    Constant,
+    Type,
+    Operator,
+    Punctuation,
+    Variable,
+    /// Brackets/parens. Distinct from `Punctuation` so themes can render the
+    /// structural delimiters a touch dimmer than ordinary punctuation. Fed by
+    /// the `@punctuation.bracket` capture (see `face_for_capture`).
+    Bracket,
+}
 
-/// The theme face name for a highlight index.
-pub fn face_name(face: usize) -> &'static str {
-    FACE_NAMES.get(face).copied().unwrap_or("variable")
+impl Face {
+    /// The theme face name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Face::Comment => "comment",
+            Face::String => "string",
+            Face::Keyword => "keyword",
+            Face::Function => "function",
+            Face::Number => "number",
+            Face::Constant => "constant",
+            Face::Type => "type",
+            Face::Operator => "operator",
+            Face::Punctuation => "punctuation",
+            Face::Variable => "variable",
+            Face::Bracket => "bracket",
+        }
+    }
+
+    /// The face a capture's base name (`string` of `string.special`) names
+    /// directly, if any.
+    fn from_base(base: &str) -> Option<Face> {
+        Some(match base {
+            "comment" => Face::Comment,
+            "string" => Face::String,
+            "keyword" => Face::Keyword,
+            "function" => Face::Function,
+            "number" => Face::Number,
+            "constant" => Face::Constant,
+            "type" => Face::Type,
+            "operator" => Face::Operator,
+            "punctuation" => Face::Punctuation,
+            "variable" => Face::Variable,
+            "bracket" => Face::Bracket,
+            _ => return None,
+        })
+    }
+}
+
+/// The theme face name for a highlight face.
+pub fn face_name(face: Face) -> &'static str {
+    face.name()
 }
 
 /// Everything bundled for one language, in one place: the grammar, its
@@ -432,7 +472,7 @@ pub fn language_for_filename(name: &str) -> Option<&'static str> {
 /// A contiguous run of source bytes and the face (if any) to draw it with.
 pub struct HlSpan {
     pub range: Range<usize>,
-    pub face: Option<usize>,
+    pub face: Option<Face>,
 }
 
 /// The byte and point deltas of a single edit, for incremental reparsing.
@@ -460,7 +500,7 @@ pub struct Highlighter {
     /// (`query_captures`) without us re-resolving the language.
     language: Language,
     /// Maps a query capture index to a face index (`None` if unrecognized).
-    capture_faces: Vec<Option<usize>>,
+    capture_faces: Vec<Option<Face>>,
     /// Language injection (e.g. fenced code blocks in markdown): a query that
     /// finds `(language, content)` regions, plus a lazily-built, per-language
     /// cache of sub-highlighters that color those regions and a per-block span
@@ -518,7 +558,7 @@ type InjectionKey = (&'static str, u64, usize);
 /// A block's spans relative to its content start, plus whether a paint used
 /// it since the last buffer change (unused entries are pruned on the next).
 struct InjectedSpans {
-    spans: Vec<(Range<usize>, usize)>,
+    spans: Vec<(Range<usize>, Face)>,
     used: bool,
 }
 
@@ -739,7 +779,7 @@ impl Highlighter {
                 .chunks()
                 .map(str::as_bytes)
         };
-        let mut captures: Vec<(usize, usize, usize)> = Vec::new();
+        let mut captures: Vec<(usize, usize, Face)> = Vec::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), provider);
         while let Some(m) = matches.next() {
             for capture in m.captures() {
@@ -774,7 +814,7 @@ impl Highlighter {
         &self,
         rope: &Rope,
         range: &Range<usize>,
-        captures: &mut Vec<(usize, usize, usize)>,
+        captures: &mut Vec<(usize, usize, Face)>,
     ) {
         let (Some(inj), Some(tree)) = (self.injection.as_ref(), self.tree.as_ref()) else {
             return;
@@ -1226,18 +1266,18 @@ fn point((row, column): (usize, usize)) -> Point {
     Point::new(row, column)
 }
 
-/// Resolve a capture name to a face index, using the dotted prefix
+/// Resolve a capture name to a face, using the dotted prefix
 /// (`string.special` -> `string`).
-fn face_for_capture(name: &str) -> Option<usize> {
+fn face_for_capture(name: &str) -> Option<Face> {
     // Brackets get their own face so themes can dim structural delimiters
     // without touching other punctuation. Checked before the base-name fallback
     // below, which would otherwise resolve `punctuation.bracket` to `punctuation`.
     if name == "punctuation.bracket" {
-        return FACE_NAMES.iter().position(|face| *face == "bracket");
+        return Some(Face::Bracket);
     }
     let base = name.split('.').next().unwrap_or(name);
-    if let Some(i) = FACE_NAMES.iter().position(|face| *face == base) {
-        return Some(i);
+    if let Some(face) = Face::from_base(base) {
+        return Some(face);
     }
     // Many grammars use capture names that don't share a base with our 10
     // faces — markdown's `text.*`, HTML/CSS `tag`/`attribute`, CSS/YAML/TOML
@@ -1249,56 +1289,56 @@ fn face_for_capture(name: &str) -> Option<usize> {
     let alias = match base {
         // markdown block/inline structure
         "text" => match name {
-            "text.title" | "text.strong" => "keyword", // headings, bold
-            "text.emphasis" => "type",                 // italic
-            "text.literal" => "string",                // code fences / spans
-            "text.uri" => "constant",                  // link / image targets
-            "text.reference" => "variable",            // link labels
+            "text.title" | "text.strong" => Face::Keyword, // headings, bold
+            "text.emphasis" => Face::Type,                 // italic
+            "text.literal" => Face::String,                // code fences / spans
+            "text.uri" => Face::Constant,                  // link / image targets
+            "text.reference" => Face::Variable,            // link labels
             _ => return None,
         },
         // The `@markup.*` family (nvim-treesitter's modern markup naming, used by
         // the LaTeX / Typst / Mermaid queries) mirrors the `text.*` mapping above.
         "markup" => {
             if name.starts_with("markup.heading") || name == "markup.strong" {
-                "keyword" // headings, bold
+                Face::Keyword // headings, bold
             } else if name == "markup.italic" {
-                "type" // italic
+                Face::Type // italic
             } else if name.starts_with("markup.raw") {
-                "string" // inline code / code blocks
+                Face::String // inline code / code blocks
             } else if name == "markup.link.url" || name == "markup.math" {
-                "constant" // link targets, math content
+                Face::Constant // link targets, math content
             } else if name.starts_with("markup.link") {
-                "variable" // link labels
+                Face::Variable // link labels
             } else {
                 return None;
             }
         }
-        "boolean" => "constant",            // true / false / nil
-        "float" => "number",                // float literals (Scala et al.)
-        "character" | "escape" => "string", // char literals, \n
-        "property" | "field" | "parameter" | "attribute" => "variable", // keys, obj.prop, attrs
+        "boolean" => Face::Constant,            // true / false / nil
+        "float" => Face::Number,                // float literals (Scala et al.)
+        "character" | "escape" => Face::String, // char literals, \n
+        "property" | "field" | "parameter" | "attribute" => Face::Variable, // keys, obj.prop, attrs
         // <tag>, if/for, #define, import, throw/catch, `lazy`/`implicit`
         "tag" | "conditional" | "repeat" | "label" | "preproc" | "include" | "exception"
-        | "storageclass" => "keyword",
-        "constructor" | "namespace" | "module" => "type", // Foo(), modules
-        "method" => "function",                           // method calls
-        "delimiter" => "punctuation",                     // bare `@delimiter`
+        | "storageclass" => Face::Keyword,
+        "constructor" | "namespace" | "module" => Face::Type, // Foo(), modules
+        "method" => Face::Function,                           // method calls
+        "delimiter" => Face::Punctuation,                     // bare `@delimiter`
         _ => return None,
     };
-    FACE_NAMES.iter().position(|face| *face == alias)
+    Some(alias)
 }
 
 /// Flatten possibly-nested capture ranges into contiguous spans tiling
 /// `[start, end)`. Query captures are tree nodes, so any two are either disjoint
 /// or nested — never partially overlapping — which lets a simple stack sweep
 /// pick the innermost (most specific) face at each byte.
-fn flatten(mut captures: Vec<(usize, usize, usize)>, start: usize, end: usize) -> Vec<HlSpan> {
+fn flatten(mut captures: Vec<(usize, usize, Face)>, start: usize, end: usize) -> Vec<HlSpan> {
     // Sort by start ascending, then by end descending so that at a shared start
     // the outer (larger) capture is processed before the inner one.
     captures.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
     let mut spans = Vec::new();
-    let mut stack: Vec<(usize, usize)> = Vec::new(); // (end, face), innermost on top
+    let mut stack: Vec<(usize, Face)> = Vec::new(); // (end, face), innermost on top
     let mut pos = start;
     let mut i = 0;
     while pos < end {
@@ -2097,7 +2137,7 @@ mod tests {
         );
     }
 
-    fn shape(spans: &[HlSpan]) -> Vec<(usize, usize, Option<usize>)> {
+    fn shape(spans: &[HlSpan]) -> Vec<(usize, usize, Option<Face>)> {
         spans
             .iter()
             .map(|s| (s.range.start, s.range.end, s.face))
