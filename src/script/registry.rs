@@ -251,25 +251,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::help::register(&mut reg, shared, &api_cell);
     prims::text::register(&mut reg, shared);
     prims::plotting::register(&mut reg, shared);
-    // --- Native spell checking (scheme/spell.scm's 'native backend) -------
-    reg.section(Section::Spell);
-    // `(spell-native-available?)` → #t where the OS provides a checker.
-    reg.register_fn("spell-native-available?", crate::spell::available);
-    // `(spell-check-text text callback)` — callback gets "start\tend\tword"
-    // rows (byte offsets into text), newline-joined; "" when nothing is wrong.
-    register_binary(&mut reg, queue, "spell-check-text", |text, callback| {
-        EditorCommand::SpellCheck { text, callback }
-    });
-    // `(spell-suggest word callback)` — callback gets one suggestion per line.
-    register_binary(&mut reg, queue, "spell-suggest", |word, callback| {
-        EditorCommand::SpellSuggest { word, callback }
-    });
-    register_unary(
-        &mut reg,
-        queue,
-        "spell-learn-word",
-        EditorCommand::SpellLearnWord,
-    );
+    prims::spell::register(&mut reg, shared);
     reg.section(Section::Modal);
     {
         // `(set-count-aware! 'name)` — the modal count loop dispatches `name`
