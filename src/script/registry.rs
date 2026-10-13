@@ -1030,7 +1030,7 @@ pub(crate) fn build_engine(
                 let callback = callback.0;
                 q.lock().unwrap().push(EditorCommand::LspRequest {
                     method,
-                    kind,
+                    kind: crate::lsp::ParamsKind::parse(&kind),
                     params,
                     callback,
                 });

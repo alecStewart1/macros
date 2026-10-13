@@ -1371,10 +1371,10 @@ enum PendingRequest {
     /// server returns nothing usable, the original one as-is).
     ResolveCodeAction(Box<lsp::CodeAction>),
     /// `prepareCallHierarchy` done → send the incoming/outgoing-calls request
-    /// (true = incoming). The prepared item is echoed back verbatim.
-    CallHierarchyPrepare(bool),
+    /// in that direction. The prepared item is echoed back verbatim.
+    CallHierarchyPrepare(lsp::CallDirection),
     /// `incomingCalls`/`outgoingCalls` result → the `*lsp-xref*` buffer.
-    CallHierarchyCalls(bool),
+    CallHierarchyCalls(lsp::CallDirection),
     /// A semantic-tokens result (full / range / delta) → decode + deliver
     /// records to the named Steel callback.
     SemanticTokens {

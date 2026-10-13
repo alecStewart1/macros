@@ -14,7 +14,9 @@ use std::sync::Arc;
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
+/// Which half of a cell a selection endpoint sits on.
+pub use alacritty_terminal::index::Side;
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
@@ -227,20 +229,18 @@ impl Terminal {
 
     // --- Mouse selection (grid-based, via alacritty's `Selection`) --------
 
-    /// Begin a text selection at viewport cell `(row, col)`. `right` picks the
-    /// right half of the cell (so the anchor sits between cells naturally).
-    pub fn selection_start(&self, row: usize, col: usize, right: bool) {
+    /// Begin a text selection at viewport cell `(row, col)`. `side` picks the
+    /// half of the cell (so the anchor sits between cells naturally).
+    pub fn selection_start(&self, row: usize, col: usize, side: Side) {
         let mut term = self.term.lock();
         let point = self.viewport_point(&term, row, col);
-        let side = if right { Side::Right } else { Side::Left };
         term.selection = Some(Selection::new(SelectionType::Simple, point, side));
     }
 
     /// Extend the in-progress selection to viewport cell `(row, col)`.
-    pub fn selection_update(&self, row: usize, col: usize, right: bool) {
+    pub fn selection_update(&self, row: usize, col: usize, side: Side) {
         let mut term = self.term.lock();
         let point = self.viewport_point(&term, row, col);
-        let side = if right { Side::Right } else { Side::Left };
         if let Some(sel) = term.selection.as_mut() {
             sel.update(point, side);
         }
@@ -614,8 +614,8 @@ mod tests {
         }
 
         // Select cells (0,0)..(0,3) and read the text back.
-        term.selection_start(0, 0, false);
-        term.selection_update(0, 3, true);
+        term.selection_start(0, 0, Side::Left);
+        term.selection_update(0, 3, Side::Right);
         let text = term.selection_text().unwrap_or_default();
         assert!(text.contains("ABCD"), "selection text was {text:?}");
 

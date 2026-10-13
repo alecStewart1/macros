@@ -4,7 +4,7 @@
 
 use gpui::{Context, Pixels, Point};
 
-use crate::terminal::{TermEvent, Terminal};
+use crate::terminal::{Side, TermEvent, Terminal};
 
 use super::*;
 
@@ -267,7 +267,7 @@ impl Editor {
         &self,
         id: u64,
         pos: Point<Pixels>,
-    ) -> Option<(usize, usize, bool)> {
+    ) -> Option<(usize, usize, Side)> {
         let g = self.terminal_geom.get(&id)?;
         let cw = f32::from(g.cell_w).max(1.0);
         let ch = f32::from(g.cell_h).max(1.0);
@@ -275,8 +275,12 @@ impl Editor {
         let rely = (f32::from(pos.y) - f32::from(g.origin.y)) / ch;
         let col = (relx.floor().max(0.0) as usize).min(g.cols.saturating_sub(1));
         let row = (rely.floor().max(0.0) as usize).min(g.rows.saturating_sub(1));
-        let right = (relx - relx.floor()) >= 0.5;
-        Some((row, col, right))
+        let side = if relx - relx.floor() >= 0.5 {
+            Side::Right
+        } else {
+            Side::Left
+        };
+        Some((row, col, side))
     }
 
     /// Begin a mouse text selection in the terminal under `pos` (if any). Returns
@@ -295,10 +299,10 @@ impl Editor {
         if pane != self.selected_pane {
             self.select_pane(pane, cx);
         }
-        if let Some((row, col, right)) = self.terminal_cell_at(tid, pos)
+        if let Some((row, col, side)) = self.terminal_cell_at(tid, pos)
             && let Some(t) = self.terminals.get(&tid)
         {
-            t.selection_start(row, col, right);
+            t.selection_start(row, col, side);
             self.terminal_drag = Some(tid);
             cx.notify();
         }
@@ -310,10 +314,10 @@ impl Editor {
         let Some(tid) = self.terminal_drag else {
             return;
         };
-        if let Some((row, col, right)) = self.terminal_cell_at(tid, pos)
+        if let Some((row, col, side)) = self.terminal_cell_at(tid, pos)
             && let Some(t) = self.terminals.get(&tid)
         {
-            t.selection_update(row, col, right);
+            t.selection_update(row, col, side);
             cx.notify();
         }
     }

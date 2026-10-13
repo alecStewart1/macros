@@ -47,6 +47,39 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+/// How `(lsp-request method kind params callback)` builds a request's base
+/// params around the active buffer (its `kind` argument).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamsKind {
+    /// `textDocument` + `position` (point) — also any unrecognized kind.
+    Position,
+    /// `textDocument` alone.
+    Document,
+    /// `textDocument` + the whole document as `range`.
+    Range,
+    /// `textDocument` + the region (or point's line) as `range`, plus
+    /// formatting `options`.
+    Region,
+    /// `textDocument` + `positions: [point]`.
+    Positions,
+    /// No base: the caller's params verbatim.
+    Raw,
+}
+
+impl ParamsKind {
+    /// Parse the Scheme-side kind name.
+    pub fn parse(kind: &str) -> Self {
+        match kind {
+            "document" => ParamsKind::Document,
+            "range" => ParamsKind::Range,
+            "region" => ParamsKind::Region,
+            "positions" => ParamsKind::Positions,
+            "raw" => ParamsKind::Raw,
+            _ => ParamsKind::Position,
+        }
+    }
+}
+
 /// A minimal LSP client: one server process, JSON-RPC over stdio. A background
 /// thread reads framed messages and forwards them as JSON `Value`s over a
 /// channel; the editor drives requests/notifications from the main thread.
@@ -1297,11 +1330,45 @@ pub fn apply_semantic_delta(prev: &[i64], result: &Value) -> Vec<i64> {
     data
 }
 
-/// Extract call locations from a `callHierarchy/incomingCalls` (`key = "from"`)
-/// or `outgoingCalls` (`key = "to"`) result. Each call's item contributes a
+/// Which way a call hierarchy is walked: callers (`incomingCalls`) or callees
+/// (`outgoingCalls`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallDirection {
+    Incoming,
+    Outgoing,
+}
+
+impl CallDirection {
+    /// The field of each call holding the other end's `CallHierarchyItem`.
+    pub fn key(self) -> &'static str {
+        match self {
+            CallDirection::Incoming => "from",
+            CallDirection::Outgoing => "to",
+        }
+    }
+
+    /// Title-case name, for the results buffer header.
+    pub fn label(self) -> &'static str {
+        match self {
+            CallDirection::Incoming => "Incoming",
+            CallDirection::Outgoing => "Outgoing",
+        }
+    }
+
+    /// The second-leg request method.
+    pub fn method(self) -> &'static str {
+        match self {
+            CallDirection::Incoming => "callHierarchy/incomingCalls",
+            CallDirection::Outgoing => "callHierarchy/outgoingCalls",
+        }
+    }
+}
+
+/// Extract call locations from a `callHierarchy/incomingCalls` or
+/// `outgoingCalls` result. Each call's item contributes a
 /// `Location` (its `selectionRange`, falling back to `range`) plus name via the
 /// returned `(name, Location)` pairs.
-pub fn parse_call_hierarchy(result: &Value, key: &str) -> Vec<(String, Location)> {
+pub fn parse_call_hierarchy(result: &Value, direction: CallDirection) -> Vec<(String, Location)> {
     /// The `CallHierarchyItem` inside an incoming/outgoing call.
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -1319,7 +1386,8 @@ pub fn parse_call_hierarchy(result: &Value, key: &str) -> Vec<(String, Location)
     };
     arr.iter()
         .filter_map(|call| {
-            let item: WireHierarchyItem = WireHierarchyItem::deserialize(call.get(key)?).ok()?;
+            let item: WireHierarchyItem =
+                WireHierarchyItem::deserialize(call.get(direction.key())?).ok()?;
             // Prefer the narrower `selectionRange` (the identifier).
             let range = item.selection_range.unwrap_or(item.range);
             Some((
@@ -1935,14 +2003,14 @@ mod tests {
             },
             "fromRanges": []
         }]);
-        let calls = parse_call_hierarchy(&incoming, "from");
+        let calls = parse_call_hierarchy(&incoming, CallDirection::Incoming);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "caller");
         assert_eq!(calls[0].1.start, (10, 3)); // prefers selectionRange
         assert_eq!(calls[0].1.uri, "file:///c.rs");
         // Wrong key / empty → nothing.
-        assert!(parse_call_hierarchy(&incoming, "to").is_empty());
-        assert!(parse_call_hierarchy(&Value::Null, "from").is_empty());
+        assert!(parse_call_hierarchy(&incoming, CallDirection::Outgoing).is_empty());
+        assert!(parse_call_hierarchy(&Value::Null, CallDirection::Incoming).is_empty());
     }
 
     #[test]

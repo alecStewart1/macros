@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::jsonrpc::Message;
+use crate::lsp::{CallDirection, ParamsKind};
 
 /// The final path component of `path`, falling back to the whole string when
 /// there is no `/` (matches the bare `rsplit('/').next().unwrap_or(path)` idiom).
@@ -792,15 +793,13 @@ impl Editor {
                     self.set_code_lens(line, character, &title, cx);
                 }
             }
-            CallHierarchyPrepare(incoming) => self.lsp_call_hierarchy_calls(incoming, result, cx),
-            CallHierarchyCalls(incoming) => {
-                let key = if incoming { "from" } else { "to" };
-                let calls = lsp::parse_call_hierarchy(result, key);
+            CallHierarchyPrepare(direction) => self.lsp_call_hierarchy_calls(direction, result, cx),
+            CallHierarchyCalls(direction) => {
+                let calls = lsp::parse_call_hierarchy(result, direction);
                 if calls.is_empty() {
                     self.echo("No calls found", cx);
                     return;
                 }
-                let direction = if incoming { "Incoming" } else { "Outgoing" };
                 let mut rows = Vec::new();
                 let mut targets = Vec::new();
                 for (name, loc) in &calls {
@@ -810,7 +809,12 @@ impl Editor {
                     targets.push((loc.uri.clone(), loc.start.0, loc.start.1));
                 }
                 self.xref_targets = targets;
-                let text = format!("{direction} calls ({})\n\n{}", calls.len(), rows.join("\n"));
+                let text = format!(
+                    "{} calls ({})\n\n{}",
+                    direction.label(),
+                    calls.len(),
+                    rows.join("\n")
+                );
                 self.render_buffer(
                     "*lsp-xref*".into(),
                     "lsp-xref-mode".into(),
@@ -1054,10 +1058,10 @@ impl Editor {
     }
 
     /// `prepareCallHierarchy` at point (incoming/outgoing call hierarchy).
-    pub(super) fn lsp_call_hierarchy(&mut self, incoming: bool, cx: &mut Context<Self>) {
+    pub(super) fn lsp_call_hierarchy(&mut self, direction: CallDirection, cx: &mut Context<Self>) {
         self.lsp_send(
             "textDocument/prepareCallHierarchy",
-            PendingRequest::CallHierarchyPrepare(incoming),
+            PendingRequest::CallHierarchyPrepare(direction),
             Self::text_doc_position,
             cx,
         );
@@ -1068,7 +1072,7 @@ impl Editor {
     /// integers — unlike a Scheme round-trip).
     pub(super) fn lsp_call_hierarchy_calls(
         &mut self,
-        incoming: bool,
+        direction: CallDirection,
         prepared: &Value,
         cx: &mut Context<Self>,
     ) {
@@ -1076,13 +1080,8 @@ impl Editor {
             self.echo("No call hierarchy at point", cx);
             return;
         };
-        let method = if incoming {
-            "callHierarchy/incomingCalls"
-        } else {
-            "callHierarchy/outgoingCalls"
-        };
-        let kind = PendingRequest::CallHierarchyCalls(incoming);
-        self.lsp_dispatch(method, json!({ "item": item }), kind);
+        let kind = PendingRequest::CallHierarchyCalls(direction);
+        self.lsp_dispatch(direction.method(), json!({ "item": item }), kind);
     }
 
     // --- LSP navigation / rename / symbols / formatting ---------------------
@@ -1500,50 +1499,48 @@ impl Editor {
 
     /// Base request params for `kind`, with the active buffer's URI/position/
     /// range filled in. `extra` (a JSON object) is merged over the base; for
-    /// `"raw"` the base is empty and `extra` is used verbatim.
-    pub(super) fn lsp_build_params(&self, kind: &str, extra: Value, uri: &str) -> Value {
-        let (line, character) = self.active.buffer.byte_to_position(self.point());
-        let position = json!({ "line": line, "character": character });
-        let document_range = {
-            let (el, ec) = self
-                .active
-                .buffer
-                .byte_to_position(self.active.buffer.len());
-            json!({ "start": { "line": 0, "character": 0 }, "end": { "line": el, "character": ec } })
+    /// [`ParamsKind::Raw`] the base is empty and `extra` is used verbatim.
+    pub(super) fn lsp_build_params(&self, kind: ParamsKind, extra: Value, uri: &str) -> Value {
+        let buffer = &self.active.buffer;
+        let range_json = |start: usize, end: usize| {
+            let (sl, sc) = buffer.byte_to_position(start);
+            let (el, ec) = buffer.byte_to_position(end);
+            json!({ "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } })
         };
-        let region_range = {
-            let (s, e) = if self.active.mark_active {
-                (
-                    self.active.selected_range.start,
-                    self.active.selected_range.end,
-                )
-            } else {
-                let l = self.active.buffer.line_range_at(self.point());
-                (l.start, l.end)
-            };
-            let s = self.active.buffer.byte_to_position(s);
-            let e = self.active.buffer.byte_to_position(e);
-            json!({ "start": { "line": s.0, "character": s.1 }, "end": { "line": e.0, "character": e.1 } })
+        let position = || {
+            let (line, character) = buffer.byte_to_position(self.point());
+            json!({ "line": line, "character": character })
         };
         let mut params = match kind {
-            "document" => json!({ "textDocument": { "uri": uri } }),
-            "range" => json!({ "textDocument": { "uri": uri }, "range": document_range }),
-            "region" => json!({
+            ParamsKind::Document => json!({ "textDocument": { "uri": uri } }),
+            ParamsKind::Range => json!({
                 "textDocument": { "uri": uri },
-                "range": region_range,
-                "options": { "tabSize": 4, "insertSpaces": true }
+                "range": range_json(0, buffer.len())
             }),
-            "positions" => json!({ "textDocument": { "uri": uri }, "positions": [position] }),
-            "raw" => json!({}),
-            // "position" and anything unknown → textDocument + position.
-            _ => json!({ "textDocument": { "uri": uri }, "position": position }),
-        };
-        if let (Some(base), Some(ext)) = (params.as_object_mut(), extra.as_object()) {
-            for (k, v) in ext {
-                base.insert(k.clone(), v.clone());
+            ParamsKind::Region => {
+                let region = if self.active.mark_active {
+                    self.active.selected_range.clone()
+                } else {
+                    buffer.line_range_at(self.point())
+                };
+                json!({
+                    "textDocument": { "uri": uri },
+                    "range": range_json(region.start, region.end),
+                    "options": { "tabSize": 4, "insertSpaces": true }
+                })
             }
-        } else if kind == "raw" {
-            params = extra;
+            ParamsKind::Positions => {
+                json!({ "textDocument": { "uri": uri }, "positions": [position()] })
+            }
+            ParamsKind::Raw => json!({}),
+            ParamsKind::Position => {
+                json!({ "textDocument": { "uri": uri }, "position": position() })
+            }
+        };
+        match (params.as_object_mut(), extra) {
+            (Some(base), Value::Object(ext)) => base.extend(ext),
+            (_, extra) if kind == ParamsKind::Raw => params = extra,
+            _ => {}
         }
         params
     }
@@ -1553,7 +1550,7 @@ impl Editor {
     pub(super) fn lsp_script_request(
         &mut self,
         method: String,
-        kind: String,
+        kind: ParamsKind,
         params_json: String,
         callback: String,
         cx: &mut Context<Self>,
@@ -1563,7 +1560,7 @@ impl Editor {
             return;
         };
         let extra: Value = serde_json::from_str(&params_json).unwrap_or(Value::Null);
-        let params = self.lsp_build_params(&kind, extra, &uri);
+        let params = self.lsp_build_params(kind, extra, &uri);
         if !self.lsp_dispatch(&method, params, PendingRequest::Script(callback)) {
             self.echo(NO_LSP_FOR_BUFFER, cx);
         }

@@ -362,12 +362,12 @@ pub enum EditorCommand {
     /// `workspace/symbol` for the given query (read via `read-string`).
     LspWorkspaceSymbol(String),
     /// Generic LSP bridge: send `method` with params built from `kind`
-    /// ("position"|"document"|"range"|"region"|"positions"|"raw") merged with
-    /// `params` (a JSON object string), delivering the result JSON to Steel fn
-    /// `callback`. This exposes the whole protocol to Scheme.
+    /// (parsed from "position"|"document"|"range"|"region"|"positions"|"raw")
+    /// merged with `params` (a JSON object string), delivering the result JSON
+    /// to Steel fn `callback`. This exposes the whole protocol to Scheme.
     LspRequest {
         method: String,
-        kind: String,
+        kind: crate::lsp::ParamsKind,
         params: String,
         callback: String,
     },
