@@ -218,19 +218,11 @@
 ;; Per-buffer set of folded heading line numbers (mirrors org's fold state),
 ;; plus each one's text anchor so the numbers can be relocated after edits shift
 ;; the lines (see fold-anchors-capture in folding.scm).
-(define *md-folded* '())
-(define *md-folded-anchors* '())
-(define (md--folded-get) (buffer-state-get *md-folded* '()))
-(define (md--folded-set v)
-  (set! *md-folded* (buffer-state-set *md-folded* v))
-  (set! *md-folded-anchors*
-        (buffer-state-set *md-folded-anchors* (fold-anchors-capture (md-lines) v))))
+(define *md-fold-store* (make-fold-store (lambda (n) n) (lambda (n m) m)))
+(define (md--folded-get) (fold-store-get *md-fold-store*))
+(define (md--folded-set v) (fold-store-set *md-fold-store* v))
 ;; Relocate the recorded folded lines to where their headings are now.
-(define (md--folded-resync lines)
-  (let ((v (md--folded-get)))
-    (when (not (null? v))
-      (md--folded-set
-       (fold-anchors-relocate-lines (buffer-state-get *md-folded-anchors* '()) lines v)))))
+(define (md--folded-resync lines) (fold-store-resync *md-fold-store* lines))
 (define (md--folded? line) (if (member line (md--folded-get)) #t #f))
 
 ;; Re-hide every folded section from scratch (the only unfold primitive is

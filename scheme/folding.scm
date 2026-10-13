@@ -50,31 +50,52 @@
   (let ((a (assoc line anchors)))
     (if a (fold-anchor-locate lines a) line)))
 
-;; Relocate a list of folded line numbers; vanished ones are dropped.
-(define (fold-anchors-relocate-lines anchors lines nums)
-  (dedup (filter (lambda (x) x) (map (lambda (n) (fold-anchor-remap anchors lines n)) nums))))
+;; --- per-buffer fold store ------------------------------------------------------
+;; One store per folding flavor (generic, markdown, org): the per-buffer list of
+;; fold entries plus each entry's text anchor. An entry is whatever the flavor
+;; records — a bare line number, or org's (line . state) — so the store is keyed
+;; by two functions: `line-of` (entry → its line) and `with-line` (entry, new
+;; line → the relocated entry).
+;;   (define s (make-fold-store (lambda (n) n) (lambda (n m) m)))
+;;   (fold-store-set s (list 3 7))   (fold-store-get s) → (3 7)
+;;   (fold-store-resync s)           ; after edits: relocate, drop vanished
+(define (make-fold-store line-of with-line)
+  (let ((entries '()) (anchors '()))
+    (letrec ((get (lambda () (buffer-state-get entries '())))
+             (put (lambda (v)
+                    (set! entries (buffer-state-set entries v))
+                    (set! anchors
+                          (buffer-state-set anchors
+                                            (if (null? v) '()
+                                                (fold-anchors-capture (buffer-lines)
+                                                                      (map line-of v)))))))
+             ;; Relocate every entry to its anchor's current line in `lines`
+             ;; (#f = read the buffer), dropping vanished ones and line repeats.
+             (resync (lambda (lines)
+                       (let ((v (get)))
+                         (when (not (null? v))
+                           (let ((ls (or lines (buffer-lines)))
+                                 (as (buffer-state-get anchors '())))
+                             (put (dedup (filter (lambda (e) e)
+                                                 (map (lambda (e)
+                                                        (let ((n (fold-anchor-remap as ls (line-of e))))
+                                                          (if n (with-line e n) #f)))
+                                                      v))
+                                         line-of))))))))
+      (list get put resync))))
+(define (fold-store-get s) ((list-ref s 0)))
+(define (fold-store-set s v) ((list-ref s 1) v))
+;; Optional `lines`: the caller's already-split buffer text.
+(define (fold-store-resync s . lines) ((list-ref s 2) (if (null? lines) #f (car lines))))
 
-(define (fold--buffer-lines) (buffer-lines))
-
-(define *fold-folded* '())
-(define *fold-anchors* '())
-(define (fold--folded-get)
-  (let ((e (alist-ref *fold-folded* (current-buffer)))) (if e e '())))
-(define (fold--folded-set v)
-  (set! *fold-folded*
-        (cons (cons (current-buffer) v)
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *fold-folded*)))
-  (set! *fold-anchors*
-        (cons (cons (current-buffer) (fold-anchors-capture (fold--buffer-lines) v))
-              (filter (lambda (p) (not (equal? (car p) (current-buffer)))) *fold-anchors*))))
+;; Generic folding's store: a list of folded header line numbers.
+(define *fold-store* (make-fold-store (lambda (n) n) (lambda (n m) m)))
+(define (fold--folded-get) (fold-store-get *fold-store*))
+(define (fold--folded-set v) (fold-store-set *fold-store* v))
 (define (fold--folded? line) (if (member line (fold--folded-get)) #t #f))
 
 ;; Bring the recorded fold lines up to date with the current buffer text.
-(define (fold--resync)
-  (let ((v (fold--folded-get)))
-    (when (not (null? v))
-      (let ((anchors (let ((e (alist-ref *fold-anchors* (current-buffer)))) (if e e '()))))
-        (fold--folded-set (fold-anchors-relocate-lines anchors (fold--buffer-lines) v))))))
+(define (fold--resync) (fold-store-resync *fold-store*))
 
 ;; Don't auto-scan very large buffers on open (the marker pass is O(lines));
 ;; `M-x fold-refresh` still works on demand.

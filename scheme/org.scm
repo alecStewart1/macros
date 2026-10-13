@@ -519,34 +519,17 @@
           ((and (> (car (car hs)) H) (<= (nth (car hs) 1) L)) (- (car (car hs)) 1))
           (else (loop (cdr hs))))))
 
-;; Per-buffer local fold state: an alist buffer → (list (heading-line . state)),
+;; Per-buffer local fold state: per buffer, a list of (heading-line . state),
 ;; state ∈ 'folded | 'children. A heading absent from the list is 'subtree (fully
 ;; shown). This drives the three-state TAB cycle (subtree→folded→children→…).
-(define *org-fold-state* '())
-;; Each folded line's text anchor, so the line numbers can be relocated when
-;; edits above them shift the buffer (see fold-anchors-capture, folding.scm).
-(define *org-fold-anchors* '())
-(define (org--fold-state-get) (buffer-state-get *org-fold-state* '()))
-(define (org--fold-state-set v)
-  (set! *org-fold-state* (buffer-state-set *org-fold-state* v))
-  (set! *org-fold-anchors*
-        (buffer-state-set *org-fold-anchors*
-                          (if (null? v) '() (fold-anchors-capture (org--lines) (map car v))))))
+;; Each folded line's text anchor is kept too, so the line numbers can be
+;; relocated when edits above them shift the buffer (make-fold-store, folding.scm).
+(define *org-fold-store* (make-fold-store car (lambda (p n) (cons n (cdr p)))))
+(define (org--fold-state-get) (fold-store-get *org-fold-store*))
+(define (org--fold-state-set v) (fold-store-set *org-fold-store* v))
 ;; Relocate every recorded fold to its heading/drawer's current line (dropping
 ;; ones whose line is gone), so a toggle never re-folds a stale line number.
-(define (org--fold-state-resync)
-  (let ((v (org--fold-state-get)))
-    (when (not (null? v))
-      (let ((anchors (buffer-state-get *org-fold-anchors* '()))
-            (lines (org--lines)))
-        (org--fold-state-set
-         (dedup
-          (filter (lambda (p) p)
-                  (map (lambda (p)
-                         (let ((n (fold-anchor-remap anchors lines (car p))))
-                           (if n (cons n (cdr p)) #f)))
-                       v))
-          car))))))
+(define (org--fold-state-resync) (fold-store-resync *org-fold-store*))
 (define (org--heading-state H)
   (let loop ((ps (org--fold-state-get)))
     (cond ((null? ps) 'subtree)
