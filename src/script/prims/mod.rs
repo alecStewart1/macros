@@ -9,6 +9,7 @@ pub(super) mod decorations;
 pub(super) mod editing;
 pub(super) mod faces;
 pub(super) mod files;
+pub(super) mod git;
 pub(super) mod grid;
 pub(super) mod help;
 pub(super) mod hooks;
