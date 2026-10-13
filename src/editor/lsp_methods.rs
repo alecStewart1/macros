@@ -23,6 +23,14 @@ fn is_builtin_lsp(command: &str) -> bool {
     command == "builtin" || command.starts_with("builtin:")
 }
 
+/// A configured server (from `set-lsp`): its launch command and the env
+/// overrides captured when it was configured.
+#[derive(Clone)]
+pub(super) struct LspCommand {
+    pub(super) command: String,
+    pub(super) env: crate::process::EnvOverrides,
+}
+
 /// One pending `textDocument/didChange`: the server's language plus the
 /// pre-edit `(line, character)` bounds of the range being replaced.
 pub(super) type LspChange = (String, (usize, usize), (usize, usize));
@@ -54,7 +62,7 @@ impl Editor {
             None => {}
         }
 
-        let Some(command) = self.lsp_commands.get(&language).cloned() else {
+        let Some(LspCommand { command, env }) = self.lsp_commands.get(&language).cloned() else {
             return; // no server configured for this language
         };
 
@@ -80,7 +88,8 @@ impl Editor {
                 .map(Path::to_path_buf)
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_default();
-            LspClient::start(&command, &root).map(|(c, rx)| (LspBackend::External(Box::new(c)), rx))
+            LspClient::start(&command, &root, &env)
+                .map(|(c, rx)| (LspBackend::External(Box::new(c)), rx))
         };
         let (client, mut rx) = match started {
             Ok(v) => v,

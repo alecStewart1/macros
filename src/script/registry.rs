@@ -893,7 +893,18 @@ pub(crate) fn build_engine(
         });
     }
     reg.section("lsp");
-    register_binary(&mut reg, queue, "set-lsp", EditorCommand::SetLsp);
+    {
+        // Captures the `with-process-env` overrides now: the server is spawned
+        // later, on the editor thread, outside this extent.
+        let q = queue.clone();
+        reg.register_fn("set-lsp", move |language: String, command: String| {
+            q.lock().unwrap().push(EditorCommand::SetLsp(
+                language,
+                command,
+                crate::process::current(),
+            ));
+        });
+    }
     reg.section("languages");
     register_binary(
         &mut reg,

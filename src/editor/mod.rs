@@ -625,7 +625,7 @@ pub struct Editor {
 
     // --- LSP (one server per language, many at once) ---
     /// Configured servers: LSP language id -> launch command (from `set-lsp`).
-    lsp_commands: HashMap<String, String>,
+    lsp_commands: HashMap<String, lsp_methods::LspCommand>,
     /// File extension -> server key / config language (from `set-extension`).
     extensions: HashMap<String, String>,
     /// File extension -> wire `languageId` sent in `didOpen` (from

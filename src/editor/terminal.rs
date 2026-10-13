@@ -4,10 +4,11 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::process::{ProcessGroup, Signal};
 use crate::util::HideConsole;
 
 use futures::StreamExt;
@@ -94,19 +95,19 @@ enum ChildMsg {
 const TERM_GRACE: Duration = Duration::from_millis(500);
 
 /// A live `make-process` child kept so Scheme can write to its stdin or kill
-/// it. The `Child` is shared with the worker thread that reaps it (so the UI
+/// it. The child's [`ProcessGroup`] is shared with the worker thread that reaps it (so the UI
 /// never blocks in `wait`); stdin writes go through a dedicated writer thread
 /// (so a full pipe never blocks the UI). Dropping the handle — the owning
 /// buffer is killed, the editor goes away — terminates the process group.
 pub(super) struct ProcessHandle {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<ProcessGroup>>,
     stdin: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     /// Buffer whose kill also kills this process (`set-process-buffer`).
     buffer: Option<String>,
 }
 
 /// Lock a shared child, ignoring poison (a panicked holder can't corrupt it).
-fn lock_child(child: &Mutex<Child>) -> std::sync::MutexGuard<'_, Child> {
+fn lock_child(child: &Mutex<ProcessGroup>) -> std::sync::MutexGuard<'_, ProcessGroup> {
     child.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -114,33 +115,14 @@ fn lock_child(child: &Mutex<Child>) -> std::sync::MutexGuard<'_, Child> {
 /// [`Editor::make_process`]) if it hasn't been reaped; true if it was still
 /// running. Holding the lock across the check and the kill means the reaper
 /// can't free the pid/pgid in between, so we never signal a recycled group.
-fn signal_group(child: &Mutex<Child>, #[allow(unused)] sig: i32) -> bool {
-    let mut c = lock_child(child);
-    if !matches!(c.try_wait(), Ok(None)) {
-        return false;
-    }
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(c.id() as i32), sig);
-    }
-    #[cfg(not(unix))]
-    let _ = c.kill();
-    true
+fn signal_group(child: &Mutex<ProcessGroup>, sig: Signal) -> bool {
+    lock_child(child).signal(sig)
 }
-
-#[cfg(unix)]
-const SIGTERM: i32 = libc::SIGTERM;
-#[cfg(unix)]
-const SIGKILL: i32 = libc::SIGKILL;
-#[cfg(not(unix))]
-const SIGTERM: i32 = 15;
-#[cfg(not(unix))]
-const SIGKILL: i32 = 9;
 
 impl ProcessHandle {
     /// SIGKILL the group now (Emacs `kill-process`).
     fn kill_now(&self) {
-        signal_group(&self.child, SIGKILL);
+        signal_group(&self.child, Signal::Kill);
     }
 
     /// Has the child exited (polling, never blocking)?
@@ -154,11 +136,11 @@ impl Drop for ProcessHandle {
     /// on a background thread, so dropping never blocks the UI. No-op for a
     /// process that already exited (the normal exit path drops it too).
     fn drop(&mut self) {
-        if signal_group(&self.child, SIGTERM) {
+        if signal_group(&self.child, Signal::Term) {
             let child = self.child.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(TERM_GRACE);
-                signal_group(&child, SIGKILL);
+                signal_group(&child, Signal::Kill);
             });
         }
     }
@@ -178,11 +160,11 @@ impl Editor {
     /// exit callbacks still fire as each one is reaped.
     pub(super) fn kill_processes_for_buffer(&mut self, name: &str) {
         for h in self.processes.values() {
-            if h.buffer.as_deref() == Some(name) && signal_group(&h.child, SIGTERM) {
+            if h.buffer.as_deref() == Some(name) && signal_group(&h.child, Signal::Term) {
                 let child = h.child.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(TERM_GRACE);
-                    signal_group(&child, SIGKILL);
+                    signal_group(&child, Signal::Kill);
                 });
             }
         }
@@ -196,7 +178,7 @@ impl Editor {
         let handles: Vec<ProcessHandle> = self.processes.drain().map(|(_, h)| h).collect();
         let live: Vec<&ProcessHandle> = handles
             .iter()
-            .filter(|h| signal_group(&h.child, SIGTERM))
+            .filter(|h| signal_group(&h.child, Signal::Term))
             .collect();
         let deadline = Instant::now() + Duration::from_millis(300);
         while Instant::now() < deadline && live.iter().any(|h| !h.exited()) {
@@ -267,7 +249,7 @@ impl Editor {
             });
             tx
         });
-        let child = Arc::new(Mutex::new(child));
+        let child = Arc::new(Mutex::new(ProcessGroup::new(child)));
         let reaper = child.clone();
         self.processes.insert(
             id,
@@ -290,14 +272,9 @@ impl Editor {
             // stdout closed; reap here, never on the UI thread. Poll with
             // try_wait (not a blocking wait) so the lock is free between polls
             // for kill-process / buffer-kill signalling.
-            let code = loop {
-                match lock_child(&reaper).try_wait() {
-                    Ok(Some(status)) => break status.code().unwrap_or(-1),
-                    Ok(None) => {}
-                    Err(_) => break -1,
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            };
+            let code = ProcessGroup::wait_shared(&reaper)
+                .and_then(|status| status.code())
+                .unwrap_or(-1);
             let _ = tx.unbounded_send(ChildMsg::Exited(code));
         });
         cx.spawn(async move |this, cx| {
@@ -1520,7 +1497,7 @@ mod process_tests {
             .spawn()
             .unwrap();
         let pgid = child.id() as i32;
-        let child = Arc::new(Mutex::new(child));
+        let child = Arc::new(Mutex::new(ProcessGroup::new(child)));
         let handle = ProcessHandle {
             child: child.clone(),
             stdin: None,
@@ -1536,7 +1513,7 @@ mod process_tests {
         // …and so does the backgrounded `sleep` in its group.
         assert!(wait_until(|| !group_alive(pgid)));
         // Signalling an already-reaped child is a no-op, not a stray kill.
-        assert!(!signal_group(&child, SIGKILL));
+        assert!(!signal_group(&child, Signal::Kill));
     }
 }
 

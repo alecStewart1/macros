@@ -32,6 +32,7 @@ mod spell;
 mod terminal;
 mod textplot;
 mod theme;
+mod transport;
 mod update;
 mod util;
 mod workspace;
