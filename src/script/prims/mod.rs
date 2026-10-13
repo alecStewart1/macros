@@ -5,6 +5,7 @@
 use super::*;
 
 pub(super) mod buffers;
+pub(super) mod crypto;
 pub(super) mod dap;
 pub(super) mod decorations;
 pub(super) mod editing;
