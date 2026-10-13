@@ -9,6 +9,7 @@ use gpui::Context;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::jsonrpc::Message;
 
 /// The final path component of `path`, falling back to the whole string when
 /// there is no `/` (matches the bare `rsplit('/').next().unwrap_or(path)` idiom).
@@ -265,55 +266,28 @@ impl Editor {
         message: Value,
         cx: &mut Context<Self>,
     ) {
-        // Notifications and server→client requests.
-        if let Some(method) = message["method"].as_str() {
-            if let Some(id) = message.get("id").cloned() {
-                self.on_lsp_server_request(&language, id, method, &message["params"], cx);
-            } else if method == lsp::EXITED_METHOD {
-                self.on_lsp_server_exit(&language, cx);
-            } else if method == "$/progress" {
-                self.on_lsp_progress(&language, &message["params"]);
-            } else if method == "textDocument/publishDiagnostics" {
-                let (uri, diagnostics) = lsp::parse_diagnostics(&message["params"]);
-                // Diagnostics are keyed only by URI, and each server runs its own
-                // async task — so after a language switch (e.g. `scheme` →
-                // `macros-scheme` via `macros-steel-mode`) the OLD server's
-                // late-arriving publish could clobber the new one's. For the active
-                // buffer, accept diagnostics only from its CURRENT language server;
-                // a stale server's are dropped. (Background buffers — a different
-                // URI — are unaffected.)
-                let stale_for_active = self.active_uri().as_deref() == Some(&uri)
-                    && self.active_language().as_deref() != Some(&language);
-                if !stale_for_active {
-                    self.diagnostics.insert(uri, diagnostics);
-                    cx.notify();
-                }
-            } else if method == "$/stderr" {
-                // Server stderr, captured into `*lsp-log*` (tagged by language)
-                // and appended live to the buffer if it's open.
-                if let Some(line) = message["params"]["line"].as_str() {
-                    let line = format!("[{language}] {line}");
-                    push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
-                    self.append_to_log_buffer("*lsp-log*", &line);
-                    cx.notify();
-                }
+        let (id, result) = match Message::from(message) {
+            Message::Request { id, method, params } => {
+                self.on_lsp_server_request(&language, id, &method, &params, cx);
+                return;
             }
-            return;
-        }
-
-        // Responses to our requests.
-        if message.get("id").is_none() {
-            return;
-        }
+            Message::Notification { method, params } => {
+                self.on_lsp_notification(&language, &method, &params, cx);
+                return;
+            }
+            // Responses to our requests.
+            Message::Response { id, result, .. } => (id, result),
+            Message::Invalid => return,
+        };
         let is_init = self.servers.get(&language).is_some_and(|s| !s.ready);
         if is_init {
-            let sync_kind = lsp::parse_sync_kind(&message["result"]);
-            let legend = lsp::parse_semantic_legend(&message["result"]);
-            let prepare_rename = lsp::parse_prepare_rename_support(&message["result"]);
-            let completion_triggers = lsp::parse_completion_triggers(&message["result"]);
-            let save = lsp::parse_save_option(&message["result"]);
+            let sync_kind = lsp::parse_sync_kind(&result);
+            let legend = lsp::parse_semantic_legend(&result);
+            let prepare_rename = lsp::parse_prepare_rename_support(&result);
+            let completion_triggers = lsp::parse_completion_triggers(&result);
+            let save = lsp::parse_save_option(&result);
             let code_action_resolve =
-                message["result"]["capabilities"]["codeActionProvider"]["resolveProvider"]
+                result["capabilities"]["codeActionProvider"]["resolveProvider"]
                     .as_bool()
                     .unwrap_or(false);
             if let Some(server) = self.servers.get_mut(&language) {
@@ -333,15 +307,16 @@ impl Editor {
             cx.notify();
             return;
         }
+        let Some(id) = id.as_i64() else {
+            return; // all our request ids are numbers
+        };
 
         // A completion response?
         let completion =
             self.servers
                 .get_mut(&language)
                 .and_then(|server| match server.pending_completion {
-                    Some((id, _)) if Some(id) == message["id"].as_i64() => {
-                        server.pending_completion.take()
-                    }
+                    Some((pending, _)) if pending == id => server.pending_completion.take(),
                     _ => None,
                 });
         if let Some((_, range)) = completion {
@@ -350,19 +325,60 @@ impl Editor {
             let Some(range) = self.completion_reply_range(range.start, range.end) else {
                 return;
             };
-            let items = lsp::parse_completion(&message["result"]);
+            let items = lsp::parse_completion(&result);
             self.show_completion(items, range, cx);
             return;
         }
 
         // A navigation / rename / symbols / … response?
-        let pending = message["id"].as_i64().and_then(|id| {
-            self.servers
-                .get_mut(&language)
-                .and_then(|server| server.pending.remove(&id))
-        });
+        let pending = self
+            .servers
+            .get_mut(&language)
+            .and_then(|server| server.pending.remove(&id));
         if let Some((kind, target)) = pending {
-            self.handle_lsp_response(&language, kind, target, &message["result"], cx);
+            self.handle_lsp_response(&language, kind, target, &result, cx);
+        }
+    }
+
+    /// A server notification (including the reader thread's synthetic
+    /// `$/stderr` and exit ones).
+    fn on_lsp_notification(
+        &mut self,
+        language: &str,
+        method: &str,
+        params: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        match method {
+            lsp::EXITED_METHOD => self.on_lsp_server_exit(language, cx),
+            "$/progress" => self.on_lsp_progress(language, params),
+            "textDocument/publishDiagnostics" => {
+                let (uri, diagnostics) = lsp::parse_diagnostics(params);
+                // Diagnostics are keyed only by URI, and each server runs its own
+                // async task — so after a language switch (e.g. `scheme` →
+                // `macros-scheme` via `macros-steel-mode`) the OLD server's
+                // late-arriving publish could clobber the new one's. For the active
+                // buffer, accept diagnostics only from its CURRENT language server;
+                // a stale server's are dropped. (Background buffers — a different
+                // URI — are unaffected.)
+                let stale_for_active = self.active_uri().as_deref() == Some(&uri)
+                    && self.active_language().as_deref() != Some(language);
+                if !stale_for_active {
+                    self.diagnostics.insert(uri, diagnostics);
+                    cx.notify();
+                }
+            }
+            "$/stderr" => {
+                // Server stderr, captured into `*lsp-log*` (tagged by language)
+                // and appended live to the buffer if it's open.
+                if let Some(line) = params["line"].as_str() {
+                    let line = format!("[{language}] {line}");
+                    push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
+                    self.append_to_log_buffer("*lsp-log*", &line);
+                    cx.notify();
+                }
+            }
+            _ => {}
         }
     }
 

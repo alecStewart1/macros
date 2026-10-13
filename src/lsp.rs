@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use steel::rvals::SteelVal;
 use steel::steel_vm::engine::Engine;
 
+use crate::jsonrpc;
 use crate::process::{EnvOverrides, ProcessGroup};
 use crate::transport;
 
@@ -121,13 +122,13 @@ impl LspClient {
     }
 
     fn notify(&mut self, method: &str, params: Value) {
-        self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+        self.send(&jsonrpc::notification(method, params));
     }
 
     fn request(&mut self, method: &str, params: Value) -> i64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        self.send(&jsonrpc::request(id, method, params));
         id
     }
 
@@ -220,16 +221,12 @@ impl LspClient {
     /// expect a response, e.g. `client/registerCapability`, unblocked).
     /// Reply to a server→client request with `result`.
     pub fn respond(&mut self, id: Value, result: Value) {
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        self.send(&jsonrpc::response(id, result));
     }
 
     /// Reply to a server→client request with a JSON-RPC error.
     pub fn respond_error(&mut self, id: Value, code: i64, message: &str) {
-        self.send(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": code, "message": message }
-        }));
+        self.send(&jsonrpc::error_response(id, code, message));
     }
 
     pub fn did_close(&mut self, uri: &str) {
@@ -1507,14 +1504,13 @@ impl SteelLsp {
         // every change, which is free in-process and keeps this server simple.
         // `prepareProvider` makes the editor validate a rename target first, so we
         // can decline (in `prepare_rename`) anything not defined in this document.
-        let _ = server.tx.unbounded_send(json!({
-            "jsonrpc": "2.0",
-            "id": 0,
-            "result": { "capabilities": {
+        let _ = server.tx.unbounded_send(jsonrpc::response(
+            0,
+            json!({ "capabilities": {
                 "textDocumentSync": 1,
                 "renameProvider": { "prepareProvider": true }
-            } }
-        }));
+            } }),
+        ));
         (server, rx)
     }
 
@@ -1539,9 +1535,7 @@ impl SteelLsp {
     fn respond(&mut self, result: Value) -> i64 {
         let id = self.next_id;
         self.next_id += 1;
-        let _ = self
-            .tx
-            .unbounded_send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        let _ = self.tx.unbounded_send(jsonrpc::response(id, result));
         id
     }
 
@@ -1554,11 +1548,10 @@ impl SteelLsp {
     fn publish_diagnostics(&mut self, uri: &str) {
         let text = self.docs.get(uri).cloned().unwrap_or_default();
         let diagnostics = self.compute_diagnostics(&text);
-        let _ = self.tx.unbounded_send(json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/publishDiagnostics",
-            "params": { "uri": uri, "diagnostics": diagnostics }
-        }));
+        let _ = self.tx.unbounded_send(jsonrpc::notification(
+            "textDocument/publishDiagnostics",
+            json!({ "uri": uri, "diagnostics": diagnostics }),
+        ));
     }
 
     /// Diagnostics in layers: (1) delimiter/string balance (precise spots);

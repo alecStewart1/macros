@@ -19,6 +19,7 @@ mod grid;
 mod grid_fn;
 mod highlight;
 mod json_format;
+mod jsonrpc;
 mod lsp;
 mod mcp;
 mod mode;

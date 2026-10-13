@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::jsonrpc::{Message, error_response as rpc_error, response as rpc_result};
+
 /// Protocol revisions we speak, newest first. A client asking for one of
 /// these gets it back; anything else gets the newest.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -421,22 +423,17 @@ fn serve_connection(stream: TcpStream, token: &str, backend: &dyn Backend) {
     }
 }
 
-fn rpc_error(id: Value, code: i64, message: &str) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-}
-
-fn rpc_result(id: Value, result: Value) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "result": result})
-}
-
 /// Answer one JSON-RPC message; `None` for a notification (no `id`).
 pub fn handle_message(message: &Value, backend: &dyn Backend) -> Option<Value> {
-    let id = message.get("id")?.clone();
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return Some(rpc_error(id, -32600, "invalid request: no method"));
+    let (id, method, params) = match Message::from(message.clone()) {
+        Message::Request { id, method, params } => (id, method, params),
+        // We never send requests, so a "response" is a request missing its method.
+        Message::Response { id, .. } => {
+            return Some(rpc_error(id, -32600, "invalid request: no method"));
+        }
+        Message::Notification { .. } | Message::Invalid => return None,
     };
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    Some(match method {
+    Some(match method.as_str() {
         "initialize" => {
             let asked = params.get("protocolVersion").and_then(Value::as_str);
             let version = asked
