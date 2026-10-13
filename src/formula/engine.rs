@@ -189,7 +189,7 @@ struct Slot {
 impl Slot {
     /// Done: `value` is the result.
     fn settle(&mut self, value: Value) {
-        self.shown = value.display();
+        self.shown = value.to_string();
         self.result = value;
         self.state = State::Clean;
     }

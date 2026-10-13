@@ -86,22 +86,10 @@ fn na(_: &[Arg], _: &mut dyn Ctx) -> Value {
     Value::Error(ErrorKind::NA)
 }
 
-/// Excel's error numbers. This engine's own errors get numbers past
-/// Excel's: `#ERROR!` (parse) 101, `#CIRC!` 102; `#CALC!` is Excel's 14.
+/// The error's number ([`ErrorKind::code`]); `#N/A` for a non-error.
 fn error_type(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     match scalar(&args[0], ctx) {
-        Value::Error(e) => Value::Number(match e {
-            ErrorKind::Null => 1.0,
-            ErrorKind::Div0 => 2.0,
-            ErrorKind::Value => 3.0,
-            ErrorKind::Ref => 4.0,
-            ErrorKind::Name => 5.0,
-            ErrorKind::Num => 6.0,
-            ErrorKind::NA => 7.0,
-            ErrorKind::Calc => 14.0,
-            ErrorKind::Parse => 101.0,
-            ErrorKind::Circ => 102.0,
-        }),
+        Value::Error(e) => Value::Number(f64::from(e.code())),
         _ => Value::Error(ErrorKind::NA),
     }
 }
