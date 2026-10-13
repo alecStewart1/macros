@@ -168,10 +168,10 @@ pub(crate) fn register_session(reg: &mut Registrar, queue: &Queue, session: &Sha
         let q = queue.clone();
         reg.register_fn(
             "set-session-ring!",
-            move |ring: SteelVal, items: SteelVal| {
+            move |ring: SteelVal, StringList(items): StringList| {
                 q.lock().unwrap().push(EditorCommand::SetSessionRing {
                     ring: steel_string(&ring).unwrap_or_default(),
-                    items: steel_string_list(&items),
+                    items,
                 });
             },
         );

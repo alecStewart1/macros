@@ -201,13 +201,14 @@ fn friendly_type(ty: &str) -> String {
             .unwrap_or_default()
     };
     match base {
-        "String" | "str" | "SteelString" | "Cow" => "string".into(),
+        "String" | "str" | "SteelString" | "Cow" | "Name" => "string".into(),
         "bool" => "bool".into(),
         "isize" | "usize" | "i64" | "u64" | "i32" | "u32" | "u16" | "u8" | "NonNeg" => "int".into(),
         "Port" => "port".into(),
         "f64" | "f32" => "number".into(),
         "SteelVal" => "any".into(),
         "Callback" => "callback".into(),
+        "StringList" => "list<string>".into(),
         "Vec" | "VecDeque" => format!("list<{}>", arg(0)),
         "Option" => format!("{}|#f", arg(0)),
         "Result" => arg(0),

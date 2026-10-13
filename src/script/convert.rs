@@ -76,6 +76,28 @@ impl steel::rvals::FromSteelVal for Callback {
     }
 }
 
+/// A list-of-strings argument; anything in it that isn't a string (or
+/// symbol) is dropped, and a non-list is the empty list — the
+/// [`steel_string_list`] coercion, so it never fails to convert.
+pub(crate) struct StringList(pub(crate) Vec<String>);
+
+impl steel::rvals::FromSteelVal for StringList {
+    fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
+        Ok(StringList(steel_string_list(val)))
+    }
+}
+
+/// A name argument given as a string or a symbol; any other value is taken
+/// as its printed form (so a bad argument reaches the editor, which reports
+/// it, instead of failing to type-check).
+pub(crate) struct Name(pub(crate) String);
+
+impl steel::rvals::FromSteelVal for Name {
+    fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
+        Ok(Name(steel_string(val).unwrap_or_else(|| val.to_string())))
+    }
+}
+
 /// Steel's own integer→`u16`/`usize` conversions are bare `as` casts, so a
 /// Scheme `-1` or `70000` silently wraps. These argument types validate the
 /// range instead and raise a Scheme conversion error when it's violated.

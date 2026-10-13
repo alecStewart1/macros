@@ -250,10 +250,8 @@ pub(crate) fn build_engine(
     // address (`C7`, `B2:D9`) from Scheme.
     {
         let q = queue.clone();
-        reg.register_fn("grid-extensions", move |exts: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::GridExtensions(steel_string_list(&exts)))
+        reg.register_fn("grid-extensions", move |StringList(exts): StringList| {
+            q.lock().unwrap().push(EditorCommand::GridExtensions(exts))
         });
     }
     register_unary(
@@ -731,10 +729,8 @@ pub(crate) fn build_engine(
         // `(set-count-aware! 'name)` — the modal count loop dispatches `name`
         // ONCE with `(prefix-count)` published instead of running it N times.
         // Accepts a symbol or a string (symbol-name references, like keymaps).
-        let q = queue.clone();
-        reg.register_fn("set-count-aware!", move |value: SteelVal| {
-            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
-            q.lock().unwrap().push(EditorCommand::SetCountAware(name));
+        register_unary(&mut reg, queue, "set-count-aware!", |Name(name)| {
+            EditorCommand::SetCountAware(name)
         });
     }
     register_unary(
@@ -799,10 +795,8 @@ pub(crate) fn build_engine(
     {
         // `(set-jump-command! 'name)` — running `name` from a key is a jump:
         // the jump list and `''` record where it started (G, /, %, gd, …).
-        let q = queue.clone();
-        reg.register_fn("set-jump-command!", move |value: SteelVal| {
-            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
-            q.lock().unwrap().push(EditorCommand::SetJumpCommand(name));
+        register_unary(&mut reg, queue, "set-jump-command!", |Name(name)| {
+            EditorCommand::SetJumpCommand(name)
         });
     }
     reg.section("tree-sitter");
@@ -861,17 +855,19 @@ pub(crate) fn build_engine(
         // `(ts-ranges-of-kinds '("function_item" …))` → flat `(start end …)` of
         // every node of those kinds, in document order.
         let shared = snapshot.clone();
-        reg.register_fn("ts-ranges-of-kinds", move |kinds: SteelVal| -> Vec<usize> {
-            let kinds = steel_string_list(&kinds);
-            let snap = shared.load();
-            let Some(tree) = snap.tree.as_ref() else {
-                return Vec::new();
-            };
-            crate::highlight::tree_ranges_of_kinds(tree, &kinds)
-                .into_iter()
-                .flat_map(|(s, e)| [s, e])
-                .collect()
-        });
+        reg.register_fn(
+            "ts-ranges-of-kinds",
+            move |StringList(kinds): StringList| -> Vec<usize> {
+                let snap = shared.load();
+                let Some(tree) = snap.tree.as_ref() else {
+                    return Vec::new();
+                };
+                crate::highlight::tree_ranges_of_kinds(tree, &kinds)
+                    .into_iter()
+                    .flat_map(|(s, e)| [s, e])
+                    .collect()
+            },
+        );
     }
     reg.section("modal");
     {
@@ -892,10 +888,8 @@ pub(crate) fn build_engine(
         // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
         // value is stringified, so a bad arg echoes "No theme named …" rather than
         // failing to type-check. The wrapper adds the no-arg interactive prompt.
-        let q = queue.clone();
-        reg.register_fn("load-theme-impl", move |value: SteelVal| {
-            let name = steel_string(&value).unwrap_or_else(|| value.to_string());
-            q.lock().unwrap().push(EditorCommand::LoadTheme(name));
+        register_unary(&mut reg, queue, "load-theme-impl", |Name(name)| {
+            EditorCommand::LoadTheme(name)
         });
     }
     reg.section("lsp");
@@ -1301,23 +1295,28 @@ pub(crate) fn build_engine(
         // a change under any of them fires `directory-changed-hook` (dired-sidebar /
         // dired live-refresh). Replace semantics: pass `'()` to drop them.
         let q = queue.clone();
-        reg.register_fn("watch-directories", move |owner: String, dirs: SteelVal| {
-            q.lock().unwrap().push(EditorCommand::WatchDirectories(
-                owner,
-                steel_string_list(&dirs),
-            ));
-        });
+        reg.register_fn(
+            "watch-directories",
+            move |owner: String, StringList(dirs): StringList| {
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::WatchDirectories(owner, dirs));
+            },
+        );
     }
     {
         // `(watch-tree owner dirs)` — like `watch-directories` but recursive: a
         // change anywhere under `dirs` fires `directory-changed-hook` with the
         // watched root (magit watches its repo root). `'()` drops the watch.
         let q = queue.clone();
-        reg.register_fn("watch-tree", move |owner: String, dirs: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::WatchTree(owner, steel_string_list(&dirs)));
-        });
+        reg.register_fn(
+            "watch-tree",
+            move |owner: String, StringList(dirs): StringList| {
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::WatchTree(owner, dirs));
+            },
+        );
     }
     reg.section("prompts");
     {
@@ -1735,11 +1734,14 @@ pub(crate) fn build_engine(
         // a list of segment tokens (bare strings = literals, or `ml-field`/
         // `ml-slot`/`ml-text` tab-encoded tokens). Defined from scheme/modeline.scm.
         let q = queue.clone();
-        reg.register_fn("set-mode-line-format", move |segs: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SetModeLineFormat(steel_string_list(&segs)));
-        });
+        reg.register_fn(
+            "set-mode-line-format",
+            move |StringList(segs): StringList| {
+                q.lock()
+                    .unwrap()
+                    .push(EditorCommand::SetModeLineFormat(segs));
+            },
+        );
     }
     {
         // `(set-titlebar-dropdown items active callback)` — publish the
@@ -1750,9 +1752,9 @@ pub(crate) fn build_engine(
         let q = queue.clone();
         reg.register_fn(
             "set-titlebar-dropdown",
-            move |items: SteelVal, active: String, callback: Callback| {
+            move |StringList(items): StringList, active: String, callback: Callback| {
                 q.lock().unwrap().push(EditorCommand::SetTitlebarDropdown {
-                    items: steel_string_list(&items),
+                    items,
                     active,
                     callback: callback.0,
                 });
@@ -2172,8 +2174,7 @@ pub(crate) fn build_engine(
     // the engine thread (never the UI), the same model as `list-directory`.
     reg.register_fn(
         "call-process",
-        move |program: String, args: SteelVal| -> String {
-            let args = steel_string_list(&args);
+        move |program: String, StringList(args): StringList| -> String {
             let program = crate::util::expand_tilde(&program);
             let mut cmd = std::process::Command::new(&program);
             cmd.args(&args).hide_console();
@@ -2192,9 +2193,9 @@ pub(crate) fn build_engine(
     // `crate::process`.
     reg.register_fn(
         "call-process-full",
-        move |program: String, args: SteelVal, input: String| -> Vec<String> {
+        move |program: String, StringList(args): StringList, input: String| -> Vec<String> {
             let env = crate::process::current();
-            crate::process::call_full(&program, &steel_string_list(&args), input, &env)
+            crate::process::call_full(&program, &args, input, &env)
         },
     );
     // `(call-process-env program args input env)` — `call-process-full` with
@@ -2204,9 +2205,13 @@ pub(crate) fn build_engine(
     // without putting it in argv, where `ps` shows it to every local user.
     reg.register_fn(
         "call-process-env",
-        move |program: String, args: SteelVal, input: String, env: SteelVal| -> Vec<String> {
-            let env = crate::process::current_then(&steel_string_list(&env));
-            crate::process::call_full(&program, &steel_string_list(&args), input, &env)
+        move |program: String,
+              StringList(args): StringList,
+              input: String,
+              StringList(env): StringList|
+              -> Vec<String> {
+            let env = crate::process::current_then(&env);
+            crate::process::call_full(&program, &args, input, &env)
         },
     );
     // `(process-env-push! env)` / `(process-env-pop!)` — the primitives under
@@ -2214,10 +2219,8 @@ pub(crate) fn build_engine(
     // an extent is open gets `env` (same list shape as `call-process-env`).
     // The engine clears the stack before each job, so an extent left by an
     // error never outlives it.
-    reg.register_fn("process-env-push!", |env: SteelVal| {
-        crate::process::push_dynamic(crate::process::EnvOverrides::parse(&steel_string_list(
-            &env,
-        )));
+    reg.register_fn("process-env-push!", |StringList(env): StringList| {
+        crate::process::push_dynamic(crate::process::EnvOverrides::parse(&env));
     });
     reg.register_fn("process-env-pop!", crate::process::pop_dynamic);
     // `(getenv name)` → the variable's value, or "" if unset. Reads the same
@@ -2251,7 +2254,7 @@ pub(crate) fn build_engine(
         // NOW: the spawn itself happens later, on the UI thread.
         let make = |ids: IdGen, q: Queue| {
             move |program: String,
-                  args: SteelVal,
+                  StringList(args): StringList,
                   on_output: Callback,
                   on_exit: Callback,
                   env: crate::process::EnvOverrides|
@@ -2262,7 +2265,7 @@ pub(crate) fn build_engine(
                     .push(EditorCommand::MakeProcess(Box::new(MakeProcessArgs {
                         id,
                         program,
-                        args: steel_string_list(&args),
+                        args,
                         env,
                         on_output: on_output.0,
                         on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
@@ -2273,7 +2276,7 @@ pub(crate) fn build_engine(
         let spawn = make(async_ids.clone(), queue.clone());
         reg.register_fn(
             "make-process",
-            move |program: String, args: SteelVal, on_output: Callback, on_exit: Callback| {
+            move |program: String, args: StringList, on_output: Callback, on_exit: Callback| {
                 spawn(program, args, on_output, on_exit, crate::process::current())
             },
         );
@@ -2281,11 +2284,11 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "make-process-env",
             move |program: String,
-                  args: SteelVal,
+                  args: StringList,
                   on_output: Callback,
                   on_exit: Callback,
-                  env: SteelVal| {
-                let env = crate::process::current_then(&steel_string_list(&env));
+                  StringList(env): StringList| {
+                let env = crate::process::current_then(&env);
                 spawn(program, args, on_output, on_exit, env)
             },
         );
@@ -2316,7 +2319,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "dap-start",
             move |program: String,
-                  args: SteelVal,
+                  StringList(args): StringList,
                   cwd: String,
                   on_message: Callback,
                   on_exit: Callback|
@@ -2327,7 +2330,7 @@ pub(crate) fn build_engine(
                     .push(EditorCommand::DapStart(Box::new(DapStartArgs {
                         id,
                         program,
-                        args: steel_string_list(&args),
+                        args,
                         env: crate::process::current(),
                         cwd,
                         on_message: on_message.0,
@@ -2387,13 +2390,12 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "make-http-stream",
             move |url: String,
-                  headers: SteelVal,
+                  StringList(flat): StringList,
                   body: String,
                   on_line: Callback,
                   on_done: Callback|
                   -> usize {
                 let id = ids.next();
-                let flat = steel_string_list(&headers);
                 let headers = flat
                     .as_chunks::<2>()
                     .0
@@ -2440,11 +2442,10 @@ pub(crate) fn build_engine(
                 name,
                 move |method: String,
                       url: String,
-                      headers: SteelVal,
+                      StringList(flat): StringList,
                       body: String,
                       on_response: Callback|
                       -> bool {
-                    let flat = steel_string_list(&headers);
                     let headers = flat
                         .as_chunks::<2>()
                         .0
@@ -2674,8 +2675,7 @@ pub(crate) fn build_engine(
     // STARTTLS: pull the plain socket out of the table and wrap it. Any bytes
     // already buffered by prior recv calls are dropped — after a STARTTLS "OK"
     // the client must not have read past it, so a non-empty buffer here would
-    // be a plaintext-injection attempt; refusing it is correct. (Bytes held
-    // back by an interrupted recv stay pending across the upgrade.)
+    // be a plaintext-injection attempt; refusing it is correct.
     reg.register_fn("tls-upgrade", |id: usize, host: String| -> bool {
         let mut conns = CONNS.lock();
         let Some(conn) = conns.remove(&id) else {
@@ -2687,6 +2687,8 @@ pub(crate) fn build_engine(
             set_last_error("tls-upgrade: buffered data before TLS (injection?)".into());
             return false;
         }
+        // Bytes held back by an interrupted recv stay pending across the
+        // upgrade, as they did when they lived in a separate table.
         let Conn { reader, pending } = conn;
         let wrapped = |sock| Conn {
             reader: std::io::BufReader::new(sock),
@@ -2850,8 +2852,7 @@ pub(crate) fn build_engine(
     });
     reg.register_fn(
         "sqlite-exec",
-        |id: usize, sql: String, params: SteelVal| -> bool {
-            let ps = steel_string_list(&params);
+        |id: usize, sql: String, StringList(ps): StringList| -> bool {
             let conns = SQLITE.lock();
             let Some(conn) = conns.get(&id) else {
                 set_last_error(format!("sqlite-exec: no db {id}"));
@@ -2874,8 +2875,7 @@ pub(crate) fn build_engine(
     );
     reg.register_fn(
         "sqlite-query",
-        |id: usize, sql: String, params: SteelVal| -> Vec<String> {
-            let ps = steel_string_list(&params);
+        |id: usize, sql: String, StringList(ps): StringList| -> Vec<String> {
             let conns = SQLITE.lock();
             let Some(conn) = conns.get(&id) else {
                 set_last_error(format!("sqlite-query: no db {id}"));
@@ -3092,7 +3092,11 @@ pub(crate) fn build_engine(
         let ids = async_ids.clone();
         reg.register_fn(
             "make-terminal",
-            move |name: String, program: String, args: SteelVal, directory: String| -> usize {
+            move |name: String,
+                  program: String,
+                  StringList(args): StringList,
+                  directory: String|
+                  -> usize {
                 let id = ids.next();
                 q.lock()
                     .unwrap()
@@ -3100,7 +3104,7 @@ pub(crate) fn build_engine(
                         id,
                         name,
                         program,
-                        args: steel_string_list(&args),
+                        args,
                         directory,
                         env: crate::process::current(),
                     })));
@@ -3252,8 +3256,8 @@ pub(crate) fn build_engine(
     // Helm filter do compiled-speed scoring instead of reimplementing it.
     reg.register_fn(
         "fuzzy-match",
-        |pattern: String, candidates: SteelVal| -> Vec<String> {
-            fuzzy_rank(&pattern, &steel_string_list(&candidates))
+        |pattern: String, StringList(candidates): StringList| -> Vec<String> {
+            fuzzy_rank(&pattern, &candidates)
         },
     );
     reg.section("buffer-reads");
@@ -3519,8 +3523,7 @@ pub(crate) fn build_engine(
     // an invalid regex yields `()` for every line.
     reg.register_fn(
         "regexp-search-lines",
-        |pattern: String, lines: SteelVal| -> SteelVal {
-            let lines = steel_string_list(&lines);
+        |pattern: String, StringList(lines): StringList| -> SteelVal {
             let re = regex::RegexBuilder::new(&pattern)
                 .multi_line(true)
                 .build()
@@ -4176,10 +4179,10 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     let p = push(queue);
     reg.register_fn(
         "grid-column-choices",
-        move |col: SteelVal, values: SteelVal| {
+        move |col: SteelVal, StringList(values): StringList| {
             p(GridOp::Choices {
                 col: steel_col(&col),
-                values: steel_string_list(&values),
+                values,
             })
         },
     );
