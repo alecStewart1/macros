@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 
 use base64::Engine as _;
 use regex::Regex;
@@ -13,8 +13,14 @@ use super::*;
 use crate::util::HideConsole;
 
 /// The nullary commands: each Steel name pushes its variant. Shared by engine
-/// registration (on the thread) and the handle's fast-path table.
-pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
+/// registration (on the thread), `(command-list)`, and the handle's fast-path
+/// table; built once.
+pub(crate) fn nullary_commands() -> &'static [(&'static str, EditorCommand)] {
+    static COMMANDS: LazyLock<Vec<(&'static str, EditorCommand)>> = LazyLock::new(build_nullary);
+    &COMMANDS
+}
+
+fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
     use EditorCommand::*;
     let mut out = vec![
         ("forward-char", ForwardChar),
@@ -234,7 +240,7 @@ pub(crate) fn build_engine(
         section: "commands",
     };
     for (name, command) in nullary_commands() {
-        register_nullary(&mut reg, queue, name, command);
+        register_nullary(&mut reg, queue, name, command.clone());
     }
 
     reg.section("editing");

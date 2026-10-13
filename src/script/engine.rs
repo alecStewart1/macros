@@ -119,8 +119,8 @@ impl ScriptEngine {
         let nullary = nullary_commands();
         let command_names: Vec<String> = nullary.iter().map(|(name, _)| name.to_string()).collect();
         let builtins: HashMap<String, EditorCommand> = nullary
-            .into_iter()
-            .map(|(n, c)| (n.to_string(), c))
+            .iter()
+            .map(|(n, c)| (n.to_string(), c.clone()))
             .collect();
 
         let buffers: BufferNames = Arc::new(Mutex::new(Vec::new()));
