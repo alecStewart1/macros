@@ -27,6 +27,34 @@ use crate::grid::model::{Change, Workbook};
 /// How long one recalculation slice may run before yielding a frame.
 const SLICE: Duration = Duration::from_millis(8);
 
+/// The interpreter for Scheme functions called from formulas (started the
+/// first time one is defined), and the calls in flight.
+pub(super) struct GridFnState {
+    pub engine: Option<crate::grid_fn::GridFnEngine>,
+    /// Drains the interpreter's outcomes.
+    pub task: Option<gpui::Task<()>>,
+    /// Formula name (upper case) → the Scheme function's own name.
+    pub names: HashMap<String, String>,
+    /// In-flight calls: id → (the grid's epoch, the call).
+    pub calls: HashMap<u64, (u64, crate::formula::engine::ExternalCall)>,
+    pub next_id: u64,
+    /// `grid-function-timeout`, in seconds.
+    pub timeout: u64,
+}
+
+impl Default for GridFnState {
+    fn default() -> Self {
+        Self {
+            engine: None,
+            task: None,
+            names: HashMap::new(),
+            calls: HashMap::new(),
+            next_id: 0,
+            timeout: crate::grid_fn::DEFAULT_TIMEOUT_SECS,
+        }
+    }
+}
+
 /// The engine's view of a workbook sheet.
 pub(super) struct WbSource<'a> {
     pub wb: &'a Workbook,
@@ -388,20 +416,20 @@ impl Editor {
     /// large recalculation didn't finish in one slice, keep it going on later
     /// frames (stale results draw until then).
     pub(super) fn grid_formulas_after(&mut self, cx: &mut Context<Self>) {
-        if !self.grid_fn_names.is_empty()
+        if !self.grid_fns.names.is_empty()
             && let Some(g) = self.active.grid.as_deref_mut()
         {
             // A grid opened since the functions were defined learns them here.
             g.formulas
-                .set_externals(self.grid_fn_names.keys().cloned().collect());
+                .set_externals(self.grid_fns.names.keys().cloned().collect());
         }
         let busy = self
             .active
             .grid
             .as_deref_mut()
             .is_some_and(|g| g.absorb_changes());
-        if busy && !self.grid_recalc_scheduled {
-            self.grid_recalc_scheduled = true;
+        if busy && !self.grid_ui.recalc_scheduled {
+            self.grid_ui.recalc_scheduled = true;
             cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -444,7 +472,7 @@ impl Editor {
                                 editor.grid_sync_sheets_from(done, cx);
                             }
                             if !more {
-                                editor.grid_recalc_scheduled = false;
+                                editor.grid_ui.recalc_scheduled = false;
                             }
                             more
                         })
@@ -529,7 +557,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.ensure_grid_fns(cx);
-        if let Some(fns) = &self.grid_fns {
+        if let Some(fns) = &self.grid_fns.engine {
             fns.define(source);
         }
         if !helper {
@@ -545,12 +573,12 @@ impl Editor {
                 );
                 return;
             }
-            self.grid_fn_names.insert(upper, name);
+            self.grid_fns.names.insert(upper, name);
         }
         // A (re)definition — of a function, or of a helper one calls —
         // changes what calls return: recompute everything that might call
         // one.
-        let names: HashSet<String> = self.grid_fn_names.keys().cloned().collect();
+        let names: HashSet<String> = self.grid_fns.names.keys().cloned().collect();
         for doc in std::iter::once(&mut self.active).chain(self.inactive.iter_mut()) {
             if let Some(g) = doc.grid.as_deref_mut() {
                 g.formulas.functions_redefined(names.clone());
@@ -562,13 +590,13 @@ impl Editor {
     }
 
     fn ensure_grid_fns(&mut self, cx: &mut Context<Self>) {
-        if self.grid_fns.is_some() {
+        if self.grid_fns.engine.is_some() {
             return;
         }
         let (fns, mut outcomes) = crate::grid_fn::GridFnEngine::new();
-        fns.set_timeout(self.grid_fn_timeout);
-        self.grid_fns = Some(fns);
-        self.grid_fn_task = Some(cx.spawn(async move |this, cx| {
+        fns.set_timeout(self.grid_fns.timeout);
+        self.grid_fns.engine = Some(fns);
+        self.grid_fns.task = Some(cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             while let Some(outcome) = outcomes.next().await {
                 if this
@@ -582,15 +610,15 @@ impl Editor {
     }
 
     pub(super) fn grid_set_function_timeout(&mut self, secs: u64) {
-        self.grid_fn_timeout = secs;
-        if let Some(fns) = &self.grid_fns {
+        self.grid_fns.timeout = secs;
+        if let Some(fns) = &self.grid_fns.engine {
             fns.set_timeout(secs);
         }
     }
 
     /// Send every grid's queued Scheme calls to the interpreter.
     pub(super) fn grid_dispatch_calls(&mut self) {
-        let Some(fns) = &self.grid_fns else {
+        let Some(fns) = &self.grid_fns.engine else {
             return;
         };
         for doc in std::iter::once(&mut self.active).chain(self.inactive.iter_mut()) {
@@ -598,17 +626,18 @@ impl Editor {
                 continue;
             };
             for call in g.formulas.take_requests() {
-                self.grid_fn_next_id += 1;
-                let id = self.grid_fn_next_id;
+                self.grid_fns.next_id += 1;
+                let id = self.grid_fns.next_id;
                 let symbol = self
-                    .grid_fn_names
+                    .grid_fns
+                    .names
                     .get(&call.name)
                     .cloned()
                     .unwrap_or_else(|| call.name.clone());
                 fns.call(id, &symbol, &call.args);
                 // By the grid's epoch, not the buffer's name: Save As renames
                 // the buffer while the call runs.
-                self.grid_fn_calls.insert(id, (g.epoch, call));
+                self.grid_fns.calls.insert(id, (g.epoch, call));
             }
         }
     }
@@ -629,13 +658,13 @@ impl Editor {
                 result,
                 timed_out,
             } => {
-                let Some((epoch, call)) = self.grid_fn_calls.remove(&id) else {
+                let Some((epoch, call)) = self.grid_fns.calls.remove(&id) else {
                     return;
                 };
                 let value = match result {
                     Ok(v) => v,
                     Err(_) if timed_out => {
-                        let secs = self.grid_fn_timeout;
+                        let secs = self.grid_fns.timeout;
                         self.echo(format!("{} timed out after {secs} s", call.name), cx);
                         Value::Error(ErrorKind::Calc)
                     }
@@ -778,7 +807,7 @@ impl Editor {
                     .iter()
                     .map(|s| s.0.to_string()),
             )
-            .chain(self.grid_fn_names.keys().cloned())
+            .chain(self.grid_fns.names.keys().cloned())
             .collect();
         names.sort();
         names.dedup();
@@ -953,7 +982,8 @@ impl Editor {
         }
         let (name, arg) = crate::formula::parse::call_context(&e.text, e.caret)?;
         crate::formula::func::sigs::hint(&name, arg).or_else(|| {
-            self.grid_fn_names
+            self.grid_fns
+                .names
                 .contains_key(&name)
                 .then(|| format!("{name}(…)   (a Scheme function)"))
         })

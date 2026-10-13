@@ -313,7 +313,7 @@ impl Editor {
             }
         };
         let count = l.sheets.len();
-        let mut grid = GridDoc::new(l.wb, Some("xlsx".into()), hash, &self.grid_opts);
+        let mut grid = GridDoc::new(l.wb, Some("xlsx".into()), hash, &self.grid_ui.opts);
         grid.xlsx_lossy = l.lossy;
         grid.xlsx_sheets = l.sheets;
         grid.xlsx_sheet = index;

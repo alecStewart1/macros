@@ -243,7 +243,7 @@ impl Element for GridElement {
 
         let editor = self.editor.read(cx);
         let g = editor.pane_grid(self.pane)?;
-        let drag = editor.grid_drag;
+        let drag = editor.grid_ui.drag;
         let zoom = g.view.zoom.max(0.1);
         let font_size = px((base_size * zoom).max(3.0));
         let chrome_size = px(base_size.min(14.0) * 0.92);
@@ -363,7 +363,7 @@ impl Element for GridElement {
         let editing = v.edit.as_ref();
         let blocks = zoom < view::BLOCK_ZOOM;
         let cell_lh = px(header_h.max(1.0));
-        let truncate = editor.grid_opts.truncate_indicator.as_str();
+        let truncate = editor.grid_ui.opts.truncate_indicator.as_str();
         let truncate_len = truncate.chars().count();
         // Zebra stripes: the face's background, or a faint wash of the text
         // color when the theme gives the face none.
@@ -963,7 +963,7 @@ impl Element for GridElement {
         let hit = p.popup.as_ref().map(|pp| pp.hit);
         self.editor.update(cx, |editor, _| {
             editor.set_grid_geometry(pane, geom);
-            editor.grid_completion_hit = hit;
+            editor.grid_ui.completion_hit = hit;
         });
         Some(p)
     }

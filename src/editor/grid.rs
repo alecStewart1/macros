@@ -81,6 +81,58 @@ impl Default for GridOptions {
     }
 }
 
+/// Editor-wide grid state (one per editor, not per grid buffer).
+pub(super) struct GridUi {
+    /// File extensions that open as a grid (`grid-extensions`, lower case).
+    pub extensions: Vec<String>,
+    /// Painted geometry per grid pane (set by `GridElement` each frame).
+    pub geom: HashMap<usize, GridGeom>,
+    /// A mouse drag (selection or header resize) on a grid pane.
+    pub drag: Option<GridDrag>,
+    /// The echo the grid last showed (formula-bar fallback), so it only
+    /// replaces its own text, never someone else's message.
+    pub echo: Option<SharedString>,
+    /// Editor-wide grid settings (`grid-default-column-width`, …).
+    pub opts: GridOptions,
+    /// An open `ge` popup.
+    pub cell_popup: Option<CellPopup>,
+    /// A background slice loop is finishing a large recalculation.
+    pub recalc_scheduled: bool,
+    /// The formulas of the last grid copy (see `FormulaClip`).
+    pub formula_clip: Option<super::grid_formula::FormulaClip>,
+    /// Where the grid's function-name dropdown was painted (for clicks).
+    pub completion_hit: Option<PopupHit>,
+}
+
+impl Default for GridUi {
+    fn default() -> Self {
+        Self {
+            extensions: ["csv", "tsv", "tab", "psv", "xlsx"]
+                .map(String::from)
+                .to_vec(),
+            geom: HashMap::new(),
+            drag: None,
+            echo: None,
+            opts: GridOptions::default(),
+            cell_popup: None,
+            recalc_scheduled: false,
+            formula_clip: None,
+            completion_hit: None,
+        }
+    }
+}
+
+/// An open `ge` popup: a text buffer editing one grid cell.
+#[derive(Debug, Clone)]
+pub(super) struct CellPopup {
+    /// The popup buffer (`*cell C7*`).
+    pub buffer: String,
+    /// The grid buffer the cell belongs to.
+    pub grid: String,
+    pub row: usize,
+    pub col: usize,
+}
+
 /// One stage of a row filter. Filters stack: each keeps only rows the ones
 /// before it kept.
 #[derive(Debug, Clone)]
@@ -1318,7 +1370,7 @@ impl Editor {
 
     /// Whether `path` should open as a grid (by `grid-extensions`).
     pub(super) fn is_grid_path(&self, path: &Path) -> bool {
-        ext_of(path).is_some_and(|e| self.grid_extensions.contains(&e))
+        ext_of(path).is_some_and(|e| self.grid_ui.extensions.contains(&e))
     }
 
     /// Ask before opening a huge file as a grid (it all goes into memory).
@@ -1388,7 +1440,7 @@ impl Editor {
             let prefix = crate::grid::parse::parse_prefix(&bytes, ext.as_deref(), PREFIX_ROWS);
             (prefix, Some(bytes))
         };
-        let mut grid = GridDoc::new(wb, ext.clone(), hash, &self.grid_opts);
+        let mut grid = GridDoc::new(wb, ext.clone(), hash, &self.grid_ui.opts);
         grid.xlsx_lossy = xlsx_lossy;
         grid.xlsx_sheets = xlsx_sheets;
         grid.other_sheets = other_sheets;
@@ -1469,7 +1521,7 @@ impl Editor {
         wb: Workbook,
         cx: &mut Context<Self>,
     ) {
-        let mut grid = GridDoc::new(wb, Some("csv".into()), 0, &self.grid_opts);
+        let mut grid = GridDoc::new(wb, Some("csv".into()), 0, &self.grid_ui.opts);
         grid.save_failed = true;
         self.install_grid_doc(name, None, grid, true, cx);
         self.grid_after(cx);
@@ -1535,7 +1587,7 @@ impl Editor {
         result: Result<Workbook, crate::grid::parse::ParseError>,
         cx: &mut Context<Self>,
     ) {
-        let opts = self.grid_opts.clone();
+        let opts = self.grid_ui.opts.clone();
         let Some(grid) = self.grid_doc_named_mut(name) else {
             return; // killed meanwhile
         };
@@ -1596,7 +1648,7 @@ impl Editor {
                     .as_deref()
                     .and_then(|p| std::fs::read(p).ok())
                     .map_or(0, |b| bytes_hash(&b));
-                let mut grid = GridDoc::new(wb, ext, disk, &self.grid_opts);
+                let mut grid = GridDoc::new(wb, ext, disk, &self.grid_ui.opts);
                 grid.save_failed = modified; // carry the unsaved state over
                 if let Some(path) = &self.active.path {
                     load_sidecar(path, &mut grid);
@@ -1660,7 +1712,7 @@ impl Editor {
 
     /// Report a grid pane's painted geometry (called by its element).
     pub(super) fn set_grid_geometry(&mut self, pane: usize, geom: GridGeom) {
-        self.grid_geom.insert(pane, geom);
+        self.grid_ui.geom.insert(pane, geom);
         let (vw, vh) = (
             (geom.width - geom.header_w).max(1.0) as f64,
             (geom.height - geom.bar_h - geom.header_h).max(1.0) as f64,
@@ -1722,9 +1774,14 @@ impl Editor {
             } else {
                 format!("{name}  │  {content}").into()
             });
-        } else if self.grid_echo.as_ref().is_some_and(|e| *e == self.status) {
+        } else if self
+            .grid_ui
+            .echo
+            .as_ref()
+            .is_some_and(|e| *e == self.status)
+        {
             self.status = SharedString::default();
-            self.grid_echo = None;
+            self.grid_ui.echo = None;
         }
         if let Some(msg) = dropped {
             self.echo(msg, cx);
@@ -1745,11 +1802,15 @@ impl Editor {
     /// isn't wiped by the next cursor move. Not logged to *Messages* —
     /// cursor moves would flood it.
     fn grid_set_echo(&mut self, line: SharedString) {
-        let ours =
-            self.status.is_empty() || self.grid_echo.as_ref().is_some_and(|e| *e == self.status);
+        let ours = self.status.is_empty()
+            || self
+                .grid_ui
+                .echo
+                .as_ref()
+                .is_some_and(|e| *e == self.status);
         if ours {
             self.status = line.clone();
-            self.grid_echo = Some(line);
+            self.grid_ui.echo = Some(line);
         }
     }
 
@@ -2181,27 +2242,27 @@ impl Editor {
                 use crate::grid::cmd::GridOption as O;
                 match opt {
                     O::DefaultColumnWidth(px) if px.is_finite() && px > 0.0 => {
-                        self.grid_opts.default_col_width = px
+                        self.grid_ui.opts.default_col_width = px
                     }
                     O::MaxAutofitWidth(px) if px.is_finite() && px > 0.0 => {
-                        self.grid_opts.max_autofit_width = px
+                        self.grid_ui.opts.max_autofit_width = px
                     }
                     O::DefaultColumnWidth(_) | O::MaxAutofitWidth(_) => {
                         self.echo("grid: a width must be a positive number of pixels", cx)
                     }
-                    O::AutoHeader(h) => self.grid_opts.auto_header = h,
+                    O::AutoHeader(h) => self.grid_ui.opts.auto_header = h,
                     O::FunctionTimeout(secs) if secs.is_finite() && secs >= 1.0 => {
                         self.grid_set_function_timeout(secs as u64)
                     }
                     O::FunctionTimeout(_) => {
                         self.echo("grid-function-timeout: give a number of seconds (≥ 1)", cx)
                     }
-                    O::TruncateIndicator(s) => self.grid_opts.truncate_indicator = s,
+                    O::TruncateIndicator(s) => self.grid_ui.opts.truncate_indicator = s,
                 }
                 cx.notify();
             }
             E::GridExtensions(exts) => {
-                self.grid_extensions = exts
+                self.grid_ui.extensions = exts
                     .into_iter()
                     .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
                     .collect();
@@ -2302,10 +2363,14 @@ impl Editor {
         let (r, c) = g.view.cursor;
         let (rows, cols) = g.used();
         let page = g.view.page_rows();
-        let char_w = self.grid_geom.get(&self.selected_pane).map_or(7.0, |geo| {
-            geo.char_w as f64 / f64::from(g.view.zoom).max(0.1)
-        });
-        let max_fit = self.grid_opts.max_autofit_width;
+        let char_w = self
+            .grid_ui
+            .geom
+            .get(&self.selected_pane)
+            .map_or(7.0, |geo| {
+                geo.char_w as f64 / f64::from(g.view.zoom).max(0.1)
+            });
+        let max_fit = self.grid_ui.opts.max_autofit_width;
         match cmd {
             // Across a whole-line selection, step it to take in the next line.
             Left | Right if g.line_selected(SelKind::Cols) => {
@@ -2999,7 +3064,7 @@ impl Editor {
         // The clipboard gets values (what other apps expect); remember the
         // formulas so a paste back into a grid pastes those instead.
         let cells = g.copied_formulas(&sel);
-        self.grid_formula_clip = (!cells.is_empty()).then(|| super::grid_formula::FormulaClip {
+        self.grid_ui.formula_clip = (!cells.is_empty()).then(|| super::grid_formula::FormulaClip {
             text: text.clone(),
             cells,
         });
@@ -3022,7 +3087,8 @@ impl Editor {
         };
         // (A copied formula whose result is "" copies as empty text.)
         let ours = self
-            .grid_formula_clip
+            .grid_ui
+            .formula_clip
             .as_ref()
             .is_some_and(|c| c.text == text);
         if text.is_empty() && !ours {
@@ -3060,7 +3126,12 @@ impl Editor {
         }
         // A grid copy of formulas pastes the formulas, references moved by
         // the paste offset (Excel's paste); other text pastes as typed.
-        if let Some(clip) = self.grid_formula_clip.as_ref().filter(|c| c.text == text) {
+        if let Some(clip) = self
+            .grid_ui
+            .formula_clip
+            .as_ref()
+            .filter(|c| c.text == text)
+        {
             if single && let Some((_, _, sr, sc, f)) = clip.cells.first() {
                 for e in &mut edits {
                     e.2 = super::grid_formula::translated(
@@ -3244,7 +3315,7 @@ impl Editor {
         }
         let hash = bytes_hash(&bytes);
         let total = bytes.len();
-        let opts = self.grid_opts.clone();
+        let opts = self.grid_ui.opts.clone();
         let doc = match inactive {
             None => &self.active,
             Some(i) => &self.inactive[i],
@@ -3467,7 +3538,12 @@ impl Editor {
         self.inactive.retain(|d| d.name != name);
         self.inactive.push(current);
         self.install_active(doc);
-        self.grid_cell_popup = Some((name, grid_name, r, c));
+        self.grid_ui.cell_popup = Some(CellPopup {
+            buffer: name,
+            grid: grid_name,
+            row: r,
+            col: c,
+        });
         self.move_to(self.active.buffer.len(), cx);
         self.echo(
             "Edit the cell; C-c C-c to save it back, C-c C-k to cancel",
@@ -3476,7 +3552,13 @@ impl Editor {
     }
 
     fn grid_cell_popup_finish(&mut self, commit: bool, cx: &mut Context<Self>) {
-        let Some((popup, grid_name, r, c)) = self.grid_cell_popup.clone() else {
+        let Some(CellPopup {
+            buffer: popup,
+            grid: grid_name,
+            row: r,
+            col: c,
+        }) = self.grid_ui.cell_popup.clone()
+        else {
             self.echo("Not editing a cell", cx);
             return;
         };
@@ -3484,7 +3566,7 @@ impl Editor {
             self.switch_to_buffer(&popup, cx);
         }
         let text = self.active.buffer.full_text();
-        self.grid_cell_popup = None;
+        self.grid_ui.cell_popup = None;
         self.switch_to_buffer(&grid_name, cx);
         self.kill_buffer_named(&popup, cx);
         if commit && self.active.name != grid_name {
@@ -3545,7 +3627,7 @@ impl Editor {
         match self.grid_resolve(&sequence) {
             GridKey::Bound(expr) => {
                 self.pending_keys.clear();
-                if self.grid_echo.as_ref() != Some(&self.status) {
+                if self.grid_ui.echo.as_ref() != Some(&self.status) {
                     self.status = SharedString::default();
                 }
                 self.grid_run(&expr, cx);
@@ -3821,7 +3903,7 @@ impl Editor {
     // --- Mouse ---------------------------------------------------------------------
 
     fn grid_hit(&self, pane: usize, pos: Point<Pixels>) -> Option<GridHit> {
-        let geo = self.grid_geom.get(&pane)?;
+        let geo = self.grid_ui.geom.get(&pane)?;
         let g = self.pane_grid(pane)?;
         let x = f32::from(pos.x) - f32::from(geo.origin.x);
         let y = f32::from(pos.y) - f32::from(geo.origin.y);
@@ -3889,7 +3971,7 @@ impl Editor {
         }
         // A click on the function-name dropdown picks that name.
         if self.grid_completion_open()
-            && let Some(hit) = self.grid_completion_hit
+            && let Some(hit) = self.grid_ui.completion_hit
             && hit.bounds.contains(&pos)
         {
             let row = ((pos.y - hit.bounds.origin.y) / hit.row_height) as usize;
@@ -3938,7 +4020,7 @@ impl Editor {
         if !keep_edit {
             self.grid_commit_pending(cx);
         }
-        let geo = self.grid_geom.get(&pane).copied();
+        let geo = self.grid_ui.geom.get(&pane).copied();
         let Some(g) = self.active.grid.as_deref_mut() else {
             return true;
         };
@@ -3978,7 +4060,7 @@ impl Editor {
                     for c in selected_or(g, col, true) {
                         let sample = (0..rows.min(AUTOFIT_SAMPLE))
                             .chain((top..top + page + 1).filter(|&x| x < rows));
-                        let w = g.fit_width(c, sample, char_w, self.grid_opts.max_autofit_width);
+                        let w = g.fit_width(c, sample, char_w, self.grid_ui.opts.max_autofit_width);
                         g.resize(true, c, w);
                     }
                     self.grid_persist_view();
@@ -3988,7 +4070,7 @@ impl Editor {
                     } else {
                         (g.view.row_y(col) as f32, g.view.rows.size(col))
                     };
-                    self.grid_drag = Some(GridDrag::Resize {
+                    self.grid_ui.drag = Some(GridDrag::Resize {
                         pane,
                         cols: is_col,
                         idx: col,
@@ -4006,7 +4088,7 @@ impl Editor {
                     g.view.sel_kind = SelKind::Cols;
                 }
                 g.sticky_sel = false;
-                self.grid_drag = Some(GridDrag::Select { pane });
+                self.grid_ui.drag = Some(GridDrag::Select { pane });
             }
             GridHit::RowHeader(row) => {
                 if shift && g.view.anchor.is_some() && g.view.sel_kind == SelKind::Rows {
@@ -4017,7 +4099,7 @@ impl Editor {
                     g.view.sel_kind = SelKind::Rows;
                 }
                 g.sticky_sel = false;
-                self.grid_drag = Some(GridDrag::Select { pane });
+                self.grid_ui.drag = Some(GridDrag::Select { pane });
             }
             GridHit::Cell(r, c) => {
                 if keep_edit {
@@ -4043,7 +4125,7 @@ impl Editor {
                     }
                     g.view.cursor = (r, c);
                     g.sticky_sel = false;
-                    self.grid_drag = Some(GridDrag::Select { pane });
+                    self.grid_ui.drag = Some(GridDrag::Select { pane });
                 }
             }
         }
@@ -4053,7 +4135,7 @@ impl Editor {
 
     /// Mouse motion while a grid drag is in progress.
     pub(super) fn grid_mouse_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-        let Some(drag) = self.grid_drag else {
+        let Some(drag) = self.grid_ui.drag else {
             return false;
         };
         match drag {
@@ -4083,7 +4165,7 @@ impl Editor {
                 start,
                 ..
             } => {
-                let Some(geo) = self.grid_geom.get(&pane).copied() else {
+                let Some(geo) = self.grid_ui.geom.get(&pane).copied() else {
                     return true;
                 };
                 let zoom = self.pane_grid(pane).map_or(1.0, |g| g.view.zoom).max(0.1);
@@ -4094,7 +4176,7 @@ impl Editor {
                     f32::from(pos.y) - cy0
                 };
                 let size = (((edge - start) / zoom) as f64).max(0.0);
-                self.grid_drag = Some(GridDrag::Resize {
+                self.grid_ui.drag = Some(GridDrag::Resize {
                     pane,
                     cols,
                     idx,
@@ -4117,7 +4199,7 @@ impl Editor {
 
     /// Mouse release: finish a resize (applied now, as one undo step).
     pub(super) fn grid_mouse_up(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.grid_drag.take() else {
+        let Some(drag) = self.grid_ui.drag.take() else {
             return;
         };
         if let GridDrag::Resize {
