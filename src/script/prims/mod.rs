@@ -11,3 +11,4 @@ pub(super) mod help;
 pub(super) mod keymaps;
 pub(super) mod languages;
 pub(super) mod prompts;
+pub(super) mod text;
