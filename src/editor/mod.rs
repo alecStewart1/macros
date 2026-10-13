@@ -1804,8 +1804,7 @@ impl Editor {
         match outcome {
             AnvilOutcome::Result {
                 callback,
-                value,
-                error,
+                result,
                 output,
             } => {
                 // Captured `(display …)` output prints first, then the value (or
@@ -1815,9 +1814,9 @@ impl Editor {
                     payload.push_str(out.trim_end_matches('\n'));
                     payload.push('\n');
                 }
-                match error {
-                    Some(error) => payload.push_str(&format!("error: {error}")),
-                    None => payload.push_str(&value.unwrap_or_default()),
+                match result {
+                    Err(error) => payload.push_str(&format!("error: {error}")),
+                    Ok(value) => payload.push_str(&value.unwrap_or_default()),
                 }
                 self.script.dispatch_action(&callback, Some(&payload));
             }
