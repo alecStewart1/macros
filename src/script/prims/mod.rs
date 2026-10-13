@@ -14,6 +14,7 @@ pub(super) mod git;
 pub(super) mod grid;
 pub(super) mod help;
 pub(super) mod hooks;
+pub(super) mod http;
 pub(super) mod keymaps;
 pub(super) mod languages;
 pub(super) mod lsp;

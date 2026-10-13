@@ -222,6 +222,7 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ("script/prims/grid.rs", include_str!("prims/grid.rs")),
     ("script/prims/help.rs", include_str!("prims/help.rs")),
     ("script/prims/hooks.rs", include_str!("prims/hooks.rs")),
+    ("script/prims/http.rs", include_str!("prims/http.rs")),
     ("script/prims/keymaps.rs", include_str!("prims/keymaps.rs")),
     (
         "script/prims/languages.rs",
