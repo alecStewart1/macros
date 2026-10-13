@@ -252,73 +252,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::text::register(&mut reg, shared);
     prims::plotting::register(&mut reg, shared);
     prims::spell::register(&mut reg, shared);
-    reg.section(Section::Modal);
-    {
-        // `(set-count-aware! 'name)` — the modal count loop dispatches `name`
-        // ONCE with `(prefix-count)` published instead of running it N times.
-        // Accepts a symbol or a string (symbol-name references, like keymaps).
-        register_unary(&mut reg, queue, "set-count-aware!", |Name(name)| {
-            EditorCommand::SetCountAware(name)
-        });
-    }
-    register_unary(
-        &mut reg,
-        queue,
-        "evil-block-replace",
-        EditorCommand::EvilBlockReplace,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "evil-use-register",
-        EditorCommand::EvilUseRegister,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "evil-insert-register",
-        EditorCommand::EvilInsertRegister,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "evil-macro-record",
-        EditorCommand::EvilMacroRecord,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "evil-macro-play",
-        EditorCommand::EvilMacroPlay,
-    );
-    register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
-    register_unary(&mut reg, queue, "evil-ex", EditorCommand::EvilEx);
-    reg.section(Section::Modal);
-    register_unary(
-        &mut reg,
-        queue,
-        "evil-replace-with",
-        EditorCommand::EvilReplaceWith,
-    );
-    register_unary(
-        &mut reg,
-        queue,
-        "evil-ex-goto-line",
-        EditorCommand::EvilExGotoLine,
-    );
-    register_unary(&mut reg, queue, "evil-goto-mark", |m: String| {
-        EditorCommand::EvilGotoMark(m, true)
-    });
-    register_unary(&mut reg, queue, "evil-goto-mark-line", |m: String| {
-        EditorCommand::EvilGotoMark(m, false)
-    });
-    {
-        // `(set-jump-command! 'name)` — running `name` from a key is a jump:
-        // the jump list and `''` record where it started (G, /, %, gd, …).
-        register_unary(&mut reg, queue, "set-jump-command!", |Name(name)| {
-            EditorCommand::SetJumpCommand(name)
-        });
-    }
+    prims::modal::register(&mut reg, shared);
     reg.section(Section::TreeSitter);
     // `(buffer-language)` → the highlighting language ("" when none).
     register_snapshot_read(&mut reg, snapshot, "buffer-language", |s| {
@@ -388,19 +322,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
                     .collect()
             },
         );
-    }
-    reg.section(Section::Modal);
-    {
-        // `(mark-position "a")` → byte offset of mark a in this buffer, or -1.
-        let shared = snapshot.clone();
-        reg.register_fn("mark-position", move |m: String| -> isize {
-            shared
-                .load()
-                .marks
-                .iter()
-                .find(|(c, _)| *c == m)
-                .map_or(-1, |(_, p)| *p as isize)
-        });
     }
     reg.section(Section::Lsp);
     register_binary(&mut reg, queue, "set-lsp", EditorCommand::SetLsp);
@@ -971,18 +892,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
                 .unwrap_or_default()
         });
     }
-    reg.section(Section::Modal);
-    // `(select-to pos)` — extend the selection to byte `pos` (goto-char
-    // collapses; this is its extend-flavored twin for visual-mode motions).
-    register_unary(&mut reg, queue, "select-to", |n: isize| {
-        EditorCommand::SelectTo(scheme_pos(n))
-    });
-    // `(set-search-query "regex" forward?)` — store the query + direction the
-    // way `/` and `?` do, without prompting, so evil-search-next/-previous
-    // repeat it (evil `*`/`#`).
-    register_binary(&mut reg, queue, "set-search-query", |query, forward| {
-        EditorCommand::SetSearchQuery { query, forward }
-    });
     reg.section(Section::Decorations);
     register_unary(
         &mut reg,
@@ -2437,29 +2346,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     }
     // `(lsp-server-ready?)` → #t if the active buffer has a ready LSP server.
     register_snapshot_read(&mut reg, snapshot, "lsp-server-ready?", |s| s.lsp_ready);
-    reg.section(Section::Modal);
-    // `(evil-enabled?)` → #t when modal (evil) editing is active.
-    register_snapshot_read(&mut reg, snapshot, "evil-enabled?", |s| s.evil_enabled);
-    // `(evil-state)` → "normal" / "insert" / "visual" / "visual-line" /
-    // "visual-block", or "" when modal editing is off.
-    register_snapshot_read(&mut reg, snapshot, "evil-state", |s| s.evil_state.clone());
-    // `(search-query)` → the active `/` regex ("" if none); `(search-forward?)`
-    // → whether it was a forward (`/`) search. For the `n`/`N` motions.
-    register_snapshot_read(&mut reg, snapshot, "search-query", |s| {
-        s.search_query.clone()
-    });
-    register_snapshot_read(&mut reg, snapshot, "search-forward?", |s| s.search_forward);
-    // `(major-mode)` → the buffer's major mode name ("rust", "org-mode", …).
-    register_snapshot_read(&mut reg, snapshot, "major-mode", |s| s.major_mode.clone());
-    // `(helix-enabled?)` → #t when Helix (selection-first) modal editing is on.
-    register_snapshot_read(&mut reg, snapshot, "helix-enabled?", |s| s.helix_enabled);
-    // `(prefix-count)` → the count typed before a count-aware modal command, 0
-    // when none (so a command can tell `G` from `1G`).
-    register_snapshot_read(&mut reg, snapshot, "prefix-count", |s| s.prefix_count);
-    // `(kbd-macro-recording?)` → #t while a keyboard macro is being recorded.
-    register_snapshot_read(&mut reg, snapshot, "kbd-macro-recording?", |s| {
-        s.kbd_macro_recording
-    });
     reg.section(Section::Lsp);
     // `(diagnostics)` → the active buffer's LSP diagnostics, each a record
     // "line\tcol\tseverity\tmessage" (line/col 0-based). The library splits it.
