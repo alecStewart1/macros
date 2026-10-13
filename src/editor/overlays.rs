@@ -287,7 +287,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let path = PathBuf::from(expand_path(&path));
-        let redirected = self.render_redirect.is_some();
+        let redirected = self.redirect_index().is_some();
         self.redirect_target()
             .line_images
             .insert(line, (path.clone(), max_width));

@@ -386,11 +386,9 @@ impl Editor {
         pick: impl Fn(&'a Document) -> R,
     ) -> R {
         match self.pane(id) {
-            Some(p) if p.buffer != self.active.name => self
-                .inactive
-                .iter()
-                .find(|d| d.name == p.buffer)
-                .map_or_else(live, pick),
+            Some(p) if p.buffer != self.active.name => {
+                self.inactive_doc(&p.buffer).map_or_else(live, pick)
+            }
             _ => live(),
         }
     }
@@ -719,7 +717,7 @@ impl Editor {
             } else {
                 format!("[No Name]<{n}>")
             };
-            if candidate != self.active.name && !self.inactive.iter().any(|d| d.name == candidate) {
+            if !self.has_buffer(&candidate) {
                 break candidate;
             }
             n += 1;
@@ -729,9 +727,7 @@ impl Editor {
         if let Some(&newest) = leaves.iter().max() {
             self.select_pane(newest, cx);
         }
-        let current = self.snapshot_active();
-        self.inactive.push(current);
-        self.install_active(make_document(name, None, ""));
+        self.switch_to_doc(make_document(name, None, ""));
         cx.notify();
     }
 

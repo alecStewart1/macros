@@ -390,19 +390,6 @@ pub struct MinibufferView {
     pub message: String,
 }
 
-/// Mutable access to every per-buffer decoration store of the buffer a
-/// decoration command should land on — resolved once by
-/// [`Editor::redirect_target`] so the [`Editor::render_redirect`] decision
-/// lives in one place.
-struct DecorationTarget<'a> {
-    /// The target's text, for clamping byte-range overlays.
-    buffer: &'a Buffer,
-    overlays: &'a mut Overlays,
-    line_icons: &'a mut HashMap<usize, (usize, SharedString)>,
-    gutter_dots: &'a mut HashMap<usize, SharedString>,
-    line_images: &'a mut HashMap<usize, (PathBuf, usize)>,
-}
-
 /// Filesystem watching (auto-revert + dired-sidebar/dired live refresh),
 /// reconciled as a unit by [`Editor::reconcile_watches`].
 struct FsWatchState {
@@ -869,10 +856,11 @@ pub struct Editor {
     fs: FsWatchState,
     /// While `render-buffer` refreshes a special buffer that's shown in a
     /// *non-selected* pane (the dired-sidebar/dired view during an auto-refresh), the
-    /// index of that inactive [`Document`] — so the icon/overlay commands in the
+    /// name of that inactive [`Document`] — so the icon/overlay commands in the
     /// same batch target it instead of the active buffer, and focus never moves.
-    /// Reset to `None` after each applied command batch.
-    render_redirect: Option<usize>,
+    /// Resolved by name ([`Editor::redirect_index`]) so reshuffling `inactive`
+    /// can't retarget it. Reset to `None` after each applied command batch.
+    render_redirect: Option<String>,
     /// Set by a failed `GuardBufferUnchanged` (the buffer was edited after the
     /// script snapshotted it); `apply_script_outcome` drops the rest of that
     /// batch — its byte-offset decorations are stale. Reset around every batch.
@@ -3526,11 +3514,12 @@ impl Editor {
     /// to it or steals focus.
     fn append_to_log_buffer(&mut self, name: &str, line: &str) {
         let entry = format!("{line}\n");
+        let lh = f32::from(self.line_height);
         if self.active.name == name {
             let end = self.active.buffer.len();
             self.active.buffer.replace(end..end, &entry);
             self.lines.clear();
-        } else if let Some(doc) = self.inactive.iter_mut().find(|d| d.name == name) {
+        } else if let Some(doc) = self.inactive_doc_mut(name) {
             let end = doc.buffer.len();
             doc.buffer.replace(end..end, &entry);
             // Bound growth (only while not being viewed): keep the last N lines.
@@ -3547,7 +3536,6 @@ impl Editor {
                 doc.selected_range = doc
                     .buffer
                     .clamp_range(r.start.saturating_sub(cut)..r.end.saturating_sub(cut));
-                let lh = f32::from(self.line_height);
                 let scroll = f32::from(doc.scroll_offset) - dropped as f32 * lh;
                 doc.scroll_offset = px(scroll.max(0.0));
             }
@@ -3564,7 +3552,7 @@ impl Editor {
         if self.active.name == "*Messages*" {
             return;
         }
-        if let Some(index) = self.inactive.iter().position(|d| d.name == "*Messages*") {
+        if let Some(index) = self.inactive_index("*Messages*") {
             self.activate(index, true, cx);
         } else {
             let text = if self.messages.is_empty() {
@@ -3572,9 +3560,7 @@ impl Editor {
             } else {
                 format!("{}\n", self.messages.join("\n"))
             };
-            let current = self.snapshot_active();
-            self.inactive.push(current);
-            self.install_active(make_log_document("*Messages*".to_string(), &text));
+            self.switch_to_doc(make_log_document("*Messages*".to_string(), &text));
             self.move_to(self.active.buffer.len(), cx);
         }
     }
@@ -3585,7 +3571,7 @@ impl Editor {
         if self.active.name == "*lsp-log*" {
             return;
         }
-        if let Some(index) = self.inactive.iter().position(|d| d.name == "*lsp-log*") {
+        if let Some(index) = self.inactive_index("*lsp-log*") {
             self.activate(index, true, cx);
         } else {
             let text = if self.lsp_log.is_empty() {
@@ -3593,9 +3579,7 @@ impl Editor {
             } else {
                 format!("{}\n", self.lsp_log.join("\n"))
             };
-            let current = self.snapshot_active();
-            self.inactive.push(current);
-            self.install_active(make_log_document("*lsp-log*".to_string(), &text));
+            self.switch_to_doc(make_log_document("*lsp-log*".to_string(), &text));
             self.move_to(self.active.buffer.len(), cx);
         }
     }
@@ -3866,27 +3850,12 @@ impl Editor {
     /// writes must follow it — otherwise the active buffer. EVERY decoration
     /// command arm must resolve its stores through this, so a redirected batch
     /// can never write into the wrong buffer.
-    fn redirect_target(&mut self) -> DecorationTarget<'_> {
-        // Out-of-range (a stale redirect) falls back to the active buffer
-        // rather than panicking.
-        match self.render_redirect.filter(|&i| i < self.inactive.len()) {
-            Some(i) => {
-                let doc = &mut self.inactive[i];
-                DecorationTarget {
-                    buffer: &doc.buffer,
-                    overlays: &mut doc.overlays,
-                    line_icons: &mut doc.line_icons,
-                    gutter_dots: &mut doc.gutter_dots,
-                    line_images: &mut doc.line_images,
-                }
-            }
-            None => DecorationTarget {
-                buffer: &self.active.buffer,
-                overlays: &mut self.active.overlays,
-                line_icons: &mut self.active.line_icons,
-                gutter_dots: &mut self.active.gutter_dots,
-                line_images: &mut self.active.line_images,
-            },
+    fn redirect_target(&mut self) -> &mut Document {
+        // A redirect whose buffer is no longer inactive falls back to the
+        // active buffer.
+        match self.redirect_index() {
+            Some(i) => &mut self.inactive[i],
+            None => &mut self.active,
         }
     }
 

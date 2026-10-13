@@ -100,14 +100,7 @@ impl Editor {
 
     /// The visited-file path of buffer `name` ("" if fileless or unknown).
     fn session_path_of(&self, name: &str) -> String {
-        let doc_path = if self.active.name == name {
-            self.active.path.as_deref()
-        } else {
-            self.inactive
-                .iter()
-                .find(|d| d.name == name)
-                .and_then(|d| d.path.as_deref())
-        };
+        let doc_path = self.doc(name).and_then(|d| d.path.as_deref());
         doc_path.map_or_else(String::new, |p| self.session_abs(p))
     }
 
@@ -293,21 +286,12 @@ impl Editor {
                     Some(PathBuf::from(path))
                 };
                 let by_path = wanted.as_ref().and_then(|w| {
-                    if self.active.path.as_deref() == Some(w.as_path()) {
-                        Some(self.active.name.clone())
-                    } else {
-                        self.inactive
-                            .iter()
-                            .find(|d| d.path.as_deref() == Some(w.as_path()))
-                            .map(|d| d.name.clone())
-                    }
+                    self.docs()
+                        .find(|d| d.path.as_deref() == Some(w.as_path()))
+                        .map(|d| d.name.clone())
                 });
                 let name = by_path
-                    .or_else(|| {
-                        (self.active.name == *buffer
-                            || self.inactive.iter().any(|d| d.name == *buffer))
-                        .then(|| buffer.clone())
-                    })
+                    .or_else(|| self.has_buffer(buffer).then(|| buffer.clone()))
                     .unwrap_or_else(|| self.active.name.clone());
                 panes.push(Pane {
                     id,
@@ -357,14 +341,7 @@ impl Editor {
             .unwrap_or_default();
         // Snap every pane's point into its buffer (a file may have shrunk).
         for pane in &mut panes {
-            let rope = if pane.buffer == self.active.name {
-                Some(self.active.buffer.rope())
-            } else {
-                self.inactive
-                    .iter()
-                    .find(|d| d.name == pane.buffer)
-                    .map(|d| d.buffer.rope())
-            };
+            let rope = self.doc(&pane.buffer).map(|d| d.buffer.rope());
             pane.point = rope.map_or(0, |r| crate::script::snap_byte(r, pane.point));
         }
         self.layout = layout;
