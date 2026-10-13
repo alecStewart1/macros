@@ -1300,17 +1300,13 @@ struct LspServer {
     client: LspBackend,
     /// True once the `initialize` response has arrived.
     ready: bool,
-    /// Server's preferred sync kind (full, incremental, or none).
-    sync_kind: lsp::SyncKind,
+    /// What the server advertised in its `initialize` result (defaults until
+    /// then).
+    caps: lsp::ServerCapabilities,
     /// The process is gone (stdout closed). Kept in the map — not ready, no
     /// open documents — until the next `maybe_start_lsp` / `lsp-restart`
     /// replaces it with a fresh spawn.
     exited: bool,
-    /// Whether the server wants `textDocument/didSave` (`Some(include_text)`).
-    save: Option<bool>,
-    /// `codeActionProvider.resolveProvider`: edit-less code actions are
-    /// completed via `codeAction/resolve` before applying.
-    code_action_resolve: bool,
     /// URIs we've sent `didOpen` for to this server.
     open: HashSet<String>,
     versions: HashMap<String, i32>,
@@ -1320,14 +1316,6 @@ struct LspServer {
     /// keyed by request id so the response can be routed to the right handler,
     /// with the document each was issued against.
     pending: HashMap<i64, (PendingRequest, RequestTarget)>,
-    /// `semanticTokens` legend (token-type names by id) from `initialize`.
-    semantic_legend: Vec<String>,
-    /// Whether the server supports `prepareRename` (gates the pre-check).
-    prepare_rename: bool,
-    /// `completionProvider.triggerCharacters` from `initialize`: single-char
-    /// strings (e.g. `.` for OCaml/Rust member access) that auto-open completion
-    /// even though they aren't word characters.
-    completion_triggers: Vec<String>,
     /// Cached semantic tokens per URI: `(resultId, packed data)`, for deltas.
     semantic_state: HashMap<String, (Option<String>, Vec<i64>)>,
     /// The reader task forwarding this server's messages; dropped on removal.

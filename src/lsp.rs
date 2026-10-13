@@ -364,22 +364,6 @@ pub fn progress_text(language: &str, title: &str, value: &Value) -> String {
     text
 }
 
-/// Whether (and how) the server wants `textDocument/didSave`, from its
-/// `initialize` result: `None` = don't send, `Some(include_text)` = send. A
-/// bare-number `textDocumentSync` predates the `save` option and gets text-less
-/// notifications (matching vscode-languageclient's resolution).
-pub fn parse_save_option(result: &Value) -> Option<bool> {
-    let sync = &result["capabilities"]["textDocumentSync"];
-    if sync.is_number() {
-        return Some(false);
-    }
-    match &sync["save"] {
-        Value::Bool(true) => Some(false),
-        Value::Object(o) => Some(o.get("includeText").and_then(Value::as_bool) == Some(true)),
-        _ => None,
-    }
-}
-
 /// A diagnostic in LSP coordinates (line, UTF-16 column), before mapping to a
 /// specific buffer's byte offsets.
 #[derive(Clone, Debug)]
@@ -395,30 +379,193 @@ pub struct RawDiagnostic {
 }
 
 /// How a server wants document changes synced, from its `initialize` result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SyncKind {
     /// Sync kind 0: the server wants no `didChange` notifications at all.
     None,
     /// Sync kind 1: resend the whole document on change.
+    #[default]
     Full,
     /// Sync kind 2: send only the changed range.
     Incremental,
 }
 
-/// The text-sync kind the server wants, from its `initialize` result.
-/// `textDocumentSync` may be a bare number or an object with a `change` field.
-/// A missing field defaults to full (the safe choice); an out-of-range value
-/// means no sync (matching the old "unrecognized number ⇒ send nothing").
-pub fn parse_sync_kind(result: &Value) -> SyncKind {
-    let sync = &result["capabilities"]["textDocumentSync"];
-    let n = sync
-        .as_u64()
-        .or_else(|| sync["change"].as_u64())
-        .unwrap_or(1);
-    match n {
-        1 => SyncKind::Full,
-        2 => SyncKind::Incremental,
-        _ => SyncKind::None,
+/// A JSON value deserialized as `T`, or `None` when it doesn't fit — so one
+/// malformed capability leaves the others intact (each used to be dug out of
+/// the raw JSON separately, defaulting on its own).
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(T::deserialize(Value::deserialize(d)?).ok())
+}
+
+/// `textDocumentSync`: a bare `TextDocumentSyncKind` number or an options
+/// object.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WireTextDocumentSync {
+    /// Kept as a raw number: any number (even an out-of-range one) means
+    /// "the pre-`save`-option form".
+    Kind(serde_json::Number),
+    Options {
+        #[serde(default, deserialize_with = "lenient")]
+        change: Option<u64>,
+        #[serde(default, deserialize_with = "lenient")]
+        save: Option<WireSaveOptions>,
+    },
+}
+
+/// `textDocumentSync.save`: a bool or `{ includeText }`.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WireSaveOptions {
+    Enabled(bool),
+    #[serde(rename_all = "camelCase")]
+    Options {
+        #[serde(default, deserialize_with = "lenient")]
+        include_text: Option<bool>,
+    },
+}
+
+/// `renameProvider`: a bool or `{ prepareProvider }`.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WireRenameProvider {
+    Enabled(#[allow(dead_code)] bool),
+    #[serde(rename_all = "camelCase")]
+    Options {
+        #[serde(default, deserialize_with = "lenient")]
+        prepare_provider: Option<bool>,
+    },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireCompletionProvider {
+    #[serde(default, deserialize_with = "lenient")]
+    trigger_characters: Option<Vec<Value>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireSemanticTokensProvider {
+    #[serde(default, deserialize_with = "lenient")]
+    legend: Option<WireSemanticLegend>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireSemanticLegend {
+    #[serde(default, deserialize_with = "lenient")]
+    token_types: Option<Vec<Value>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireCodeActionProvider {
+    #[serde(default, deserialize_with = "lenient")]
+    resolve_provider: Option<bool>,
+}
+
+/// The `capabilities` of an `initialize` result — just the ones we consume.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WireCapabilities {
+    #[serde(default, deserialize_with = "lenient")]
+    text_document_sync: Option<WireTextDocumentSync>,
+    #[serde(default, deserialize_with = "lenient")]
+    rename_provider: Option<WireRenameProvider>,
+    #[serde(default, deserialize_with = "lenient")]
+    completion_provider: Option<WireCompletionProvider>,
+    #[serde(default, deserialize_with = "lenient")]
+    semantic_tokens_provider: Option<WireSemanticTokensProvider>,
+    #[serde(default, deserialize_with = "lenient")]
+    code_action_provider: Option<WireCodeActionProvider>,
+}
+
+/// What a server advertised in its `initialize` result, parsed once when it
+/// arrives. The `Default` (also what an empty `capabilities` parses to) is
+/// what we assume until then.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ServerCapabilities {
+    /// How it wants document changes synced. A missing kind defaults to full
+    /// (the safe choice); an out-of-range one means no sync.
+    pub sync_kind: SyncKind,
+    /// Whether (and how) it wants `textDocument/didSave`: `None` = don't
+    /// send, `Some(include_text)` = send. A bare-number `textDocumentSync`
+    /// predates the `save` option and gets text-less notifications (matching
+    /// vscode-languageclient's resolution).
+    pub save: Option<bool>,
+    /// `semanticTokensProvider.legend.tokenTypes`: token-type names by id.
+    pub semantic_legend: Vec<String>,
+    /// `renameProvider.prepareProvider`: gates the `prepareRename` pre-check.
+    pub prepare_rename: bool,
+    /// `completionProvider.triggerCharacters` — characters that should
+    /// auto-open completion even though they aren't identifier characters
+    /// (e.g. `.` for member access in OCaml/Rust).
+    pub completion_triggers: Vec<String>,
+    /// `codeActionProvider.resolveProvider`: edit-less code actions are
+    /// completed via `codeAction/resolve` before applying.
+    pub code_action_resolve: bool,
+}
+
+impl ServerCapabilities {
+    /// Parse the capabilities out of an `initialize` result.
+    pub fn from_initialize(result: &Value) -> Self {
+        WireCapabilities::deserialize(&result["capabilities"])
+            .unwrap_or_default()
+            .into()
+    }
+}
+
+impl From<WireCapabilities> for ServerCapabilities {
+    fn from(wire: WireCapabilities) -> Self {
+        let (change, save) = match wire.text_document_sync {
+            Some(WireTextDocumentSync::Kind(n)) => (n.as_u64(), Some(false)),
+            Some(WireTextDocumentSync::Options { change, save }) => (
+                change,
+                match save {
+                    Some(WireSaveOptions::Enabled(true)) => Some(false),
+                    Some(WireSaveOptions::Options { include_text }) => {
+                        Some(include_text == Some(true))
+                    }
+                    Some(WireSaveOptions::Enabled(false)) | None => None,
+                },
+            ),
+            None => (None, None),
+        };
+        let sync_kind = match change.unwrap_or(1) {
+            1 => SyncKind::Full,
+            2 => SyncKind::Incremental,
+            _ => SyncKind::None,
+        };
+        let strings = |values: Option<Vec<Value>>| values.unwrap_or_default().into_iter();
+        ServerCapabilities {
+            sync_kind,
+            save,
+            semantic_legend: strings(
+                wire.semantic_tokens_provider
+                    .and_then(|p| p.legend)
+                    .and_then(|l| l.token_types),
+            )
+            .map(|v| v.as_str().unwrap_or("").to_string())
+            .collect(),
+            prepare_rename: matches!(
+                wire.rename_provider,
+                Some(WireRenameProvider::Options {
+                    prepare_provider: Some(true)
+                })
+            ),
+            completion_triggers: strings(
+                wire.completion_provider.and_then(|p| p.trigger_characters),
+            )
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+            code_action_resolve: wire.code_action_provider.and_then(|p| p.resolve_provider)
+                == Some(true),
+        }
     }
 }
 
@@ -680,27 +827,6 @@ pub fn parse_prepare_rename(result: &Value) -> Option<PrepareRename> {
             range: Some((start.into(), end.into())),
         }),
     }
-}
-
-/// Whether the server's `renameProvider` advertises `prepareSupport`.
-pub fn parse_prepare_rename_support(result: &Value) -> bool {
-    result["capabilities"]["renameProvider"]["prepareProvider"]
-        .as_bool()
-        .unwrap_or(false)
-}
-
-/// The server's `completionProvider.triggerCharacters` — characters that should
-/// auto-open completion even though they aren't identifier characters (e.g. `.`
-/// for member access in OCaml/Rust). Empty if the server advertises none.
-pub fn parse_completion_triggers(result: &Value) -> Vec<String> {
-    result["capabilities"]["completionProvider"]["triggerCharacters"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// A code lens: where it sits, its title (if the command is already present),
@@ -1102,19 +1228,6 @@ pub fn parse_code_actions(result: &Value) -> Vec<CodeAction> {
             })
         })
         .collect()
-}
-
-/// The semantic-tokens legend (`tokenTypes`) from the server's `initialize`
-/// result, indexed by the token-type id in the encoded stream.
-pub fn parse_semantic_legend(result: &Value) -> Vec<String> {
-    result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|v| v.as_str().unwrap_or("").to_string())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// One decoded semantic token: `(line, start_char, length, type_name)` in LSP
@@ -2229,21 +2342,70 @@ mod tests {
     }
 
     #[test]
+    fn sync_kind_shapes_and_lenient_capabilities() {
+        let sync = |sync: Value| {
+            ServerCapabilities::from_initialize(
+                &json!({ "capabilities": { "textDocumentSync": sync } }),
+            )
+            .sync_kind
+        };
+        assert_eq!(sync(json!(2)), SyncKind::Incremental);
+        assert_eq!(sync(json!({ "change": 1 })), SyncKind::Full);
+        assert_eq!(sync(json!({ "change": 0 })), SyncKind::None);
+        assert_eq!(sync(json!(7)), SyncKind::None);
+        // Missing or malformed → full.
+        assert_eq!(sync(json!({})), SyncKind::Full);
+        assert_eq!(sync(json!({ "change": "x" })), SyncKind::Full);
+        assert_eq!(sync(json!("x")), SyncKind::Full);
+        assert_eq!(
+            ServerCapabilities::from_initialize(&Value::Null),
+            ServerCapabilities::default()
+        );
+        // One malformed capability doesn't sink the others.
+        let caps = ServerCapabilities::from_initialize(&json!({ "capabilities": {
+            "textDocumentSync": 2,
+            "semanticTokensProvider": "bogus",
+            "completionProvider": { "triggerCharacters": [".", 3] },
+            "codeActionProvider": { "resolveProvider": true },
+        } }));
+        assert_eq!(caps.sync_kind, SyncKind::Incremental);
+        assert!(caps.semantic_legend.is_empty());
+        assert_eq!(caps.completion_triggers, vec!["."]);
+        assert!(caps.code_action_resolve);
+    }
+
+    #[test]
     fn save_option_shapes() {
         let caps = |sync: Value| json!({ "capabilities": { "textDocumentSync": sync } });
-        assert_eq!(parse_save_option(&caps(json!(2))), Some(false));
-        assert_eq!(parse_save_option(&caps(json!({ "change": 2 }))), None);
         assert_eq!(
-            parse_save_option(&caps(json!({ "save": true }))),
+            ServerCapabilities::from_initialize(&caps(json!(2))).save,
             Some(false)
         );
-        assert_eq!(parse_save_option(&caps(json!({ "save": false }))), None);
         assert_eq!(
-            parse_save_option(&caps(json!({ "save": { "includeText": true } }))),
+            ServerCapabilities::from_initialize(&caps(json!({ "change": 2 }))).save,
+            None
+        );
+        assert_eq!(
+            ServerCapabilities::from_initialize(&caps(json!({ "save": true }))).save,
+            Some(false)
+        );
+        assert_eq!(
+            ServerCapabilities::from_initialize(&caps(json!({ "save": false }))).save,
+            None
+        );
+        assert_eq!(
+            ServerCapabilities::from_initialize(&caps(json!({ "save": { "includeText": true } })))
+                .save,
             Some(true)
         );
-        assert_eq!(parse_save_option(&caps(json!({ "save": {} }))), Some(false));
-        assert_eq!(parse_save_option(&json!({ "capabilities": {} })), None);
+        assert_eq!(
+            ServerCapabilities::from_initialize(&caps(json!({ "save": {} }))).save,
+            Some(false)
+        );
+        assert_eq!(
+            ServerCapabilities::from_initialize(&json!({ "capabilities": {} })).save,
+            None
+        );
     }
 
     #[test]
@@ -2828,7 +2990,7 @@ mod tests {
             "legend": { "tokenTypes": ["a", "b"], "tokenModifiers": [] }
         } } });
         assert_eq!(
-            parse_semantic_legend(&init),
+            ServerCapabilities::from_initialize(&init).semantic_legend,
             vec!["a".to_string(), "b".to_string()]
         );
     }
@@ -2867,10 +3029,13 @@ mod tests {
         assert_eq!(parse_prepare_rename(&json!({ "x": 1 })), None);
         // capability flag.
         let init = json!({ "capabilities": { "renameProvider": { "prepareProvider": true } } });
-        assert!(parse_prepare_rename_support(&init));
-        assert!(!parse_prepare_rename_support(
-            &json!({ "capabilities": { "renameProvider": true } })
-        ));
+        assert!(ServerCapabilities::from_initialize(&init).prepare_rename);
+        assert!(
+            !ServerCapabilities::from_initialize(
+                &json!({ "capabilities": { "renameProvider": true } })
+            )
+            .prepare_rename
+        );
     }
 
     #[test]
@@ -2878,13 +3043,21 @@ mod tests {
         let init = json!({
             "capabilities": { "completionProvider": { "triggerCharacters": [".", "#", "~"] } }
         });
-        assert_eq!(parse_completion_triggers(&init), vec![".", "#", "~"]);
+        assert_eq!(
+            ServerCapabilities::from_initialize(&init).completion_triggers,
+            vec![".", "#", "~"]
+        );
         // No completionProvider, or no triggerCharacters → empty.
-        assert!(parse_completion_triggers(&json!({ "capabilities": {} })).is_empty());
         assert!(
-            parse_completion_triggers(&json!({
+            ServerCapabilities::from_initialize(&json!({ "capabilities": {} }))
+                .completion_triggers
+                .is_empty()
+        );
+        assert!(
+            ServerCapabilities::from_initialize(&json!({
                 "capabilities": { "completionProvider": {} }
             }))
+            .completion_triggers
             .is_empty()
         );
     }

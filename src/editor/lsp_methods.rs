@@ -128,16 +128,11 @@ impl Editor {
                 client,
                 ready: false,
                 exited: false,
-                save: None,
-                code_action_resolve: false,
-                sync_kind: lsp::SyncKind::Full,
+                caps: lsp::ServerCapabilities::default(),
                 open: HashSet::new(),
                 versions: HashMap::new(),
                 pending_completion: None,
                 pending: HashMap::new(),
-                semantic_legend: Vec::new(),
-                prepare_rename: false,
-                completion_triggers: Vec::new(),
                 semantic_state: HashMap::new(),
                 _task: task,
             },
@@ -203,7 +198,7 @@ impl Editor {
         let Some((sync_kind, open)) = self
             .servers
             .get(language)
-            .map(|s| (s.sync_kind, s.open.contains(&uri)))
+            .map(|s| (s.caps.sync_kind, s.open.contains(&uri)))
         else {
             return;
         };
@@ -281,23 +276,9 @@ impl Editor {
         };
         let is_init = self.servers.get(&language).is_some_and(|s| !s.ready);
         if is_init {
-            let sync_kind = lsp::parse_sync_kind(&result);
-            let legend = lsp::parse_semantic_legend(&result);
-            let prepare_rename = lsp::parse_prepare_rename_support(&result);
-            let completion_triggers = lsp::parse_completion_triggers(&result);
-            let save = lsp::parse_save_option(&result);
-            let code_action_resolve =
-                result["capabilities"]["codeActionProvider"]["resolveProvider"]
-                    .as_bool()
-                    .unwrap_or(false);
             if let Some(server) = self.servers.get_mut(&language) {
                 server.ready = true;
-                server.save = save;
-                server.code_action_resolve = code_action_resolve;
-                server.sync_kind = sync_kind;
-                server.semantic_legend = legend;
-                server.prepare_rename = prepare_rename;
-                server.completion_triggers = completion_triggers;
+                server.caps = lsp::ServerCapabilities::from_initialize(&result);
                 server.client.initialized();
             }
             // Open the buffer that triggered the server (if it's this language).
@@ -595,7 +576,7 @@ impl Editor {
         let wants_text = self
             .servers
             .values()
-            .any(|s| s.save == Some(true) && s.open.contains(uri));
+            .any(|s| s.caps.save == Some(true) && s.open.contains(uri));
         let text = if wants_text {
             match self.document_for_uri(uri) {
                 Some(None) => Some(self.active.buffer.full_text()),
@@ -606,7 +587,7 @@ impl Editor {
             None
         };
         for server in self.servers.values_mut() {
-            if let Some(include_text) = server.save
+            if let Some(include_text) = server.caps.save
                 && server.ready
                 && server.open.contains(uri)
             {
@@ -622,7 +603,7 @@ impl Editor {
     /// path. A full-text change is valid for incremental servers too.
     pub(super) fn lsp_sync_document(&mut self, uri: &str, text: &str) {
         for server in self.servers.values_mut() {
-            if server.sync_kind == lsp::SyncKind::None || !server.open.contains(uri) {
+            if server.caps.sync_kind == lsp::SyncKind::None || !server.open.contains(uri) {
                 continue;
             }
             let version = server.versions.entry(uri.to_string()).or_insert(1);
@@ -764,7 +745,7 @@ impl Editor {
                 if !fresh {
                     return;
                 }
-                let tokens = lsp::decode_semantic_data(&data, &server.semantic_legend);
+                let tokens = lsp::decode_semantic_data(&data, &server.caps.semantic_legend);
                 let records: Vec<String> = tokens
                     .iter()
                     .map(|(line, col, len, ty)| format!("{line}\t{col}\t{len}\t{ty}"))
@@ -955,7 +936,7 @@ impl Editor {
         let supports = self
             .active_language()
             .and_then(|l| self.servers.get(&l))
-            .is_some_and(|s| s.prepare_rename);
+            .is_some_and(|s| s.caps.prepare_rename);
         if supports {
             self.lsp_send(
                 "textDocument/prepareRename",
@@ -1952,7 +1933,7 @@ impl Editor {
         let can_resolve = self
             .active_language()
             .and_then(|l| self.servers.get(&l))
-            .is_some_and(|s| s.code_action_resolve);
+            .is_some_and(|s| s.caps.code_action_resolve);
         if can_resolve && let Some(raw) = action.resolve.clone() {
             let mut original = action.clone();
             original.resolve = None;
