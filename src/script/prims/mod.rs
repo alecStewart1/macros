@@ -4,5 +4,6 @@
 
 use super::*;
 
+pub(super) mod grid;
 pub(super) mod help;
 pub(super) mod keymaps;
