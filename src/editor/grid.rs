@@ -1715,20 +1715,11 @@ impl Editor {
         self.active.modified = modified;
         if !bar_visible {
             let content = content.replace('\n', "↵");
-            let line: SharedString = if content.is_empty() {
+            self.grid_set_echo(if content.is_empty() {
                 name.into()
             } else {
                 format!("{name}  │  {content}").into()
-            };
-            // Only replace an echo the grid itself put there (or none), so an
-            // error or other message isn't wiped by the next cursor move. Not
-            // logged to *Messages* — cursor moves would flood it.
-            let ours = self.status.is_empty()
-                || self.grid_echo.as_ref().is_some_and(|e| *e == self.status);
-            if ours {
-                self.status = line.clone();
-                self.grid_echo = Some(line);
-            }
+            });
         } else if self.grid_echo.as_ref().is_some_and(|e| *e == self.status) {
             self.status = SharedString::default();
             self.grid_echo = None;
@@ -1739,18 +1730,25 @@ impl Editor {
         // Typing a formula: the name dropdown, and the argument being typed.
         self.grid_refresh_completion();
         if let Some(hint) = self.grid_formula_hint() {
-            let ours = self.status.is_empty()
-                || self.grid_echo.as_ref().is_some_and(|e| *e == self.status);
-            if ours {
-                let line: SharedString = hint.into();
-                self.status = line.clone();
-                self.grid_echo = Some(line);
-            }
+            self.grid_set_echo(hint.into());
         }
         if sel_changed {
             self.grid_fire_selection_changed();
         }
         cx.notify();
+    }
+
+    /// Show `line` in the echo area as the grid's own. Only an echo the grid
+    /// itself put there (or none) is replaced, so an error or other message
+    /// isn't wiped by the next cursor move. Not logged to *Messages* —
+    /// cursor moves would flood it.
+    fn grid_set_echo(&mut self, line: SharedString) {
+        let ours =
+            self.status.is_empty() || self.grid_echo.as_ref().is_some_and(|e| *e == self.status);
+        if ours {
+            self.status = line.clone();
+            self.grid_echo = Some(line);
+        }
     }
 
     /// Call `grid-selection-changed-hook` functions (no arguments; they read
