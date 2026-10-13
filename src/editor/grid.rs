@@ -23,7 +23,7 @@ use gpui::{Context, Keystroke, MouseButton, Pixels, Point, SharedString};
 use super::input::Handled;
 use super::*;
 use crate::grid::cellfmt::{self, CellFmt, CellFormats, NumCode};
-use crate::grid::cmd::{GridCmd, GridOp};
+use crate::grid::cmd::{GridCmd, GridInvocation, GridOp};
 use crate::grid::infer::ColType;
 use crate::grid::model::{CellsSnapshot, Change, Workbook};
 use crate::grid::sidecar::Sidecar;
@@ -2171,20 +2171,7 @@ impl Editor {
         use EditorCommand as E;
         match command {
             E::GridOp(op) => self.grid_op(op, cx),
-            E::Grid(GridCmd::GridMode) => self.grid_mode_from_text(cx),
-            E::Grid(GridCmd::ToggleView) => {
-                if self.active.grid.is_some() {
-                    self.grid_view_as_text(cx);
-                } else {
-                    self.grid_mode_from_text(cx);
-                }
-            }
-            E::Grid(GridCmd::CellPopupCommit) => self.grid_cell_popup_finish(true, cx),
-            E::Grid(GridCmd::CellPopupAbort) => self.grid_cell_popup_finish(false, cx),
-            E::Grid(GridCmd::OrgTableToGrid) => self.org_table_to_grid(cx),
-            E::Grid(GridCmd::Recalculate) if self.active.grid.is_some() => {
-                self.grid_recalculate(cx)
-            }
+            E::Grid(inv) => self.grid_invoked(inv, cx),
             E::GridRegisterFunction {
                 name,
                 source,
@@ -2213,14 +2200,6 @@ impl Editor {
                 }
                 cx.notify();
             }
-            E::Grid(cmd) => {
-                if self.active.grid.is_none() {
-                    self.echo("Not a grid buffer", cx);
-                } else {
-                    let count = std::mem::take(&mut self.grid_count);
-                    self.grid_command(cmd, count, cx);
-                }
-            }
             E::GridExtensions(exts) => {
                 self.grid_extensions = exts
                     .into_iter()
@@ -2229,33 +2208,33 @@ impl Editor {
             }
             E::GridGotoAddress(addr) => self.grid_goto_address(&addr, cx),
             other if self.active.grid.is_some() => match other {
-                E::Undo => self.grid_command(GridCmd::Undo, 0, cx),
-                E::Redo => self.grid_command(GridCmd::Redo, 0, cx),
+                E::Undo => self.grid_command(GridCmd::Undo, cx),
+                E::Redo => self.grid_command(GridCmd::Redo, cx),
                 E::SaveBuffer => self.grid_save(cx),
                 E::RevertBuffer => self.grid_revert(cx),
-                E::ClipboardCopy | E::KillRingSave => self.grid_command(GridCmd::Yank, 0, cx),
-                E::YankPop => self.grid_command(GridCmd::YankPop, 0, cx),
-                E::Recenter => self.grid_command(GridCmd::Recenter, 0, cx),
-                E::ExchangePointAndMark => self.grid_command(GridCmd::ExchangeAnchor, 0, cx),
-                E::KillLine => self.grid_command(GridCmd::KillToRowEnd, 0, cx),
-                E::IsearchForward => self.grid_command(GridCmd::SearchForward, 0, cx),
-                E::IsearchBackward => self.grid_command(GridCmd::SearchBackward, 0, cx),
-                E::ClipboardCut | E::KillRegion => self.grid_command(GridCmd::Cut, 0, cx),
+                E::ClipboardCopy | E::KillRingSave => self.grid_command(GridCmd::Yank, cx),
+                E::YankPop => self.grid_command(GridCmd::YankPop, cx),
+                E::Recenter => self.grid_command(GridCmd::Recenter, cx),
+                E::ExchangePointAndMark => self.grid_command(GridCmd::ExchangeAnchor, cx),
+                E::KillLine => self.grid_command(GridCmd::KillToRowEnd, cx),
+                E::IsearchForward => self.grid_command(GridCmd::SearchForward, cx),
+                E::IsearchBackward => self.grid_command(GridCmd::SearchBackward, cx),
+                E::ClipboardCut | E::KillRegion => self.grid_command(GridCmd::Cut, cx),
                 E::ClipboardPaste | E::Yank => {
                     if self.grid_editing() {
                         if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
                             self.grid_edit_input(&text, cx);
                         }
                     } else {
-                        self.grid_command(GridCmd::Paste, 0, cx);
+                        self.grid_command(GridCmd::Paste, cx);
                     }
                 }
-                E::MarkWholeBuffer => self.grid_command(GridCmd::SelectAll, 0, cx),
+                E::MarkWholeBuffer => self.grid_command(GridCmd::SelectAll, cx),
                 E::KeyboardQuit => {
                     if self.grid_editing() {
                         self.grid_cancel_edit(cx);
                     } else {
-                        self.grid_command(GridCmd::SelectCancel, 0, cx);
+                        self.grid_command(GridCmd::SelectCancel, cx);
                     }
                     self.pending_keys.clear();
                     self.status = SharedString::default();
@@ -2267,11 +2246,32 @@ impl Editor {
         Ok(())
     }
 
-    /// Apply one grid command to the active grid. `count` is the typed count
-    /// (0 = none): count-aware commands read it, others repeat.
-    pub(super) fn grid_command(&mut self, cmd: GridCmd, count: usize, cx: &mut Context<Self>) {
+    /// A grid command from the command router: the few that mean something
+    /// outside a grid (or switch into one) here, the rest on the active grid.
+    fn grid_invoked(&mut self, inv: GridInvocation, cx: &mut Context<Self>) {
+        match inv.cmd {
+            GridCmd::GridMode => self.grid_mode_from_text(cx),
+            GridCmd::ToggleView => {
+                if self.active.grid.is_some() {
+                    self.grid_view_as_text(cx);
+                } else {
+                    self.grid_mode_from_text(cx);
+                }
+            }
+            GridCmd::CellPopupCommit => self.grid_cell_popup_finish(true, cx),
+            GridCmd::CellPopupAbort => self.grid_cell_popup_finish(false, cx),
+            GridCmd::OrgTableToGrid => self.org_table_to_grid(cx),
+            _ if self.active.grid.is_none() => self.echo("Not a grid buffer", cx),
+            GridCmd::Recalculate => self.grid_recalculate(cx),
+            _ => self.grid_command(inv, cx),
+        }
+    }
+
+    /// Apply one grid command to the active grid. The invocation's count
+    /// (0 = none) is read by count-aware commands; others repeat.
+    pub(super) fn grid_command(&mut self, inv: impl Into<GridInvocation>, cx: &mut Context<Self>) {
         use GridCmd::*;
-        let flag = std::mem::take(&mut self.grid_flag);
+        let GridInvocation { cmd, count, flag } = inv.into();
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
@@ -2292,7 +2292,7 @@ impl Editor {
         // Count-aware: run once with the count as an argument.
         if !matches!(cmd, GotoLastRow | GotoColumn) && count > 1 {
             for _ in 0..count.min(10_000) {
-                self.grid_command(cmd, 0, cx);
+                self.grid_command(cmd, cx);
             }
             return;
         }
@@ -2443,7 +2443,7 @@ impl Editor {
             }
             Cut => {
                 self.grid_copy_selection(cx);
-                self.grid_command(Clear, 0, cx);
+                self.grid_command(Clear, cx);
                 if let Some(g) = self.active.grid.as_deref_mut() {
                     g.deselect();
                 }
@@ -2564,7 +2564,7 @@ impl Editor {
             }
             Repeat => match g.last_repeat.clone() {
                 Some(RepeatOp::Cmd(cmd)) => {
-                    self.grid_command(cmd, 0, cx);
+                    self.grid_command(cmd, cx);
                     return;
                 }
                 Some(RepeatOp::SetText(text)) => {
@@ -3651,14 +3651,16 @@ impl Editor {
             // Through the command router, so commands it handles itself
             // (`grid-toggle-view`, popup commit) work from keys too.
             Some(cmd) => {
-                let mut count = count;
+                let mut inv = GridInvocation {
+                    count,
+                    ..cmd.into()
+                };
                 match prefix {
-                    Some(_) if cmd.prefix_is_flag() => self.grid_flag = true,
-                    Some(n) if count == 0 && n > 1 => count = n as usize,
+                    Some(_) if cmd.prefix_is_flag() => inv.flag = true,
+                    Some(n) if count == 0 && n > 1 => inv.count = n as usize,
                     _ => {}
                 }
-                self.grid_count = count;
-                self.apply_command(EditorCommand::Grid(cmd), cx);
+                self.apply_command(EditorCommand::Grid(inv), cx);
             }
             None => {
                 let count = match prefix {
@@ -3943,7 +3945,7 @@ impl Editor {
         let (rows, cols) = g.used();
         match hit {
             GridHit::NameBox => {
-                self.grid_command(GridCmd::Goto, 0, cx);
+                self.grid_command(GridCmd::Goto, cx);
                 return true;
             }
             GridHit::Bar { x } => {

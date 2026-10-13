@@ -206,7 +206,7 @@ pub(crate) fn nullary_commands() -> Vec<(&'static str, EditorCommand)> {
     out.extend(
         crate::grid::cmd::GRID_COMMANDS
             .iter()
-            .map(|&(name, cmd)| (name, Grid(cmd))),
+            .map(|&(name, cmd)| (name, Grid(cmd.into()))),
     );
     out
 }

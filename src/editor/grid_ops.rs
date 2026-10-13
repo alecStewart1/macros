@@ -197,7 +197,7 @@ impl Editor {
             self.echo("No older kill to yank", cx);
             return;
         }
-        self.grid_command(GridCmd::Undo, 0, cx);
+        self.grid_command(GridCmd::Undo, cx);
         if let Some(g) = self.active.grid.as_deref_mut() {
             g.view.cursor = y.cursor;
             g.view.anchor = y.anchor;

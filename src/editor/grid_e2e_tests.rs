@@ -871,7 +871,7 @@ fn org_table_to_grid_and_mode_hooks(cx: &mut TestAppContext) {
         e.install_active(doc);
         e.move_to(10, cx);
         e.apply_command(
-            EditorCommand::Grid(crate::grid::cmd::GridCmd::OrgTableToGrid),
+            EditorCommand::Grid(crate::grid::cmd::GridCmd::OrgTableToGrid.into()),
             cx,
         );
     });
@@ -1907,7 +1907,7 @@ fn editing_waits_for_the_background_load(cx: &mut TestAppContext) {
         // RET / F2 is refused like typing: the prefix is replaced when the
         // load lands, and an edit made to it would be lost.
         e.grid_goto_address("B2", cx);
-        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, 0, cx);
+        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, cx);
         assert!(e.active.grid.as_ref().unwrap().view.edit.is_none());
         assert!(e.status.contains("Still loading"), "{}", e.status);
         assert!(!e.active.modified);
@@ -1920,7 +1920,7 @@ fn regression_quit_save_after_edit_during_load_truncates(cx: &mut TestAppContext
     let (big, s) = regression_big(&path);
     ed.update(cx, |e, cx| {
         e.open_grid("big.csv".into(), big.clone(), s.clone().into_bytes(), cx);
-        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, 0, cx);
+        e.grid_command(crate::grid::cmd::GridCmd::EditEnd, cx);
         e.grid_edit_input("X", cx);
         e.grid_commit_edit(0, 0, cx);
         // C-x C-c → "yes" (and `:wqa`).

@@ -131,8 +131,9 @@ pub struct MakeProcessArgs {
 
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
-    /// A grid-buffer command (scheme/grid.scm); see [`crate::grid::cmd`].
-    Grid(crate::grid::cmd::GridCmd),
+    /// A grid-buffer command (scheme/grid.scm), with the count or `C-u`
+    /// flag its key carried; see [`crate::grid::cmd`].
+    Grid(crate::grid::cmd::GridInvocation),
     /// `(grid-extensions '("csv" …))`: extensions that open as a grid.
     GridExtensions(Vec<String>),
     /// `(grid-goto-address "C7")`: move the grid cursor (or select a range).

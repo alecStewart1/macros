@@ -827,11 +827,6 @@ pub struct Editor {
     /// The echo the grid last showed (formula-bar fallback), so it only
     /// replaces its own text, never someone else's message.
     grid_echo: Option<SharedString>,
-    /// Count handed to a grid command dispatched through the command path.
-    grid_count: usize,
-    /// A `C-u` typed before a grid command whose prefix is a flag (see
-    /// `GridCmd::prefix_is_flag`).
-    grid_flag: bool,
     /// Editor-wide grid settings (`grid-default-column-width`, …).
     grid_opts: grid::GridOptions,
     /// An open `ge` popup: (popup buffer, grid buffer, row, col).
@@ -1594,8 +1589,6 @@ impl Editor {
             grid_geom: HashMap::new(),
             grid_drag: None,
             grid_echo: None,
-            grid_count: 0,
-            grid_flag: false,
             grid_opts: Default::default(),
             grid_cell_popup: None,
             grid_recalc_scheduled: false,

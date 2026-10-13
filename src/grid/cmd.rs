@@ -156,6 +156,30 @@ pub enum GridCmd {
     DecreaseDecimals,
 }
 
+/// One run of a grid command: the command and the prefix typed before the
+/// key that ran it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridInvocation {
+    pub cmd: GridCmd,
+    /// The typed count (0 = none): count-aware commands read it, others
+    /// repeat.
+    pub count: usize,
+    /// A `C-u` typed before a command whose prefix is a flag (see
+    /// [`GridCmd::prefix_is_flag`]).
+    pub flag: bool,
+}
+
+impl From<GridCmd> for GridInvocation {
+    /// The command with no prefix.
+    fn from(cmd: GridCmd) -> Self {
+        Self {
+            cmd,
+            count: 0,
+            flag: false,
+        }
+    }
+}
+
 /// Steel name → command, for builtin registration.
 pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
     use GridCmd::*;
