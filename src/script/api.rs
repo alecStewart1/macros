@@ -209,6 +209,7 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ("script/registry.rs", include_str!("registry.rs")),
     ("script/session.rs", include_str!("session.rs")),
     ("authinfo.rs", include_str!("../authinfo.rs")),
+    ("script/prims/keymaps.rs", include_str!("prims/keymaps.rs")),
 ];
 
 /// name → the `//` comment block immediately above its registration.

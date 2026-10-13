@@ -4,7 +4,8 @@
 //!     (snapshots, markers, options).
 //!   * [`gix`] — pure git backends (log/diff/status/…) with no Steel coupling.
 //!   * [`engine`] — the [`ScriptEngine`] handle and its dedicated thread.
-//!   * [`registry`] — `build_engine`: every registered Scheme bridge function.
+//!   * [`registry`] — `build_engine`, the [`Registrar`] and its helpers.
+//!   * [`prims`] — the registered Scheme primitives, one module per category.
 //!   * [`search`] — ripgrep-library file walking for the search primitives.
 //!   * [`convert`] — SteelVal parsing/formatting helpers.
 //!   * [`session`] — session-persistence primitives (savehist / desktop).
@@ -16,6 +17,7 @@ mod commands;
 mod convert;
 mod engine;
 mod gix;
+mod prims;
 mod registry;
 mod search;
 mod session;
