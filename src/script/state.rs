@@ -6,7 +6,28 @@ use ropey::Rope;
 
 use super::EditorCommand;
 
-pub(crate) type Queue = Arc<Mutex<Vec<EditorCommand>>>;
+/// The engine thread's outbox: the [`EditorCommand`]s Scheme queued during the
+/// current job, handed to the editor (in order) when the job finishes.
+#[derive(Clone, Default)]
+pub(crate) struct Queue(Arc<Mutex<Vec<EditorCommand>>>);
+
+impl Queue {
+    /// Queue one command.
+    pub(crate) fn push(&self, cmd: EditorCommand) {
+        self.0.lock().unwrap().push(cmd);
+    }
+
+    /// Queue several commands under one lock (a batch primitive's output).
+    pub(crate) fn extend(&self, cmds: impl IntoIterator<Item = EditorCommand>) {
+        self.0.lock().unwrap().extend(cmds);
+    }
+
+    /// Take everything queued so far, oldest first.
+    pub(crate) fn drain(&self) -> Vec<EditorCommand> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
 pub(crate) type BufferNames = Arc<Mutex<Vec<String>>>;
 /// Buffer name → absolute file path, for buffers visiting a file. Lets Scheme
 /// resolve a non-active buffer's path (`buffer-file-name-of`) — the snapshot
@@ -216,3 +237,20 @@ pub struct SessionState {
 
 /// The published [`SessionState`], shared with the engine thread.
 pub(crate) type SharedSession = Arc<Mutex<SessionState>>;
+
+/// Every handle the engine thread's primitives share with the editor (and
+/// with each other), bundled so they travel as one value: from
+/// [`ScriptEngine::new`] into the engine thread and through registration.
+#[derive(Clone, Default)]
+pub(crate) struct EngineShared {
+    pub(crate) queue: Queue,
+    pub(crate) buffers: BufferNames,
+    pub(crate) buffer_paths: BufferPaths,
+    pub(crate) snapshot: SharedSnapshot,
+    pub(crate) markers: Markers,
+    pub(crate) options: Options,
+    pub(crate) session: SharedSession,
+    /// The id source shared by `make-process`, `make-terminal`, `dap-*`,
+    /// `make-http-stream` and the async sockets (see [`IdGen`]).
+    pub(crate) ids: IdGen,
+}

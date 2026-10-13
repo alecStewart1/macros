@@ -219,15 +219,16 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
 
 /// Build the Steel engine and register every command/bridge function. Runs on
 /// the engine thread (the engine is `!Send`).
-pub(crate) fn build_engine(
-    queue: &Queue,
-    buffers: &BufferNames,
-    buffer_paths: &BufferPaths,
-    snapshot: &SharedSnapshot,
-    markers: &Markers,
-    options: &Options,
-    session: &SharedSession,
-) -> (Engine, Vec<String>) {
+pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
+    let EngineShared {
+        queue,
+        buffers,
+        buffer_paths,
+        snapshot,
+        markers,
+        options,
+        ..
+    } = shared;
     let mut engine = Engine::new();
     let mut names: Vec<String> = Vec::new();
     let mut api: Vec<ApiEntry> = Vec::new();
@@ -251,7 +252,7 @@ pub(crate) fn build_engine(
     {
         let q = queue.clone();
         reg.register_fn("grid-extensions", move |StringList(exts): StringList| {
-            q.lock().unwrap().push(EditorCommand::GridExtensions(exts))
+            q.push(EditorCommand::GridExtensions(exts))
         });
     }
     register_unary(
@@ -273,7 +274,7 @@ pub(crate) fn build_engine(
                 SteelVal::StringV(s) => s.to_string(),
                 other => other.to_string(),
             };
-            q.lock().unwrap().push(EditorCommand::Message(text));
+            q.push(EditorCommand::Message(text));
         });
     }
     reg.section(Section::Keymaps);
@@ -297,9 +298,7 @@ pub(crate) fn build_engine(
                     s.retain(|(m, c, _)| !(m == &mode && c == &chord));
                     s.push((mode.clone(), chord.clone(), command.clone()));
                 }
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::DefineKey(mode, chord, command));
+                q.push(EditorCommand::DefineKey(mode, chord, command));
             },
         );
     }
@@ -392,16 +391,14 @@ pub(crate) fn build_engine(
                   extensions: String,
                   symbol: String,
                   subdir: String| {
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::InstallGrammar(Box::new(GrammarInstall {
-                        id,
-                        repo,
-                        rev,
-                        extensions,
-                        symbol,
-                        subdir,
-                    })));
+                q.push(EditorCommand::InstallGrammar(Box::new(GrammarInstall {
+                    id,
+                    repo,
+                    rev,
+                    extensions,
+                    symbol,
+                    subdir,
+                })));
             },
         );
     }
@@ -678,26 +675,14 @@ pub(crate) fn build_engine(
     // `(set-face-font name family)` — the font family for text under `name`
     // (an installed or bundled family, e.g. "Macros Plot").
     register_binary(&mut reg, queue, "set-face-font", EditorCommand::SetFaceFont);
-    {
-        let q = queue.clone();
-        reg.register_fn("set-face-underline", move |name: String, on: bool| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SetFaceUnderline(name, on));
-        });
-    }
-    {
-        let q = queue.clone();
-        reg.register_fn("set-face-bold", move |name: String, on: bool| {
-            q.lock().unwrap().push(EditorCommand::SetFaceBold(name, on));
-        });
-    }
-    {
-        let q = queue.clone();
-        reg.register_fn("set-face-wavy", move |name: String, on: bool| {
-            q.lock().unwrap().push(EditorCommand::SetFaceWavy(name, on));
-        });
-    }
+    register_binary(
+        &mut reg,
+        queue,
+        "set-face-underline",
+        EditorCommand::SetFaceUnderline,
+    );
+    register_binary(&mut reg, queue, "set-face-bold", EditorCommand::SetFaceBold);
+    register_binary(&mut reg, queue, "set-face-wavy", EditorCommand::SetFaceWavy);
     // --- Native spell checking (scheme/spell.scm's 'native backend) -------
     reg.section(Section::Spell);
     // `(spell-native-available?)` → #t where the OS provides a checker.
@@ -913,9 +898,7 @@ pub(crate) fn build_engine(
         // to the option's declared type when applied (see `Settings::set`).
         let q = queue.clone();
         reg.register_fn("set-option", move |key: String, value: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SetOption(key, option_from_steelval(&value)));
+            q.push(EditorCommand::SetOption(key, option_from_steelval(&value)));
         });
     }
     reg.section(Section::Buffers);
@@ -1017,7 +1000,7 @@ pub(crate) fn build_engine(
             "lsp-request",
             move |method: String, kind: String, params: String, callback: Callback| {
                 let callback = callback.0;
-                q.lock().unwrap().push(EditorCommand::LspRequest {
+                q.push(EditorCommand::LspRequest {
                     method,
                     kind,
                     params,
@@ -1106,7 +1089,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "set-line-image-impl",
             move |line: usize, path: String, max_width: usize| {
-                q.lock().unwrap().push(EditorCommand::SetLineImage {
+                q.push(EditorCommand::SetLineImage {
                     line,
                     path,
                     max_width,
@@ -1131,7 +1114,7 @@ pub(crate) fn build_engine(
             let shared = snapshot.clone();
             reg.register_fn("guard-buffer-unchanged", move |on_stale: String| {
                 let s = shared.load();
-                q.lock().unwrap().push(EditorCommand::GuardBufferUnchanged {
+                q.push(EditorCommand::GuardBufferUnchanged {
                     name: s.name.clone(),
                     tick: s.tick,
                     on_stale,
@@ -1151,7 +1134,7 @@ pub(crate) fn build_engine(
             reg.register_fn(
                 "guard-buffer-tick",
                 move |name: String, tick: usize, on_stale: String| {
-                    q.lock().unwrap().push(EditorCommand::GuardBufferUnchanged {
+                    q.push(EditorCommand::GuardBufferUnchanged {
                         name,
                         tick: tick as u64,
                         on_stale,
@@ -1175,7 +1158,7 @@ pub(crate) fn build_engine(
         // base font size (e.g. a heading); `(clear-line-scales)` resets all.
         let q = queue.clone();
         reg.register_fn("set-line-scale", move |line: usize, scale: f64| {
-            q.lock().unwrap().push(EditorCommand::SetLineScale {
+            q.push(EditorCommand::SetLineScale {
                 line,
                 scale: scale as f32,
             });
@@ -1298,9 +1281,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "watch-directories",
             move |owner: String, StringList(dirs): StringList| {
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::WatchDirectories(owner, dirs));
+                q.push(EditorCommand::WatchDirectories(owner, dirs));
             },
         );
     }
@@ -1312,9 +1293,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "watch-tree",
             move |owner: String, StringList(dirs): StringList| {
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::WatchTree(owner, dirs));
+                q.push(EditorCommand::WatchTree(owner, dirs));
             },
         );
     }
@@ -1323,14 +1302,12 @@ pub(crate) fn build_engine(
         // `(helm sources)` where sources is a list of `(name candidates action)`.
         let q = queue.clone();
         reg.register_fn("helm", move |sources: SteelVal| {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::Helm(parse_helm_sources(&sources)));
+            q.push(EditorCommand::Helm(parse_helm_sources(&sources)));
         });
         // `(helm-from initial sources)` — Helm with a pre-filled input.
         let q = queue.clone();
         reg.register_fn("helm-from", move |initial: String, sources: SteelVal| {
-            q.lock().unwrap().push(EditorCommand::HelmFrom(
+            q.push(EditorCommand::HelmFrom(
                 initial,
                 parse_helm_sources(&sources),
             ));
@@ -1394,7 +1371,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "buffer-copy-lines",
             move |src: String, ss: usize, se: usize, dst: String, ds: usize, de: usize| {
-                q.lock().unwrap().push(EditorCommand::BufferCopyLines {
+                q.push(EditorCommand::BufferCopyLines {
                     src,
                     src_start: ss,
                     src_end: se,
@@ -1412,7 +1389,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "buffer-highlight-lines",
             move |name: String, start: usize, end: usize, face: String| {
-                q.lock().unwrap().push(EditorCommand::BufferHighlightLines {
+                q.push(EditorCommand::BufferHighlightLines {
                     name,
                     start,
                     end,
@@ -1472,7 +1449,7 @@ pub(crate) fn build_engine(
         reg.register_fn("set-selections", move |flat: SteelVal| {
             let v = steel_usize_list(&flat);
             let pairs = v.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect();
-            q.lock().unwrap().push(EditorCommand::SetSelections(pairs));
+            q.push(EditorCommand::SetSelections(pairs));
         });
     }
     reg.section(Section::Lsp);
@@ -1593,7 +1570,7 @@ pub(crate) fn build_engine(
                     Some(func) => (Vec::new(), Some(func)),
                     None => (steel_string_list(&candidates), None),
                 };
-                q.lock().unwrap().push(EditorCommand::CompletingRead {
+                q.push(EditorCommand::CompletingRead {
                     prompt,
                     candidates,
                     dynamic,
@@ -1737,9 +1714,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "set-mode-line-format",
             move |StringList(segs): StringList| {
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::SetModeLineFormat(segs));
+                q.push(EditorCommand::SetModeLineFormat(segs));
             },
         );
     }
@@ -1753,7 +1728,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "set-titlebar-dropdown",
             move |StringList(items): StringList, active: String, callback: Callback| {
-                q.lock().unwrap().push(EditorCommand::SetTitlebarDropdown {
+                q.push(EditorCommand::SetTitlebarDropdown {
                     items,
                     active,
                     callback: callback.0,
@@ -1773,23 +1748,19 @@ pub(crate) fn build_engine(
         // the unary form dominated it. Malformed entries are skipped.
         let q = queue.clone();
         reg.register_fn("overlay-set-faces", move |triples: SteelVal| {
-            let mut queue = q.lock().unwrap();
-            for t in steel_list(&triples).unwrap_or_default() {
-                let Some(items) = steel_list(&t) else {
-                    continue;
-                };
+            let faces = steel_list(&triples).unwrap_or_default();
+            q.extend(faces.iter().filter_map(|t| {
+                let items = steel_list(t)?;
                 let usize_at = |i: usize| match items.get(i) {
                     Some(SteelVal::IntV(n)) if *n >= 0 => Some(*n as usize),
                     _ => None,
                 };
-                if let (Some(start), Some(end), Some(face)) = (
-                    usize_at(0),
-                    usize_at(1),
-                    items.get(2).and_then(steel_string),
-                ) {
-                    queue.push(EditorCommand::OverlayFace { start, end, face });
-                }
-            }
+                Some(EditorCommand::OverlayFace {
+                    start: usize_at(0)?,
+                    end: usize_at(1)?,
+                    face: items.get(2).and_then(steel_string)?,
+                })
+            }));
         });
     }
     register_binary(&mut reg, queue, "overlay-hide", |start, end| {
@@ -1833,7 +1804,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "put-text-property",
             move |start: usize, end: usize, key: String, value: String| {
-                q.lock().unwrap().push(EditorCommand::PutTextProperty {
+                q.push(EditorCommand::PutTextProperty {
                     start,
                     end,
                     key,
@@ -2241,9 +2212,10 @@ pub(crate) fn build_engine(
         unsafe { std::env::set_var(&name, &value) };
     });
     // --- Async (subprocess streaming, timers) -----------------------------
-    // Dedicated id source for processes/terminals. Each lives in its own
-    // editor-side map keyed by id, so it needn't share the marker counter.
-    let async_ids = IdGen::default();
+    // Processes, terminals, DAP sessions, HTTP streams and async sockets draw
+    // their ids from `shared.ids`. Each lives in its own editor-side map keyed
+    // by id, so it needn't share the marker counter.
+    let async_ids = &shared.ids;
     {
         // `(make-process program args on-output on-exit)` → a process id (used by
         // process-send-string / kill-process). on-exit "" = none; it receives the
@@ -2260,16 +2232,14 @@ pub(crate) fn build_engine(
                   env: crate::process::EnvOverrides|
                   -> usize {
                 let id = ids.next();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::MakeProcess(Box::new(MakeProcessArgs {
-                        id,
-                        program,
-                        args,
-                        env,
-                        on_output: on_output.0,
-                        on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
-                    })));
+                q.push(EditorCommand::MakeProcess(Box::new(MakeProcessArgs {
+                    id,
+                    program,
+                    args,
+                    env,
+                    on_output: on_output.0,
+                    on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
+                })));
                 id as usize
             }
         };
@@ -2325,17 +2295,15 @@ pub(crate) fn build_engine(
                   on_exit: Callback|
                   -> usize {
                 let id = ids.next();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::DapStart(Box::new(DapStartArgs {
-                        id,
-                        program,
-                        args,
-                        env: crate::process::current(),
-                        cwd,
-                        on_message: on_message.0,
-                        on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
-                    })));
+                q.push(EditorCommand::DapStart(Box::new(DapStartArgs {
+                    id,
+                    program,
+                    args,
+                    env: crate::process::current(),
+                    cwd,
+                    on_message: on_message.0,
+                    on_exit: Some(on_exit.0).filter(|s| !s.is_empty()),
+                })));
                 id as usize
             },
         );
@@ -2360,7 +2328,7 @@ pub(crate) fn build_engine(
                     .filter(|&p| p != 0)
                     .ok_or_else(|| format!("dap-connect: invalid port {port}"))?;
                 let id = ids.next();
-                q.lock().unwrap().push(EditorCommand::DapConnect {
+                q.push(EditorCommand::DapConnect {
                     id,
                     host,
                     port,
@@ -2404,16 +2372,14 @@ pub(crate) fn build_engine(
                     .collect();
                 let Callback(on_line) = on_line;
                 let Callback(on_done) = on_done;
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::HttpStream(Box::new(HttpStreamArgs {
-                        id,
-                        url,
-                        headers,
-                        body,
-                        on_line,
-                        on_done,
-                    })));
+                q.push(EditorCommand::HttpStream(Box::new(HttpStreamArgs {
+                    id,
+                    url,
+                    headers,
+                    body,
+                    on_line,
+                    on_done,
+                })));
                 id as usize
             },
         );
@@ -2453,16 +2419,14 @@ pub(crate) fn build_engine(
                         .map(|kv| (kv[0].clone(), kv[1].clone()))
                         .collect();
                     let Callback(on_response) = on_response;
-                    q.lock()
-                        .unwrap()
-                        .push(EditorCommand::HttpRequest(Box::new(HttpRequestArgs {
-                            method,
-                            url,
-                            headers,
-                            body,
-                            on_response,
-                            full,
-                        })));
+                    q.push(EditorCommand::HttpRequest(Box::new(HttpRequestArgs {
+                        method,
+                        url,
+                        headers,
+                        body,
+                        on_response,
+                        full,
+                    })));
                     true
                 },
             );
@@ -2496,15 +2460,13 @@ pub(crate) fn build_engine(
                     return 0;
                 }
                 let Callback(on_request) = on_request;
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::HttpServe(Box::new(HttpServeArgs {
-                        listener: Arc::new(Mutex::new(Some(listener))),
-                        port: bound,
-                        content_type,
-                        body,
-                        on_request,
-                    })));
+                q.push(EditorCommand::HttpServe(Box::new(HttpServeArgs {
+                    listener: Arc::new(Mutex::new(Some(listener))),
+                    port: bound,
+                    content_type,
+                    body,
+                    on_request,
+                })));
                 bound as usize
             },
         );
@@ -2955,7 +2917,7 @@ pub(crate) fn build_engine(
                 let id = ids.next();
                 let Callback(on_data) = on_data;
                 let Callback(on_close) = on_close;
-                q.lock().unwrap().push(EditorCommand::SocketConnectAsync {
+                q.push(EditorCommand::SocketConnectAsync {
                     id,
                     host,
                     port,
@@ -2972,7 +2934,7 @@ pub(crate) fn build_engine(
         reg.register_fn(
             "socket-async-send",
             move |id: usize, hex_data: String| -> bool {
-                q.lock().unwrap().push(EditorCommand::SocketAsyncSend {
+                q.push(EditorCommand::SocketAsyncSend {
                     id: id as u64,
                     hex: hex_data,
                 });
@@ -2983,9 +2945,7 @@ pub(crate) fn build_engine(
     {
         let q = queue.clone();
         reg.register_fn("socket-async-close", move |id: usize| -> bool {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::SocketAsyncClose { id: id as u64 });
+            q.push(EditorCommand::SocketAsyncClose { id: id as u64 });
             true
         });
     }
@@ -2998,7 +2958,7 @@ pub(crate) fn build_engine(
                 let id = ids.next();
                 let Callback(on_message) = on_message;
                 let Callback(on_close) = on_close;
-                q.lock().unwrap().push(EditorCommand::WsConnect {
+                q.push(EditorCommand::WsConnect {
                     id,
                     url,
                     on_message,
@@ -3011,7 +2971,7 @@ pub(crate) fn build_engine(
     {
         let q = queue.clone();
         reg.register_fn("ws-send", move |id: usize, text: String| -> bool {
-            q.lock().unwrap().push(EditorCommand::WsSend {
+            q.push(EditorCommand::WsSend {
                 id: id as u64,
                 text,
             });
@@ -3021,9 +2981,7 @@ pub(crate) fn build_engine(
     {
         let q = queue.clone();
         reg.register_fn("ws-close", move |id: usize| -> bool {
-            q.lock()
-                .unwrap()
-                .push(EditorCommand::WsClose { id: id as u64 });
+            q.push(EditorCommand::WsClose { id: id as u64 });
             true
         });
     }
@@ -3098,16 +3056,14 @@ pub(crate) fn build_engine(
                   directory: String|
                   -> usize {
                 let id = ids.next();
-                q.lock()
-                    .unwrap()
-                    .push(EditorCommand::MakeTerminal(Box::new(MakeTerminalArgs {
-                        id,
-                        name,
-                        program,
-                        args,
-                        directory,
-                        env: crate::process::current(),
-                    })));
+                q.push(EditorCommand::MakeTerminal(Box::new(MakeTerminalArgs {
+                    id,
+                    name,
+                    program,
+                    args,
+                    directory,
+                    env: crate::process::current(),
+                })));
                 id as usize
             },
         );
@@ -3566,7 +3522,7 @@ pub(crate) fn build_engine(
     }
     // Session persistence (savehist / desktop) — see src/script/session.rs.
     reg.section(Section::Session);
-    register_session(&mut reg, queue, session);
+    register_session(&mut reg, shared);
     // The unlocked authinfo.gpg store behind scheme/secrets.scm.
     reg.section(Section::Secrets);
     crate::authinfo::register(&mut reg);
@@ -3698,7 +3654,7 @@ pub(crate) fn register_nullary(
     cmd: EditorCommand,
 ) {
     let q = queue.clone();
-    reg.register_fn(name, move || q.lock().unwrap().push(cmd.clone()));
+    reg.register_fn(name, move || q.push(cmd.clone()));
 }
 
 /// Register a one-argument Steel command: `name` enqueues the command built by
@@ -3713,7 +3669,7 @@ pub(crate) fn register_unary<T>(
     T: steel::rvals::FromSteelVal + 'static,
 {
     let q = queue.clone();
-    reg.register_fn(name, move |arg: T| q.lock().unwrap().push(make(arg)));
+    reg.register_fn(name, move |arg: T| q.push(make(arg)));
 }
 
 /// Register a two-argument Steel command (see [`register_unary`]).
@@ -3727,7 +3683,7 @@ pub(crate) fn register_binary<T, U>(
     U: steel::rvals::FromSteelVal + 'static,
 {
     let q = queue.clone();
-    reg.register_fn(name, move |a: T, b: U| q.lock().unwrap().push(make(a, b)));
+    reg.register_fn(name, move |a: T, b: U| q.push(make(a, b)));
 }
 
 /// Register a three-argument Steel command (see [`register_unary`]).
@@ -3742,9 +3698,7 @@ pub(crate) fn register_ternary<T, U, V>(
     V: steel::rvals::FromSteelVal + 'static,
 {
     let q = queue.clone();
-    reg.register_fn(name, move |a: T, b: U, c: V| {
-        q.lock().unwrap().push(make(a, b, c))
-    });
+    reg.register_fn(name, move |a: T, b: U, c: V| q.push(make(a, b, c)));
 }
 
 /// Register one of the `y-or-n-p` / `y-or-n-p-sticky` pair: a yes/no prompt
@@ -3757,7 +3711,7 @@ pub(crate) fn register_y_or_n_p(
 ) {
     let q = queue.clone();
     reg.register_fn(name, move |prompt: String, callback: Callback| {
-        q.lock().unwrap().push(EditorCommand::YesOrNo {
+        q.push(EditorCommand::YesOrNo {
             prompt,
             callback: callback.0,
             sticky,
@@ -3778,7 +3732,7 @@ pub(crate) fn register_render_buffer(
         fn_name,
         move |name: String, mode: String, text: String, faces: SteelVal| {
             let line_faces = parse_line_faces(&faces);
-            q.lock().unwrap().push(EditorCommand::RenderBuffer {
+            q.push(EditorCommand::RenderBuffer {
                 name,
                 mode,
                 text,
@@ -3799,7 +3753,7 @@ pub(crate) fn register_transient(
 ) {
     let q = queue.clone();
     reg.register_fn(name, move |title: String, rows: SteelVal| {
-        q.lock().unwrap().push(EditorCommand::Transient {
+        q.push(EditorCommand::Transient {
             title,
             columns: parse_transient_columns(&rows),
             sticky,
@@ -3816,7 +3770,7 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     use crate::grid::cmd::GridOp;
     let push = |queue: &Queue| {
         let q = queue.clone();
-        move |op: GridOp| q.lock().unwrap().push(EditorCommand::GridOp(op))
+        move |op: GridOp| q.push(EditorCommand::GridOp(op))
     };
     // --- reads ------------------------------------------------------------
     register_snapshot_read(reg, snapshot, "grid-buffer?", |s| s.grid.is_some());
@@ -4301,7 +4255,7 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     // --- editor-wide options ----------------------------------------------
     let option = |queue: &Queue| {
         let q = queue.clone();
-        move |o: crate::grid::cmd::GridOption| q.lock().unwrap().push(EditorCommand::GridOption(o))
+        move |o: crate::grid::cmd::GridOption| q.push(EditorCommand::GridOption(o))
     };
     use crate::grid::cmd::GridOption as O;
     let o = option(queue);
@@ -4316,7 +4270,7 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
         reg.register_fn(
             "grid-register-function",
             move |kind: String, name: String, datum: SteelVal| {
-                q.lock().unwrap().push(EditorCommand::GridRegisterFunction {
+                q.push(EditorCommand::GridRegisterFunction {
                     name,
                     source: crate::grid_fn::write_datum(&datum),
                     helper: kind == "helper",

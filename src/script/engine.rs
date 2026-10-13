@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use steel::rvals::{IntoSteelVal, SteelVal};
 
@@ -104,12 +103,7 @@ pub struct ScriptEngine {
     /// Fast path: a nullary command name → its `EditorCommand`, so trivial
     /// keybindings (motion, etc.) apply synchronously without a thread hop.
     builtins: HashMap<String, EditorCommand>,
-    buffers: BufferNames,
-    buffer_paths: BufferPaths,
-    snapshot: SharedSnapshot,
-    markers: Markers,
-    options: Options,
-    session: SharedSession,
+    shared: EngineShared,
 }
 
 impl ScriptEngine {
@@ -123,35 +117,13 @@ impl ScriptEngine {
             .map(|(n, c)| (n.to_string(), c.clone()))
             .collect();
 
-        let buffers: BufferNames = Arc::new(Mutex::new(Vec::new()));
-        let buffer_paths: BufferPaths = Arc::new(Mutex::new(HashMap::new()));
-        let snapshot: SharedSnapshot = Arc::new(ArcSwap::from_pointee(EditorSnapshot::default()));
-        let markers: Markers = Arc::new(Mutex::new(MarkerStore::default()));
-        let options: Options = Arc::new(Mutex::new(HashMap::new()));
-        let session: SharedSession = Arc::new(Mutex::new(SessionState::default()));
+        let shared = EngineShared::default();
         let (jobs, jobs_rx) = channel::<Job>();
         let (outcomes, outcomes_rx) = unbounded::<ScriptOutcome>();
         let (names_tx, names_rx) = channel::<Vec<String>>();
 
-        let thread_buffers = buffers.clone();
-        let thread_buffer_paths = buffer_paths.clone();
-        let thread_snapshot = snapshot.clone();
-        let thread_markers = markers.clone();
-        let thread_options = options.clone();
-        let thread_session = session.clone();
-        std::thread::spawn(move || {
-            engine_thread(
-                jobs_rx,
-                outcomes,
-                names_tx,
-                thread_buffers,
-                thread_buffer_paths,
-                thread_snapshot,
-                thread_markers,
-                thread_options,
-                thread_session,
-            )
-        });
+        let thread_shared = shared.clone();
+        std::thread::spawn(move || engine_thread(jobs_rx, outcomes, names_tx, thread_shared));
 
         (
             Self {
@@ -160,12 +132,7 @@ impl ScriptEngine {
                 global_names: std::sync::OnceLock::new(),
                 global_names_rx: Mutex::new(Some(names_rx)),
                 builtins,
-                buffers,
-                buffer_paths,
-                snapshot,
-                markers,
-                options,
-                session,
+                shared,
             },
             outcomes_rx,
         )
@@ -176,7 +143,7 @@ impl ScriptEngine {
     /// it shift by the length delta.
     pub fn adjust_markers(&self, start: usize, old_end: usize, new_len: usize) {
         let delta = new_len as isize - (old_end - start) as isize;
-        let mut store = self.markers.lock().unwrap();
+        let mut store = self.shared.markers.lock().unwrap();
         for pos in store.positions.values_mut() {
             if *pos >= old_end {
                 *pos = (*pos as isize + delta).max(0) as usize;
@@ -188,24 +155,30 @@ impl ScriptEngine {
 
     /// Drop all markers (e.g. on a buffer switch — markers are buffer-positions).
     pub fn clear_markers(&self) {
-        let mut store = self.markers.lock().unwrap();
+        let mut store = self.shared.markers.lock().unwrap();
         store.positions.clear();
     }
 
     /// Create a marker at `pos`, returning its id. The snippet session uses these
     /// to track tab-stop fields, which then ride along on `adjust_markers`.
     pub fn add_marker(&self, pos: usize) -> u64 {
-        self.markers.lock().unwrap().alloc(pos)
+        self.shared.markers.lock().unwrap().alloc(pos)
     }
 
     /// Current byte position of marker `id`, if it still exists.
     pub fn marker_pos(&self, id: u64) -> Option<usize> {
-        self.markers.lock().unwrap().positions.get(&id).copied()
+        self.shared
+            .markers
+            .lock()
+            .unwrap()
+            .positions
+            .get(&id)
+            .copied()
     }
 
     /// Remove marker `id` (snippet field cleanup).
     pub fn remove_marker(&self, id: u64) {
-        self.markers.lock().unwrap().positions.remove(&id);
+        self.shared.markers.lock().unwrap().positions.remove(&id);
     }
 
     /// The nullary command names, for `M-x` completion.
@@ -229,32 +202,32 @@ impl ScriptEngine {
 
     /// Update the buffer list Scheme sees via `(buffer-names)`.
     pub fn set_buffer_names(&self, names: Vec<String>) {
-        *self.buffers.lock().unwrap() = names;
+        *self.shared.buffers.lock().unwrap() = names;
     }
 
     /// Publish the buffer name → file path map Scheme reads via
     /// `(buffer-file-name-of name)`. Only file-visiting buffers appear.
     pub fn set_buffer_paths(&self, paths: HashMap<String, String>) {
-        *self.buffer_paths.lock().unwrap() = paths;
+        *self.shared.buffer_paths.lock().unwrap() = paths;
     }
 
     /// Publish the current editor options so Scheme can read them via
     /// `(get-option "name")`. Called after any option change.
     pub fn set_options(&self, options: HashMap<String, crate::settings::OptionValue>) {
-        *self.options.lock().unwrap() = options;
+        *self.shared.options.lock().unwrap() = options;
     }
 
     /// Publish the session-persistence state (rings, buffers, layout) that
     /// `(session-ring …)` / `(window-layout)` / `(session-file-buffers)` read.
     pub fn set_session(&self, state: SessionState) {
-        *self.session.lock().unwrap() = state;
+        *self.shared.session.lock().unwrap() = state;
     }
 
     /// Publish the active buffer name and point line for `(current-buffer)` /
     /// `(buffer-line)`. Called just before dispatching so a command reads point
     /// as it was when invoked.
     pub fn set_snapshot(&self, snapshot: EditorSnapshot) {
-        self.snapshot.store(Arc::new(snapshot));
+        self.shared.snapshot.store(Arc::new(snapshot));
     }
 
     /// Recognise one or more bare `(builtin)` forms — `(forward-char)` or a
@@ -435,28 +408,14 @@ impl ActionHandle {
 
 /// The engine thread: owns the `!Send` `Engine` for its whole life, processing
 /// jobs FIFO so results stay ordered.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn engine_thread(
     jobs: Receiver<Job>,
     outcomes: UnboundedSender<ScriptOutcome>,
     names_tx: Sender<Vec<String>>,
-    buffers: BufferNames,
-    buffer_paths: BufferPaths,
-    snapshot: SharedSnapshot,
-    markers: Markers,
-    options: Options,
-    session: SharedSession,
+    shared: EngineShared,
 ) {
-    let queue: Queue = Arc::new(Mutex::new(Vec::new()));
-    let (mut engine, names) = build_engine(
-        &queue,
-        &buffers,
-        &buffer_paths,
-        &snapshot,
-        &markers,
-        &options,
-        &session,
-    );
+    let queue = shared.queue.clone();
+    let (mut engine, names) = build_engine(&shared);
     let _ = names_tx.send(names);
 
     while let Ok(Job {
@@ -487,7 +446,7 @@ pub(crate) fn engine_thread(
                 // dynamic source queued (e.g. a stray `message`) are discarded
                 // here rather than leaking into — and being attributed to — the
                 // next eval's command batch.
-                drop(drain(&queue));
+                drop(queue.drain());
                 let _ = outcomes.unbounded_send(ScriptOutcome::Candidates {
                     source,
                     query_id,
@@ -524,7 +483,7 @@ pub(crate) fn engine_thread(
                 }
                 // CAPFs are queries, not commands: discard anything they queued
                 // so it can't leak into the next eval's command batch.
-                drop(drain(&queue));
+                drop(queue.drain());
                 let _ = outcomes.unbounded_send(ScriptOutcome::Capf {
                     start: out_start,
                     end: out_end,
@@ -534,12 +493,12 @@ pub(crate) fn engine_thread(
             }
             Task::Eval(source) => match engine.run(source) {
                 Ok(values) => RawResult {
-                    commands: drain(&queue),
+                    commands: queue.drain(),
                     value: values.last().and_then(format_value),
                     error: None,
                 },
                 Err(error) => RawResult {
-                    commands: drain(&queue),
+                    commands: queue.drain(),
                     value: None,
                     error: Some(steel_error_string(&error)),
                 },
@@ -554,7 +513,7 @@ pub(crate) fn engine_thread(
                     .err()
                     .map(|e| steel_error_string(&e));
                 RawResult {
-                    commands: drain(&queue),
+                    commands: queue.drain(),
                     value: None,
                     error,
                 }
@@ -566,7 +525,7 @@ pub(crate) fn engine_thread(
                     .err()
                     .map(|_| format!("{name} failed (details hidden: its argument is secret)"));
                 RawResult {
-                    commands: drain(&queue),
+                    commands: queue.drain(),
                     value: None,
                     error,
                 }
@@ -605,8 +564,4 @@ pub(crate) fn engine_thread(
             }
         }
     }
-}
-
-pub(crate) fn drain(queue: &Queue) -> Vec<EditorCommand> {
-    queue.lock().unwrap().drain(..).collect()
 }
