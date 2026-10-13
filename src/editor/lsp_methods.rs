@@ -28,7 +28,7 @@ fn is_builtin_lsp(command: &str) -> bool {
 pub(super) type LspChange = (String, (usize, usize), (usize, usize));
 
 /// Cap on the `*lsp-log*` scrollback ring (captured server stderr).
-const LSP_LOG_CAP: usize = 2000;
+pub(super) const LSP_LOG_CAP: usize = 2000;
 
 /// Cap on the xref jump-back ring (`pop-tag-mark` locations).
 const XREF_MARKER_RING_CAP: usize = 64;
@@ -88,7 +88,7 @@ impl Editor {
                 // Record the cause in *lsp-log* (persistent) as well as the echo
                 // area (transient) — a failed spawn is otherwise invisible.
                 let line = format!("[{language}] could not start `{command}`: {reason}");
-                push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
+                self.lsp_log.push(line.clone());
                 self.append_to_log_buffer("*lsp-log*", &line);
                 self.echo(format!("Could not start {command}: {reason}"), cx);
                 return;
@@ -284,7 +284,7 @@ impl Editor {
                 // and appended live to the buffer if it's open.
                 if let Some(line) = message["params"]["line"].as_str() {
                     let line = format!("[{language}] {line}");
-                    push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
+                    self.lsp_log.push(line.clone());
                     self.append_to_log_buffer("*lsp-log*", &line);
                     cx.notify();
                 }
@@ -436,7 +436,7 @@ impl Editor {
             server.exited = true;
         }
         let line = format!("[{language}] server exited");
-        push_capped(&mut self.lsp_log, line.clone(), LSP_LOG_CAP);
+        self.lsp_log.push(line.clone());
         self.append_to_log_buffer("*lsp-log*", &line);
         self.echo(
             format!("Language server for {language} exited — M-x lsp-restart to restart it"),

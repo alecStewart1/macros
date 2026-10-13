@@ -73,6 +73,7 @@ use minibuffer::MinibufferHistory;
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
 use overlays::{Overlays, shift_line_map};
 use panes::{Child, SplitAxis, WindowLayout, union_bounds};
+use session::BoundedRing;
 use terminal::{ProcessHandle, keystroke_to_bytes};
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
@@ -509,14 +510,14 @@ pub struct Editor {
     autoscroll: AutoscrollState,
     /// Scrollback of echo-area messages (Emacs `*Messages*`), capped. Every
     /// `echo` appends here so transient status can be reviewed later.
-    messages: Vec<String>,
+    messages: BoundedRing,
     /// The MCP server (src/mcp.rs), when the `mcp-server` option is on.
     mcp: Option<mcp::McpState>,
     /// Its request log, shown by `M-x mcp-server-info` (capped).
-    mcp_log: Vec<String>,
+    mcp_log: BoundedRing,
     /// Captured stderr from external language servers (Emacs-style `*lsp-log*`),
     /// capped — the only window into why a server failed/crashed.
-    lsp_log: Vec<String>,
+    lsp_log: BoundedRing,
     /// The diagnostic message currently echoed because the pointer is hovering
     /// it — so a later move off the diagnostic clears only our own echo.
     hover_message: Option<SharedString>,
@@ -1373,10 +1374,10 @@ impl Editor {
             keymap: Keymap::default(),
             status: "Macros ready".into(),
             is_selecting: false,
-            messages: Vec::new(),
+            messages: BoundedRing::new(MESSAGES_CAP),
             mcp: None,
-            mcp_log: Vec::new(),
-            lsp_log: Vec::new(),
+            mcp_log: BoundedRing::new(mcp::MCP_LOG_CAP),
+            lsp_log: BoundedRing::new(lsp_methods::LSP_LOG_CAP),
             hover_message: None,
             electric_pair: false,
             snippet_fields: Vec::new(),
@@ -3326,7 +3327,7 @@ impl Editor {
     fn echo(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.status = message.into();
         let line = self.status.to_string();
-        push_capped(&mut self.messages, line.clone(), MESSAGES_CAP);
+        self.messages.push(line.clone());
         // Append live to `*Messages*` if it's open (active or any pane/inactive),
         // so the buffer accumulates like Emacs's `*Messages*`.
         self.append_to_log_buffer("*Messages*", &line);
@@ -3418,40 +3419,29 @@ impl Editor {
         }
     }
 
-    /// `C-h e`: switch to the editable `*Messages*` buffer (creating it from the
-    /// scrollback ring if it doesn't exist yet). New messages append live.
-    fn list_messages(&mut self, cx: &mut Context<Self>) {
-        if self.active.name == "*Messages*" {
+    /// Switch to the editable log buffer `name`, creating it from the
+    /// scrollback ring `ring` selects if it doesn't exist yet (`C-h e`:
+    /// `*Messages*`; `C-h l`: `*lsp-log*`, the captured server stderr). New
+    /// lines append live (see [`Self::append_to_log_buffer`]).
+    fn open_log_buffer(
+        &mut self,
+        name: &str,
+        ring: fn(&Self) -> &BoundedRing,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active.name == name {
             return;
         }
-        if let Some(index) = self.inactive_index("*Messages*") {
+        if let Some(index) = self.inactive_index(name) {
             self.activate(index, true, cx);
         } else {
-            let text = if self.messages.is_empty() {
+            let ring = ring(self);
+            let text = if ring.is_empty() {
                 String::new()
             } else {
-                format!("{}\n", self.messages.join("\n"))
+                format!("{}\n", ring.join("\n"))
             };
-            self.switch_to_doc(make_log_document("*Messages*".to_string(), &text));
-            self.move_to(self.active.buffer.len(), cx);
-        }
-    }
-
-    /// `C-h l`: switch to the editable `*lsp-log*` buffer (creating it from the
-    /// captured stderr if needed). New server output appends live.
-    fn list_lsp_log(&mut self, cx: &mut Context<Self>) {
-        if self.active.name == "*lsp-log*" {
-            return;
-        }
-        if let Some(index) = self.inactive_index("*lsp-log*") {
-            self.activate(index, true, cx);
-        } else {
-            let text = if self.lsp_log.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", self.lsp_log.join("\n"))
-            };
-            self.switch_to_doc(make_log_document("*lsp-log*".to_string(), &text));
+            self.switch_to_doc(make_log_document(name.to_string(), &text));
             self.move_to(self.active.buffer.len(), cx);
         }
     }
@@ -3468,7 +3458,7 @@ impl Editor {
         let new_id = self.next_pane_id;
         self.split_window_ratio(SplitAxis::Vertical, LSP_LOG_SPLIT_RATIO, cx);
         self.select_pane(new_id, cx);
-        self.list_lsp_log(cx); // render into the new (selected) pane
+        self.open_log_buffer("*lsp-log*", |e| &e.lsp_log, cx); // render into the new (selected) pane
         self.select_pane(origin, cx); // hand focus back to the file
     }
 
@@ -4791,15 +4781,6 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         .or_else(|| crate::grammar::language_for_extension(ext))
 }
 
-/// Append `item` to a capped ring buffer, dropping the oldest entries on
-/// overflow (used by the `*Messages*` and `*lsp-log*` rings).
-fn push_capped(ring: &mut Vec<String>, item: String, cap: usize) {
-    ring.push(item);
-    if ring.len() > cap {
-        ring.drain(0..ring.len() - cap);
-    }
-}
-
 /// A blank document with the shared default editing state (empty selection, a
 /// fresh undo tree, no overlays/locals/faces). The `make_*` constructors layer
 /// the buffer contents, mode stack, and any special/hooks flags on top via
@@ -5528,7 +5509,7 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
-        file_completions, language_for_path, last_sexp, line_span, prefix_arg_value, push_capped,
+        file_completions, language_for_path, last_sexp, line_span, prefix_arg_value,
         scheme_symbol_token, symbol_at, top_level_form_at,
     };
 
@@ -5642,18 +5623,6 @@ mod tests {
         assert_eq!(line_span(&buf, 2, 99), (5, 9));
     }
 
-    #[test]
-    fn push_capped_drops_oldest_over_cap() {
-        let mut ring = Vec::new();
-        for i in 0..5 {
-            push_capped(&mut ring, format!("m{i}"), 3);
-        }
-        // Keeps the newest `cap`, oldest dropped, order preserved.
-        assert_eq!(
-            ring,
-            vec!["m2".to_string(), "m3".to_string(), "m4".to_string()]
-        );
-    }
     use std::path::Path;
 
     #[test]

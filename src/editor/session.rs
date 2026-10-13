@@ -18,25 +18,103 @@ const COMMAND_HISTORY_MAX: usize = 200;
 
 /// History rings that exist only for session persistence (the minibuffer
 /// history and kill ring live in their own fields).
-#[derive(Default)]
 pub(super) struct SessionRings {
     /// Completed search strings, oldest first.
-    pub(super) search_ring: Vec<String>,
+    pub(super) search_ring: BoundedRing,
     /// Commands run via `M-x`, oldest first; `helm-M-x` lists them first.
-    pub(super) command_history: Vec<String>,
+    pub(super) command_history: BoundedRing,
 }
 
-/// Append `item` as the newest entry, dropping an older duplicate and evicting
-/// the oldest entries past `max`. Blank items are ignored.
-fn push_bounded(ring: &mut Vec<String>, item: &str, max: usize) {
-    if item.is_empty() {
-        return;
+impl Default for SessionRings {
+    fn default() -> Self {
+        SessionRings {
+            search_ring: BoundedRing::new(SEARCH_RING_MAX),
+            command_history: BoundedRing::new(COMMAND_HISTORY_MAX),
+        }
     }
-    ring.retain(|s| s != item);
-    ring.push(item.to_string());
-    if ring.len() > max {
-        let excess = ring.len() - max;
-        ring.drain(..excess);
+}
+
+/// A capped ring of strings, oldest first: a push past `cap` evicts the
+/// oldest entry (O(1), from the front). Backs the session rings and the
+/// `*Messages*` / `*lsp-log*` / MCP scrollback logs.
+pub(super) struct BoundedRing {
+    items: VecDeque<String>,
+    cap: usize,
+}
+
+impl BoundedRing {
+    pub(super) fn new(cap: usize) -> Self {
+        BoundedRing {
+            items: VecDeque::new(),
+            cap,
+        }
+    }
+
+    /// Append `item` as the newest entry, evicting the oldest past the cap.
+    pub(super) fn push(&mut self, item: String) {
+        self.items.push_back(item);
+        while self.items.len() > self.cap {
+            self.items.pop_front();
+        }
+    }
+
+    /// Like [`Self::push`], but an older duplicate of `item` is dropped first
+    /// (so it moves to the newest slot), and a blank item is ignored.
+    pub(super) fn push_dedup(&mut self, item: &str) {
+        if item.is_empty() {
+            return;
+        }
+        self.items.retain(|s| s != item);
+        self.push(item.to_string());
+    }
+
+    /// Replace the contents with the newest `cap` of `items` (oldest first).
+    pub(super) fn replace(&mut self, items: Vec<String>) {
+        self.items = newest(items, self.cap).into();
+    }
+
+    /// Empty the ring, returning its old contents as a ring of the same cap.
+    pub(super) fn take(&mut self) -> BoundedRing {
+        std::mem::replace(self, BoundedRing::new(self.cap))
+    }
+
+    pub(super) fn iter(&self) -> std::collections::vec_deque::Iter<'_, String> {
+        self.items.iter()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub(super) fn last(&self) -> Option<&String> {
+        self.items.back()
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    /// The entries, oldest first, joined by `sep`.
+    pub(super) fn join(&self, sep: &str) -> String {
+        self.join_newest(self.items.len(), sep)
+    }
+
+    /// The newest `count` entries, oldest first, joined by `sep`.
+    pub(super) fn join_newest(&self, count: usize, sep: &str) -> String {
+        let skip = self.items.len().saturating_sub(count);
+        let mut out = String::new();
+        for (i, item) in self.items.iter().skip(skip).enumerate() {
+            if i > 0 {
+                out.push_str(sep);
+            }
+            out.push_str(item);
+        }
+        out
+    }
+
+    pub(super) fn to_vec(&self) -> Vec<String> {
+        self.items.iter().cloned().collect()
     }
 }
 
@@ -61,12 +139,12 @@ fn char_floor(text: &str, pos: usize) -> usize {
 impl Editor {
     /// Record a completed search string (isearch RET, evil `/` `?`).
     pub(super) fn note_search(&mut self, query: &str) {
-        push_bounded(&mut self.session.search_ring, query, SEARCH_RING_MAX);
+        self.session.search_ring.push_dedup(query);
     }
 
     /// Record a command run via `M-x` (minibuffer or Helm).
     pub(super) fn note_command(&mut self, name: &str) {
-        push_bounded(&mut self.session.command_history, name, COMMAND_HISTORY_MAX);
+        self.session.command_history.push_dedup(name);
     }
 
     /// `candidates` reordered so recently run commands come first (newest
@@ -156,8 +234,8 @@ impl Editor {
         self.script.set_session(SessionState {
             minibuffer_history: self.minibuffer_history.entries().to_vec(),
             kill_ring: self.kill_ring.clone(),
-            search_ring: self.session.search_ring.clone(),
-            command_history: self.session.command_history.clone(),
+            search_ring: self.session.search_ring.to_vec(),
+            command_history: self.session.command_history.to_vec(),
             file_buffers,
             layout: Some(self.session_layout(&self.layout)),
         });
@@ -197,13 +275,13 @@ impl Editor {
                 self.kill_index = self.kill_ring.len().saturating_sub(1);
             }
             "search" => {
-                self.session.search_ring = newest(items, SEARCH_RING_MAX);
+                self.session.search_ring.replace(items);
                 // An empty C-s after a restart repeats the last search.
                 if let Some(last) = self.session.search_ring.last() {
                     self.last_isearch = Some(last.clone());
                 }
             }
-            "command" => self.session.command_history = newest(items, COMMAND_HISTORY_MAX),
+            "command" => self.session.command_history.replace(items),
             _ => {}
         }
     }
@@ -376,21 +454,33 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::{char_floor, newest, push_bounded};
+    use super::{BoundedRing, char_floor, newest};
 
     #[test]
-    fn push_bounded_dedupes_and_evicts_oldest() {
-        let mut ring = Vec::new();
+    fn push_dedup_dedupes_and_evicts_oldest() {
+        let mut ring = BoundedRing::new(3);
         for s in ["a", "b", "", "a", "c", "d"] {
-            push_bounded(&mut ring, s, 3);
+            ring.push_dedup(s);
         }
         // "" ignored; the re-pushed "a" moved to the newest slot, then the
         // cap of 3 evicted "b" (the oldest).
-        assert_eq!(ring, vec!["a", "c", "d"]);
+        assert_eq!(ring.to_vec(), vec!["a", "c", "d"]);
+        assert_eq!(ring.join_newest(2, "|"), "c|d");
         assert_eq!(
             newest(vec!["1".into(), "2".into(), "3".into()], 2),
             vec!["2", "3"]
         );
+    }
+
+    #[test]
+    fn push_drops_oldest_over_cap() {
+        let mut ring = BoundedRing::new(3);
+        for i in 0..5 {
+            ring.push(format!("m{i}"));
+        }
+        // Keeps the newest `cap`, oldest dropped, order preserved.
+        assert_eq!(ring.to_vec(), vec!["m2", "m3", "m4"]);
+        assert_eq!(ring.join(" "), "m2 m3 m4");
     }
 
     #[test]

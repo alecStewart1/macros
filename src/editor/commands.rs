@@ -1188,8 +1188,8 @@ impl Editor {
             ExecuteExtendedCommand => {
                 self.open_minibuffer("M-x ", MinibufferPurpose::ExecuteCommand, "", cx);
             }
-            ListMessages => self.list_messages(cx),
-            ListLspLog => self.list_lsp_log(cx),
+            ListMessages => self.open_log_buffer("*Messages*", |e| &e.messages, cx),
+            ListLspLog => self.open_log_buffer("*lsp-log*", |e| &e.lsp_log, cx),
             CheckForUpdates => self.check_for_updates(cx),
             InstallGrammar(args) => {
                 // Empty strings are the Scheme wrapper's "use the default" sentinel.

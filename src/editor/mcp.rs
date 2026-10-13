@@ -118,7 +118,7 @@ impl Backend for EditorBackend {
 }
 
 /// Cap on the `*mcp-server*` request log.
-const MCP_LOG_CAP: usize = 200;
+pub(super) const MCP_LOG_CAP: usize = 200;
 
 /// The token file in the config directory: created on first start with a
 /// random 256-bit token, owner-readable only, and reused after that so a
@@ -240,7 +240,7 @@ impl Editor {
 
     fn mcp_log_line(&mut self, line: String) {
         let stamped = format!("{} {line}", chrono::Local::now().format("%H:%M:%S"));
-        push_capped(&mut self.mcp_log, stamped.clone(), MCP_LOG_CAP);
+        self.mcp_log.push(stamped.clone());
         self.append_to_log_buffer("*mcp-server*", &stamped);
     }
 
@@ -253,7 +253,7 @@ impl Editor {
             McpRequest::Apply(commands, reply) => {
                 // Capture what the batch echoes: swap the message log out,
                 // apply, and splice the new tail back in.
-                let before = std::mem::take(&mut self.messages);
+                let before = self.messages.take();
                 self.apply_script_outcome(
                     ScriptOutcome::Commands {
                         commands,
@@ -262,10 +262,10 @@ impl Editor {
                     cx,
                 );
                 let new = std::mem::replace(&mut self.messages, before);
-                for m in &new {
-                    push_capped(&mut self.messages, m.clone(), MESSAGES_CAP);
+                for m in new.iter() {
+                    self.messages.push(m.clone());
                 }
-                let _ = reply.send(new);
+                let _ = reply.send(new.to_vec());
             }
             McpRequest::BufferText {
                 name,
@@ -294,8 +294,7 @@ impl Editor {
                 let _ = reply.send(Ok(out.join("\n")));
             }
             McpRequest::Messages(count, reply) => {
-                let start = self.messages.len().saturating_sub(count);
-                let text = self.messages[start..].join("\n");
+                let text = self.messages.join_newest(count, "\n");
                 let _ = reply.send(Ok(if text.is_empty() {
                     "(no messages)".into()
                 } else {
