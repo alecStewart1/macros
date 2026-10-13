@@ -226,9 +226,10 @@ struct Document {
     special: Option<String>,
     /// Per-line whole-line face overrides, by line index (special buffers).
     line_faces: HashMap<usize, SharedString>,
-    /// Per-line icon (asset name + char column to paint at), for special buffers
-    /// like the file tree. Mirrors `line_faces`.
-    line_icons: HashMap<usize, (usize, SharedString)>,
+    /// Per-line icons (char column to paint at, asset name, optional tint face —
+    /// `None` takes the line's face), for special buffers like the file tree.
+    /// Mirrors `line_faces`.
+    line_icons: HashMap<usize, Vec<(usize, SharedString, Option<SharedString>)>>,
     /// Gutter dot faces by line index — breakpoint signs (`set-gutter-dot`,
     /// dap.scm). Mirrors `line_faces`.
     gutter_dots: HashMap<usize, SharedString>,

@@ -29,7 +29,7 @@ const SCROLLBAR_MIN_THUMB: f32 = 24.0;
 /// Alpha multiplier applied to a block cursor so the glyph under it stays legible.
 const BLOCK_CURSOR_ALPHA: f32 = 0.5;
 /// File-tree icon size as a fraction of the line height.
-const ICON_SCALE: f32 = 0.82;
+const ICON_SCALE: f32 = 0.68;
 /// Diameter of a diagnostic gutter dot.
 const DIAG_DOT: f32 = 7.0;
 
@@ -1110,9 +1110,9 @@ fn layout_decorations(
     let i = line.i;
     let range = &line.range;
 
-    // File-tree icon, painted in a reserved column (the Scheme renders leading
-    // space at `col` so it doesn't overlap the label).
-    if let Some((col, name)) = editor.pane_line_icon(pane, i) {
+    // File-tree icons, painted in reserved columns (the Scheme renders leading
+    // space at `col` so they don't overlap the label).
+    for (col, name, face) in editor.pane_line_icons(pane, i) {
         let ipos = line
             .wrapped
             .position_for_index(
@@ -1127,8 +1127,8 @@ fn layout_decorations(
             line.line_origin.x + ipos.x,
             line.line_origin.y + ipos.y + px(pad),
         );
-        let color = editor
-            .pane_line_face(pane, i)
+        let color = face
+            .or_else(|| editor.pane_line_face(pane, i))
             .map_or(text_color, |f| theme.color(f, text_color));
         acc.icons.push((
             Bounds::new(origin, size(px(sz), px(sz))),
@@ -1275,8 +1275,10 @@ impl Element for EditorElement {
         };
         let cursor_width = px(settings.cursor_width());
         // When blinking is on, only paint the cursor in the "shown" half of the
-        // cycle; a steady cursor (blink off) is always shown.
-        let cursor_shown = !settings.cursor_blink() || editor.cursor_blink_visible();
+        // cycle; a steady cursor (blink off) is always shown. A mode can hide it
+        // outright (`cursor-visible:<mode>`).
+        let cursor_shown = settings.cursor_visible_for(editor.pane_major_mode(pane))
+            && (!settings.cursor_blink() || editor.cursor_blink_visible());
 
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());

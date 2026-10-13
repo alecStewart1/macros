@@ -278,7 +278,16 @@ impl Editor {
             SetLineIcon(line, col, name) => {
                 self.redirect_target()
                     .line_icons
-                    .insert(line, (col, SharedString::from(name)));
+                    .insert(line, vec![(col, SharedString::from(name), None)]);
+                cx.notify();
+            }
+            AddLineIcon(line, col, name, face) => {
+                let face = (!face.is_empty()).then(|| SharedString::from(face));
+                self.redirect_target()
+                    .line_icons
+                    .entry(line)
+                    .or_default()
+                    .push((col, SharedString::from(name), face));
                 cx.notify();
             }
             ClearLineIcons => {

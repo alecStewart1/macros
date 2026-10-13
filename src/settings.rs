@@ -211,6 +211,7 @@ const OPTIONS: &[OptionSpec] = &[
     flag("helm-fuzzy", true),
     flag("line-numbers", true),
     flag("hl-line", false),
+    flag("cursor-visible", true),
     flag("word-wrap", true),
     flag("auto-revert", false),
     flag("electric-indent", true),
@@ -649,6 +650,14 @@ impl Settings {
     pub fn hl_line_for(&self, mode: Option<&str>) -> bool {
         const HL_LINE: &OptionSpec = spec("hl-line");
         self.bool_per_mode(HL_LINE, mode, spec_bool(HL_LINE))
+    }
+
+    /// Paint the cursor in a buffer whose major mode is `mode`. A *per-major-
+    /// mode* option: on everywhere unless a mode turns it off — the
+    /// dired-sidebar tree hides it and lets the `hl-line` band mark the row.
+    pub fn cursor_visible_for(&self, mode: Option<&str>) -> bool {
+        const CURSOR_VISIBLE: &OptionSpec = spec("cursor-visible");
+        self.bool_per_mode(CURSOR_VISIBLE, mode, spec_bool(CURSOR_VISIBLE))
     }
 
     /// Show a scroll bar on the right edge of each pane (Emacs `scroll-bar-mode`).
