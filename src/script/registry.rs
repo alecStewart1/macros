@@ -253,76 +253,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::plotting::register(&mut reg, shared);
     prims::spell::register(&mut reg, shared);
     prims::modal::register(&mut reg, shared);
-    reg.section(Section::TreeSitter);
-    // `(buffer-language)` → the highlighting language ("" when none).
-    register_snapshot_read(&mut reg, snapshot, "buffer-language", |s| {
-        s.language.clone()
-    });
-    {
-        // `(ts-ancestors pos)` → flat `(kind start end …)` of every syntax node
-        // containing pos, innermost first; `()` without a tree. Synchronous —
-        // the published snapshot carries the tree.
-        let shared = snapshot.clone();
-        reg.register_fn("ts-ancestors", move |pos: usize| -> Vec<SteelVal> {
-            let snap = shared.load();
-            let Some(tree) = snap.tree.as_ref() else {
-                return Vec::new();
-            };
-            crate::highlight::tree_ancestors(tree, pos)
-                .into_iter()
-                .flat_map(|(k, s, e)| {
-                    [
-                        SteelVal::StringV(k.into()),
-                        SteelVal::IntV(s as isize),
-                        SteelVal::IntV(e as isize),
-                    ]
-                })
-                .collect()
-        });
-    }
-    {
-        // `(ts-children start end)` → flat `(kind start end named? …)` of the
-        // children of the node spanning exactly [start, end).
-        let shared = snapshot.clone();
-        reg.register_fn(
-            "ts-children",
-            move |start: usize, end: usize| -> Vec<SteelVal> {
-                let snap = shared.load();
-                let Some(tree) = snap.tree.as_ref() else {
-                    return Vec::new();
-                };
-                crate::highlight::tree_children(tree, start, end)
-                    .into_iter()
-                    .flat_map(|(k, s, e, named)| {
-                        [
-                            SteelVal::StringV(k.into()),
-                            SteelVal::IntV(s as isize),
-                            SteelVal::IntV(e as isize),
-                            SteelVal::BoolV(named),
-                        ]
-                    })
-                    .collect()
-            },
-        );
-    }
-    {
-        // `(ts-ranges-of-kinds '("function_item" …))` → flat `(start end …)` of
-        // every node of those kinds, in document order.
-        let shared = snapshot.clone();
-        reg.register_fn(
-            "ts-ranges-of-kinds",
-            move |StringList(kinds): StringList| -> Vec<usize> {
-                let snap = shared.load();
-                let Some(tree) = snap.tree.as_ref() else {
-                    return Vec::new();
-                };
-                crate::highlight::tree_ranges_of_kinds(tree, &kinds)
-                    .into_iter()
-                    .flat_map(|(s, e)| [s, e])
-                    .collect()
-            },
-        );
-    }
+    prims::tree_sitter::register(&mut reg, shared);
     reg.section(Section::Lsp);
     register_binary(&mut reg, queue, "set-lsp", EditorCommand::SetLsp);
     reg.section(Section::Options);
@@ -846,25 +777,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
         queue,
         "lsp-semantic-tokens-delta",
         EditorCommand::LspSemanticTokensDelta,
-    );
-    reg.section(Section::TreeSitter);
-    register_binary(
-        &mut reg,
-        queue,
-        "tree-sitter-query",
-        |query, callback: Callback| EditorCommand::TreeSitterQuery {
-            query,
-            callback: callback.0,
-        },
-    );
-    register_binary(
-        &mut reg,
-        queue,
-        "tree-sitter-node-at",
-        |byte, callback: Callback| EditorCommand::TreeSitterNodeAt {
-            byte,
-            callback: callback.0,
-        },
     );
     reg.section(Section::SpecialBuffers);
     // `(set-special-mode "occur-mode")` makes the active buffer a read-only

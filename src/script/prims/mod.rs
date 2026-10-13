@@ -15,3 +15,4 @@ pub(super) mod plotting;
 pub(super) mod prompts;
 pub(super) mod spell;
 pub(super) mod text;
+pub(super) mod tree_sitter;

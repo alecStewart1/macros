@@ -226,6 +226,10 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ("script/prims/prompts.rs", include_str!("prims/prompts.rs")),
     ("script/prims/spell.rs", include_str!("prims/spell.rs")),
     ("script/prims/text.rs", include_str!("prims/text.rs")),
+    (
+        "script/prims/tree_sitter.rs",
+        include_str!("prims/tree_sitter.rs"),
+    ),
 ];
 
 /// name → the `//` comment block immediately above its registration.
