@@ -438,15 +438,10 @@
 
 ;; Emit a paired removed-run + added-run: the removed lines first (in file
 ;; order), each accented against its positional partner, then the added lines.
+;; (Steel's `for-each` takes one list, so the runs are zipped with `map cons`.)
 (define (magit-emit-paired-lines rem add)
-  (let loop ((rs rem) (as add))
-    (when (not (null? rs))
-      (magit-emit-intra-line (car rs) (car as) #t)
-      (loop (cdr rs) (cdr as))))
-  (let loop ((rs rem) (as add))
-    (when (not (null? as))
-      (magit-emit-intra-line (car as) (car rs) #f)
-      (loop (cdr rs) (cdr as)))))
+  (for-each (lambda (p) (magit-emit-intra-line (car p) (cdr p) #t)) (map cons rem add))
+  (for-each (lambda (p) (magit-emit-intra-line (car p) (cdr p) #f)) (map cons add rem)))
 
 ;; Emit a hunk body (the lines after the @@ header) with within-line word diff:
 ;; an N-removed / N-added block is paired and intra-highlighted; everything else

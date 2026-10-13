@@ -182,29 +182,36 @@
           ((md-heading-line? (nth lines n)) n)
           (else (loop (- n 1))))))
 
+;; Walk `ls` (the lines from index `n` on) to the first heading whose level is
+;; `level` or higher → its index, else the index just past the last line. One
+;; pass over a list tail (no per-step `nth`).
+(define (md--section-end-from ls n level)
+  (cond ((null? ls) n)
+        ((and (md-heading-line? (car ls)) (<= (md-heading-level (car ls)) level)) n)
+        (else (md--section-end-from (cdr ls) (+ n 1) level))))
+
 ;; First line index after the section starting at `start` (of level `level`):
 ;; the next heading whose level is the same or higher, else end of buffer. This
 ;; is the section body's exclusive end, so the body is the half-open
 ;; `[start+1, end)`.
 (define (md-section-end lines start level)
   (let ((total (length lines)))
-    (let loop ((n (+ start 1)))
-      (cond ((>= n total) total)
-            ((and (md-heading-line? (nth lines n))
-                  (<= (md-heading-level (nth lines n)) level))
-             n)
-            (else (loop (+ n 1)))))))
+    (if (>= (+ start 1) total)
+        total
+        (md--section-end-from (list-tail lines (+ start 1)) (+ start 1) level))))
 
 ;; Exclusive body end of the section headed by `start`.
 (define (md--section-body-end lines start)
   (md-section-end lines start (md-heading-level (nth lines start))))
 
 ;; Heading line indices that have a non-empty body (so are actually foldable).
+;; Each heading's section end is scanned from the heading's own list tail.
 (define (md--foldable-headings lines)
   (let loop ((ls lines) (i 0) (acc '()))
     (cond ((null? ls) (reverse acc))
           ((and (md-heading-line? (car ls))
-                (> (md--section-body-end lines i) (+ i 1)))
+                (> (md--section-end-from (cdr ls) (+ i 1) (md-heading-level (car ls)))
+                   (+ i 1)))
            (loop (cdr ls) (+ i 1) (cons i acc)))
           (else (loop (cdr ls) (+ i 1) acc)))))
 

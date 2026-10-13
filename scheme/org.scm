@@ -393,27 +393,29 @@
           (let* ((line (car lines))
                  (lend (+ off (utf8-length line)))
                  (lvl (org--heading-level line)))
-            (cond
-              ((and insrc (org--block-end? line))
-               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-              (insrc
-               (org--span off lend "org-block") (loop (cdr lines) (+ lend 1) #t))
-              ((org--block-begin? line)
-               (org--span off lend "org-meta")
-               (loop (cdr lines) (+ lend 1)
-                     (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0)))
-              ((org--block-end? line)
-               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-              (lvl
-               (org--fontify-heading off line lvl) (loop (cdr lines) (+ lend 1) #f))
-              ((or (org--keyword-line? line) (org--comment-line? line))
-               (org--span off lend "org-meta") (loop (cdr lines) (+ lend 1) #f))
-              ((org--drawer-line? line)
-               (org--span off lend "org-drawer") (loop (cdr lines) (+ lend 1) #f))
-              ((org--table-line? line)
-               (org--span off lend "org-table") (loop (cdr lines) (+ lend 1) #f))
-              (else
-               (org--fontify-plain off line) (loop (cdr lines) (+ lend 1) #f))))))
+            ;; Paint this line; each branch yields whether the NEXT line is
+            ;; inside a src/example block.
+            (loop (cdr lines) (+ lend 1)
+                  (cond
+                    ((and insrc (org--block-end? line))
+                     (org--span off lend "org-meta") #f)
+                    (insrc
+                     (org--span off lend "org-block") #t)
+                    ((org--block-begin? line)
+                     (org--span off lend "org-meta")
+                     (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0))
+                    ((org--block-end? line)
+                     (org--span off lend "org-meta") #f)
+                    (lvl
+                     (org--fontify-heading off line lvl) #f)
+                    ((or (org--keyword-line? line) (org--comment-line? line))
+                     (org--span off lend "org-meta") #f)
+                    ((org--drawer-line? line)
+                     (org--span off lend "org-drawer") #f)
+                    ((org--table-line? line)
+                     (org--span off lend "org-table") #f)
+                    (else
+                     (org--fontify-plain off line) #f))))))
       (org--flush-spans)
       (org--apply-indent all-lines))))
 
