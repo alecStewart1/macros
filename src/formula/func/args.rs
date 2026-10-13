@@ -7,11 +7,6 @@ use super::{Arg, Array, Ctx, RangeRef};
 use crate::formula::date;
 use crate::formula::value::{ErrorKind, Value};
 
-/// Excel's sheet size, for the dimensions of open-ended references
-/// (`ROWS(A:A)` is 1,048,576).
-pub const SHEET_ROWS: usize = 1_048_576;
-pub const SHEET_COLS: usize = 16_384;
-
 /// A rectangular argument: a (clamped) range, an array, or a lone value
 /// standing in as a 1×1 area.
 #[derive(Clone, Debug)]

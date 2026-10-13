@@ -18,10 +18,9 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::args::{
-    Area, SHEET_COLS, SHEET_ROWS, area, def, given, int, opt_bool, opt_int, opt_num, positive,
-};
+use super::args::{Area, area, def, given, int, opt_bool, opt_int, opt_num, positive};
 use super::{Arg, Ctx, FuncDef, RangeRef, scalar};
+use crate::a1::{MAX_COLS, MAX_ROWS};
 use crate::formula::criteria::{Pattern, fold, has_wildcards};
 use crate::formula::value::{ErrorKind, Value, cmp_text};
 
@@ -541,12 +540,12 @@ fn index(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
         Arg::Range(rg) => {
             ctx.extent(rg.sheet.as_deref()).ok_or(ErrorKind::Ref)?;
             let rows = if rg.r1 == usize::MAX {
-                SHEET_ROWS - rg.r0.min(SHEET_ROWS - 1)
+                MAX_ROWS - rg.r0.min(MAX_ROWS - 1)
             } else {
                 rg.rows()
             };
             let cols = if rg.c1 == usize::MAX {
-                SHEET_COLS - rg.c0.min(SHEET_COLS - 1)
+                MAX_COLS - rg.c0.min(MAX_COLS - 1)
             } else {
                 rg.cols()
             };
@@ -616,7 +615,7 @@ fn column(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
 /// is 1,048,576).
 fn rows(args: &[Arg], _: &mut dyn Ctx) -> Value {
     Value::Number(match &args[0] {
-        Arg::Range(r) if r.r1 == usize::MAX => SHEET_ROWS.saturating_sub(r.r0),
+        Arg::Range(r) if r.r1 == usize::MAX => MAX_ROWS.saturating_sub(r.r0),
         Arg::Range(r) => r.rows(),
         Arg::Array(a) => a.rows,
         _ => 1,
@@ -625,7 +624,7 @@ fn rows(args: &[Arg], _: &mut dyn Ctx) -> Value {
 
 fn columns(args: &[Arg], _: &mut dyn Ctx) -> Value {
     Value::Number(match &args[0] {
-        Arg::Range(r) if r.c1 == usize::MAX => SHEET_COLS.saturating_sub(r.c0),
+        Arg::Range(r) if r.c1 == usize::MAX => MAX_COLS.saturating_sub(r.c0),
         Arg::Range(r) => r.cols(),
         Arg::Array(a) => a.cols,
         _ => 1,

@@ -15,7 +15,7 @@ use super::value::{ErrorKind, parse_number};
 
 /// Columns a reference may name: `A`..`XFD`, as in Excel (so `TAX2024` is a
 /// cell, while `TAXES2024` is a name).
-pub const MAX_COL: usize = 16_383;
+pub const MAX_COL: usize = crate::a1::MAX_COLS - 1;
 /// Rows a reference may name. Excel stops at 1,048,576; the grid doesn't.
 pub const MAX_ROW: usize = (1 << 31) - 1;
 
@@ -316,7 +316,7 @@ fn split_row(word: &str) -> Option<Coord> {
 }
 
 fn col_index(letters: &str) -> Option<usize> {
-    crate::xlsx::parse_col_name(letters).filter(|&c| c <= MAX_COL)
+    crate::a1::parse_col_name(letters).filter(|&c| c <= MAX_COL)
 }
 
 fn row_index(digits: &str) -> Option<usize> {
