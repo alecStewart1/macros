@@ -2,6 +2,7 @@
 
 use regex::Regex;
 
+use super::ex::{ExCmd, parse_ex_line};
 use super::*;
 
 impl Editor {
@@ -690,7 +691,7 @@ impl Editor {
             return;
         }
         // Ranges and the line commands (`:%s`, `:'<,'>d`, `:g/…/`, `:12`, …).
-        let parsed = super::ex::parse_ex_line(cmd);
+        let parsed = parse_ex_line(cmd);
         if self.ex_dispatch(&parsed, cx) {
             return;
         }
@@ -698,86 +699,87 @@ impl Editor {
             self.echo(format!("E481: No range allowed: {cmd}"), cx);
             return;
         }
-        {
-            // Split a verb from its optional argument (`:e file`, `:b name`, …).
-            let (verb, arg) = match cmd.split_once(char::is_whitespace) {
-                Some((v, a)) => (v, a.trim()),
-                None => (cmd, ""),
-            };
-            match verb {
-                // Write / quit.
-                "w" | "write" if !arg.is_empty() => self.write_buffer_to(arg, cx),
-                "w" | "write" => self.save_buffer(cx),
-                // Every quit here ends the APP (vim's would close one window),
-                // so the non-`!` forms refuse while ANY buffer is unsaved —
-                // vim's E37/E162 — and `!` is the explicit discard.
-                "q" | "quit" | "qa" | "qall" | "quitall" => {
-                    if !self.refuse_quit_if_modified(cx) {
-                        self.quit_now(cx);
-                    }
+        // The verb is the first whitespace-separated word (`:e file`,
+        // `:b name`, …). It must be exactly the parsed name plus its `!`: one
+        // glued to its argument (`:b2`, `:e!x`) is unknown.
+        let (verb, arg) = match cmd.split_once(char::is_whitespace) {
+            Some((v, a)) => (v, a.trim()),
+            None => (cmd, ""),
+        };
+        let bang = parsed.bang;
+        let spelled = verb.strip_suffix('!').filter(|_| bang).unwrap_or(verb);
+        let kind = ExCmd::lookup(&parsed.name).filter(|_| spelled == parsed.name);
+        match (kind, bang) {
+            // Write / quit.
+            (Some(ExCmd::Write), false) if !arg.is_empty() => self.write_buffer_to(arg, cx),
+            (Some(ExCmd::Write), false) => self.save_buffer(cx),
+            // Every quit here ends the APP (vim's would close one window),
+            // so the non-`!` forms refuse while ANY buffer is unsaved —
+            // vim's E37/E162 — and `!` is the explicit discard.
+            (Some(ExCmd::Quit), false) => {
+                if !self.refuse_quit_if_modified(cx) {
+                    self.quit_now(cx);
                 }
-                "q!" | "quit!" | "qa!" | "qall!" | "quitall!" => self.quit_now(cx),
-                // Write-then-quit must save *synchronously*: `save_buffer` spawns
-                // a background write that `cx.quit()` would cancel mid-flight
-                // (see `save_all_modified`'s quit-path contract). A failed write
-                // aborts the quit so the error stays visible and no work is lost.
-                "wq" | "x" | "xit" => {
-                    if self.save_active_sync(cx) && !self.refuse_quit_if_modified(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                // `:wq!` writes this buffer, then quits discarding the others.
-                "wq!" | "x!" | "xit!" => {
-                    if self.save_active_sync(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                // Still refuses if something couldn't be written (a modified
-                // buffer with no file, e.g. an edited *scratch*-like buffer).
-                "wqa" | "wqall" | "xa" | "xall" => {
-                    if self.save_all_modified(cx) && !self.refuse_quit_if_modified(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                "wqa!" | "wqall!" | "xa!" | "xall!" => {
-                    if self.save_all_modified(cx) {
-                        self.quit_now(cx);
-                    }
-                }
-                // Files.
-                "e!" | "edit!" => self.revert_buffer(cx),
-                "e" | "edit" if !arg.is_empty() => self.find_file(arg, cx),
-                "e" | "edit" => self.echo("Usage: :e <file>", cx),
-                // Clear search highlighting.
-                "noh" | "nohl" | "nohlsearch" => {
-                    self.search_query = None;
-                    cx.notify();
-                }
-                // Buffers.
-                "b" | "bu" | "buf" | "buffer" if !arg.is_empty() => self.switch_to_buffer(arg, cx),
-                "bn" | "bnext" => self.next_buffer(cx),
-                "bp" | "bN" | "bprev" | "bprevious" | "bNext" => self.previous_buffer(cx),
-                "bd" | "bdel" | "bdelete" => self.kill_buffer(cx),
-                // Windows (Vim abbreviations): :split / :vsplit and friends.
-                "split" | "sp" | "spl" => self.split_window(true, cx),
-                "vsplit" | "vs" | "vsp" | "vspl" => self.split_window(false, cx),
-                "only" | "on" => self.delete_other_windows(cx),
-                "new" => self.new_window_buffer(true, cx),
-                "vne" | "vnew" => self.new_window_buffer(false, cx),
-                "winc" | "wincmd" => self.run_wincmd(arg, cx),
-                "close" | "clo" => self.delete_window(cx),
-                "reg" | "registers" | "di" | "display" => self.show_registers(arg, cx),
-                "marks" => self.show_marks(arg, cx),
-                "ju" | "jumps" => self.show_jumps(cx),
-                "cle" | "clearjumps" => {
-                    self.vim.jumps.clear();
-                    self.vim.jump_idx = 0;
-                }
-                "delm" | "delmarks" => self.delete_marks(arg, false, cx),
-                "delm!" | "delmarks!" => self.delete_marks(arg, true, cx),
-                "k" | "mark" | "ma" => self.evil_set_mark(arg, cx),
-                other => self.echo(format!("Unknown ex command: {other}"), cx),
             }
+            (Some(ExCmd::Quit), true) => self.quit_now(cx),
+            // Write-then-quit must save *synchronously*: `save_buffer` spawns
+            // a background write that `cx.quit()` would cancel mid-flight
+            // (see `save_all_modified`'s quit-path contract). A failed write
+            // aborts the quit so the error stays visible and no work is lost.
+            (Some(ExCmd::WriteQuit), false) => {
+                if self.save_active_sync(cx) && !self.refuse_quit_if_modified(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            // `:wq!` writes this buffer, then quits discarding the others.
+            (Some(ExCmd::WriteQuit), true) => {
+                if self.save_active_sync(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            // Still refuses if something couldn't be written (a modified
+            // buffer with no file, e.g. an edited *scratch*-like buffer).
+            (Some(ExCmd::WriteQuitAll), false) => {
+                if self.save_all_modified(cx) && !self.refuse_quit_if_modified(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            (Some(ExCmd::WriteQuitAll), true) => {
+                if self.save_all_modified(cx) {
+                    self.quit_now(cx);
+                }
+            }
+            // Files.
+            (Some(ExCmd::Edit), true) => self.revert_buffer(cx),
+            (Some(ExCmd::Edit), false) if !arg.is_empty() => self.find_file(arg, cx),
+            (Some(ExCmd::Edit), false) => self.echo("Usage: :e <file>", cx),
+            // Clear search highlighting.
+            (Some(ExCmd::NoHighlight), false) => {
+                self.search_query = None;
+                cx.notify();
+            }
+            // Buffers.
+            (Some(ExCmd::Buffer), false) if !arg.is_empty() => self.switch_to_buffer(arg, cx),
+            (Some(ExCmd::BufferNext), false) => self.next_buffer(cx),
+            (Some(ExCmd::BufferPrev), false) => self.previous_buffer(cx),
+            (Some(ExCmd::BufferDelete), false) => self.kill_buffer(cx),
+            // Windows (Vim abbreviations): :split / :vsplit and friends.
+            (Some(ExCmd::Split), false) => self.split_window(true, cx),
+            (Some(ExCmd::VSplit), false) => self.split_window(false, cx),
+            (Some(ExCmd::Only), false) => self.delete_other_windows(cx),
+            (Some(ExCmd::New), false) => self.new_window_buffer(true, cx),
+            (Some(ExCmd::VNew), false) => self.new_window_buffer(false, cx),
+            (Some(ExCmd::WinCmd), false) => self.run_wincmd(arg, cx),
+            (Some(ExCmd::Close), false) => self.delete_window(cx),
+            (Some(ExCmd::Registers), false) => self.show_registers(arg, cx),
+            (Some(ExCmd::Marks), false) => self.show_marks(arg, cx),
+            (Some(ExCmd::Jumps), false) => self.show_jumps(cx),
+            (Some(ExCmd::ClearJumps), false) => {
+                self.vim.jumps.clear();
+                self.vim.jump_idx = 0;
+            }
+            (Some(ExCmd::DelMarks), bang) => self.delete_marks(arg, bang, cx),
+            _ => self.echo(format!("Unknown ex command: {verb}"), cx),
         }
     }
 }

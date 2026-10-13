@@ -53,6 +53,103 @@ pub(super) struct ExLine {
     pub arg: String,
 }
 
+/// An ex command, resolved from any of its names and abbreviations by
+/// [`ExCmd::lookup`] — the one alias table. The line commands (the first
+/// group) take a range and run under `:g`; the rest are plain verbs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExCmd {
+    Substitute,
+    /// `:&` / `:&&` — repeat the last substitute.
+    SubRepeat,
+    Global,
+    VGlobal,
+    Normal,
+    Delete,
+    Yank,
+    Move,
+    Copy,
+    Join,
+    /// `:>` / `:<<` … (one step per character).
+    Shift,
+    Sort,
+    Put,
+    /// `:=` — echo a line number.
+    LineNumber,
+    Mark,
+    /// `:p` / `:#` / `:nu` — only meaningful as `:g`'s command.
+    Print,
+    Write,
+    Quit,
+    WriteQuit,
+    WriteQuitAll,
+    Edit,
+    NoHighlight,
+    Buffer,
+    BufferNext,
+    BufferPrev,
+    BufferDelete,
+    Split,
+    VSplit,
+    Only,
+    New,
+    VNew,
+    WinCmd,
+    Close,
+    Registers,
+    Marks,
+    Jumps,
+    ClearJumps,
+    DelMarks,
+}
+
+impl ExCmd {
+    /// The command named `name` (as [`parse_ex_line`] splits it off).
+    pub(super) fn lookup(name: &str) -> Option<Self> {
+        use ExCmd::*;
+        Some(match name {
+            "s" | "su" | "sub" | "substitute" => Substitute,
+            "&" | "&&" => SubRepeat,
+            "g" | "gl" | "global" => Global,
+            "v" | "vg" | "vglobal" => VGlobal,
+            "norm" | "norma" | "normal" => Normal,
+            "d" | "de" | "del" | "delete" => Delete,
+            "y" | "ya" | "yank" => Yank,
+            "m" | "mo" | "move" => Move,
+            "t" | "co" | "copy" => Copy,
+            "j" | "jo" | "join" => Join,
+            ">" | ">>" | ">>>" | "<" | "<<" | "<<<" => Shift,
+            "sor" | "sort" => Sort,
+            "pu" | "put" => Put,
+            "=" => LineNumber,
+            "k" | "ma" | "mark" => Mark,
+            "p" | "pr" | "print" | "#" | "nu" | "number" => Print,
+            "w" | "write" => Write,
+            "q" | "quit" | "qa" | "qall" | "quitall" => Quit,
+            "wq" | "x" | "xit" => WriteQuit,
+            "wqa" | "wqall" | "xa" | "xall" => WriteQuitAll,
+            "e" | "edit" => Edit,
+            "noh" | "nohl" | "nohlsearch" => NoHighlight,
+            "b" | "bu" | "buf" | "buffer" => Buffer,
+            "bn" | "bnext" => BufferNext,
+            "bp" | "bN" | "bprev" | "bprevious" | "bNext" => BufferPrev,
+            "bd" | "bdel" | "bdelete" => BufferDelete,
+            "split" | "sp" | "spl" => Split,
+            "vsplit" | "vs" | "vsp" | "vspl" => VSplit,
+            "only" | "on" => Only,
+            "new" => New,
+            "vne" | "vnew" => VNew,
+            "winc" | "wincmd" => WinCmd,
+            "close" | "clo" => Close,
+            "reg" | "registers" | "di" | "display" => Registers,
+            "marks" => Marks,
+            "ju" | "jumps" => Jumps,
+            "cle" | "clearjumps" => ClearJumps,
+            "delm" | "delmarks" => DelMarks,
+            _ => return None,
+        })
+    }
+}
+
 /// Read a delimited pattern body up to the (unescaped) `delim`, returning it
 /// and the rest after the delimiter (or the end when it is missing).
 pub(super) fn take_delimited(s: &str, delim: char) -> (String, &str) {
@@ -718,30 +815,31 @@ impl Editor {
     /// Returns false when it isn't one (the caller's plain verbs take it).
     pub(super) fn ex_dispatch(&mut self, line: &ExLine, cx: &mut Context<Self>) -> bool {
         let cur = self.ex_cur_line();
-        let res = match (line.name.as_str(), line.range.is_some()) {
-            // `:{range}` alone: go to its last line.
-            ("", true) => self.ex_goto(line.range.as_ref(), cx),
-            ("s" | "su" | "sub" | "substitute", _) => self.ex_sub(line, false, cx),
-            ("&" | "&&", _) => self.ex_sub(line, true, cx),
-            ("g" | "gl" | "global", _) => self.ex_global(line, !line.bang, cx),
-            ("v" | "vg" | "vglobal", _) => self.ex_global(line, false, cx),
-            ("norm" | "norma" | "normal", _) => self.ex_normal(line, cx),
-            ("d" | "de" | "del" | "delete", _) => self.ex_delete(line, cx),
-            ("y" | "ya" | "yank", _) => self.ex_yank(line, cx),
-            ("m" | "mo" | "move", _) => self.ex_move_copy(line, true, cx),
-            ("t" | "co" | "copy", _) => self.ex_move_copy(line, false, cx),
-            ("j" | "jo" | "join", _) => self.ex_join(line, cx),
-            (">" | ">>" | ">>>" | "<" | "<<" | "<<<", _) => self.ex_shift(line, cx),
-            ("sor" | "sort", _) => self.ex_sort(line, cx),
-            ("pu" | "put", _) => self.ex_put(line, cx),
-            ("=", _) => {
+        // `:{range}` alone: go to its last line.
+        let goto = line.name.is_empty() && line.range.is_some();
+        let res = match ExCmd::lookup(&line.name) {
+            _ if goto => self.ex_goto(line.range.as_ref(), cx),
+            Some(ExCmd::Substitute) => self.ex_sub(line, false, cx),
+            Some(ExCmd::SubRepeat) => self.ex_sub(line, true, cx),
+            Some(ExCmd::Global) => self.ex_global(line, !line.bang, cx),
+            Some(ExCmd::VGlobal) => self.ex_global(line, false, cx),
+            Some(ExCmd::Normal) => self.ex_normal(line, cx),
+            Some(ExCmd::Delete) => self.ex_delete(line, cx),
+            Some(ExCmd::Yank) => self.ex_yank(line, cx),
+            Some(ExCmd::Move) => self.ex_move_copy(line, true, cx),
+            Some(ExCmd::Copy) => self.ex_move_copy(line, false, cx),
+            Some(ExCmd::Join) => self.ex_join(line, cx),
+            Some(ExCmd::Shift) => self.ex_shift(line, cx),
+            Some(ExCmd::Sort) => self.ex_sort(line, cx),
+            Some(ExCmd::Put) => self.ex_put(line, cx),
+            Some(ExCmd::LineNumber) => {
                 let l = self.ex_resolve_range(
                     line.range.as_ref(),
                     (self.ex_last_line(), self.ex_last_line()),
                 );
                 l.map(|(_, e)| self.echo(e.to_string(), cx))
             }
-            ("k" | "ma" | "mark", _) => {
+            Some(ExCmd::Mark) => {
                 self.ex_resolve_range(line.range.as_ref(), (cur, cur))
                     .map(|(_, e)| {
                         let pos = self.ex_line_range(e).start;
@@ -1226,16 +1324,14 @@ impl Editor {
             return Err(ExError::PatternNotFound(None));
         }
         let sub = parse_ex_line(&cmd);
-        if matches!(sub.name.as_str(), "norm" | "norma" | "normal") {
+        let sub_cmd = ExCmd::lookup(&sub.name);
+        if sub_cmd == Some(ExCmd::Normal) {
             let tokens = normal_key_tokens(&sub.arg);
             let events = normal_events_on_lines(lines.iter().rev().copied(), &tokens);
             self.replay_events(events, true, cx);
             return Ok(());
         }
-        if matches!(
-            sub.name.as_str(),
-            "p" | "pr" | "print" | "#" | "nu" | "number"
-        ) {
+        if sub_cmd == Some(ExCmd::Print) {
             let rows: Vec<String> = lines
                 .iter()
                 .map(|&l| format!("{l:>6} {}", self.ex_line(l)))
@@ -1422,6 +1518,12 @@ mod tests {
         assert_eq!((l.name.as_str(), l.range.is_none()), ("wq", true));
         let l = parse_ex_line("q!");
         assert_eq!((l.name.as_str(), l.bang), ("q", true));
+        assert_eq!(ExCmd::lookup("norma"), Some(ExCmd::Normal));
+        assert_eq!(ExCmd::lookup("<<<"), Some(ExCmd::Shift));
+        assert_eq!(ExCmd::lookup("bN"), Some(ExCmd::BufferPrev));
+        assert_eq!(ExCmd::lookup("ma"), Some(ExCmd::Mark));
+        assert_eq!(ExCmd::lookup("marks"), Some(ExCmd::Marks));
+        assert_eq!(ExCmd::lookup("nope"), None);
     }
 
     #[test]
