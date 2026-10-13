@@ -742,6 +742,19 @@
     ((symbol? cmd) (define-key map chord (symbol->string cmd)))
     ((string? cmd) (define-key map chord cmd))
     (else (define-key map chord (string-append "run-thunk \"" (register-thunk cmd) "\"")))))
+;; Bind a table of keys in keymap `map`: each entry is (chord cmd), with `cmd`
+;; anything `bind-key` takes. A quoted table keeps the 'name symbol form:
+;;
+;;   (define-keys "dired" '(("enter" dired-find-file)
+;;                          ("g"     dired-refresh)
+;;                          ("@"     "my-command %c")))
+(define (define-keys map bindings)
+  (for-each (lambda (b) (bind-key map (car b) (cadr b))) bindings))
+
+;; `define-keys` into each keymap of `maps` — one table shared by several maps:
+;;   (define-keys-in '("evil-visual" "evil-visual-line") '(("u" evil-visual-downcase)))
+(define (define-keys-in maps bindings)
+  (for-each (lambda (m) (define-keys m bindings)) maps))
 
 ;; --- hook argument plumbing -------------------------------------------------
 ;; The editor stores hooks BY NAME and calls them by name on the engine thread —

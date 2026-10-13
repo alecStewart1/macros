@@ -1590,6 +1590,10 @@
   (let ((p (point)))
     (when (< (grapheme-forward p) (line-end-pos p)) (forward-char))))
 
+;; The three Visual keymaps (charwise, linewise, blockwise), for bindings they
+;; all share.
+(define *evil-visual-maps* '("evil-visual" "evil-visual-line" "evil-visual-block"))
+
 ;; --- normal state -----------------------------------------------------------
 ;; motion
 (define-key "evil-normal" "h" 'backward-char)
@@ -1648,9 +1652,7 @@
 ;; "x — use register x for the next yank / delete / put ("_ black hole, "+ / "*
 ;; clipboard, "0 last yank, "1-"9 deletes, "- small delete, ". : / read-only).
 (define-key "evil-normal" "\"" "evil-use-register %c")
-(define-key "evil-visual" "\"" "evil-use-register %c")
-(define-key "evil-visual-line" "\"" "evil-use-register %c")
-(define-key "evil-visual-block" "\"" "evil-use-register %c")
+(define-keys-in *evil-visual-maps* '(("\"" "evil-use-register %c")))
 (define-key "evil-normal" "shift-d" 'evil-delete-to-eol) ; D  (= d$)
 (define-key "evil-normal" "shift-c" 'evil-change-to-eol) ; C  (= c$)
 (define-key "evil-normal" "shift-y" 'evil-yank-line)     ; Y (= yy)
@@ -1676,9 +1678,7 @@
 (define-key "evil-normal" "ctrl-v" 'evil-visual-block-state) ; C-v (block-wise)
 (define-key "evil-normal" ":" 'evil-ex-command)          ; :  (e.g. :%s/a/b/g)
 ;; From Visual, `:` starts on the selected lines (`:'<,'>`).
-(define-key "evil-visual" ":" 'evil-ex-command)
-(define-key "evil-visual-line" ":" 'evil-ex-command)
-(define-key "evil-visual-block" ":" 'evil-ex-command)
+(define-keys-in *evil-visual-maps* '((":" evil-ex-command)))
 (define-key "evil-normal" "escape" 'keyboard-quit)
 ;; search
 (define-key "evil-normal" "/" 'evil-search-forward)
@@ -1721,8 +1721,7 @@
    (let* ((key (car b)) (category (cadr b)) (forward (caddr b)) (ends (list-ref b 3))
           (name (evil-ts-motion-name category forward ends)))
      (define-key "evil-normal" key name)
-     (define-key "evil-visual" key (string-append name "-visual"))
-     (define-key "evil-visual-line" key (string-append name "-visual"))
+     (define-keys-in '("evil-visual" "evil-visual-line") (list (list key (string-append name "-visual"))))
      (define-key "evil-operator" key
                  (string-append "evil-ts-motion \"" category "\" "
                                 (evil-scheme-bool forward) " " (evil-scheme-bool ends)))))
@@ -1749,18 +1748,14 @@
 ;; on with (evil-enable-ctrl-x-decrement); `g -` decrements regardless.
 (define-key "evil-normal" "ctrl-a" 'evil-increment)
 (define-key "evil-normal" "g -" 'evil-decrement)
-(define-key "evil-visual" "ctrl-a" 'evil-visual-increment)
-(define-key "evil-visual" "g ctrl-a" 'evil-visual-increment-progressive)
-(define-key "evil-visual" "g ctrl-x" 'evil-visual-decrement-progressive)
-(define-key "evil-visual" "g -" 'evil-visual-decrement)
-(define-key "evil-visual-line" "ctrl-a" 'evil-visual-increment)
-(define-key "evil-visual-line" "g ctrl-a" 'evil-visual-increment-progressive)
-(define-key "evil-visual-line" "g ctrl-x" 'evil-visual-decrement-progressive)
-(define-key "evil-visual-line" "g -" 'evil-visual-decrement)
+(define-keys-in '("evil-visual" "evil-visual-line")
+  '(("ctrl-a" evil-visual-increment)
+    ("g ctrl-a" evil-visual-increment-progressive)
+    ("g ctrl-x" evil-visual-decrement-progressive)
+    ("g -" evil-visual-decrement)))
 (define (evil-enable-ctrl-x-decrement)
   (define-key "evil-normal" "ctrl-x" 'evil-decrement)
-  (define-key "evil-visual" "ctrl-x" 'evil-visual-decrement)
-  (define-key "evil-visual-line" "ctrl-x" 'evil-visual-decrement))
+  (define-keys-in '("evil-visual" "evil-visual-line") '(("ctrl-x" evil-visual-decrement))))
 
 ;; (`>>` / `<<` and every other operator + motion pair live in the operator
 ;; grammar above: `>` / `<` are operators, doubled for the current line.)
@@ -1821,137 +1816,107 @@
 (define-key "evil-insert" "escape" 'evil-normal-state)
 (define-key "evil-insert" "ctrl-r" "evil-insert-register %c") ; C-r x — insert register x
 
-;; --- visual state (motions extend; the mark is active) ----------------------
-(define-key "evil-visual" "h" 'backward-char)
-(define-key "evil-visual" "l" 'evil-visual-forward-char)
-(define-key "evil-visual" "j" 'next-line)
-(define-key "evil-visual" "k" 'previous-line)
-(define-key "evil-visual" "w" 'forward-word-start)
-(define-key "evil-visual" "b" 'backward-word-start)
-(define-key "evil-visual" "0" 'move-beginning-of-line)
-(define-key "evil-visual" "$" 'move-end-of-line)
-(define-key "evil-visual" "g g" 'beginning-of-buffer)
-(define-key "evil-visual" "shift-g" 'end-of-buffer)
-(define-key "evil-visual" "e" 'evil-forward-word-end)          ; e — end of word (extends)
-(define-key "evil-visual" "{" 'evil-backward-paragraph-visual) ; { / } — extend by paragraph
-(define-key "evil-visual" "}" 'evil-forward-paragraph-visual)
-(define-key "evil-visual" "(" 'evil-backward-sentence-visual)
-(define-key "evil-visual" ")" 'evil-forward-sentence-visual)
-(define-key "evil-visual" "f" 'evil-find-char-forward-visual)  ; f/F/t/T — extend to char
-(define-key "evil-visual" "shift-f" 'evil-find-char-backward-visual)
-(define-key "evil-visual" "t" 'evil-till-char-forward-visual)
-(define-key "evil-visual" "shift-t" 'evil-till-char-backward-visual)
-(define-key "evil-visual" ";" 'evil-find-repeat-visual)        ; ; , — repeat f/t (extends)
-(define-key "evil-visual" "," 'evil-find-repeat-reverse-visual)
-(define-key "evil-visual" "d" 'evil-visual-delete)
-(define-key "evil-visual" "x" 'evil-visual-delete)
-(define-key "evil-visual" "y" 'evil-visual-yank)
-(define-key "evil-visual" "p" 'evil-visual-paste)             ; p — paste over selection
-(define-key "evil-visual" "c" 'evil-visual-change)            ; c/s — change selection
-(define-key "evil-visual" "s" 'evil-visual-change)
-(define-key "evil-visual" "o" 'exchange-point-and-mark)       ; o — swap selection ends
-(define-key "evil-visual" "u" 'evil-visual-downcase)          ; u — lowercase selection
-(define-key "evil-visual" "shift-u" 'evil-visual-upcase)      ; U — uppercase selection
-(define-key "evil-visual" "~" 'evil-visual-toggle-case)       ; ~ — toggle case
-(define-key "evil-visual" "g q" 'evil-visual-fill)            ; gq — format selected lines
-(define-key "evil-visual" "g w" 'evil-visual-fill)
-(define-key "evil-visual" ">" 'evil-visual-indent)            ; > / < — shift selected lines
-(define-key "evil-visual" "<" 'evil-visual-outdent)
-(define-key "evil-visual" "shift-j" 'evil-visual-join)        ; J — join selected lines
-(define-key "evil-visual" "r" 'evil-visual-replace-char)      ; r<char> — replace every char
-(define-key "evil-visual" "shift-w" 'forward-bigword-start)   ; W / B / E — WORD motions
-(define-key "evil-visual" "shift-b" 'backward-bigword-start)
-(define-key "evil-visual" "shift-e" 'forward-bigword-end)
-(define-key "evil-visual" "%" 'evil-matchit-visual)           ; % — extend to matching bracket
-(define-key "evil-visual" "ctrl-d" 'evil-scroll-down)         ; half-page, extending
-(define-key "evil-visual" "ctrl-u" 'evil-scroll-up)
-(define-key "evil-visual" "v" 'evil-normal-state)             ; v again exits
-(define-key "evil-visual" "shift-v" 'evil-visual-line-state)  ; switch to line-wise
-(define-key "evil-visual" "ctrl-v" 'evil-visual-block-state)  ; switch to block-wise
-(define-key "evil-visual" "escape" 'evil-normal-state)
-(for-each
- (lambda (km)
-   (define-key km "'" "evil-goto-mark-line %c")
-   (define-key km "`" "evil-goto-mark %c")
-   (define-key km "shift-h" 'evil-window-top-visual)
-   (define-key km "shift-m" 'evil-window-middle-visual)
-   (define-key km "shift-l" 'evil-window-bottom-visual))
- (list "evil-visual" "evil-visual-line"))
+;; --- visual states (motions extend; the mark is active) ---------------------
+;; One motion table shared by all three Visual maps, then what charwise and
+;; linewise share, then each map's own keys. Charwise-only motions (e ( ) f t ;
+;; , B %) are not bound in the line / block maps, and the case / shift / join /
+;; fill / paragraph / mark / screen-line keys are not bound in the block map.
+(define-keys-in *evil-visual-maps*
+  '(("h" backward-char)
+    ("j" next-line)
+    ("k" previous-line)
+    ("w" forward-word-start)
+    ("b" backward-word-start)
+    ("0" move-beginning-of-line)
+    ("$" move-end-of-line)
+    ("g g" beginning-of-buffer)
+    ("shift-g" end-of-buffer)
+    ("o" exchange-point-and-mark)       ; o — swap selection ends / block corners
+    ("shift-w" forward-bigword-start)   ; W / E — WORD motions
+    ("shift-e" forward-bigword-end)
+    ("escape" evil-normal-state)))
+
+;; Charwise + linewise Visual.
+(define-keys-in '("evil-visual" "evil-visual-line")
+  '(("{" evil-backward-paragraph-visual) ; { / } — extend by paragraph
+    ("}" evil-forward-paragraph-visual)
+    ("p" evil-visual-paste)              ; p — paste over selection
+    ("u" evil-visual-downcase)           ; u — lowercase selection
+    ("shift-u" evil-visual-upcase)       ; U — uppercase selection
+    ("~" evil-visual-toggle-case)        ; ~ — toggle case
+    ("g q" evil-visual-fill)             ; gq — format selected lines
+    ("g w" evil-visual-fill)
+    (">" evil-visual-indent)             ; > / < — shift selected lines
+    ("<" evil-visual-outdent)
+    ("shift-j" evil-visual-join)         ; J — join selected lines
+    ("r" evil-visual-replace-char)       ; r<char> — replace every char
+    ("ctrl-d" evil-scroll-down)          ; half-page, extending
+    ("ctrl-u" evil-scroll-up)
+    ("'" "evil-goto-mark-line %c")
+    ("`" "evil-goto-mark %c")
+    ("shift-h" evil-window-top-visual)
+    ("shift-m" evil-window-middle-visual)
+    ("shift-l" evil-window-bottom-visual)))
+
+;; Charwise Visual (`v`).
+(define-keys "evil-visual"
+  '(("l" evil-visual-forward-char)
+    ("e" evil-forward-word-end)          ; e — end of word (extends)
+    ("(" evil-backward-sentence-visual)
+    (")" evil-forward-sentence-visual)
+    ("f" evil-find-char-forward-visual)  ; f/F/t/T — extend to char
+    ("shift-f" evil-find-char-backward-visual)
+    ("t" evil-till-char-forward-visual)
+    ("shift-t" evil-till-char-backward-visual)
+    (";" evil-find-repeat-visual)        ; ; , — repeat f/t (extends)
+    ("," evil-find-repeat-reverse-visual)
+    ("d" evil-visual-delete)
+    ("x" evil-visual-delete)
+    ("y" evil-visual-yank)
+    ("c" evil-visual-change)             ; c/s — change selection
+    ("s" evil-visual-change)
+    ("shift-b" backward-bigword-start)
+    ("%" evil-matchit-visual)            ; % — extend to matching bracket
+    ("v" evil-normal-state)              ; v again exits
+    ("shift-v" evil-visual-line-state)   ; switch to line-wise
+    ("ctrl-v" evil-visual-block-state))) ; switch to block-wise
 
 ;; --- visual line state (`V`: whole-line selection; j/k extend by line) -------
 ;; The selection is rounded out to whole lines in the core, so the motions here
 ;; just move point; `d`/`y` act line-wise. `I`/`A` are vim's blockwise insert /
 ;; append: they drop a cursor at the start / end of every selected line, so the
 ;; text you type (then Escape) lands on all of them at once.
-(define-key "evil-visual-line" "h" 'backward-char)
-(define-key "evil-visual-line" "l" 'forward-char)
-(define-key "evil-visual-line" "j" 'next-line)
-(define-key "evil-visual-line" "k" 'previous-line)
-(define-key "evil-visual-line" "w" 'forward-word-start)
-(define-key "evil-visual-line" "b" 'backward-word-start)
-(define-key "evil-visual-line" "0" 'move-beginning-of-line)
-(define-key "evil-visual-line" "$" 'move-end-of-line)
-(define-key "evil-visual-line" "g g" 'beginning-of-buffer)
-(define-key "evil-visual-line" "shift-g" 'end-of-buffer)
-(define-key "evil-visual-line" "d" 'evil-visual-line-delete)
-(define-key "evil-visual-line" "x" 'evil-visual-line-delete)
-(define-key "evil-visual-line" "y" 'evil-visual-line-yank)
-(define-key "evil-visual-line" "c" 'evil-visual-line-change)   ; c/s — change selected lines
-(define-key "evil-visual-line" "s" 'evil-visual-line-change)
-(define-key "evil-visual-line" "o" 'exchange-point-and-mark)   ; o — swap selection ends
-(define-key "evil-visual-line" "u" 'evil-visual-downcase)      ; u — lowercase selection
-(define-key "evil-visual-line" "shift-u" 'evil-visual-upcase)  ; U — uppercase selection
-(define-key "evil-visual-line" "~" 'evil-visual-toggle-case)   ; ~ — toggle case
-(define-key "evil-visual-line" "p" 'evil-visual-paste)         ; p — paste over selection
-(define-key "evil-visual-line" "{" 'evil-backward-paragraph-visual) ; { / } — by paragraph
-(define-key "evil-visual-line" "}" 'evil-forward-paragraph-visual)
-(define-key "evil-visual-line" "g q" 'evil-visual-fill)        ; gq — format selected lines
-(define-key "evil-visual-line" "g w" 'evil-visual-fill)
-(define-key "evil-visual-line" ">" 'evil-visual-indent)        ; > / < — shift selected lines
-(define-key "evil-visual-line" "<" 'evil-visual-outdent)
-(define-key "evil-visual-line" "shift-j" 'evil-visual-join)    ; J — join selected lines
-(define-key "evil-visual-line" "r" 'evil-visual-replace-char)  ; r<char> — replace every char
-(define-key "evil-visual-line" "shift-w" 'forward-bigword-start)
-(define-key "evil-visual-line" "shift-e" 'forward-bigword-end)
-(define-key "evil-visual-line" "ctrl-d" 'evil-scroll-down)
-(define-key "evil-visual-line" "ctrl-u" 'evil-scroll-up)
-(define-key "evil-visual-line" "shift-i" 'evil-visual-insert)  ; I — insert at each line start
-(define-key "evil-visual-line" "shift-a" 'evil-visual-append)  ; A — append at each line end
-(define-key "evil-visual-line" "v" 'evil-visual-state)         ; switch to charwise visual
-(define-key "evil-visual-line" "shift-v" 'evil-normal-state)   ; V again exits
-(define-key "evil-visual-line" "ctrl-v" 'evil-visual-block-state) ; switch to block-wise
-(define-key "evil-visual-line" "escape" 'evil-normal-state)
+(define-keys "evil-visual-line"
+  '(("l" forward-char)
+    ("d" evil-visual-line-delete)
+    ("x" evil-visual-line-delete)
+    ("y" evil-visual-line-yank)
+    ("c" evil-visual-line-change)        ; c/s — change selected lines
+    ("s" evil-visual-line-change)
+    ("shift-i" evil-visual-insert)       ; I — insert at each line start
+    ("shift-a" evil-visual-append)       ; A — append at each line end
+    ("v" evil-visual-state)              ; switch to charwise visual
+    ("shift-v" evil-normal-state)        ; V again exits
+    ("ctrl-v" evil-visual-block-state))) ; switch to block-wise
 
 ;; --- visual block state (`C-v`: rectangular column selection) ----------------
 ;; The selection is a rectangle between two corners; the renderer highlights only
 ;; the column strip (not whole lines). Motions move the cursor corner. `I`/`A`
 ;; insert/append down the block's left/right column on every row at once (vim's
 ;; block-insert); `d`/`x` delete the rectangle and `y` yanks it.
-(define-key "evil-visual-block" "h" 'backward-char)
-(define-key "evil-visual-block" "l" 'forward-char)
-(define-key "evil-visual-block" "j" 'next-line)
-(define-key "evil-visual-block" "k" 'previous-line)
-(define-key "evil-visual-block" "w" 'forward-word-start)
-(define-key "evil-visual-block" "b" 'backward-word-start)
-(define-key "evil-visual-block" "0" 'move-beginning-of-line)
-(define-key "evil-visual-block" "$" 'move-end-of-line)
-(define-key "evil-visual-block" "g g" 'beginning-of-buffer)
-(define-key "evil-visual-block" "shift-g" 'end-of-buffer)
-(define-key "evil-visual-block" "d" 'evil-block-delete)
-(define-key "evil-visual-block" "x" 'evil-block-delete)
-(define-key "evil-visual-block" "y" 'evil-block-yank)
-(define-key "evil-visual-block" "c" 'evil-block-change)        ; c — change the rectangle
-(define-key "evil-visual-block" "s" 'evil-block-change)
-(define-key "evil-visual-block" "o" 'exchange-point-and-mark)  ; o — swap block corners
-(define-key "evil-visual-block" "r" 'evil-block-replace-char)  ; r<char> — replace the rectangle
-(define-key "evil-visual-block" "shift-w" 'forward-bigword-start)
-(define-key "evil-visual-block" "shift-e" 'forward-bigword-end)
-(define-key "evil-visual-block" "shift-i" 'evil-block-insert)  ; I — insert down the left column
-(define-key "evil-visual-block" "shift-a" 'evil-block-append)  ; A — append down the right column
-(define-key "evil-visual-block" "v" 'evil-visual-state)        ; switch to charwise visual
-(define-key "evil-visual-block" "shift-v" 'evil-visual-line-state) ; switch to line-wise
-(define-key "evil-visual-block" "ctrl-v" 'evil-normal-state)   ; C-v again exits
-(define-key "evil-visual-block" "escape" 'evil-normal-state)
+(define-keys "evil-visual-block"
+  '(("l" forward-char)
+    ("d" evil-block-delete)
+    ("x" evil-block-delete)
+    ("y" evil-block-yank)
+    ("c" evil-block-change)              ; c — change the rectangle
+    ("s" evil-block-change)
+    ("r" evil-block-replace-char)        ; r<char> — replace the rectangle
+    ("shift-i" evil-block-insert)        ; I — insert down the left column
+    ("shift-a" evil-block-append)        ; A — append down the right column
+    ("v" evil-visual-state)              ; switch to charwise visual
+    ("shift-v" evil-visual-line-state)   ; switch to line-wise
+    ("ctrl-v" evil-normal-state)))       ; C-v again exits
 
 ;; --- binding commands by identity (not by name string) ----------------------
 ;; A keymap stores a NAME string and evals "(name)" on the keypress. To let you
