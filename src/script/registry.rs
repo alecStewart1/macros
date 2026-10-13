@@ -257,93 +257,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::decorations::register(&mut reg, shared);
     prims::files::register(&mut reg, shared);
     prims::hooks::register(&mut reg, shared);
-    // --- Special buffers / transient (the magit primitives) ---------------
-    reg.section(Section::SpecialBuffers);
-    // `(render-buffer name mode text faces)` — faces is a list of
-    // `(line-number face-name)`. Replaces/creates a read-only buffer. The
-    // `-quiet` variant refreshes in place without switching/focusing (sidebar
-    // auto-refresh).
-    register_render_buffer(&mut reg, queue, "render-buffer", false);
-    register_render_buffer(&mut reg, queue, "render-buffer-quiet", true);
-    register_unary(&mut reg, queue, "goto-line", |n: isize| {
-        EditorCommand::GotoLine(scheme_pos(n))
-    });
-    register_unary(
-        &mut reg,
-        queue,
-        "scroll-cursor-to-row",
-        EditorCommand::ScrollCursorToRow,
-    );
-    register_ternary(
-        &mut reg,
-        queue,
-        "diff-buffers",
-        |a, b, callback: Callback| EditorCommand::DiffBuffers {
-            a,
-            b,
-            callback: callback.0,
-        },
-    );
-    register_unary(&mut reg, queue, "buffer-clear-highlights", |name| {
-        EditorCommand::BufferClearHighlights { name }
-    });
-    reg.section(Section::SpecialBuffers);
-    {
-        // `(buffer-copy-lines src ss se dst ds de)` — copy a line range between
-        // named buffers (ediff hunk copy). Six args, so registered directly.
-        let q = queue.clone();
-        reg.register_fn(
-            "buffer-copy-lines",
-            move |src: String, ss: usize, se: usize, dst: String, ds: usize, de: usize| {
-                q.push(EditorCommand::BufferCopyLines {
-                    src,
-                    src_start: ss,
-                    src_end: se,
-                    dst,
-                    dst_start: ds,
-                    dst_end: de,
-                });
-            },
-        );
-    }
-    {
-        // `(buffer-highlight-lines name start end face)` — paint a face on a line
-        // range of any named buffer (works on the non-selected ediff pane too).
-        let q = queue.clone();
-        reg.register_fn(
-            "buffer-highlight-lines",
-            move |name: String, start: usize, end: usize, face: String| {
-                q.push(EditorCommand::BufferHighlightLines {
-                    name,
-                    start,
-                    end,
-                    face,
-                });
-            },
-        );
-    }
-    // `(transient title rows)` — `rows` is a list of `(key label command)`, or
-    // a list of `(column-title (key label command) …)` for columns. In the
-    // `-sticky` variant selecting a row keeps the popup open — the row's
-    // command re-opens it (to refresh state) or calls `transient-quit`, for
-    // menus where you toggle several options before dismissing.
-    register_transient(&mut reg, queue, "transient", false);
-    register_transient(&mut reg, queue, "transient-sticky", true);
-    register_nullary(
-        &mut reg,
-        queue,
-        "transient-quit",
-        EditorCommand::TransientQuit,
-    );
-    reg.section(Section::SpecialBuffers);
-    // `(set-special-mode "occur-mode")` makes the active buffer a read-only
-    // special buffer on that keymap; `(set-special-mode "")` makes it editable.
-    register_unary(
-        &mut reg,
-        queue,
-        "set-special-mode",
-        EditorCommand::SetSpecialMode,
-    );
+    prims::special_buffers::register(&mut reg, shared);
     reg.section(Section::Ui);
     register_unary(
         &mut reg,
@@ -2220,48 +2134,6 @@ pub(crate) fn register_ternary<T, U, V>(
 {
     let q = queue.clone();
     reg.register_fn(name, move |a: T, b: U, c: V| q.push(make(a, b, c)));
-}
-
-/// Register one of the `render-buffer` / `render-buffer-quiet` pair — same
-/// signature, differing only in whether the rendered buffer is switched to.
-pub(crate) fn register_render_buffer(
-    reg: &mut Registrar,
-    queue: &Queue,
-    fn_name: &'static str,
-    quiet: bool,
-) {
-    let q = queue.clone();
-    reg.register_fn(
-        fn_name,
-        move |name: String, mode: String, text: String, faces: SteelVal| {
-            let line_faces = parse_line_faces(&faces);
-            q.push(EditorCommand::RenderBuffer {
-                name,
-                mode,
-                text,
-                line_faces,
-                quiet,
-            });
-        },
-    );
-}
-
-/// Register one of the `transient` / `transient-sticky` pair, differing only
-/// in whether selecting a row keeps the popup open.
-pub(crate) fn register_transient(
-    reg: &mut Registrar,
-    queue: &Queue,
-    name: &'static str,
-    sticky: bool,
-) {
-    let q = queue.clone();
-    reg.register_fn(name, move |title: String, rows: SteelVal| {
-        q.push(EditorCommand::Transient {
-            title,
-            columns: parse_transient_columns(&rows),
-            sticky,
-        });
-    });
 }
 
 /// Register a nullary Steel *read* bridge: `name` returns a value derived from

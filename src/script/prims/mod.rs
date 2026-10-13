@@ -19,6 +19,7 @@ pub(super) mod modal;
 pub(super) mod options;
 pub(super) mod plotting;
 pub(super) mod prompts;
+pub(super) mod special_buffers;
 pub(super) mod spell;
 pub(super) mod text;
 pub(super) mod tree_sitter;
