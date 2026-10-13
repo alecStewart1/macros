@@ -14,7 +14,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -27,6 +26,7 @@ use crate::grid::cellfmt::{self, CellFmt, CellFormats, NumCode};
 use crate::grid::cmd::{GridCmd, GridOp};
 use crate::grid::infer::ColType;
 use crate::grid::model::{CellsSnapshot, Change, Workbook};
+use crate::grid::sidecar::Sidecar;
 use crate::grid::style::RuleTest;
 use crate::grid::view::{
     self, CellEdit, CellRange, GridView, SelKind, cell_name, parse_address, range_name,
@@ -1197,13 +1197,7 @@ fn group_thousands(n: f64) -> String {
     if n < 0.0 { format!("-{out}") } else { out }
 }
 
-/// A fast content fingerprint for auto-revert (not a security hash).
-pub(super) fn bytes_hash(bytes: &[u8]) -> u64 {
-    let mut h = rustc_hash::FxHasher::default();
-    h.write(bytes);
-    h.write_usize(bytes.len());
-    h.finish()
-}
+pub(super) use crate::grid::bytes_hash;
 
 /// Painted geometry of one grid pane, reported by the element every frame so
 /// mouse events can be hit-tested against what's actually on screen.
@@ -1265,72 +1259,49 @@ enum GridHit {
     Cell(usize, usize),
 }
 
-/// Persisted per-file view settings (column widths, row heights, zoom,
-/// header choice), kept beside the config so they never touch the CSV.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct Sidecar {
-    cols: Vec<(usize, f64)>,
-    rows: Vec<(usize, f64)>,
-    zoom: Option<f32>,
-    header: Option<bool>,
-    /// Frozen rows, when the user froze some (`grid-toggle-freeze`).
-    #[serde(default)]
-    freeze: Option<usize>,
-    /// Columns hidden with `grid-hide-column`.
-    #[serde(default)]
-    hidden_cols: Vec<usize>,
-}
-
-fn sidecar_path(path: &Path) -> PathBuf {
-    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let key = bytes_hash(canon.to_string_lossy().as_bytes());
-    crate::runtime::config_directory()
-        .join("grid-layouts")
-        .join(format!("{key:016x}.json"))
-}
-
 fn load_sidecar(path: &Path, doc: &mut GridDoc) {
-    let Ok(text) = std::fs::read_to_string(sidecar_path(path)) else {
-        return;
-    };
-    let Ok(sc) = serde_json::from_str::<Sidecar>(&text) else {
-        return;
-    };
-    for (i, w) in sc.cols {
-        doc.view.cols.set(i, w);
-    }
-    for (i, h) in sc.rows {
-        doc.view.rows.set(i, h);
-    }
-    if let Some(z) = sc.zoom {
-        doc.view.zoom = z.clamp(0.1, 4.0);
-    }
-    if let Some(h) = sc.header
-        && h != doc.wb.header(SHEET)
-    {
-        doc.wb.set_header(SHEET, h);
-    }
-    doc.view.frozen_rows = sc.freeze.unwrap_or(0);
-    for c in sc.hidden_cols {
-        doc.view.cols.set_hidden(c, true);
+    if let Some(sc) = Sidecar::load(path) {
+        doc.apply_sidecar(sc);
     }
 }
 
 fn store_sidecar(path: &Path, doc: &GridDoc) {
-    let sc = Sidecar {
-        cols: doc.view.cols.overrides().collect(),
-        rows: doc.view.rows.overrides().collect(),
-        zoom: ((doc.view.zoom - 1.0).abs() > 1e-3).then_some(doc.view.zoom),
-        header: Some(doc.wb.header(SHEET)),
-        freeze: (doc.view.frozen_rows > 0).then_some(doc.view.frozen_rows),
-        hidden_cols: doc.view.cols.hidden().collect(),
-    };
-    let file = sidecar_path(path);
-    if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    doc.sidecar().store(path);
+}
+
+impl GridDoc {
+    /// Apply view settings saved for this grid's file.
+    fn apply_sidecar(&mut self, sc: Sidecar) {
+        for (i, w) in sc.cols {
+            self.view.cols.set(i, w);
+        }
+        for (i, h) in sc.rows {
+            self.view.rows.set(i, h);
+        }
+        if let Some(z) = sc.zoom {
+            self.view.zoom = z.clamp(0.1, 4.0);
+        }
+        if let Some(h) = sc.header
+            && h != self.wb.header(SHEET)
+        {
+            self.wb.set_header(SHEET, h);
+        }
+        self.view.frozen_rows = sc.freeze.unwrap_or(0);
+        for c in sc.hidden_cols {
+            self.view.cols.set_hidden(c, true);
+        }
     }
-    if let Ok(text) = serde_json::to_string(&sc) {
-        let _ = std::fs::write(file, text);
+
+    /// The view settings to save for this grid's file.
+    fn sidecar(&self) -> Sidecar {
+        Sidecar {
+            cols: self.view.cols.overrides().collect(),
+            rows: self.view.rows.overrides().collect(),
+            zoom: ((self.view.zoom - 1.0).abs() > 1e-3).then_some(self.view.zoom),
+            header: Some(self.wb.header(SHEET)),
+            freeze: (self.view.frozen_rows > 0).then_some(self.view.frozen_rows),
+            hidden_cols: self.view.cols.hidden().collect(),
+        }
     }
 }
 

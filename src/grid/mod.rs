@@ -15,6 +15,7 @@
 //! - [`cellfmt`]: bold and colors set by hand on single cells.
 //! - [`series`]: continuing a series down a column (copy-down / fill).
 //! - [`export`]: cells as org / Markdown / JSON / CSV, and org tables back.
+//! - [`sidecar`]: per-file view settings saved beside the config.
 //!
 //! The core invariant: a row loaded from the file and never edited ("clean")
 //! is written back by copying its original bytes, so saving an untouched file
@@ -33,8 +34,19 @@ pub mod parse;
 mod regression_tests;
 pub mod series;
 pub mod sheet;
+pub mod sidecar;
 pub mod style;
 #[cfg(test)]
 mod testgen;
 pub mod view;
 pub mod write;
+
+/// A fast content fingerprint (auto-revert, sidecar names; not a security
+/// hash).
+pub fn bytes_hash(bytes: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = rustc_hash::FxHasher::default();
+    h.write(bytes);
+    h.write_usize(bytes.len());
+    h.finish()
+}
