@@ -3803,22 +3803,13 @@ pub(crate) fn register_render_buffer(
         fn_name,
         move |name: String, mode: String, text: String, faces: SteelVal| {
             let line_faces = parse_line_faces(&faces);
-            let cmd = if quiet {
-                EditorCommand::RenderBufferQuiet {
-                    name,
-                    mode,
-                    text,
-                    line_faces,
-                }
-            } else {
-                EditorCommand::RenderBuffer {
-                    name,
-                    mode,
-                    text,
-                    line_faces,
-                }
-            };
-            q.lock().unwrap().push(cmd);
+            q.lock().unwrap().push(EditorCommand::RenderBuffer {
+                name,
+                mode,
+                text,
+                line_faces,
+                quiet,
+            });
         },
     );
 }

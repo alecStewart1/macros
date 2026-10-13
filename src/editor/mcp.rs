@@ -421,6 +421,7 @@ impl Editor {
                 mode: "help-mode".into(),
                 text,
                 line_faces: Vec::new(),
+                quiet: false,
             },
             cx,
         );
