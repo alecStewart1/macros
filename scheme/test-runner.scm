@@ -57,7 +57,7 @@
         (row (or (assoc runner *test-commands*) (list runner "" "" ""))))
     (set! *test-commands*
           (cons (map (lambda (j) (if (= j i) template (nth row j))) (list 0 1 2 3))
-                (filter (lambda (r) (not (equal? (car r) runner))) *test-commands*)))))
+                (alist-remove *test-commands* runner)))))
 
 (define (test-template runner kind)
   (let ((row (assoc runner *test-commands*)))

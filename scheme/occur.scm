@@ -120,10 +120,7 @@
   (let ((names (buffer-names)))
     (cond ((and (not (equal? bufname "")) (member bufname names)) bufname)
           ((equal? path "") #f)
-          (else (let loop ((ns names))
-                  (cond ((null? ns) #f)
-                        ((equal? (buffer-file-name-of (car ns)) path) (car ns))
-                        (else (loop (cdr ns)))))))))
+          (else (find-buffer-visiting path)))))
 
 ;; Show `bufname` (or the file `path`) in another window and put point on
 ;; 0-based `line0`, byte column `col`.

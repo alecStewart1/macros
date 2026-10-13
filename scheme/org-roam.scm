@@ -293,7 +293,7 @@
 ;; Following links (id: / file: / http)
 ;; ===========================================================================
 (define (org-roam--current-line)
-  (let ((ls (split-many (buffer-string) "\n")) (i (buffer-line)))
+  (let ((ls (buffer-lines)) (i (buffer-line)))
     (if (< i (length ls)) (nth ls i) "")))
 
 ;; (prefix . target) for the link on the current line, or #f. `prefix` is one of
@@ -479,12 +479,8 @@
 (define (org-roam--daily-file date) (path-join (org-roam--dailies-dir) (string-append date ".org")))
 ;; Gregorian day arithmetic comes from core.scm (ymd->days / days->ymd / pad2),
 ;; which loads before this file; org-roam stays independent of org.scm.
-(define (org-roam--date-str->days s)
-  (let ((c (regexp-captures "([0-9]{4})-([0-9]{2})-([0-9]{2})" s)))
-    (if (null? c) 0 (ymd->days (string->number (nth c 1)) (string->number (nth c 2)) (string->number (nth c 3))))))
-(define (org-roam--date-str days)
-  (let ((ymd (days->ymd days)))
-    (string-append (number->string (nth ymd 0)) "-" (pad2 (nth ymd 1)) "-" (pad2 (nth ymd 2)))))
+(define (org-roam--date-str->days s) (or (iso-date->days s) 0))
+(define (org-roam--date-str days) (days->iso-date days))
 (define (org-roam--ensure-daily date)
   (let ((f (org-roam--daily-file date)))
     (when (not (file-exists? f))
@@ -539,7 +535,7 @@
 ;; on org.scm's org-id-get-create) since this file loads first.
 (define (org-roam--list-drop lst n) (if (or (<= n 0) (null? lst)) lst (org-roam--list-drop (cdr lst) (- n 1))))
 (define-command (org-roam-node-from-heading)
-  (let* ((lines (split-many (buffer-string) "\n")) (L (buffer-line))
+  (let* ((lines (buffer-lines)) (L (buffer-line))
          (H (let loop ((i L))
               (cond ((< i 0) #f)
                     ((>= (string-match "^\\*+[ \t]" (nth lines i)) 0) i)

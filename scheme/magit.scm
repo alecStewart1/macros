@@ -1930,8 +1930,7 @@
             recs))
 ;; The file to blame: the buffer's real path — its name may be uniquified
 ;; (`mod.rs<parser>`), which git can't resolve. Falls back to the name.
-(define (magit-blame-file)
-  (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f)))
+(define (magit-blame-file) (buffer-path-or-name))
 (define (magit-blame-ensure)
   (when (not (equal? (magit-blame-file) *magit-blame-buf*))
     (magit-blame-store (magit-blame-file) (magit-blame-fetch (buffer-directory) (magit-blame-file))))

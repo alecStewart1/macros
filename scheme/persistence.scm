@@ -19,8 +19,7 @@
 
 (define (saveplace-set! path pos)
   (set! *saveplace*
-        (cons (cons path pos)
-              (filter (lambda (kv) (not (equal? (car kv) path))) *saveplace*))))
+        (alist-set *saveplace* path pos)))
 
 ;; Parse "pos\tpath" lines back into the alist.
 (define (saveplace-load)

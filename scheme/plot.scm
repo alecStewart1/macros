@@ -27,10 +27,7 @@
 (define (plot-row-spans row) (cadr row))
 
 ;; Look `key` up in a flat (key value …) plist, else `default`.
-(define (plot--opt opts key default)
-  (cond ((or (null? opts) (null? (cdr opts))) default)
-        ((eq? (car opts) key) (cadr opts))
-        (else (plot--opt (cdr (cdr opts)) key default))))
+(define (plot--opt opts key default) (plist-get opts key default))
 
 (define (plot--shift spans n)
   (map (lambda (s) (list (+ (car s) n) (+ (cadr s) n) (nth s 2))) spans))

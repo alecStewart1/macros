@@ -9,7 +9,7 @@
 (for-each (lambda (e) (set-extension e "markdown"))
           (list "md" "markdown" "mdown" "mkd" "mkdn"))
 
-(define (md-lines) (split-many (buffer-string) "\n"))
+(define (md-lines) (buffer-lines))
 
 (define (md-heading-line? line)
   (>= (string-match "^#+ " line) 0))
@@ -36,10 +36,7 @@
 (define (md--active?)
   ;; The visited file's path (the buffer name of a uniquified buffer is
   ;; `README.md<dir>`), or the buffer name for a fileless buffer.
-  (let ((b (let ((f (buffer-file-name)))
-             (if (or (not (string? f)) (equal? f "")) (current-buffer) f))))
-    (or (ends-with? b ".md") (ends-with? b ".markdown")
-        (ends-with? b ".mdown") (ends-with? b ".mkd") (ends-with? b ".mkdn"))))
+  (ends-with-any? (buffer-path-or-name) (list ".md" ".markdown" ".mdown" ".mkd" ".mkdn")))
 
 ;; Font multiplier per heading level — h1 biggest, tapering toward body size.
 (define (md--heading-scale level)

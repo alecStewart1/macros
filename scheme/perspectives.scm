@@ -97,7 +97,7 @@
 ;; the list, clear it from the title bar if it was current, and write through.
 (define (perspective-remove root)
   (set! *perspectives*
-        (filter (lambda (kv) (not (equal? (car kv) root))) *perspectives*))
+        (alist-remove *perspectives* root))
   (when (equal? *perspective-current* root)
     (set! *perspective-current* #f))
   (perspective-sync-titlebar)

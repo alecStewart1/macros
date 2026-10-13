@@ -50,20 +50,11 @@
   (let ((a (assoc line anchors)))
     (if a (fold-anchor-locate lines a) line)))
 
-;; Drop entries whose key (via `key`) repeats an earlier one.
-(define (fold--dedupe xs key)
-  (let loop ((xs xs) (seen '()) (acc '()))
-    (cond ((null? xs) (reverse acc))
-          ((member (key (car xs)) seen) (loop (cdr xs) seen acc))
-          (else (loop (cdr xs) (cons (key (car xs)) seen) (cons (car xs) acc))))))
-
 ;; Relocate a list of folded line numbers; vanished ones are dropped.
 (define (fold-anchors-relocate-lines anchors lines nums)
-  (fold--dedupe
-   (filter (lambda (x) x) (map (lambda (n) (fold-anchor-remap anchors lines n)) nums))
-   (lambda (x) x)))
+  (dedup (filter (lambda (x) x) (map (lambda (n) (fold-anchor-remap anchors lines n)) nums))))
 
-(define (fold--buffer-lines) (split-many (buffer-string) "\n"))
+(define (fold--buffer-lines) (buffer-lines))
 
 (define *fold-folded* '())
 (define *fold-anchors* '())
@@ -169,8 +160,7 @@
 (define *fold-handlers* '())
 (define (fold-register-style style proc)
   (set! *fold-handlers*
-        (cons (cons style proc)
-              (filter (lambda (p) (not (equal? (car p) style))) *fold-handlers*))))
+        (alist-set *fold-handlers* style proc)))
 
 ;; Toggle the fold whose header is `line`, dispatched on the buffer's style. This
 ;; is the exact name Rust's chevron click invokes (with an explicit line, since a

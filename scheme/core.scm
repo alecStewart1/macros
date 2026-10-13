@@ -78,6 +78,46 @@
         ((equal? (car (car alist)) key) (cdr (car alist)))
         (else (alist-ref (cdr alist) key))))
 
+;; `alist` without any entry keyed `key` (order of the rest preserved).
+(define (alist-remove alist key)
+  (filter (lambda (p) (not (equal? (car p) key))) alist))
+
+;; `alist` with `key` bound to `v`: the new entry goes to the FRONT and any old
+;; entry for `key` is dropped. A record list works too — `(alist-set al id
+;; (list a b))` stores the row `(id a b)`.
+(define (alist-set alist key v)
+  (cons (cons key v) (alist-remove alist key)))
+
+;; The value after `key` in a flat (key value …) plist, else `default` (#f when
+;; omitted). Keys compare with `equal?`, so symbols and strings both work.
+(define (plist-get opts key . default)
+  (let loop ((opts opts))
+    (cond ((or (null? opts) (null? (cdr opts))) (if (null? default) #f (car default)))
+          ((equal? (car opts) key) (cadr opts))
+          (else (loop (cddr opts))))))
+
+;; Safe field access on a parsed JSON object (string->jsexpr hashes key by
+;; symbol): the value, or #f when `o` isn't a hash or lacks `k`.
+(define (json-get o k) (if (hash? o) (hash-try-get o k) #f))
+;; A JSON number (a float after parsing) as an exact integer; 0 if not a number.
+(define (json-int x) (if (number? x) (exact (round x)) 0))
+
+;; Does `s` end with any of the suffixes in `exts`?
+(define (ends-with-any? s exts)
+  (let loop ((es exts))
+    (cond ((null? es) #f)
+          ((ends-with? s (car es)) #t)
+          (else (loop (cdr es))))))
+
+;; The extension of a file name, after the last "." of its final path segment
+;; ("src/main.rs" -> "rs", ".bashrc" -> "bashrc"; "" for "Makefile" or "a.d/x").
+(define (file-extension name)
+  (let loop ((i (- (string-length name) 1)))
+    (cond ((< i 0) "")
+          ((equal? (substring name i (+ i 1)) ".") (substring name (+ i 1) (string-length name)))
+          ((equal? (substring name i (+ i 1)) "/") "")
+          (else (loop (- i 1))))))
+
 (define (non-empty-lines s)
   (filter (lambda (l) (not (equal? l ""))) (split-many s "\n")))
 
@@ -114,12 +154,14 @@
   (let ((len (string-length s)))
     (if (>= len width) s (string-append (string-repeat " " (- width len)) s))))
 
-;; Distinct elements of `lst`, preserving first-seen order.
-(define (dedup lst)
-  (let loop ((lst lst) (seen '()) (acc '()))
-    (cond ((null? lst) (reverse acc))
-          ((member (car lst) seen) (loop (cdr lst) seen acc))
-          (else (loop (cdr lst) (cons (car lst) seen) (cons (car lst) acc))))))
+;; Distinct elements of `lst`, preserving first-seen order. With the optional
+;; `key` procedure, an element is dropped when its key repeats an earlier one's.
+(define (dedup lst . key)
+  (let ((k (if (null? key) (lambda (x) x) (car key))))
+    (let loop ((lst lst) (seen '()) (acc '()))
+      (cond ((null? lst) (reverse acc))
+            ((member (k (car lst)) seen) (loop (cdr lst) seen acc))
+            (else (loop (cdr lst) (cons (k (car lst)) seen) (cons (car lst) acc)))))))
 
 ;; The last `n` elements of `lst` (all of it when shorter). The first `n` is
 ;; Steel's builtin `(take lst n)`.
@@ -387,6 +429,20 @@
 
 ;; Two-digit zero-padded number ("07"), for date/time formatting.
 (define (pad2 n) (if (< n 10) (string-append "0" (number->string n)) (number->string n)))
+
+;; ISO dates. "YYYY-MM-DD" (anywhere in `s`) → (y m d), or #f.
+(define (parse-iso-date s)
+  (let ((c (regexp-captures "([0-9]{4})-([0-9]{2})-([0-9]{2})" s)))
+    (if (null? c) #f
+        (list (string->number (nth c 1)) (string->number (nth c 2)) (string->number (nth c 3))))))
+;; The day count of the first "YYYY-MM-DD" in `s`, or #f.
+(define (iso-date->days s)
+  (let ((ymd (parse-iso-date s)))
+    (if ymd (ymd->days (nth ymd 0) (nth ymd 1) (nth ymd 2)) #f)))
+;; A day count as "YYYY-MM-DD".
+(define (days->iso-date days)
+  (let ((ymd (days->ymd days)))
+    (string-append (number->string (nth ymd 0)) "-" (pad2 (nth ymd 1)) "-" (pad2 (nth ymd 2)))))
 
 ;; Minibuffer reads with an OPTIONAL initial value (Emacs `read-string` /
 ;; `completing-read` style). The Rust `*-impl` primitives take a required
@@ -657,9 +713,7 @@
 ;; buffer-local migration needs non-string value support in the primitive.)
 (define (buffer-state-get alist default)
   (let ((e (alist-ref alist (current-buffer)))) (if e e default)))
-(define (buffer-state-set alist v)
-  (cons (cons (current-buffer) v)
-        (filter (lambda (p) (not (equal? (car p) (current-buffer)))) alist)))
+(define (buffer-state-set alist v) (alist-set alist (current-buffer) v))
 
 ;; --- list-buffer keymap boilerplate --------------------------------------------
 ;; The conventional read-only list-buffer keys: RET visits, n/p move, q kills,
@@ -756,6 +810,27 @@
   (or (equal? a b)
       (and (string? a) (not (equal? a ""))
            (equal? (file-truename a) (file-truename b)))))
+
+;; The name of an open buffer visiting `path` (compared with `same-file?`, so
+;; a relative, symlinked or /private-prefixed spelling still matches), or #f.
+(define (find-buffer-visiting path)
+  (and (not (equal? path ""))
+       (let loop ((names (buffer-names)))
+         (cond ((null? names) #f)
+               ((let ((f (buffer-file-name-of (car names))))
+                  (and (string? f) (not (equal? f "")) (same-file? f path)))
+                (car names))
+               (else (loop (cdr names)))))))
+
+;; The current buffer's visited path, or its name for a fileless buffer. Use
+;; this for extension checks: a uniquified buffer is named `notes.org<dir>`,
+;; which no longer ends in ".org".
+(define (buffer-path-or-name)
+  (let ((f (buffer-file-name)))
+    (if (or (not (string? f)) (equal? f "")) (current-buffer) f)))
+
+;; The current buffer's text as a list of lines (split on "\n").
+(define (buffer-lines) (split-many (buffer-string) "\n"))
 
 ;; Put point on 0-based `line0`, byte column `col`, once buffer `bufname` (or
 ;; the buffer visiting `path`; either may be "") is current.

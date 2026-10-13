@@ -27,8 +27,7 @@
 
 (define (tabulated-set! buffer state)
   (set! *tabulated-tables*
-        (cons (cons buffer state)
-              (filter (lambda (kv) (not (equal? (car kv) buffer))) *tabulated-tables*))))
+        (alist-set *tabulated-tables* buffer state)))
 
 ;; alist-ref returns the stored state (the cdr) or #f.
 (define (tabulated-get buffer) (alist-ref *tabulated-tables* buffer))

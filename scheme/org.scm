@@ -171,7 +171,7 @@
 ;; ===========================================================================
 ;; Buffer line / offset helpers (operate on the active buffer)
 ;; ===========================================================================
-(define (org--lines) (split-many (buffer-string) "\n"))
+(define (org--lines) (buffer-lines))
 
 ;; Lines-list variants: loops should split the buffer ONCE via (org--lines) and
 ;; thread the list through these, not call the one-shot helpers per iteration
@@ -263,9 +263,7 @@
 ;; The visited file's path, or the buffer name for a fileless buffer. Name-based
 ;; checks must use this: a uniquified buffer is named `notes.org<dir>`, which
 ;; no longer ends in ".org".
-(define (org--file-or-name)
-  (let ((f (buffer-file-name)))
-    (if (or (not (string? f)) (equal? f "")) (current-buffer) f)))
+(define (org--file-or-name) (buffer-path-or-name))
 
 ;; Is the active buffer an Org buffer? (.org file, or explicitly activated.)
 (define (org--active?)
@@ -540,7 +538,7 @@
       (let ((anchors (buffer-state-get *org-fold-anchors* '()))
             (lines (org--lines)))
         (org--fold-state-set
-         (fold--dedupe
+         (dedup
           (filter (lambda (p) p)
                   (map (lambda (p)
                          (let ((n (fold-anchor-remap anchors lines (car p))))
@@ -1795,17 +1793,13 @@
 (define (org--dow-name days) (nth *org-dow-names* (modulo (+ days 4) 7)))
 
 ;; "YYYY-MM-DD" (anywhere in `s`) → (y m d), or #f.
-(define (org--parse-date s)
-  (let ((c (regexp-captures "([0-9]{4})-([0-9]{2})-([0-9]{2})" s)))
-    (if (null? c) #f
-        (list (string->number (nth c 1)) (string->number (nth c 2)) (string->number (nth c 3))))))
-(define (org--date-str->days s)
-  (let ((ymd (org--parse-date s)))
-    (if ymd (ymd->days (nth ymd 0) (nth ymd 1) (nth ymd 2)) #f)))
+;; (The ISO parse/format itself — parse-iso-date, iso-date->days,
+;; days->iso-date — is in core.scm, shared with org-roam.)
+(define org--parse-date parse-iso-date)
+(define org--date-str->days iso-date->days)
+;; "YYYY-MM-DD Dow", the Org timestamp body.
 (define (org--days->date-str days)
-  (let ((ymd (days->ymd days)))
-    (string-append (number->string (nth ymd 0)) "-" (pad2 (nth ymd 1)) "-"
-                   (pad2 (nth ymd 2)) " " (org--dow-name days))))
+  (string-append (days->iso-date days) " " (org--dow-name days)))
 (define (org--today-days) (org--date-str->days (current-time "%Y-%m-%d")))
 
 (define (org--leap? y) (and (= 0 (modulo y 4)) (or (not (= 0 (modulo y 100))) (= 0 (modulo y 400)))))

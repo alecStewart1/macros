@@ -62,8 +62,8 @@
 ;;; ===========================================================================
 
 ;; --- JSON helpers -----------------------------------------------------------
-(define (lsp-int x) (if (number? x) (exact (round x)) 0))   ; JSON num -> int
-(define (jget o k) (if (hash? o) (hash-try-get o k) #f))    ; safe field access
+(define lsp-int json-int)   ; JSON num -> int (core.scm)
+(define jget json-get)      ; safe field access (core.scm)
 (define (as-list r) (cond ((list? r) r) ((hash? r) (list r)) (else '())))
 
 ;; A range's start position, as byte offsets in the current buffer.
@@ -312,16 +312,10 @@
 
 ;; The current buffer's visited path — its NAME may be uniquified
 ;; (`mod.rs<parser>`), which hides the extension. Fileless buffers: the name.
-(define (lsp--buffer-path)
-  (let ((f (buffer-file-name))) (if (equal? f "") (current-buffer) f)))
+(define (lsp--buffer-path) (buffer-path-or-name))
 
 ;; The extension of a file name ("src/main.rs" -> "rs"; "" if none).
-(define (lsp--file-ext name)
-  (let loop ((i (- (string-length name) 1)))
-    (cond ((< i 0) "")
-          ((equal? (substring name i (+ i 1)) ".") (substring name (+ i 1) (string-length name)))
-          ((equal? (substring name i (+ i 1)) "/") "")
-          (else (loop (- i 1))))))
+(define (lsp--file-ext name) (file-extension name))
 
 ;; before-save-hook: run the formatter configured for this file's extension. A
 ;; shell formatter gets the buffer on stdin and replaces it with stdout; a

@@ -44,7 +44,7 @@
 
 (define (async-lane--drop name)
   (set! *async-lanes*
-        (filter (lambda (e) (not (equal? (car e) name))) *async-lanes*)))
+        (alist-remove *async-lanes* name)))
 
 ;; Spawn `program`/`args` on the lane → the process id, or #f (after a
 ;; message) when the lane already has a live process. `on-output` / `on-exit`
