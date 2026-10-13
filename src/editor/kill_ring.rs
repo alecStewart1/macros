@@ -35,6 +35,34 @@ impl Editor {
         }
         self.kill_index = self.kill_ring.len() - 1;
     }
+
+    /// File a yank/delete's `text` everywhere a kill goes: the system
+    /// clipboard, the Vim registers (`reg` is the `"x` prefix, already taken)
+    /// and the kill ring, then mark it line-wise for `p` when `linewise`.
+    /// The black-hole register `"_` swallows it: nothing is filed and this
+    /// returns false.
+    pub(super) fn file_kill(
+        &mut self,
+        kind: super::registers::KillKind,
+        reg: Option<char>,
+        text: String,
+        linewise: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if reg == Some('_') {
+            return false;
+        }
+        self.set_clipboard(&text, cx);
+        self.note_register_kill(kind, reg, &text);
+        // Resets the line-wise flag; set it again after for a line-wise kill.
+        self.push_kill(text);
+        if linewise {
+            self.evil_yank_linewise = true;
+            self.vim.registers.set_linewise_last(true);
+        }
+        true
+    }
+
     pub(super) fn kill_line(&mut self, cx: &mut Context<Self>) {
         let p = self.point();
         let line = self.active.buffer.line_range_at(p);
@@ -79,9 +107,7 @@ impl Editor {
                 self.set_auto_mark('[', range.start);
                 self.set_auto_mark(']', range.end.saturating_sub(1).max(range.start));
                 let text = self.active.buffer.slice_to_string(range);
-                self.set_clipboard(&text, cx); // sync the system clipboard
-                self.note_register_kill(super::registers::KillKind::Yank, reg, &text);
-                self.push_kill(text);
+                self.file_kill(super::registers::KillKind::Yank, reg, text, false, cx);
                 self.active.mark_active = false;
                 self.echo("Saved to kill ring", cx);
             }

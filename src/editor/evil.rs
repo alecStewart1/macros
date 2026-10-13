@@ -264,13 +264,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let reg = self.take_kill_register();
-        if reg == Some('_') {
-            return;
-        }
-        self.set_clipboard(&text, cx);
-        self.note_register_kill(kind, reg, &text);
-        self.push_kill(text);
-        self.evil_yank_linewise = false;
+        self.file_kill(kind, reg, text, false, cx);
     }
 
     /// Block `d`/`x`: delete the rectangle (columns `[left, right]` on every row),

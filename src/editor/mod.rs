@@ -2509,14 +2509,11 @@ impl Editor {
         }
         // Vim `"_d`: the black hole register swallows the text.
         let reg = self.take_kill_register();
-        if reg == Some('_') {
-            self.delete_range(range, cx);
-            return;
+        if reg != Some('_') {
+            // C-k/C-w/M-d also feed the OS clipboard.
+            let killed = self.active.buffer.slice_to_string(range.clone());
+            self.file_kill(registers::KillKind::Delete, reg, killed, false, cx);
         }
-        let killed = self.active.buffer.slice_to_string(range.clone());
-        self.set_clipboard(&killed, cx); // C-k/C-w/M-d also feed the OS clipboard
-        self.note_register_kill(registers::KillKind::Delete, reg, &killed);
-        self.push_kill(killed);
         self.delete_range(range, cx);
     }
 
