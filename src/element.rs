@@ -12,7 +12,7 @@ use gpui::{
 use crate::editor::{CompletionView, Editor};
 use crate::highlight::{HlSpan, face_name};
 use crate::lsp::Severity;
-use crate::theme::Theme;
+use crate::theme::{Theme, Underline};
 
 mod popup;
 mod terminal;
@@ -1934,9 +1934,9 @@ struct Seg {
     start: usize,
     end: usize,
     color: Hsla,
-    /// `None`, or `Some((wavy, color))` — the underline carries its own color
-    /// so a squiggle can be tinted without recoloring the text under it.
-    underline: Option<(bool, Hsla)>,
+    /// `None`, or `Some((style, color))` — the underline carries its own
+    /// color so a squiggle can be tinted without recoloring the text under it.
+    underline: Option<(Underline, Hsla)>,
     bold: bool,
     /// Background painted behind the run (`set-face-background`).
     background: Option<Hsla>,
@@ -2001,7 +2001,7 @@ fn line_runs(
         if let Some(i) = span.face {
             let name = face_name(i);
             seg.color = theme.color(name, default);
-            seg.underline = theme.underline(name).map(|wavy| (wavy, seg.color));
+            seg.underline = theme.underline(name).map(|style| (style, seg.color));
             seg.bold = theme.is_bold(name);
         }
         segs.push(seg);
@@ -2051,8 +2051,8 @@ fn line_runs(
             .font_of(face)
             .map(|f| SharedString::from(f.to_string()));
         let fcolor = theme.color(face, default);
-        let ul = theme.underline(face).map(|wavy| (wavy, fcolor));
-        let wavy_only = matches!(ul, Some((true, _)));
+        let ul = theme.underline(face).map(|style| (style, fcolor));
+        let wavy_only = matches!(ul, Some((Underline::Wavy, _)));
         let bold = theme.is_bold(face);
         let mut next = Vec::with_capacity(segs.len() + 2);
         for seg in segs.drain(..) {
@@ -2090,11 +2090,11 @@ fn line_runs(
         .filter(|seg| seg.end > seg.start)
         .map(|seg| {
             let mut run = plain_run(seg.end - seg.start, font.clone(), seg.color);
-            if let Some((wavy, ul_color)) = seg.underline {
+            if let Some((style, ul_color)) = seg.underline {
                 run.underline = Some(UnderlineStyle {
                     thickness: px(1.),
                     color: Some(ul_color),
-                    wavy,
+                    wavy: style == Underline::Wavy,
                 });
             }
             if seg.bold {
