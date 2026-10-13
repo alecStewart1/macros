@@ -562,12 +562,14 @@ impl Editor {
                 mode,
                 text,
                 line_faces,
+                quiet: false,
             } => self.render_buffer(name, mode, text, line_faces, cx),
-            RenderBufferQuiet {
+            RenderBuffer {
                 name,
                 mode,
                 text,
                 line_faces,
+                quiet: true,
             } => self.render_buffer_quiet(name, mode, text, line_faces, cx),
             AppendToBuffer { name, text } => self.append_to_buffer(name, text, cx),
             FontifyOrgBuffer(name) => self.fontify_org_buffer(name, cx),

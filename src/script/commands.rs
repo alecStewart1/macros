@@ -682,20 +682,16 @@ pub enum EditorCommand {
     /// Render `text` into a read-only buffer `name` with major mode `mode` and
     /// per-line faces `(line, face)`, switching to it (creating it if needed,
     /// refreshing in place — point preserved — if already shown).
+    ///
+    /// With `quiet`, refresh the buffer wherever it already lives without
+    /// switching to it or moving focus — the auto-refresh path for the
+    /// dired-sidebar/dired view when a watched directory changes on disk.
     RenderBuffer {
         name: String,
         mode: String,
         text: String,
         line_faces: Vec<(usize, String)>,
-    },
-    /// Like [`RenderBuffer`], but refresh the buffer wherever it already lives
-    /// without switching to it or moving focus — the auto-refresh path for the
-    /// dired-sidebar/dired view when a watched directory changes on disk.
-    RenderBufferQuiet {
-        name: String,
-        mode: String,
-        text: String,
-        line_faces: Vec<(usize, String)>,
+        quiet: bool,
     },
     /// Move point to the start of (0-based) line `n` in the active buffer.
     GotoLine(usize),

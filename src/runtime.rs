@@ -398,10 +398,14 @@ pub fn is_macros_scheme_path(path: &Path) -> bool {
 /// candidate location (so it resolves even before the user writes a config).
 /// `package-install` clones into its `packages/` subdirectory — exposed to Scheme
 /// as `(packages-directory)`.
+/// Same precedence as [`user_config`], but only checks that `init.scm` exists
+/// rather than reading it.
 pub fn config_directory() -> PathBuf {
-    user_config()
-        .map(|(dir, _)| dir)
-        .or_else(|| config_dirs().into_iter().next())
+    let dirs = config_dirs();
+    dirs.iter()
+        .find(|d| d.join("init.scm").is_file())
+        .or(dirs.first())
+        .cloned()
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
