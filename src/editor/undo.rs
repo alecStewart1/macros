@@ -6,14 +6,184 @@ use gpui::Context;
 
 use super::*;
 
+/// A reversible edit at byte `at`: it replaced `removed` with `inserted`.
+/// Undo restores `removed` over the inserted span; redo re-applies `inserted`
+/// over the removed span. Storing both texts makes undo and redo symmetric,
+/// which is what the undo *tree* (branching history) needs.
+#[derive(Clone)]
+pub(super) struct UndoRecord {
+    pub at: usize,
+    pub removed: String,
+    pub inserted: String,
+}
+
+/// One state in the undo tree. The root (index 0) is the buffer as loaded;
+/// every other node carries the edit group that transforms its parent into it.
+/// Branches are preserved: undoing then typing adds a *sibling* child rather
+/// than discarding the redo branch (the whole point of an undo tree / vundo).
+#[derive(Clone)]
+pub(super) struct UndoNode {
+    pub parent: Option<usize>,
+    pub children: Vec<usize>,
+    /// Edits (in application order) that take `parent`'s state to this node's.
+    pub edit: Vec<UndoRecord>,
+}
+
+/// A document's branching undo history: the nodes (index 0 is the root, the
+/// buffer as loaded) and which one the buffer is at now.
+#[derive(Clone)]
+pub(super) struct UndoTree {
+    pub nodes: Vec<UndoNode>,
+    pub current: usize,
+}
+
+impl Default for UndoTree {
+    /// A fresh tree: a single root node with no edits.
+    fn default() -> Self {
+        Self {
+            nodes: vec![UndoNode {
+                parent: None,
+                children: Vec::new(),
+                edit: Vec::new(),
+            }],
+            current: 0,
+        }
+    }
+}
+
+impl UndoTree {
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Start a NEW node holding `record`, branching off the current one, and
+    /// make it current — undoing then editing keeps the old branch as a
+    /// sibling (undo tree, not a stack).
+    pub fn record(&mut self, record: UndoRecord) {
+        let node = self.nodes.len();
+        let parent = self.current;
+        self.nodes.push(UndoNode {
+            parent: Some(parent),
+            children: Vec::new(),
+            edit: vec![record],
+        });
+        self.nodes[parent].children.push(node);
+        self.current = node;
+    }
+
+    /// Append `record` to the current node's edit group.
+    pub fn extend_current(&mut self, record: UndoRecord) {
+        self.nodes[self.current].edit.push(record);
+    }
+
+    /// What undo replays: the current node's parent and the edit group that
+    /// leads from it here. `None` at the root.
+    pub fn undo_group(&self) -> Option<(usize, Vec<UndoRecord>)> {
+        let node = self.nodes.get(self.current)?;
+        Some((node.parent?, node.edit.clone()))
+    }
+
+    /// What redo replays: the most recently created child of the current node
+    /// (undo-tree semantics — the last branch you came from / created) and its
+    /// edit group.
+    pub fn redo_child(&self) -> Option<(usize, Vec<UndoRecord>)> {
+        let child = *self.nodes.get(self.current)?.children.last()?;
+        Some((child, self.nodes.get(child)?.edit.clone()))
+    }
+
+    /// How many redo branches leave node `idx`.
+    pub fn branches(&self, idx: usize) -> usize {
+        self.nodes[idx].children.len()
+    }
+
+    /// Fold every node added since the tree had `base_len` nodes into the
+    /// first of them, so a multi-run command (`3dd`) undoes in one step. Only
+    /// when the new nodes form a straight chain off `base_current` ending at
+    /// the current node — anything else (an undo mid-way) is left untouched.
+    pub fn squash_since(&mut self, base_len: usize, base_current: usize) {
+        if self.nodes.len() <= base_len + 1 {
+            return;
+        }
+        let chain = (base_len..self.nodes.len()).all(|i| {
+            let parent = if i == base_len { base_current } else { i - 1 };
+            self.nodes[i].parent == Some(parent)
+        });
+        if !chain || self.current != self.nodes.len() - 1 {
+            return;
+        }
+        let rest: Vec<UndoRecord> = self
+            .nodes
+            .drain(base_len + 1..)
+            .flat_map(|node| node.edit)
+            .collect();
+        let first = &mut self.nodes[base_len];
+        first.edit.extend(rest);
+        first.children.clear();
+        self.current = base_len;
+    }
+
+    /// A textual dump for the vundo visualizer: one
+    /// "idx\tparent\tcurrent?\tdepth\tsize" line per node (depth = distance from
+    /// root, size = edits in the node's group).
+    pub fn dump(&self) -> String {
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let mut depth = 0;
+                let mut p = n.parent;
+                while let Some(parent) = p {
+                    depth += 1;
+                    p = self.nodes[parent].parent;
+                }
+                let parent = n.parent.map_or(-1, |x| x as isize);
+                let current = if i == self.current { 1 } else { 0 };
+                format!("{i}\t{parent}\t{current}\t{depth}\t{}", n.edit.len())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// The editor-wide undo grouping state: while a group is open, edits append
+/// to one undo node (so a multi-edit Scheme command undoes as one unit).
+#[derive(Default)]
+pub(super) struct UndoGrouping {
+    /// Nesting depth of open undo groups. While > 0, edits append to the current
+    /// undo group; otherwise each edit is its own group. Counted, so a nested
+    /// begin/end (a `C-u N` repeat or `:s` inside a Scheme batch) merges into
+    /// the outer group.
+    depth: usize,
+    /// Bumped each time an outermost undo group opens, so grid edits can tell
+    /// which Scheme command batch they belong to (one batch = one undo step).
+    batch_seq: u64,
+    /// Whether the current group has received an edit yet (lazily created).
+    started: bool,
+    /// The buffer the open group's node lives in. An edit in another buffer
+    /// (the batch switched buffers) starts its own node there instead of
+    /// appending to whatever that buffer's current node happens to be.
+    buffer: String,
+}
+
+impl UndoGrouping {
+    /// The open outermost group's batch number, `None` outside any group.
+    pub fn batch(&self) -> Option<u64> {
+        (self.depth > 0).then_some(self.batch_seq)
+    }
+
+    /// Close the current group's node: the next edit starts a new one.
+    pub fn boundary(&mut self) {
+        self.started = false;
+    }
+}
+
 impl Document {
     /// Forget all undo history. Required whenever the text changes WITHOUT an
     /// undo record (a special buffer re-rendered wholesale, an unrecorded
     /// rewrite of an inactive buffer): the old records address text that no
     /// longer exists, and replaying one would corrupt the buffer.
     pub(super) fn reset_undo(&mut self) {
-        self.undo_tree = new_undo_tree();
-        self.undo_current = 0;
+        self.undo = UndoTree::default();
     }
 }
 
@@ -30,19 +200,36 @@ fn record_matches(buffer: &Buffer, at: usize, expect: &str) -> bool {
 }
 
 impl Editor {
-    /// Replay one node's edit group — inverted (undo, last record first) or
-    /// forward (redo) — keeping overlays, markers, and LSP in step exactly as
-    /// `edit()` does. Returns the cursor after the last applied record, and
-    /// whether every record applied (`false` = history was stale; replay
-    /// stopped at the first record that no longer matched the text).
-    fn replay_undo_group(&mut self, group: Vec<UndoRecord>, forward: bool) -> (usize, bool) {
-        let mut cursor = self.point();
-        let records: Box<dyn Iterator<Item = UndoRecord>> = if forward {
-            Box::new(group.into_iter())
+    /// Record `record` (an edit about to apply) in the active buffer's undo
+    /// tree: appended to the open group's node when grouping (one Scheme
+    /// command = one undo), otherwise as a new node branching off the current
+    /// one.
+    pub(super) fn record_undo(&mut self, record: UndoRecord) {
+        let g = &mut self.undo_grouping;
+        let grouping = g.depth > 0;
+        if grouping && g.started && g.buffer == self.active.name {
+            self.active.undo.extend_current(record);
         } else {
-            Box::new(group.into_iter().rev())
-        };
-        for record in records {
+            self.active.undo.record(record);
+            g.started = grouping;
+            if grouping && g.buffer != self.active.name {
+                g.buffer.clone_from(&self.active.name);
+            }
+        }
+    }
+
+    /// Replay one node's edit group — inverted (undo, last record first) or
+    /// forward (redo) — through [`Self::apply_tracked_replace`], so overlays,
+    /// markers, marks and LSP stay in step exactly as with `edit()`. Returns
+    /// the cursor after the last applied record, and whether every record
+    /// applied (`false` = history was stale; replay stopped at the first
+    /// record that no longer matched the text).
+    fn replay_undo_group(&mut self, mut group: Vec<UndoRecord>, forward: bool) -> (usize, bool) {
+        let mut cursor = self.point();
+        if !forward {
+            group.reverse();
+        }
+        for record in group {
             let (old, new) = if forward {
                 (&record.removed, &record.inserted)
             } else {
@@ -51,28 +238,7 @@ impl Editor {
             if !record_matches(&self.active.buffer, record.at, old) {
                 return (cursor, false);
             }
-            let old_end = record.at + old.len();
-            // Capture the pre-change LSP positions BEFORE mutating the rope,
-            // exactly as `edit()` does — an undo is an ordinary document change
-            // as far as the server is concerned, and skipping it leaves an
-            // incremental-sync server (rust-analyzer, gopls, …) permanently
-            // out of step with the buffer for the rest of the session.
-            let lsp_change = self.lsp_change_positions(record.at, old_end);
-            self.active.buffer.replace(record.at..old_end, new);
-            if let Some((language, start, end)) = lsp_change {
-                self.lsp_did_change(&language, start, end, new);
-            }
-            // Overlays and markers track each replayed edit just like `edit()`
-            // does — without this, org's hidden stars / faces / virtual indents
-            // sit at stale positions after an undo, and (with no after-change
-            // hook fired) nothing repaints them.
-            let line_delta =
-                new.matches('\n').count() as isize - old.matches('\n').count() as isize;
-            let start_line = self.active.buffer.byte_to_position(record.at).0;
-            self.adjust_overlays(record.at, old_end, new.len(), line_delta, start_line);
-            self.script.adjust_markers(record.at, old_end, new.len());
-            self.shift_vim_positions(record.at, old_end, new.len());
-            cursor = record.at + new.len();
+            cursor = self.apply_tracked_replace(record.at..record.at + old.len(), new);
         }
         (cursor, true)
     }
@@ -81,7 +247,7 @@ impl Editor {
     /// history (`ok == false`) the tree is dropped — the text is intact, only
     /// the ability to step further is lost — and the user is told why.
     fn finish_undo_replay(&mut self, cursor: usize, ok: bool, cx: &mut Context<Self>) -> bool {
-        self.undo_group_started = false; // next edit branches a new node
+        self.undo_grouping.boundary(); // next edit branches a new node
         self.active.modified = true;
         self.parse_full();
         self.collapse_to(self.active.buffer.snap(cursor));
@@ -100,8 +266,7 @@ impl Editor {
     }
 
     pub(super) fn undo(&mut self, cx: &mut Context<Self>) {
-        let node = self.active.undo_current;
-        let Some(parent) = self.active.undo_tree.get(node).and_then(|n| n.parent) else {
+        let Some((parent, group)) = self.active.undo.undo_group() else {
             self.echo("No further undo information", cx);
             return;
         };
@@ -112,15 +277,14 @@ impl Editor {
         self.active.ghost = None;
         // Invert the current node's edit group (last edit undone first):
         // restore `removed` over the inserted span.
-        let group = self.active.undo_tree[node].edit.clone();
         let (cursor, ok) = self.replay_undo_group(group, false);
         if ok {
-            self.active.undo_current = parent;
+            self.active.undo.current = parent;
         }
         if !self.finish_undo_replay(cursor, ok, cx) {
             return;
         }
-        let branches = self.active.undo_tree[parent].children.len();
+        let branches = self.active.undo.branches(parent);
         if branches > 1 {
             self.echo(format!("Undo (branch point: {branches} redo branches)"), cx);
         } else {
@@ -131,50 +295,26 @@ impl Editor {
     /// Redo: re-apply the most recently created child branch of the current node
     /// (undo-tree semantics — the last branch you came from / created).
     pub(super) fn redo(&mut self, cx: &mut Context<Self>) {
-        let Some(child) = self
-            .active
-            .undo_tree
-            .get(self.active.undo_current)
-            .and_then(|n| n.children.last().copied())
-            .filter(|&c| c < self.active.undo_tree.len())
-        else {
+        let Some((child, group)) = self.active.undo.redo_child() else {
             self.echo("No further redo information", cx);
             return;
         };
         self.active.ghost = None; // direct buffer mutation, like undo() above
         // Re-apply the child's edit group forward: `inserted` over the removed
         // span.
-        let group = self.active.undo_tree[child].edit.clone();
         let (cursor, ok) = self.replay_undo_group(group, true);
         if ok {
-            self.active.undo_current = child;
+            self.active.undo.current = child;
         }
         if self.finish_undo_replay(cursor, ok, cx) {
             self.echo("Redo", cx);
         }
     }
 
-    /// A textual dump of the undo tree for the vundo visualizer: one
-    /// "idx\tparent\tcurrent?\tdepth\tsize" line per node (depth = distance from
-    /// root, size = edits in the node's group).
+    /// The active buffer's undo tree for the vundo visualizer (see
+    /// [`UndoTree::dump`]).
     pub(super) fn undo_tree_dump(&self) -> String {
-        self.active
-            .undo_tree
-            .iter()
-            .enumerate()
-            .map(|(i, n)| {
-                let mut depth = 0;
-                let mut p = n.parent;
-                while let Some(parent) = p {
-                    depth += 1;
-                    p = self.active.undo_tree[parent].parent;
-                }
-                let parent = n.parent.map_or(-1, |x| x as isize);
-                let current = if i == self.active.undo_current { 1 } else { 0 };
-                format!("{i}\t{parent}\t{current}\t{depth}\t{}", n.edit.len())
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.active.undo.dump()
     }
 
     /// Group all edits made by one Scheme command batch into a single undo unit.
@@ -182,24 +322,45 @@ impl Editor {
     /// outermost end closes it, so an inner group (a `C-u N` repeat, `:s`, a
     /// block op inside a batch) merges into the enclosing one.
     pub(super) fn begin_undo_group(&mut self) {
-        if self.undo_group_depth == 0 {
-            self.undo_group_started = false;
-            self.undo_batch_seq += 1;
+        let g = &mut self.undo_grouping;
+        if g.depth == 0 {
+            g.started = false;
+            g.batch_seq += 1;
         }
-        self.undo_group_depth += 1;
+        g.depth += 1;
     }
 
     pub(super) fn end_undo_group(&mut self) {
-        self.undo_group_depth = self.undo_group_depth.saturating_sub(1);
-        if self.undo_group_depth == 0 {
-            self.undo_group_started = false;
+        let g = &mut self.undo_grouping;
+        g.depth = g.depth.saturating_sub(1);
+        if g.depth == 0 {
+            g.started = false;
         }
     }
 
     /// `(undo-boundary)`: close the current group so the next edit starts a new
     /// one even within the same command batch.
     pub(super) fn undo_boundary(&mut self) {
-        self.undo_group_started = false;
+        self.undo_grouping.boundary();
+    }
+
+    /// Where the undo tree stands now, for [`Self::squash_undo_since`].
+    pub(super) fn undo_base(&self) -> UndoBase {
+        UndoBase {
+            buffer: self.active.name.clone(),
+            len: self.active.undo.len(),
+            current: self.active.undo.current,
+        }
+    }
+
+    /// Fold every undo node added since `base` into the first of them, so a
+    /// multi-run command (`3dd`) undoes in one step. Only when the new nodes
+    /// form a straight chain off `base.current` in the same buffer — anything
+    /// else (an undo mid-way, a buffer switch) is left untouched.
+    pub(super) fn squash_undo_since(&mut self, base: &UndoBase) {
+        if self.active.name == base.buffer {
+            self.active.undo.squash_since(base.len, base.current);
+        }
     }
 
     // --- Programmatic range editing ---------------------------------------

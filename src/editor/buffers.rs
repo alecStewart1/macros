@@ -1396,7 +1396,7 @@ impl Editor {
             // The old undo records address the replaced text; replaying one
             // against the new text corrupts it (or panics). Start fresh.
             self.active.reset_undo();
-            self.undo_group_started = false;
+            self.undo_grouping.boundary();
             self.active.line_faces = faces;
             self.lines.clear();
             let last = self.active.buffer.line_count().saturating_sub(1);
