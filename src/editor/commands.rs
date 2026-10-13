@@ -13,6 +13,10 @@ use crate::theme::Theme;
 
 use super::*;
 
+/// A category dispatcher: handles the commands it owns, handing any other back.
+type CommandHandler =
+    fn(&mut Editor, EditorCommand, &mut Context<Editor>) -> Result<(), EditorCommand>;
+
 impl Editor {
     /// Apply a command, honoring a pending universal-argument (Emacs `C-u N`):
     /// a repeatable command runs `N` times (as one undo group for edits); others
@@ -20,7 +24,7 @@ impl Editor {
     /// script, or an OS-special action — flows through here.
     pub(super) fn apply_command(&mut self, command: EditorCommand, cx: &mut Context<Self>) {
         match self.uarg.pending.take() {
-            Some(n) if n > 1 && is_repeatable(&command) => {
+            Some(n) if n > 1 && command.is_repeatable() => {
                 self.status = SharedString::default();
                 self.begin_undo_group();
                 for _ in 0..n {
@@ -39,74 +43,38 @@ impl Editor {
         self.last_was_yank = yank_like;
     }
 
-    /// Route a command to the first category dispatcher that owns it. Each
-    /// `cmd_*` handler returns `Err(command)` for variants it does not own, so
-    /// the command falls through to the next; the partition is exhaustive.
-    fn dispatch_command(&mut self, command: EditorCommand, cx: &mut Context<Self>) {
-        // Grid commands, and generic ones (undo, save, clipboard) that mean
-        // something else in a grid buffer, go first.
-        let command = match self.cmd_grid(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_motion(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_edit(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_view(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_buffer(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_window(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_lsp(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_completion(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_helm(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_evil(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_overlay(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_proc(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_extras(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_misc(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
-        let command = match self.cmd_session(command, cx) {
-            Ok(()) => return,
-            Err(c) => c,
-        };
+    /// The category dispatchers, in routing order. Each `cmd_*` handler
+    /// returns `Err(command)` for variants it does not own, so the command
+    /// falls through to the next; the partition is exhaustive. Grid commands,
+    /// and generic ones (undo, save, clipboard) that mean something else in a
+    /// grid buffer, go first.
+    const COMMAND_HANDLERS: &[CommandHandler] = &[
+        Self::cmd_grid,
+        Self::cmd_motion,
+        Self::cmd_edit,
+        Self::cmd_view,
+        Self::cmd_buffer,
+        Self::cmd_window,
+        Self::cmd_lsp,
+        Self::cmd_completion,
+        Self::cmd_helm,
+        Self::cmd_evil,
+        Self::cmd_overlay,
+        Self::cmd_proc,
+        Self::cmd_extras,
+        Self::cmd_misc,
+        Self::cmd_session,
+    ];
+
+    /// Route a command to the first of [`Self::COMMAND_HANDLERS`] that owns it.
+    fn dispatch_command(&mut self, mut command: EditorCommand, cx: &mut Context<Self>) {
+        for handler in Self::COMMAND_HANDLERS {
+            match handler(self, command, cx) {
+                Ok(()) => return,
+                Err(c) => command = c,
+            }
+        }
         debug_assert!(false, "unhandled editor command: {command:?}");
-        let _ = command;
     }
 
     /// Cursor motion, selection, marks, and goto.
@@ -247,7 +215,7 @@ impl Editor {
         // touching the rope, so they must not be refused here.
         if self.active.special.is_some()
             && self.active_running_terminal_id().is_none()
-            && is_interactive_edit(&command)
+            && command.is_interactive_edit()
         {
             self.echo("Buffer is read-only", cx);
             return Ok(());
@@ -1457,39 +1425,71 @@ impl Editor {
     }
 }
 
-/// Whether `command` is an *interactive* text mutation — the kind a keybinding
-/// runs on "the text at point". These are refused in read-only special buffers
-/// (see [`Editor::cmd_edit`]). The explicitly-addressed primitives
-/// (`ReplaceRegion`, `DeleteRegion`, `InsertAt`, `KillRegionBetween`, `Insert`)
-/// are NOT listed: Scheme uses them to populate and rewrite these buffers, and
-/// no default keybinding reaches them.
-fn is_interactive_edit(command: &EditorCommand) -> bool {
-    use EditorCommand::*;
-    matches!(
-        command,
-        Newline
-            | OpenLine
-            | IndentForTab
-            | ReindentRegion
-            | JsonPrettyPrintBuffer
-            | JsonPrettyPrintRegion
-            | DeleteChar
-            | DeleteBackwardChar
-            | TransposeChars
-            | KillLine
-            | KillWord
-            | BackwardKillWord
-            | KillRegion
-            | ClipboardCut
-            | ClipboardPaste
-            | Yank
-            | YankPop
-    )
+impl EditorCommand {
+    /// Whether this command repeats under a universal-argument (Emacs `C-u N`).
+    /// Limited to motions and simple edits, where "do it N times" is the meaning;
+    /// modal/meta commands (`M-x`, eval, quit, toggles, …) run once regardless.
+    pub(super) fn is_repeatable(&self) -> bool {
+        use EditorCommand::*;
+        matches!(
+            self,
+            ForwardChar
+                | BackwardChar
+                | NextLine
+                | PreviousLine
+                | ForwardWord
+                | BackwardWord
+                | ScrollUp
+                | ScrollDown
+                | EvilScrollUp
+                | EvilScrollDown
+                | DeleteChar
+                | DeleteBackwardChar
+                | KillWord
+                | BackwardKillWord
+                | KillLine
+                | Newline
+                | OpenLine
+                | TransposeChars
+                | Yank
+                | Undo
+                | Redo
+        )
+    }
+
+    /// Whether this is an *interactive* text mutation — the kind a keybinding
+    /// runs on "the text at point". These are refused in read-only special buffers
+    /// (see `Editor::cmd_edit`). The explicitly-addressed primitives
+    /// (`ReplaceRegion`, `DeleteRegion`, `InsertAt`, `KillRegionBetween`, `Insert`)
+    /// are NOT listed: Scheme uses them to populate and rewrite these buffers, and
+    /// no default keybinding reaches them.
+    pub(super) fn is_interactive_edit(&self) -> bool {
+        use EditorCommand::*;
+        matches!(
+            self,
+            Newline
+                | OpenLine
+                | IndentForTab
+                | ReindentRegion
+                | JsonPrettyPrintBuffer
+                | JsonPrettyPrintRegion
+                | DeleteChar
+                | DeleteBackwardChar
+                | TransposeChars
+                | KillLine
+                | KillWord
+                | BackwardKillWord
+                | KillRegion
+                | ClipboardCut
+                | ClipboardPaste
+                | Yank
+                | YankPop
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_interactive_edit;
     use crate::script::EditorCommand::*;
 
     #[test]
@@ -1513,7 +1513,7 @@ mod tests {
             IndentForTab,
             DeleteBackwardChar,
         ] {
-            assert!(is_interactive_edit(&c), "{c:?} must be refused");
+            assert!(c.is_interactive_edit(), "{c:?} must be refused");
         }
         // Programmatic primitives still run — that is how Scheme builds and
         // rewrites these buffers.
@@ -1535,7 +1535,7 @@ mod tests {
             Undo,
             Redo,
         ] {
-            assert!(!is_interactive_edit(&c), "{c:?} must stay allowed");
+            assert!(!c.is_interactive_edit(), "{c:?} must stay allowed");
         }
     }
 }

@@ -5321,37 +5321,6 @@ fn prefix_arg_value(digits: Option<i64>, cu: u32) -> i64 {
     n.min(MAX_PREFIX_REPEAT)
 }
 
-/// Whether a command should repeat under a universal-argument (Emacs `C-u N`).
-/// Limited to motions and simple edits, where "do it N times" is the meaning;
-/// modal/meta commands (`M-x`, eval, quit, toggles, …) run once regardless.
-fn is_repeatable(command: &EditorCommand) -> bool {
-    use EditorCommand::*;
-    matches!(
-        command,
-        ForwardChar
-            | BackwardChar
-            | NextLine
-            | PreviousLine
-            | ForwardWord
-            | BackwardWord
-            | ScrollUp
-            | ScrollDown
-            | EvilScrollUp
-            | EvilScrollDown
-            | DeleteChar
-            | DeleteBackwardChar
-            | KillWord
-            | BackwardKillWord
-            | KillLine
-            | Newline
-            | OpenLine
-            | TransposeChars
-            | Yank
-            | Undo
-            | Redo
-    )
-}
-
 impl Focusable for Editor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -5699,9 +5668,8 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
-        file_completions, is_repeatable, language_for_path, last_sexp, line_span, prefix_arg_value,
-        push_capped, scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at,
-        top_level_form_at,
+        file_completions, language_for_path, last_sexp, line_span, prefix_arg_value, push_capped,
+        scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at, top_level_form_at,
     };
 
     #[test]
@@ -5764,14 +5732,14 @@ mod tests {
     #[test]
     fn prefix_arg_repeats_motions_and_edits_not_meta() {
         use EditorCommand::*;
-        assert!(is_repeatable(&NextLine));
-        assert!(is_repeatable(&ForwardChar));
-        assert!(is_repeatable(&KillLine));
-        assert!(is_repeatable(&Yank));
+        assert!(NextLine.is_repeatable());
+        assert!(ForwardChar.is_repeatable());
+        assert!(KillLine.is_repeatable());
+        assert!(Yank.is_repeatable());
         // Meta/modal commands must run once regardless of the argument.
-        assert!(!is_repeatable(&ExecuteExtendedCommand));
-        assert!(!is_repeatable(&Quit));
-        assert!(!is_repeatable(&SaveBuffer));
+        assert!(!ExecuteExtendedCommand.is_repeatable());
+        assert!(!Quit.is_repeatable());
+        assert!(!SaveBuffer.is_repeatable());
     }
 
     #[test]
