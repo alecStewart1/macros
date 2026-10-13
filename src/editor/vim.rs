@@ -231,6 +231,19 @@ pub(super) struct DotRec {
     pub unrepeatable: bool,
 }
 
+impl DotRec {
+    /// An empty recording of a command starting now in the active buffer.
+    fn new(ed: &Editor, prefix_only: bool, unrepeatable: bool) -> Self {
+        Self {
+            events: Vec::new(),
+            buffer: ed.active.name.clone(),
+            tick: ed.active.buffer.tick(),
+            prefix_only,
+            unrepeatable,
+        }
+    }
+}
+
 /// Recorded events replayed one at a time: each async (Scheme) command must
 /// apply before the next runs, or every command would read the same stale
 /// pre-replay snapshot.
@@ -559,14 +572,23 @@ impl Editor {
                 lines.push(format!("  m  @{c}   <keyboard macro: {n} commands>"));
             }
         }
+        self.show_listing("*registers*", &lines, cx);
+    }
+
+    /// Show `lines` in the read-only `help-mode` buffer `name` (the
+    /// `:registers` / `:marks` / `:jumps` / `:g…p` listings).
+    pub(super) fn show_listing(&mut self, name: &str, lines: &[String], cx: &mut Context<Self>) {
         let text = lines.join("\n") + "\n";
-        self.render_buffer(
-            "*registers*".into(),
-            "help-mode".into(),
-            text,
-            Vec::new(),
-            cx,
-        );
+        self.render_buffer(name.into(), "help-mode".into(), text, Vec::new(), cx);
+    }
+
+    /// The LSP-style `(line, column)` of `pos` in the active buffer (clamped),
+    /// and that line's text, trimmed — a `:marks` / `:jumps` row.
+    fn line_text_at(&self, pos: usize) -> (usize, usize, String) {
+        let buf = &self.active.buffer;
+        let (line, col) = buf.byte_to_position(pos.min(buf.len()));
+        let text = buf.slice_to_string(buf.line_range(line));
+        (line, col, text.trim().to_string())
     }
 
     // --- marks & jumps ------------------------------------------------------
@@ -991,13 +1013,8 @@ impl Editor {
         for (i, j) in self.vim.jumps.iter().enumerate() {
             let dist = i.abs_diff(cur);
             let (line, col, what) = if j.buffer == self.active.name {
-                let p = j.pos.min(self.active.buffer.len());
-                let (l, c) = self.active.buffer.byte_to_position(p);
-                let text = self
-                    .active
-                    .buffer
-                    .slice_to_string(self.active.buffer.line_range(l));
-                (l + 1, c, text.trim().to_string())
+                let (l, c, text) = self.line_text_at(j.pos);
+                (l + 1, c, text)
             } else {
                 (0, 0, j.buffer.clone())
             };
@@ -1006,8 +1023,7 @@ impl Editor {
         if cur >= self.vim.jumps.len() {
             lines.push(">".into());
         }
-        let text = lines.join("\n") + "\n";
-        self.render_buffer("*jumps*".into(), "help-mode".into(), text, Vec::new(), cx);
+        self.show_listing("*jumps*", &lines, cx);
     }
 
     /// `:marks [names]`.
@@ -1016,13 +1032,8 @@ impl Editor {
         let mut rows: Vec<(char, String, usize, usize, String)> = Vec::new();
         if let Some(m) = self.vim.marks.get(&self.active.name) {
             for (&c, &p) in m {
-                let p = p.min(self.active.buffer.len());
-                let (line, col) = self.active.buffer.byte_to_position(p);
-                let text = self
-                    .active
-                    .buffer
-                    .slice_to_string(self.active.buffer.line_range(line));
-                rows.push((c, String::new(), line + 1, col, text.trim().to_string()));
+                let (line, col, text) = self.line_text_at(p);
+                rows.push((c, String::new(), line + 1, col, text));
             }
         }
         for (&c, g) in &self.vim.global_marks {
@@ -1051,8 +1062,7 @@ impl Editor {
             let what = if file.is_empty() { text } else { file };
             lines.push(format!(" {c} {line:>6} {col:>4} {what}"));
         }
-        let text = lines.join("\n") + "\n";
-        self.render_buffer("*marks*".into(), "help-mode".into(), text, Vec::new(), cx);
+        self.show_listing("*marks*", &lines, cx);
     }
 
     /// `:delmarks a b` / `:delm!` (all lowercase marks of this buffer).
@@ -1245,26 +1255,14 @@ impl Editor {
         if expr.trim() == "(evil-repeat)" {
             return; // `.` itself is never recorded
         }
-        self.vim.dot = Some(DotRec {
-            events: Vec::new(),
-            buffer: self.active.name.clone(),
-            tick: self.active.buffer.tick(),
-            prefix_only: register_prefix,
-            unrepeatable: false,
-        });
+        self.vim.dot = Some(DotRec::new(self, register_prefix, false));
     }
 
     /// The current command can't be repeated by replaying its keys (a mouse
     /// selection made it).
     pub(super) fn dot_unrepeatable(&mut self) {
         self.dot_finalize();
-        self.vim.dot = Some(DotRec {
-            events: Vec::new(),
-            buffer: self.active.name.clone(),
-            tick: self.active.buffer.tick(),
-            prefix_only: false,
-            unrepeatable: true,
-        });
+        self.vim.dot = Some(DotRec::new(self, false, true));
     }
 
     /// Escape out of Insert: the whole session (and the command that opened

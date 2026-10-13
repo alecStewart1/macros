@@ -1236,18 +1236,11 @@ impl Editor {
             sub.name.as_str(),
             "p" | "pr" | "print" | "#" | "nu" | "number"
         ) {
-            let text = lines
+            let rows: Vec<String> = lines
                 .iter()
                 .map(|&l| format!("{l:>6} {}", self.ex_line(l)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.render_buffer(
-                "*global*".into(),
-                "help-mode".into(),
-                text + "\n",
-                Vec::new(),
-                cx,
-            );
+                .collect();
+            self.show_listing("*global*", &rows, cx);
             return Ok(());
         }
         // Anchors (line starts) that ride along with the edits; one whose
