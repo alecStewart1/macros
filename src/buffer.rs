@@ -185,10 +185,22 @@ impl Buffer {
         (line, col)
     }
 
-    /// Byte range of line `i`, excluding any trailing line break.
+    /// Byte range of line `i`, excluding any trailing line break: one `\n`,
+    /// then one `\r` (so a CRLF pair is excluded whole). Allocation-free — the
+    /// break is probed byte-wise on the rope slice (both are ASCII, so a byte
+    /// match is a char match).
     pub fn line_range(&self, i: usize) -> Range<usize> {
-        let (range, _) = self.line(i);
-        range
+        let i = i.min(self.line_count().saturating_sub(1));
+        let start = self.rope.line_to_byte(i);
+        let line = self.rope.line(i);
+        let mut end = line.len_bytes();
+        if end > 0 && line.byte(end - 1) == b'\n' {
+            end -= 1;
+        }
+        if end > 0 && line.byte(end - 1) == b'\r' {
+            end -= 1;
+        }
+        start..start + end
     }
 
     /// Byte range of the line containing `offset`, excluding the line break.
@@ -198,13 +210,9 @@ impl Buffer {
 
     /// Line `i` as `(byte_range_excluding_break, text)`.
     pub fn line(&self, i: usize) -> (Range<usize>, String) {
-        let i = i.min(self.line_count().saturating_sub(1));
-        let start = self.rope.line_to_byte(i);
-        let raw = self.rope.line(i).to_string();
-        let trimmed = raw.strip_suffix('\n').unwrap_or(&raw);
-        let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
-        let text = trimmed.to_string();
-        (start..start + text.len(), text)
+        let range = self.line_range(i);
+        let text = self.slice_to_string(range.clone());
+        (range, text)
     }
 
     /// The bytes in `range` as an owned string. An inverted range (`start > end`)
@@ -720,6 +728,10 @@ mod tests {
         assert_eq!(b.line_count(), 2);
         assert_eq!(b.line_range(0), 0..3);
         assert_eq!(b.line_range(1), 5..8);
+        assert_eq!(b.line(0), (0..3, "abc".to_string()));
+        // A bare trailing `\r` on the last line is excluded too.
+        assert_eq!(Buffer::new("ab\r").line_range(0), 0..2);
+        assert_eq!(Buffer::new("").line_range(0), 0..0);
         // C-f / C-d at EOL crosses the pair; C-b / Backspace at BOL does too.
         assert_eq!(b.next_grapheme(3), 5);
         assert_eq!(b.prev_grapheme(5), 3);
