@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::args::{Area, MANY, area, def, fold_args, opt_num};
+use super::args::{Area, MANY, area, def, fold_args, given, opt_num};
 use super::{Arg, Ctx, FuncDef, num, numbers, scalar};
 use crate::formula::criteria::Criterion;
 use crate::formula::value::{ErrorKind, Value};
@@ -387,8 +387,8 @@ fn matched_numbers(m: &Matches, target: &Area, ctx: &dyn Ctx) -> Result<Vec<f64>
 fn single_if(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<f64>, ErrorKind> {
     let range = area(&args[0], ctx)?;
     let crit = criterion(&args[1], ctx)?;
-    let target = match args.get(2) {
-        None | Some(Arg::Omitted) => range.clone(),
+    let target = match given(args.get(2)) {
+        None => range.clone(),
         Some(a) => area(a, ctx)?.sub(0, 0, range.rows(), range.cols()),
     };
     let pairs = [(range, crit)];

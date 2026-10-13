@@ -18,8 +18,10 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::args::{Area, SHEET_COLS, SHEET_ROWS, area, def, opt_bool, opt_int, trunc_i64};
-use super::{Arg, Ctx, FuncDef, RangeRef, num, scalar};
+use super::args::{
+    Area, SHEET_COLS, SHEET_ROWS, area, def, given, int, opt_bool, opt_int, positive,
+};
+use super::{Arg, Ctx, FuncDef, RangeRef, scalar};
 use crate::formula::criteria::{Pattern, fold, has_wildcards};
 use crate::formula::value::{ErrorKind, Value, cmp_text};
 
@@ -226,17 +228,15 @@ fn hlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
 fn table_lookup(args: &[Arg], ctx: &mut dyn Ctx, horizontal: bool) -> Result<Value, ErrorKind> {
     let needle = needle(&args[0], ctx)?;
     let table = area(&args[1], ctx)?;
-    let k = trunc_i64(num(&args[2], ctx)?)?;
+    let k = int(&args[2], ctx)?;
     let approx = opt_bool(args.get(3), ctx, true)?;
     let span = if horizontal {
         table.rows()
     } else {
         table.cols()
     };
-    if k < 1 {
-        return Err(ErrorKind::Value);
-    }
-    if k as usize > span {
+    let k = positive(k)?;
+    if k > span {
         return Err(ErrorKind::Ref);
     }
     let keys = if horizontal {
@@ -250,7 +250,7 @@ fn table_lookup(args: &[Arg], ctx: &mut dyn Ctx, horizontal: bool) -> Result<Val
         find_exact(ctx, &keys, &needle, true, false)
     }
     .ok_or(ErrorKind::NA)?;
-    let k = k as usize - 1;
+    let k = k - 1;
     Ok(if horizontal {
         table.get(&*ctx, k, i)
     } else {
@@ -305,8 +305,8 @@ fn xlookup(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
         } else {
             ret.get(&*ctx, 0, i)
         }),
-        None => match args.get(3) {
-            None | Some(Arg::Omitted) => Err(ErrorKind::NA),
+        None => match given(args.get(3)) {
+            None => Err(ErrorKind::NA),
             Some(a) => Ok(scalar(a, ctx)),
         },
     }
@@ -415,7 +415,9 @@ fn xbinary(
 /// no spilling, so that's `#VALUE!` unless the dimension is a single cell.
 /// Returns a value, not a reference (`INDEX(…):INDEX(…)` isn't supported).
 fn index(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
-    if args.len() == 4 && !matches!(args[3], Arg::Omitted) && opt_int(args.get(3), ctx, 1)? != 1 {
+    if let Some(a) = given(args.get(3))
+        && int(a, ctx)? != 1
+    {
         return Err(ErrorKind::Ref);
     }
     // Whole-column references keep Excel's dimensions here.
@@ -440,7 +442,7 @@ fn index(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
         }
     };
     let row_arg = opt_int(args.get(1), ctx, 0)?;
-    let col_given = matches!(args.get(2), Some(a) if !matches!(a, Arg::Omitted));
+    let col_given = given(args.get(2)).is_some();
     let col_arg = opt_int(args.get(2), ctx, 0)?;
     let (mut r, mut c) = if !col_given && rows == 1 && cols > 1 {
         // A single row: the one number picks the column.
@@ -479,16 +481,16 @@ fn index(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Value, ErrorKind> {
 /// `ROW([ref])`: the 1-based row of the reference's top-left cell, or of
 /// the formula's own cell.
 fn row(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match args.first() {
-        None | Some(Arg::Omitted) => Value::Number((ctx.here().0 + 1) as f64),
+    match given(args.first()) {
+        None => Value::Number((ctx.here().0 + 1) as f64),
         Some(Arg::Range(r)) => Value::Number((r.r0 + 1) as f64),
         Some(_) => Value::Error(ErrorKind::Value),
     }
 }
 
 fn column(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match args.first() {
-        None | Some(Arg::Omitted) => Value::Number((ctx.here().1 + 1) as f64),
+    match given(args.first()) {
+        None => Value::Number((ctx.here().1 + 1) as f64),
         Some(Arg::Range(r)) => Value::Number((r.c0 + 1) as f64),
         Some(_) => Value::Error(ErrorKind::Value),
     }

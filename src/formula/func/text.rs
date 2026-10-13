@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use super::args::{MANY, arg_values, def, opt_bool, opt_int, to_serial, trunc_i64};
+use super::args::{
+    MANY, arg_values, count_arg, def, given, int, opt_bool, opt_int, pos_int, positive, to_serial,
+};
 use super::{Arg, Ctx, FuncDef, MAX_TEXT_LEN, num, scalar, text};
 use crate::formula::criteria::Pattern;
 use crate::formula::decimal::{Dec, Mode};
@@ -38,16 +40,6 @@ pub(super) const FUNCS: &[FuncDef] = &[
     def!("DOLLAR", 1, 2, dollar),
 ];
 
-/// A count argument: truncated, negative is `#VALUE!`.
-fn count_arg(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: i64) -> Result<usize, ErrorKind> {
-    let n = opt_int(arg, ctx, default)?;
-    if n < 0 {
-        Err(ErrorKind::Value)
-    } else {
-        Ok(n as usize)
-    }
-}
-
 fn len(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     Ok(text(&args[0], ctx)?.chars().count() as f64)
 }
@@ -67,12 +59,10 @@ fn right(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
 
 fn mid(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     let s = text(&args[0], ctx)?;
-    let start = trunc_i64(num(&args[1], ctx)?)?;
+    let start = int(&args[1], ctx)?;
     let n = count_arg(args.get(2), ctx, 0)?;
-    if start < 1 {
-        return Err(ErrorKind::Value);
-    }
-    Ok(s.chars().skip(start as usize - 1).take(n).collect())
+    let start = positive(start)?;
+    Ok(s.chars().skip(start - 1).take(n).collect())
 }
 
 fn map_text(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&str) -> String) -> Result<String, ErrorKind> {
@@ -181,15 +171,9 @@ fn substitute(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     let s = text(&args[0], ctx)?;
     let old = text(&args[1], ctx)?;
     let new = text(&args[2], ctx)?;
-    let instance = match args.get(3) {
-        None | Some(Arg::Omitted) => None,
-        Some(a) => {
-            let n = trunc_i64(num(a, ctx)?)?;
-            if n < 1 {
-                return Err(ErrorKind::Value);
-            }
-            Some(n as usize)
-        }
+    let instance = match given(args.get(3)) {
+        None => None,
+        Some(a) => Some(pos_int(a, ctx)?),
     };
     if old.is_empty() {
         return Ok(s.to_string());
@@ -206,13 +190,11 @@ fn substitute(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
 /// REPLACE(old, start, count, new) by character position.
 fn replace(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     let s: Vec<char> = text(&args[0], ctx)?.chars().collect();
-    let start = trunc_i64(num(&args[1], ctx)?)?;
+    let start = int(&args[1], ctx)?;
     let n = count_arg(args.get(2), ctx, 0)?;
     let new = text(&args[3], ctx)?;
-    if start < 1 {
-        return Err(ErrorKind::Value);
-    }
-    let a = (start as usize - 1).min(s.len());
+    let start = positive(start)?;
+    let a = (start - 1).min(s.len());
     let b = a.saturating_add(n).min(s.len());
     let mut out: String = s[..a].iter().collect();
     out.push_str(&new);
@@ -298,7 +280,7 @@ const CP1252_HIGH: [char; 32] = [
 ];
 
 fn char_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
-    let n = trunc_i64(num(&args[0], ctx)?)?;
+    let n = int(&args[0], ctx)?;
     let c = match n {
         1..=127 | 160..=255 => char::from_u32(n as u32).ok_or(ErrorKind::Value)?,
         128..=159 => CP1252_HIGH[n as usize - 128],
@@ -339,8 +321,8 @@ fn clean(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
 fn numbervalue(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     let s = text(&args[0], ctx)?;
     let sep = |a: Option<&Arg>, ctx: &mut dyn Ctx, d: char| -> Result<char, ErrorKind> {
-        match a {
-            None | Some(Arg::Omitted) => Ok(d),
+        match given(a) {
+            None => Ok(d),
             Some(a) => text(a, ctx)?.chars().next().ok_or(ErrorKind::Value),
         }
     };

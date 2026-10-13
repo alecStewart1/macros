@@ -1,6 +1,6 @@
 //! Math functions.
 
-use super::args::{MANY, area, def, opt_int, opt_num, trunc_i64};
+use super::args::{MANY, area, def, int, opt_int, opt_num};
 use super::{Arg, Ctx, FuncDef, num, numbers};
 use crate::formula::decimal::{self, Mode, to_15_digits};
 use crate::formula::value::{ErrorKind, Value};
@@ -12,7 +12,7 @@ pub(super) const FUNCS: &[FuncDef] = &[
     def!("ROUND", 2, 2, round),
     def!("ROUNDUP", 2, 2, roundup),
     def!("ROUNDDOWN", 2, 2, rounddown),
-    def!("INT", 1, 1, int),
+    def!("INT", 1, 1, int_),
     def!("TRUNC", 1, 2, trunc),
     def!("MOD", 2, 2, modulo),
     def!("POWER", 2, 2, power),
@@ -75,7 +75,7 @@ fn abs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
 fn round_with(args: &[Arg], ctx: &mut dyn Ctx, mode: Mode) -> Result<f64, ErrorKind> {
     let x = num(&args[0], ctx)?;
     // num_digits is truncated, as Excel does.
-    let d = trunc_i64(num(&args[1], ctx)?)?.clamp(-400, 400) as i32;
+    let d = int(&args[1], ctx)?.clamp(-400, 400) as i32;
     Ok(decimal::round(x, d, mode))
 }
 
@@ -91,7 +91,7 @@ fn rounddown(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     round_with(args, ctx, Mode::Down)
 }
 
-fn int(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+fn int_(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     unary(args, ctx, |x| Ok(x.floor()))
 }
 

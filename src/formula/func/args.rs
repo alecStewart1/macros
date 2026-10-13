@@ -242,11 +242,17 @@ pub fn arg_values(arg: &Arg, ctx: &dyn Ctx) -> Result<Vec<Value>, ErrorKind> {
     }
 }
 
+/// An optional argument that was given: `None` when it's left out, past
+/// the end of the list or as an empty slot (`ROUND(2.5,)`).
+pub fn given(arg: Option<&Arg>) -> Option<&Arg> {
+    arg.filter(|a| !matches!(a, Arg::Omitted))
+}
+
 /// An optional numeric argument: its default when left out. (An empty cell
 /// passed explicitly is 0, as in Excel.)
 pub fn opt_num(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: f64) -> Result<f64, ErrorKind> {
-    match arg {
-        None | Some(Arg::Omitted) => Ok(default),
+    match given(arg) {
+        None => Ok(default),
         Some(a) => super::num(a, ctx),
     }
 }
@@ -260,18 +266,49 @@ pub fn trunc_i64(x: f64) -> Result<i64, ErrorKind> {
     Ok(x.trunc() as i64)
 }
 
+/// An integer argument: the number truncated ([`trunc_i64`]).
+pub fn int(arg: &Arg, ctx: &mut dyn Ctx) -> Result<i64, ErrorKind> {
+    trunc_i64(super::num(arg, ctx)?)
+}
+
+/// A 1-based position (`MID`'s start, `VLOOKUP`'s column): below 1 is
+/// `#VALUE!`.
+pub fn positive(n: i64) -> Result<usize, ErrorKind> {
+    if n < 1 {
+        Err(ErrorKind::Value)
+    } else {
+        Ok(n as usize)
+    }
+}
+
+/// A 1-based position argument ([`int`], then [`positive`]).
+pub fn pos_int(arg: &Arg, ctx: &mut dyn Ctx) -> Result<usize, ErrorKind> {
+    positive(int(arg, ctx)?)
+}
+
 /// An optional integer argument (truncated).
 pub fn opt_int(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: i64) -> Result<i64, ErrorKind> {
-    match arg {
-        None | Some(Arg::Omitted) => Ok(default),
-        Some(a) => trunc_i64(super::num(a, ctx)?),
+    match given(arg) {
+        None => Ok(default),
+        Some(a) => int(a, ctx),
+    }
+}
+
+/// An optional count argument (`LEFT`'s `num_chars`): truncated, negative
+/// is `#VALUE!`.
+pub fn count_arg(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: i64) -> Result<usize, ErrorKind> {
+    let n = opt_int(arg, ctx, default)?;
+    if n < 0 {
+        Err(ErrorKind::Value)
+    } else {
+        Ok(n as usize)
     }
 }
 
 /// An optional boolean argument.
 pub fn opt_bool(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: bool) -> Result<bool, ErrorKind> {
-    match arg {
-        None | Some(Arg::Omitted) => Ok(default),
+    match given(arg) {
+        None => Ok(default),
         Some(a) => super::scalar(a, ctx).to_bool(),
     }
 }

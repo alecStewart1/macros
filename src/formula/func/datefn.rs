@@ -5,8 +5,8 @@
 
 use std::collections::HashSet;
 
-use super::args::{arg_values, current_year, date_arg, def, opt_int, to_serial, trunc_i64};
-use super::{Arg, Ctx, FuncDef, num, scalar, text};
+use super::args::{arg_values, current_year, date_arg, def, int, opt_int, to_serial};
+use super::{Arg, Ctx, FuncDef, scalar, text};
 use crate::formula::date::{self, days_from_civil, days_in_month, is_leap};
 use crate::formula::value::{ErrorKind, Value};
 
@@ -35,9 +35,9 @@ pub(super) const FUNCS: &[FuncDef] = &[
 ];
 
 fn date_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
-    let y = trunc_i64(num(&args[0], ctx)?)?;
-    let m = trunc_i64(num(&args[1], ctx)?)?;
-    let d = trunc_i64(num(&args[2], ctx)?)?;
+    let y = int(&args[0], ctx)?;
+    let m = int(&args[1], ctx)?;
+    let d = int(&args[2], ctx)?;
     date::date_serial(y, m, d, ctx.date1904()).ok_or(ErrorKind::Num)
 }
 
@@ -88,7 +88,7 @@ fn second(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
 fn time(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     let mut total = 0i64;
     for (a, mult) in args.iter().zip([3600, 60, 1]) {
-        let v = trunc_i64(num(a, ctx)?)?;
+        let v = int(a, ctx)?;
         // Bounded both ways (and so the sum can't overflow).
         if !(-32_767..=32_767).contains(&v) {
             return Err(ErrorKind::Num);
@@ -173,19 +173,15 @@ fn iso_week(y: i64, m: u32, d: u32) -> i64 {
     }
 }
 
-fn months_arg(arg: &Arg, ctx: &mut dyn Ctx) -> Result<i64, ErrorKind> {
-    trunc_i64(num(arg, ctx)?)
-}
-
 fn edate(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     let s = date_arg(&args[0], ctx)?;
-    let m = months_arg(&args[1], ctx)?;
+    let m = int(&args[1], ctx)?;
     date::edate(s, m, ctx.date1904()).ok_or(ErrorKind::Num)
 }
 
 fn eomonth(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     let s = date_arg(&args[0], ctx)?;
-    let m = months_arg(&args[1], ctx)?;
+    let m = int(&args[1], ctx)?;
     date::eomonth(s, m, ctx.date1904()).ok_or(ErrorKind::Num)
 }
 
@@ -292,7 +288,7 @@ fn networkdays(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
 /// (or before) start.
 fn workday(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     let s = date_arg(&args[0], ctx)?.floor() as i64;
-    let n = trunc_i64(num(&args[1], ctx)?)?;
+    let n = int(&args[1], ctx)?;
     let hol = holidays(args.get(2), ctx)?;
     let d1904 = ctx.date1904();
     let max = date::max_serial(d1904) as i64;
