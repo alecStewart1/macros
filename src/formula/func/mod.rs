@@ -154,6 +154,9 @@ pub struct FuncDef {
     pub min_args: usize,
     /// `usize::MAX` for variadic functions.
     pub max_args: usize,
+    /// The argument names, for the signature hint shown while a formula is
+    /// typed (see [`sigs`]).
+    pub sig: &'static str,
     /// The body, its result already converted to a cell value (see
     /// [`args::def`]).
     pub f: fn(&[Arg], &mut dyn Ctx) -> Value,
@@ -185,22 +188,42 @@ pub fn all() -> impl Iterator<Item = &'static FuncDef> {
 }
 
 /// Functions the evaluator implements itself because they don't evaluate
-/// every argument (they short-circuit): `(name, min_args, max_args)`.
-pub const SPECIAL: &[(&str, usize, usize)] = &[
-    ("IF", 2, 3),
-    ("IFS", 2, usize::MAX),
-    ("IFERROR", 2, 2),
-    ("IFNA", 2, 2),
-    ("CHOOSE", 2, usize::MAX),
-    ("SWITCH", 3, usize::MAX),
+/// every argument (they short-circuit): `(name, min_args, max_args,
+/// signature)`.
+pub const SPECIAL: &[(&str, usize, usize, &str)] = &[
+    ("IF", 2, 3, "logical_test, value_if_true, [value_if_false]"),
+    (
+        "IFS",
+        2,
+        usize::MAX,
+        "condition1, value1, [condition2, value2], …",
+    ),
+    ("IFERROR", 2, 2, "value, value_if_error"),
+    ("IFNA", 2, 2, "value, value_if_na"),
+    ("CHOOSE", 2, usize::MAX, "index, value1, [value2], …"),
+    (
+        "SWITCH",
+        3,
+        usize::MAX,
+        "expression, value1, result1, [value2, result2], …, [default]",
+    ),
 ];
+
+/// The [`SPECIAL`] entry for `name` (case-insensitive).
+fn special_form(name: &str) -> Option<&'static (&'static str, usize, usize, &'static str)> {
+    SPECIAL.iter().find(|s| s.0.eq_ignore_ascii_case(name))
+}
 
 /// Arity of an evaluator-implemented form (see [`SPECIAL`]).
 pub fn special(name: &str) -> Option<(usize, usize)> {
-    SPECIAL
-        .iter()
-        .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
-        .map(|&(_, min, max)| (min, max))
+    special_form(name).map(|&(_, min, max, _)| (min, max))
+}
+
+/// The argument list of function `name`, built-in or evaluator form.
+pub fn signature(name: &str) -> Option<&'static str> {
+    lookup(name)
+        .map(|f| f.sig)
+        .or_else(|| special_form(name).map(|s| s.3))
 }
 
 pub mod args;

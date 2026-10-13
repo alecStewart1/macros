@@ -26,15 +26,45 @@ use crate::formula::criteria::{Pattern, fold, has_wildcards};
 use crate::formula::value::{ErrorKind, Value, cmp_text};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def!("VLOOKUP", 3, 4, vlookup),
-    def!("HLOOKUP", 3, 4, hlookup),
-    def!("XLOOKUP", 3, 6, xlookup),
-    def!("MATCH", 2, 3, match_),
-    def!("INDEX", 2, 4, index),
-    def!("ROW", 0, 1, row),
-    def!("COLUMN", 0, 1, column),
-    def!("ROWS", 1, 1, rows),
-    def!("COLUMNS", 1, 1, columns),
+    def!(
+        "VLOOKUP",
+        3,
+        4,
+        vlookup,
+        "lookup_value, table_array, col_index_num, [range_lookup]"
+    ),
+    def!(
+        "HLOOKUP",
+        3,
+        4,
+        hlookup,
+        "lookup_value, table_array, row_index_num, [range_lookup]"
+    ),
+    def!(
+        "XLOOKUP",
+        3,
+        6,
+        xlookup,
+        "lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode]"
+    ),
+    def!(
+        "MATCH",
+        2,
+        3,
+        match_,
+        "lookup_value, lookup_array, [match_type]"
+    ),
+    def!(
+        "INDEX",
+        2,
+        4,
+        index,
+        "array, row_num, [column_num], [area_num]"
+    ),
+    def!("ROW", 0, 1, row, "[reference]"),
+    def!("COLUMN", 0, 1, column, "[reference]"),
+    def!("ROWS", 1, 1, rows, "array"),
+    def!("COLUMNS", 1, 1, columns, "array"),
 ];
 
 /// A normalised exact-match key: numbers by value (`-0` is `0`), text

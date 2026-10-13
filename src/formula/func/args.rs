@@ -159,22 +159,24 @@ impl Area<'_> {
 pub const MANY: usize = usize::MAX;
 
 /// A function definition for a category's `FUNCS` table:
-/// `def!("NAME", min_args, max_args, body)`, or `def!(volatile "NOW", …)`
-/// for one re-run on every recalculation. `body` is any
+/// `def!("NAME", min_args, max_args, body, "signature")`, or
+/// `def!(volatile "NOW", …)` for one re-run on every recalculation. `body`
+/// is any
 /// `fn(&[Arg], &mut dyn Ctx) -> R` where `R:` [`IntoValue`](super::IntoValue);
 /// the result is converted to a cell value here, once.
 macro_rules! def {
-    (volatile $name:literal, $min:expr, $max:expr, $f:path) => {
-        $crate::formula::func::args::def!(@ $name, $min, $max, $f, true)
+    (volatile $name:literal, $min:expr, $max:expr, $f:path, $sig:literal) => {
+        $crate::formula::func::args::def!(@ $name, $min, $max, $f, $sig, true)
     };
-    ($name:literal, $min:expr, $max:expr, $f:path) => {
-        $crate::formula::func::args::def!(@ $name, $min, $max, $f, false)
+    ($name:literal, $min:expr, $max:expr, $f:path, $sig:literal) => {
+        $crate::formula::func::args::def!(@ $name, $min, $max, $f, $sig, false)
     };
-    (@ $name:literal, $min:expr, $max:expr, $f:path, $volatile:expr) => {
+    (@ $name:literal, $min:expr, $max:expr, $f:path, $sig:literal, $volatile:expr) => {
         $crate::formula::func::FuncDef {
             name: $name,
             min_args: $min,
             max_args: $max,
+            sig: $sig,
             f: |args: &[$crate::formula::func::Arg], ctx: &mut dyn $crate::formula::func::Ctx| {
                 $crate::formula::func::IntoValue::into_value($f(args, ctx))
             },

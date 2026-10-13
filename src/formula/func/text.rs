@@ -13,31 +13,61 @@ use crate::formula::textfmt;
 use crate::formula::value::{ErrorKind, Value, parse_number};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def!("LEN", 1, 1, len),
-    def!("LEFT", 1, 2, left),
-    def!("RIGHT", 1, 2, right),
-    def!("MID", 3, 3, mid),
-    def!("UPPER", 1, 1, upper),
-    def!("LOWER", 1, 1, lower),
-    def!("PROPER", 1, 1, proper),
-    def!("TRIM", 1, 1, trim),
-    def!("CONCAT", 1, MANY, concat),
-    def!("CONCATENATE", 1, MANY, concatenate),
-    def!("TEXTJOIN", 3, MANY, textjoin),
-    def!("SUBSTITUTE", 3, 4, substitute),
-    def!("REPLACE", 4, 4, replace),
-    def!("FIND", 2, 3, find),
-    def!("SEARCH", 2, 3, search),
-    def!("VALUE", 1, 1, value),
-    def!("TEXT", 2, 2, text_fn),
-    def!("REPT", 2, 2, rept),
-    def!("EXACT", 2, 2, exact),
-    def!("CHAR", 1, 1, char_fn),
-    def!("CODE", 1, 1, code),
-    def!("CLEAN", 1, 1, clean),
-    def!("NUMBERVALUE", 1, 3, numbervalue),
-    def!("FIXED", 1, 3, fixed),
-    def!("DOLLAR", 1, 2, dollar),
+    def!("LEN", 1, 1, len, "text"),
+    def!("LEFT", 1, 2, left, "text, [num_chars]"),
+    def!("RIGHT", 1, 2, right, "text, [num_chars]"),
+    def!("MID", 3, 3, mid, "text, start_num, num_chars"),
+    def!("UPPER", 1, 1, upper, "text"),
+    def!("LOWER", 1, 1, lower, "text"),
+    def!("PROPER", 1, 1, proper, "text"),
+    def!("TRIM", 1, 1, trim, "text"),
+    def!("CONCAT", 1, MANY, concat, "text1, [text2], …"),
+    def!("CONCATENATE", 1, MANY, concatenate, "text1, [text2], …"),
+    def!(
+        "TEXTJOIN",
+        3,
+        MANY,
+        textjoin,
+        "delimiter, ignore_empty, text1, [text2], …"
+    ),
+    def!(
+        "SUBSTITUTE",
+        3,
+        4,
+        substitute,
+        "text, old_text, new_text, [instance_num]"
+    ),
+    def!(
+        "REPLACE",
+        4,
+        4,
+        replace,
+        "old_text, start_num, num_chars, new_text"
+    ),
+    def!("FIND", 2, 3, find, "find_text, within_text, [start_num]"),
+    def!(
+        "SEARCH",
+        2,
+        3,
+        search,
+        "find_text, within_text, [start_num]"
+    ),
+    def!("VALUE", 1, 1, value, "text"),
+    def!("TEXT", 2, 2, text_fn, "value, format_text"),
+    def!("REPT", 2, 2, rept, "text, number_times"),
+    def!("EXACT", 2, 2, exact, "text1, text2"),
+    def!("CHAR", 1, 1, char_fn, "number"),
+    def!("CODE", 1, 1, code, "text"),
+    def!("CLEAN", 1, 1, clean, "text"),
+    def!(
+        "NUMBERVALUE",
+        1,
+        3,
+        numbervalue,
+        "text, [decimal_separator], [group_separator]"
+    ),
+    def!("FIXED", 1, 3, fixed, "number, [decimals], [no_commas]"),
+    def!("DOLLAR", 1, 2, dollar, "number, [decimals]"),
 ];
 
 fn len(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {

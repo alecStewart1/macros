@@ -6,12 +6,12 @@ use super::{Arg, Ctx, FuncDef, scalar};
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def!("AND", 1, MANY, and),
-    def!("OR", 1, MANY, or),
-    def!("XOR", 1, MANY, xor),
-    def!("NOT", 1, 1, not),
-    def!("TRUE", 0, 0, true_),
-    def!("FALSE", 0, 0, false_),
+    def!("AND", 1, MANY, and, "logical1, [logical2], …"),
+    def!("OR", 1, MANY, or, "logical1, [logical2], …"),
+    def!("XOR", 1, MANY, xor, "logical1, [logical2], …"),
+    def!("NOT", 1, 1, not, "logical"),
+    def!("TRUE", 0, 0, true_, ""),
+    def!("FALSE", 0, 0, false_, ""),
 ];
 
 /// The logical values of the arguments, as Excel's `AND`/`OR`/`XOR` read

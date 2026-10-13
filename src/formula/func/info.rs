@@ -5,21 +5,21 @@ use super::{Arg, Ctx, FuncDef, scalar};
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def!("ISBLANK", 1, 1, isblank),
-    def!("ISNUMBER", 1, 1, isnumber),
-    def!("ISTEXT", 1, 1, istext),
-    def!("ISNONTEXT", 1, 1, isnontext),
-    def!("ISLOGICAL", 1, 1, islogical),
-    def!("ISERROR", 1, 1, iserror),
-    def!("ISERR", 1, 1, iserr),
-    def!("ISNA", 1, 1, isna),
-    def!("ISEVEN", 1, 1, iseven),
-    def!("ISODD", 1, 1, isodd),
-    def!("NA", 0, 0, na),
-    def!("ERROR.TYPE", 1, 1, error_type),
-    def!("TYPE", 1, 1, type_),
-    def!("N", 1, 1, n),
-    def!("T", 1, 1, t),
+    def!("ISBLANK", 1, 1, isblank, "value"),
+    def!("ISNUMBER", 1, 1, isnumber, "value"),
+    def!("ISTEXT", 1, 1, istext, "value"),
+    def!("ISNONTEXT", 1, 1, isnontext, "value"),
+    def!("ISLOGICAL", 1, 1, islogical, "value"),
+    def!("ISERROR", 1, 1, iserror, "value"),
+    def!("ISERR", 1, 1, iserr, "value"),
+    def!("ISNA", 1, 1, isna, "value"),
+    def!("ISEVEN", 1, 1, iseven, "number"),
+    def!("ISODD", 1, 1, isodd, "number"),
+    def!("NA", 0, 0, na, ""),
+    def!("ERROR.TYPE", 1, 1, error_type, "error_val"),
+    def!("TYPE", 1, 1, type_, "value"),
+    def!("N", 1, 1, n, "value"),
+    def!("T", 1, 1, t, "value"),
 ];
 
 fn is(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&Value) -> bool) -> bool {
