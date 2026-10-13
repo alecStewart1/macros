@@ -230,8 +230,7 @@ impl Editor {
         };
         let edits: Vec<(usize, usize, String)> =
             (c..=last).map(|k| (r, k, String::new())).collect();
-        let changes = g.set_cells_tracked(&edits);
-        self.grid_changes.extend(changes);
+        g.set_cells_tracked(&edits);
         self.set_clipboard(&text, cx);
         self.push_kill(text);
         self.echo(format!("Killed {} cells", row.len()), cx);
@@ -351,8 +350,7 @@ impl Editor {
                 (r, c, new)
             })
             .collect();
-        let changes = g.set_cells_tracked(&edits);
-        self.grid_changes.extend(changes);
+        g.set_cells_tracked(&edits);
         self.grid_after(cx);
     }
 
@@ -443,8 +441,7 @@ impl Editor {
                 g.move_to(below, c, false);
             }
         }
-        let changes = g.set_cells_tracked(&edits);
-        self.grid_changes.extend(changes);
+        g.set_cells_tracked(&edits);
         self.grid_after(cx);
     }
 
@@ -680,8 +677,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if let Some(g) = self.active.grid.as_deref_mut() {
-            let changes = g.set_cells_tracked(&[(r, c, text.to_string())]);
-            self.grid_changes.extend(changes);
+            g.set_cells_tracked(&[(r, c, text.to_string())]);
         }
         self.grid_after(cx);
     }

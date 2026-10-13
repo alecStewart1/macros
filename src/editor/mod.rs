@@ -836,9 +836,6 @@ pub struct Editor {
     grid_opts: grid::GridOptions,
     /// An open `ge` popup: (popup buffer, grid buffer, row, col).
     grid_cell_popup: Option<(String, String, usize, usize)>,
-    /// Cells the user changed in the current command, for
-    /// `grid-cell-changed-hook` (fired from `grid_after`).
-    grid_changes: Vec<(usize, usize, String, String)>,
     /// A background slice loop is finishing a large recalculation.
     grid_recalc_scheduled: bool,
     /// The formulas of the last grid copy (see `FormulaClip`).
@@ -1601,7 +1598,6 @@ impl Editor {
             grid_flag: false,
             grid_opts: Default::default(),
             grid_cell_popup: None,
-            grid_changes: Vec::new(),
             grid_recalc_scheduled: false,
             grid_formula_clip: None,
             grid_fns: None,

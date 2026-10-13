@@ -273,6 +273,9 @@ pub(super) struct GridDoc {
     /// `(data generation, formula evaluations)` when this sheet's values
     /// were last handed to the other open sheets.
     pub(super) sheet_published: Option<(u64, u64)>,
+    /// Cells the user changed in the current command, for
+    /// `grid-cell-changed-hook` (drained by `grid_fire_changes`).
+    changed: Vec<CellChange>,
 }
 
 impl Drop for GridDoc {
@@ -339,6 +342,7 @@ impl GridDoc {
             xlsx_text: Default::default(),
             layout_moved: false,
             sheet_published: None,
+            changed: Vec::new(),
         }
     }
 
@@ -1082,12 +1086,10 @@ impl GridDoc {
         out
     }
 
-    /// Set cells as one edit, returning `(row, col, old, new)` for each cell
-    /// that actually changed — what `grid-cell-changed-hook` receives.
-    pub(super) fn set_cells_tracked(
-        &mut self,
-        edits: &[(usize, usize, String)],
-    ) -> Vec<CellChange> {
+    /// Set cells as one edit made by the user, queueing `(row, col, old,
+    /// new)` for each cell that actually changed — what
+    /// `grid-cell-changed-hook` receives (see [`Self::changed`]).
+    pub(super) fn set_cells_tracked(&mut self, edits: &[(usize, usize, String)]) {
         // What the user typed becomes what's stored (`=…` → a formula).
         let edits: Vec<(usize, usize, String)> = edits
             .iter()
@@ -1112,7 +1114,7 @@ impl GridDoc {
                 self.model_op(|wb| wb.set_cells(SHEET, edits));
             }
         }
-        changes
+        self.changed.extend(changes);
     }
 
     /// What Scheme's `grid-*` reads see (published with every snapshot).
@@ -1773,10 +1775,15 @@ impl Editor {
     /// by Scheme itself (`grid-set-cell`, …) don't fire it, so a hook that
     /// writes cells can't loop.
     fn grid_fire_changes(&mut self) {
-        if self.grid_changes.is_empty() {
+        let Some(changes) = self
+            .active
+            .grid
+            .as_deref_mut()
+            .map(|g| std::mem::take(&mut g.changed))
+            .filter(|c| !c.is_empty())
+        else {
             return;
-        }
-        let changes = std::mem::take(&mut self.grid_changes);
+        };
         let Some(functions) = self
             .hooks
             .get("grid-cell-changed-hook")
@@ -2431,8 +2438,7 @@ impl Editor {
                     .map(|(r, c)| (r, c, String::new()))
                     .collect();
                 if !edits.is_empty() {
-                    let changes = g.set_cells_tracked(&edits);
-                    self.grid_changes.extend(changes);
+                    g.set_cells_tracked(&edits);
                 }
             }
             Cut => {
@@ -2562,8 +2568,7 @@ impl Editor {
                     return;
                 }
                 Some(RepeatOp::SetText(text)) => {
-                    let changes = g.set_cells_tracked(&[(r, c, text)]);
-                    self.grid_changes.extend(changes);
+                    g.set_cells_tracked(&[(r, c, text)]);
                 }
                 None => {}
             },
@@ -2897,8 +2902,7 @@ impl Editor {
             return;
         };
         if edit.text != edit.original {
-            let changes = g.set_cells_tracked(&[(edit.row, edit.col, edit.text.clone())]);
-            self.grid_changes.extend(changes);
+            g.set_cells_tracked(&[(edit.row, edit.col, edit.text.clone())]);
             g.last_repeat = Some(RepeatOp::SetText(edit.text));
         }
         let r = edit.row.saturating_add_signed(dr);
@@ -3079,8 +3083,7 @@ impl Editor {
             }
         }
         let n = edits.len();
-        let changes = g.set_cells_tracked(&edits);
-        self.grid_changes.extend(changes);
+        g.set_cells_tracked(&edits);
         if !single {
             let h = block.len();
             let w = block.iter().map(Vec::len).max().unwrap_or(1);
@@ -3489,8 +3492,7 @@ impl Editor {
             return;
         }
         if commit && let Some(g) = self.active.grid.as_deref_mut() {
-            let changes = g.set_cells_tracked(&[(r, c, text)]);
-            self.grid_changes.extend(changes);
+            g.set_cells_tracked(&[(r, c, text)]);
             g.move_to(r, c, false);
         }
         self.grid_after(cx);
