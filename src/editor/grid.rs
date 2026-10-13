@@ -1184,17 +1184,10 @@ fn fmt_num(n: f64) -> String {
     }
 }
 
+/// `n` rounded to a whole number, grouped: `-1234567.0` → `-1,234,567`.
 fn group_thousands(n: f64) -> String {
-    let neg = n < 0.0;
-    let digits = format!("{:.0}", n.abs());
-    let mut out = String::new();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    if neg { format!("-{out}") } else { out }
+    let out = cellfmt::group_digits(&format!("{:.0}", n.abs()));
+    if n < 0.0 { format!("-{out}") } else { out }
 }
 
 /// A fast content fingerprint for auto-revert (not a security hash).
@@ -4241,5 +4234,9 @@ mod tests {
         assert_eq!(fmt_num(50.25), "50.25");
         assert_eq!(fmt_num(1234.5), "1,234.50");
         assert_eq!(fmt_num(12.0), "12");
+        assert_eq!(fmt_num(-0.4), "-0.40");
+        assert_eq!(fmt_num(-1234.5), "-1,234.50");
+        assert_eq!(group_thousands(0.0), "0");
+        assert_eq!(group_thousands(999.0), "999");
     }
 }

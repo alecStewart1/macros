@@ -447,13 +447,11 @@ fn fixed_text(x: f64, decimals: i64, commas: bool) -> Result<String, ErrorKind> 
     let nd = decimals.max(0) as usize;
     let (int, frac) = d.fixed_parts(nd);
     let int = if int.is_empty() { "0".to_string() } else { int };
-    let mut grouped = String::new();
-    for (i, ch) in int.chars().enumerate() {
-        if commas && i > 0 && (int.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(ch);
-    }
+    let grouped = if commas {
+        crate::grid::cellfmt::group_digits(&int)
+    } else {
+        int
+    };
     let mut out = String::new();
     if x < 0.0 && !d.is_zero() {
         out.push('-');
