@@ -189,7 +189,7 @@ pub(crate) fn steel_list(value: &SteelVal) -> Option<Vec<SteelVal>> {
 
 /// Rank `candidates` against `pattern` with nucleo (best first), dropping
 /// non-matches. An empty pattern keeps the list as-is. The matcher matches Helm's
-/// own (`helm_filter`), so a Scheme filter ranks identically to a native source.
+/// own (`HelmSession::refilter`), so a Scheme filter ranks identically to a native source.
 pub(crate) fn fuzzy_rank(pattern: &str, candidates: &[String]) -> Vec<String> {
     if pattern.is_empty() {
         return candidates.to_vec();

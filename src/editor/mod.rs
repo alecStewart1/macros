@@ -680,10 +680,9 @@ pub struct Editor {
     /// The active Helm selection session, if any.
     helm: Option<HelmSession>,
     /// Monotonic id for dynamic-candidate queries (stale results are dropped).
+    /// Shared by Helm sessions and dynamic `completing-read`s, so it outlives
+    /// any one session.
     helm_query_counter: u64,
-    /// While the TAB action menu is open: the candidate it acts on + the
-    /// `(label, fn)` actions to choose among.
-    helm_action_context: Option<(String, Vec<(String, String)>)>,
     /// Modal-editing (evil) state.
     evil: EvilState,
     /// Vim `r` replace-pending: armed by `evil-replace-char`, it makes the very
@@ -1442,7 +1441,6 @@ impl Editor {
             completion_stamp: None,
             helm: None,
             helm_query_counter: 0,
-            helm_action_context: None,
             evil: EvilState::Disabled,
             evil_replace_pending: false,
             evil_replace_count: 1,

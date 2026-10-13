@@ -1407,7 +1407,7 @@ fn xlsx_sheets_list_and_open_as_buffers(cx: &mut TestAppContext) {
     // the platform's input path, so they're fed to it directly here).
     keys(&ed, cx, "g t");
     ed.update(cx, |e, cx| {
-        assert_eq!(e.helm_matches().len(), 3);
+        assert_eq!(e.helm_match_count(), 3);
         e.helm_input("thi", cx);
         e.helm_accept(cx);
     });
