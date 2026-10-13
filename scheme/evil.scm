@@ -1662,37 +1662,36 @@
 ;; Structural motions (tree-sitter): ]m [m / ]f [f — next / previous function
 ;; start, ]M [M / ]F [F — function end; ]] [[ — next / previous class (section)
 ;; start, ][ [] — its end. ]d [d — next / previous diagnostic.
+;; Each row is (key category forward? end?); the command names follow from the
+;; row — `evil-{next,previous}-{category}-{start,end}` (+ `-visual`, defined
+;; above) — and the operator motion is `evil-ts-motion` on the same arguments.
+(define (evil-ts-motion-name category forward ends)
+  (string-append "evil-" (if forward "next" "previous") "-" category
+                 "-" (if ends "end" "start")))
+(define (evil-scheme-bool b) (if b "#t" "#f"))
 (for-each
  (lambda (b)
-   (define-key "evil-normal" (car b) (cadr b))
-   (define-key "evil-visual" (car b) (caddr b))
-   (define-key "evil-visual-line" (car b) (caddr b))
-   (define-key "evil-operator" (car b) (list-ref b 3)))
+   (let* ((key (car b)) (category (cadr b)) (forward (caddr b)) (ends (list-ref b 3))
+          (name (evil-ts-motion-name category forward ends)))
+     (define-key "evil-normal" key name)
+     (define-key "evil-visual" key (string-append name "-visual"))
+     (define-key "evil-visual-line" key (string-append name "-visual"))
+     (define-key "evil-operator" key
+                 (string-append "evil-ts-motion \"" category "\" "
+                                (evil-scheme-bool forward) " " (evil-scheme-bool ends)))))
  (list
-  (list "] m" "evil-next-function-start" "evil-next-function-start-visual"
-        "evil-ts-motion \"function\" #t #f")
-  (list "[ m" "evil-previous-function-start" "evil-previous-function-start-visual"
-        "evil-ts-motion \"function\" #f #f")
-  (list "] shift-m" "evil-next-function-end" "evil-next-function-end-visual"
-        "evil-ts-motion \"function\" #t #t")
-  (list "[ shift-m" "evil-previous-function-end" "evil-previous-function-end-visual"
-        "evil-ts-motion \"function\" #f #t")
-  (list "] f" "evil-next-function-start" "evil-next-function-start-visual"
-        "evil-ts-motion \"function\" #t #f")
-  (list "[ f" "evil-previous-function-start" "evil-previous-function-start-visual"
-        "evil-ts-motion \"function\" #f #f")
-  (list "] shift-f" "evil-next-function-end" "evil-next-function-end-visual"
-        "evil-ts-motion \"function\" #t #t")
-  (list "[ shift-f" "evil-previous-function-end" "evil-previous-function-end-visual"
-        "evil-ts-motion \"function\" #f #t")
-  (list "] ]" "evil-next-class-start" "evil-next-class-start-visual"
-        "evil-ts-motion \"class\" #t #f")
-  (list "[ [" "evil-previous-class-start" "evil-previous-class-start-visual"
-        "evil-ts-motion \"class\" #f #f")
-  (list "] [" "evil-next-class-end" "evil-next-class-end-visual"
-        "evil-ts-motion \"class\" #t #t")
-  (list "[ ]" "evil-previous-class-end" "evil-previous-class-end-visual"
-        "evil-ts-motion \"class\" #f #t")))
+  (list "] m"       "function" #t #f)
+  (list "[ m"       "function" #f #f)
+  (list "] shift-m" "function" #t #t)
+  (list "[ shift-m" "function" #f #t)
+  (list "] f"       "function" #t #f)
+  (list "[ f"       "function" #f #f)
+  (list "] shift-f" "function" #t #t)
+  (list "[ shift-f" "function" #f #t)
+  (list "] ]"       "class" #t #f)
+  (list "[ ["       "class" #f #f)
+  (list "] ["       "class" #t #t)
+  (list "[ ]"       "class" #f #t)))
 (define-key "evil-normal" "] d" 'evil-next-diagnostic)
 (define-key "evil-normal" "[ d" 'evil-previous-diagnostic)
 
