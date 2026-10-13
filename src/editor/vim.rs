@@ -170,6 +170,19 @@ pub(super) fn shift_pos(pos: usize, start: usize, old_end: usize, new_len: usize
     }
 }
 
+/// `` ` `` and `'` name the same mark (the previous context).
+pub(super) fn normalize_mark(c: char) -> char {
+    if c == '`' { '\'' } else { c }
+}
+
+/// Why [`Editor::resolve_mark`] has no position to jump to.
+enum MarkErr {
+    /// Unset, or its buffer is gone (already echoed).
+    Missing,
+    /// The mark's file is still opening; the jump lands once it is open.
+    Deferred,
+}
+
 /// Whether `c` names a settable / jumpable mark.
 pub(super) fn is_mark(c: char) -> bool {
     c.is_ascii_alphabetic() || matches!(c, '\'' | '`' | '[' | ']' | '<' | '>' | '.' | '^')
@@ -682,7 +695,7 @@ impl Editor {
             return;
         };
         let pos = self.point();
-        let c = if c == '`' { '\'' } else { c };
+        let c = normalize_mark(c);
         if c.is_ascii_uppercase() {
             self.vim.global_marks.insert(
                 c,
@@ -763,29 +776,47 @@ impl Editor {
         .detach();
     }
 
+    /// Where mark `c` (already normalized) is in the active buffer, without
+    /// switching buffers: a local mark, or a file mark pointing here.
+    pub(super) fn mark_pos_in_active(&self, c: char) -> Option<usize> {
+        if c.is_ascii_uppercase() {
+            self.vim
+                .global_marks
+                .get(&c)
+                .filter(|g| g.buffer == self.active.name)
+                .map(|g| g.pos)
+        } else {
+            self.vim
+                .marks
+                .get(&self.active.name)
+                .and_then(|m| m.get(&c))
+                .copied()
+        }
+    }
+
     /// Where mark `c` is, switching to its buffer first for a file mark in
-    /// another buffer. `Err(false)` (with an echo) when unset or gone;
-    /// `Err(true)` when the mark's file is still opening (the jump then lands
-    /// once it is open).
+    /// another buffer. [`MarkErr::Missing`] (with an echo) when unset or
+    /// gone; [`MarkErr::Deferred`] when the mark's file is still opening (the
+    /// jump then lands once it is open).
     fn resolve_mark(
         &mut self,
         c: char,
         exact: bool,
         cx: &mut Context<Self>,
-    ) -> Result<usize, bool> {
-        let c = if c == '`' { '\'' } else { c };
+    ) -> Result<usize, MarkErr> {
+        let c = normalize_mark(c);
         if c.is_ascii_uppercase() {
             let Some(g) = self.vim.global_marks.get(&c).cloned() else {
                 self.echo(format!("Mark not set: {c}"), cx);
-                return Err(false);
+                return Err(MarkErr::Missing);
             };
             if g.buffer != self.active.name {
                 match self.visit_position_buffer(&g.buffer, g.path.as_ref(), g.pos, exact, cx) {
                     Target::Here => {}
-                    Target::Deferred => return Err(true),
+                    Target::Deferred => return Err(MarkErr::Deferred),
                     Target::Gone => {
                         self.echo(format!("Mark {c}: buffer is gone"), cx);
-                        return Err(false);
+                        return Err(MarkErr::Missing);
                     }
                 }
                 // The buffer may have been reopened under a new name.
@@ -795,16 +826,11 @@ impl Editor {
             }
             return Ok(g.pos.min(self.active.buffer.len()));
         }
-        match self
-            .vim
-            .marks
-            .get(&self.active.name)
-            .and_then(|m| m.get(&c))
-        {
-            Some(&p) => Ok(p.min(self.active.buffer.len())),
+        match self.mark_pos_in_active(c) {
+            Some(p) => Ok(p.min(self.active.buffer.len())),
             None => {
                 self.echo(format!("Mark not set: {c}"), cx);
-                Err(false)
+                Err(MarkErr::Missing)
             }
         }
     }
@@ -819,17 +845,16 @@ impl Editor {
         let from = self.point();
         let pos = match self.resolve_mark(c, exact, cx) {
             Ok(pos) => pos,
-            Err(deferred) => {
-                if deferred {
-                    // Landing once its file opens: record where we were.
-                    self.push_jump(Jump {
-                        buffer: from_buffer,
-                        path: None,
-                        pos: from,
-                    });
-                }
+            Err(MarkErr::Deferred) => {
+                // Landing once its file opens: record where we were.
+                self.push_jump(Jump {
+                    buffer: from_buffer,
+                    path: None,
+                    pos: from,
+                });
                 return;
             }
+            Err(MarkErr::Missing) => return,
         };
         let target = if exact {
             pos

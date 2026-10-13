@@ -566,21 +566,10 @@ impl Editor {
             AddrBase::Cur => cur,
             AddrBase::Last => self.ex_last_line(),
             AddrBase::Mark(c) => {
-                let c = if *c == '`' { '\'' } else { *c };
-                let pos = if c.is_ascii_uppercase() {
-                    self.vim
-                        .global_marks
-                        .get(&c)
-                        .filter(|g| g.buffer == self.active.name)
-                        .map(|g| g.pos)
-                } else {
-                    self.vim
-                        .marks
-                        .get(&self.active.name)
-                        .and_then(|m| m.get(&c))
-                        .copied()
-                };
-                let pos = pos.ok_or_else(|| format!("E20: Mark not set: {c}"))?;
+                let c = super::vim::normalize_mark(*c);
+                let pos = self
+                    .mark_pos_in_active(c)
+                    .ok_or_else(|| format!("E20: Mark not set: {c}"))?;
                 self.active
                     .buffer
                     .line_index_at_byte(pos.min(self.active.buffer.len())) as i64
