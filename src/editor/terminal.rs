@@ -718,7 +718,7 @@ impl Editor {
             let tcp = match crate::script::tcp_connect_for_async(&host, port) {
                 Ok(t) => t,
                 Err(e) => {
-                    crate::script::tls_set_error(e);
+                    crate::script::set_last_error(e);
                     let _ = tx.unbounded_send(ProcMsg::Exit);
                     return;
                 }
@@ -732,14 +732,14 @@ impl Editor {
                         // send/recv under the 150ms poll timeout below and a
                         // server slower than that would fail spuriously.
                         if let Err(e) = s.conn.complete_io(&mut s.sock) {
-                            crate::script::tls_set_error(format!("tls handshake: {e}"));
+                            crate::script::set_last_error(format!("tls handshake: {e}"));
                             let _ = tx.unbounded_send(ProcMsg::Exit);
                             return;
                         }
                         crate::script::Sock::Tls(Box::new(s))
                     }
                     Err(e) => {
-                        crate::script::tls_set_error(e);
+                        crate::script::set_last_error(e);
                         let _ = tx.unbounded_send(ProcMsg::Exit);
                         return;
                     }
@@ -867,7 +867,7 @@ impl Editor {
         std::thread::spawn(move || {
             match ws_run(&url, &cmd_rx, &tx) {
                 Ok(()) => {}
-                Err(e) => crate::script::tls_set_error(e),
+                Err(e) => crate::script::set_last_error(e),
             }
             let _ = tx.unbounded_send(ProcMsg::Exit);
         });

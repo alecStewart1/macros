@@ -7700,7 +7700,14 @@ mod diagnostics_lib {
             .commands
             .as_slice()
         {
-            [EditorCommand::RenderBuffer { name, text, quiet: false, .. }] => {
+            [
+                EditorCommand::RenderBuffer {
+                    name,
+                    text,
+                    quiet: false,
+                    ..
+                },
+            ] => {
                 assert_eq!(name, "*diagnostics*");
                 assert!(
                     text.contains("6:3  error: unbound x"),

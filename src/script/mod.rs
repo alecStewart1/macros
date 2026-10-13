@@ -7,6 +7,7 @@
 //!   * [`registry`] — `build_engine`: every registered Scheme bridge function.
 //!   * [`convert`] — SteelVal parsing/formatting helpers.
 //!   * [`session`] — session-persistence primitives (savehist / desktop).
+//!   * [`sockets`] — socket / SQLite / DNS backends and their handle tables.
 //!   * [`api`] — the package-API reference (categories, types, docs).
 
 mod api;
@@ -16,6 +17,7 @@ mod engine;
 mod gix;
 mod registry;
 mod session;
+mod sockets;
 mod state;
 
 pub(crate) use api::{ApiEntry, render as render_api};
@@ -25,6 +27,7 @@ pub use engine::*;
 pub(crate) use gix::*;
 pub(crate) use registry::*;
 pub(crate) use session::*;
+pub(crate) use sockets::*;
 pub use state::*;
 
 #[cfg(test)]

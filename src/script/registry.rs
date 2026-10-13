@@ -2652,20 +2652,8 @@ pub(crate) fn build_engine(
          NonNeg(connect_ms): NonNeg,
          NonNeg(read_ms): NonNeg|
          -> usize {
-            match tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64) {
-                Ok(tcp) => {
-                    let id = sock_next_id();
-                    sock_conns()
-                        .lock()
-                        .unwrap()
-                        .insert(id, std::io::BufReader::new(Sock::Plain(tcp)));
-                    id
-                }
-                Err(e) => {
-                    tls_set_error(e);
-                    0
-                }
-            }
+            let tcp = tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64);
+            or_report(tcp.map(|tcp| CONNS.insert(Conn::new(Sock::Plain(tcp)))), 0)
         },
     );
     reg.register_fn(
@@ -2675,57 +2663,48 @@ pub(crate) fn build_engine(
          NonNeg(connect_ms): NonNeg,
          NonNeg(read_ms): NonNeg|
          -> usize {
-            let tcp = match tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64) {
-                Ok(t) => t,
-                Err(e) => {
-                    tls_set_error(e);
-                    return 0;
-                }
-            };
-            match tls_wrap(tcp, &host) {
-                Ok(tls) => {
-                    let id = sock_next_id();
-                    sock_conns()
-                        .lock()
-                        .unwrap()
-                        .insert(id, std::io::BufReader::new(Sock::Tls(Box::new(tls))));
-                    id
-                }
-                Err(e) => {
-                    tls_set_error(e);
-                    0
-                }
-            }
+            let tls = tcp_connect_impl(&host, port, connect_ms as u64, read_ms as u64)
+                .and_then(|tcp| tls_wrap(tcp, &host));
+            or_report(
+                tls.map(|tls| CONNS.insert(Conn::new(Sock::Tls(Box::new(tls))))),
+                0,
+            )
         },
     );
     // STARTTLS: pull the plain socket out of the table and wrap it. Any bytes
     // already buffered by prior recv calls are dropped — after a STARTTLS "OK"
     // the client must not have read past it, so a non-empty buffer here would
-    // be a plaintext-injection attempt; refusing it is correct.
+    // be a plaintext-injection attempt; refusing it is correct. (Bytes held
+    // back by an interrupted recv stay pending across the upgrade.)
     reg.register_fn("tls-upgrade", |id: usize, host: String| -> bool {
-        let mut conns = sock_conns().lock().unwrap();
-        let Some(reader) = conns.remove(&id) else {
-            tls_set_error(format!("tls-upgrade: no connection {id}"));
+        let mut conns = CONNS.lock();
+        let Some(conn) = conns.remove(&id) else {
+            set_last_error(format!("tls-upgrade: no connection {id}"));
             return false;
         };
-        if !reader.buffer().is_empty() {
-            conns.insert(id, reader);
-            tls_set_error("tls-upgrade: buffered data before TLS (injection?)".into());
+        if !conn.reader.buffer().is_empty() {
+            conns.insert(id, conn);
+            set_last_error("tls-upgrade: buffered data before TLS (injection?)".into());
             return false;
         }
+        let Conn { reader, pending } = conn;
+        let wrapped = |sock| Conn {
+            reader: std::io::BufReader::new(sock),
+            pending,
+        };
         match reader.into_inner() {
             Sock::Tls(tls) => {
-                conns.insert(id, std::io::BufReader::new(Sock::Tls(tls)));
-                tls_set_error(format!("tls-upgrade: {id} is already TLS"));
+                conns.insert(id, wrapped(Sock::Tls(tls)));
+                set_last_error(format!("tls-upgrade: {id} is already TLS"));
                 false
             }
             Sock::Plain(tcp) => match tls_wrap(tcp, &host) {
                 Ok(tls) => {
-                    conns.insert(id, std::io::BufReader::new(Sock::Tls(Box::new(tls))));
+                    conns.insert(id, wrapped(Sock::Tls(Box::new(tls))));
                     true
                 }
                 Err(e) => {
-                    tls_set_error(e);
+                    set_last_error(e);
                     false
                 }
             },
@@ -2734,9 +2713,9 @@ pub(crate) fn build_engine(
     reg.register_fn(
         "socket-set-timeout",
         |id: usize, NonNeg(ms): NonNeg| -> bool {
-            let conns = sock_conns().lock().unwrap();
-            let Some(reader) = conns.get(&id) else {
-                tls_set_error(format!("socket-set-timeout: no connection {id}"));
+            let conns = CONNS.lock();
+            let Some(conn) = conns.get(&id) else {
+                set_last_error(format!("socket-set-timeout: no connection {id}"));
                 return false;
             };
             let dur = if ms == 0 {
@@ -2744,7 +2723,7 @@ pub(crate) fn build_engine(
             } else {
                 Some(std::time::Duration::from_millis(ms as u64))
             };
-            reader.get_ref().tcp().set_read_timeout(dur).is_ok()
+            conn.reader.get_ref().tcp().set_read_timeout(dur).is_ok()
         },
     );
     reg.register_fn("socket-send", |id: usize, text: String| -> bool {
@@ -2757,13 +2736,8 @@ pub(crate) fn build_engine(
         "socket-recv-bytes",
         |id: usize, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
     );
-    reg.register_fn("socket-close", |id: usize| -> bool {
-        sock_pending().lock().unwrap().remove(&id);
-        sock_conns().lock().unwrap().remove(&id).is_some()
-    });
-    reg.register_fn("socket-last-error", || -> String {
-        tls_last_error_slot().lock().unwrap().clone()
-    });
+    reg.register_fn("socket-close", |id: usize| -> bool { CONNS.remove(id) });
+    reg.register_fn("socket-last-error", last_error);
     // Back-compat aliases for the original TLS-only names.
     reg.register_fn("tls-send", |id: usize, text: String| -> bool {
         socket_send_impl(id, text.as_bytes())
@@ -2774,31 +2748,17 @@ pub(crate) fn build_engine(
     reg.register_fn("tls-recv-bytes", |id: usize, NonNeg(n): NonNeg| -> String {
         socket_recv_bytes_impl(id, n)
     });
-    reg.register_fn("tls-close", |id: usize| -> bool {
-        sock_pending().lock().unwrap().remove(&id);
-        sock_conns().lock().unwrap().remove(&id).is_some()
-    });
-    reg.register_fn("tls-last-error", || -> String {
-        tls_last_error_slot().lock().unwrap().clone()
-    });
+    reg.register_fn("tls-close", |id: usize| -> bool { CONNS.remove(id) });
+    reg.register_fn("tls-last-error", last_error);
     // TCP server.
     reg.register_fn("tcp-listen", |host: String, Port(port): Port| -> usize {
-        match std::net::TcpListener::bind((host.as_str(), port)) {
-            Ok(l) => {
-                let id = sock_next_id();
-                sock_listeners().lock().unwrap().insert(id, l);
-                id
-            }
-            Err(e) => {
-                tls_set_error(format!("tcp-listen {host}:{port}: {e}"));
-                0
-            }
-        }
+        let listener = std::net::TcpListener::bind((host.as_str(), port))
+            .map_err(|e| format!("tcp-listen {host}:{port}: {e}"));
+        or_report(listener.map(|l| LISTENERS.insert(l)), 0)
     });
     reg.register_fn("tcp-listener-port", |id: usize| -> usize {
-        sock_listeners()
+        LISTENERS
             .lock()
-            .unwrap()
             .get(&id)
             .and_then(|l| l.local_addr().ok())
             .map(|a| a.port() as usize)
@@ -2807,96 +2767,64 @@ pub(crate) fn build_engine(
     reg.register_fn("tcp-accept", |id: usize| -> usize {
         // Clone the listener handle out so the accept doesn't hold the table
         // lock (which would deadlock a concurrent close or another accept).
-        let listener = {
-            let listeners = sock_listeners().lock().unwrap();
-            match listeners.get(&id) {
-                Some(l) => match l.try_clone() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tls_set_error(format!("tcp-accept: {e}"));
-                        return 0;
-                    }
-                },
-                None => {
-                    tls_set_error(format!("tcp-accept: no listener {id}"));
-                    return 0;
-                }
-            }
+        let listener = match LISTENERS.lock().get(&id) {
+            Some(l) => l.try_clone().map_err(|e| format!("tcp-accept: {e}")),
+            None => Err(format!("tcp-accept: no listener {id}")),
         };
-        match listener.accept() {
-            Ok((tcp, _)) => {
-                let cid = sock_next_id();
-                sock_conns()
-                    .lock()
-                    .unwrap()
-                    .insert(cid, std::io::BufReader::new(Sock::Plain(tcp)));
-                cid
-            }
-            Err(e) => {
-                tls_set_error(format!("tcp-accept: {e}"));
-                0
-            }
-        }
+        let accepted = listener.and_then(|l| l.accept().map_err(|e| format!("tcp-accept: {e}")));
+        or_report(
+            accepted.map(|(tcp, _)| CONNS.insert(Conn::new(Sock::Plain(tcp)))),
+            0,
+        )
     });
     reg.register_fn("tcp-listener-close", |id: usize| -> bool {
-        sock_listeners().lock().unwrap().remove(&id).is_some()
+        LISTENERS.remove(id)
     });
     // UDP.
     reg.register_fn("udp-open", || -> usize {
-        match std::net::UdpSocket::bind("0.0.0.0:0") {
-            Ok(s) => {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp-open: {e}"));
+        or_report(
+            sock.map(|s| {
                 let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-                let id = sock_next_id();
-                sock_udp().lock().unwrap().insert(id, s);
-                id
-            }
-            Err(e) => {
-                tls_set_error(format!("udp-open: {e}"));
-                0
-            }
-        }
+                UDP.insert(s)
+            }),
+            0,
+        )
     });
     reg.register_fn(
         "udp-send",
         |id: usize, host: String, Port(port): Port, hex_data: String| -> bool {
             let Ok(bytes) = hex::decode(hex_data.trim()) else {
-                tls_set_error("udp-send: bad hex".into());
+                set_last_error("udp-send: bad hex".into());
                 return false;
             };
-            let socks = sock_udp().lock().unwrap();
+            let socks = UDP.lock();
             let Some(sock) = socks.get(&id) else {
-                tls_set_error(format!("udp-send: no socket {id}"));
+                set_last_error(format!("udp-send: no socket {id}"));
                 return false;
             };
-            match sock.send_to(&bytes, (host.as_str(), port)) {
-                Ok(_) => true,
-                Err(e) => {
-                    tls_set_error(format!("udp-send: {e}"));
-                    false
-                }
-            }
+            let sent = sock
+                .send_to(&bytes, (host.as_str(), port))
+                .map_err(|e| format!("udp-send: {e}"));
+            or_report(sent.map(|_| true), false)
         },
     );
     reg.register_fn("udp-recv", |id: usize, NonNeg(max): NonNeg| -> String {
-        let socks = sock_udp().lock().unwrap();
+        let socks = UDP.lock();
         let Some(sock) = socks.get(&id) else {
-            tls_set_error(format!("udp-recv: no socket {id}"));
+            set_last_error(format!("udp-recv: no socket {id}"));
             return String::new();
         };
         // A UDP datagram can't exceed ~64 KiB; clamp so a huge `max` can't
         // pre-allocate unboundedly (and 1 is the floor so recv has room).
         let mut buf = vec![0u8; max.clamp(1, 65535)];
-        match sock.recv_from(&mut buf) {
-            Ok((n, from)) => format!("{from}\n{}", hex::encode(&buf[..n])),
-            Err(e) => {
-                tls_set_error(format!("udp-recv: {e}"));
-                String::new()
-            }
-        }
+        let received = sock
+            .recv_from(&mut buf)
+            .map(|(n, from)| format!("{from}\n{}", hex::encode(&buf[..n])))
+            .map_err(|e| format!("udp-recv: {e}"));
+        or_report(received, String::new())
     });
-    reg.register_fn("udp-close", |id: usize| -> bool {
-        sock_udp().lock().unwrap().remove(&id).is_some()
-    });
+    reg.register_fn("udp-close", |id: usize| -> bool { UDP.remove(id) });
     // --- SQLite (generic embedded database; bundled, with FTS5) -----------
     reg.section("sqlite");
     // A real database for Scheme packages — a full-text search index, a
@@ -2916,25 +2844,17 @@ pub(crate) fn build_engine(
     //   (sqlite-close db)           → #t if the id existed
     //   (sqlite-last-error)         → the most recent failure text
     reg.register_fn("sqlite-open", |path: String| -> usize {
-        match rusqlite::Connection::open(&path) {
-            Ok(conn) => {
-                let id = sock_next_id();
-                sqlite_conns().lock().unwrap().insert(id, conn);
-                id
-            }
-            Err(e) => {
-                tls_set_error(format!("sqlite-open {path}: {e}"));
-                0
-            }
-        }
+        let conn =
+            rusqlite::Connection::open(&path).map_err(|e| format!("sqlite-open {path}: {e}"));
+        or_report(conn.map(|c| SQLITE.insert(c)), 0)
     });
     reg.register_fn(
         "sqlite-exec",
         |id: usize, sql: String, params: SteelVal| -> bool {
             let ps = steel_string_list(&params);
-            let conns = sqlite_conns().lock().unwrap();
+            let conns = SQLITE.lock();
             let Some(conn) = conns.get(&id) else {
-                tls_set_error(format!("sqlite-exec: no db {id}"));
+                set_last_error(format!("sqlite-exec: no db {id}"));
                 return false;
             };
             let result = if ps.is_empty() {
@@ -2944,28 +2864,27 @@ pub(crate) fn build_engine(
                 conn.execute(&sql, rusqlite::params_from_iter(ps.iter()))
                     .map(|_| ())
             };
-            match result {
-                Ok(()) => true,
-                Err(e) => {
-                    tls_set_error(format!("sqlite-exec: {e}"));
-                    false
-                }
-            }
+            or_report(
+                result
+                    .map(|()| true)
+                    .map_err(|e| format!("sqlite-exec: {e}")),
+                false,
+            )
         },
     );
     reg.register_fn(
         "sqlite-query",
         |id: usize, sql: String, params: SteelVal| -> Vec<String> {
             let ps = steel_string_list(&params);
-            let conns = sqlite_conns().lock().unwrap();
+            let conns = SQLITE.lock();
             let Some(conn) = conns.get(&id) else {
-                tls_set_error(format!("sqlite-query: no db {id}"));
+                set_last_error(format!("sqlite-query: no db {id}"));
                 return Vec::new();
             };
             let mut stmt = match conn.prepare(&sql) {
                 Ok(s) => s,
                 Err(e) => {
-                    tls_set_error(format!("sqlite-query: {e}"));
+                    set_last_error(format!("sqlite-query: {e}"));
                     return Vec::new();
                 }
             };
@@ -2985,34 +2904,24 @@ pub(crate) fn build_engine(
                 }
                 Ok(cells.join("\u{1f}"))
             });
-            match rows {
-                Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-                Err(e) => {
-                    tls_set_error(format!("sqlite-query: {e}"));
-                    Vec::new()
-                }
-            }
+            let rows = rows
+                .map(|iter| iter.filter_map(|r| r.ok()).collect())
+                .map_err(|e| format!("sqlite-query: {e}"));
+            or_report(rows, Vec::new())
         },
     );
-    reg.register_fn("sqlite-close", |id: usize| -> bool {
-        sqlite_conns().lock().unwrap().remove(&id).is_some()
-    });
-    reg.register_fn("sqlite-last-error", || -> String {
-        tls_last_error_slot().lock().unwrap().clone()
-    });
+    reg.register_fn("sqlite-close", |id: usize| -> bool { SQLITE.remove(id) });
+    reg.register_fn("sqlite-last-error", last_error);
     reg.section("sockets");
     // DNS: resolve `host` for a record `type` ("A" "AAAA" "MX" "TXT" "SRV"
     // "CNAME" "NS"). Returns newline-separated records ("" = none/failure);
     // MX/SRV keep their priority/weight fields space-separated. Hand-rolled
     // over UDP to the system resolver, so no async DNS dependency.
     reg.register_fn("dns-resolve", |host: String, rtype: String| -> String {
-        match dns_resolve_impl(&host, &rtype) {
-            Ok(records) => records.join("\n"),
-            Err(e) => {
-                tls_set_error(format!("dns-resolve: {e}"));
-                String::new()
-            }
-        }
+        let records = dns_resolve_impl(&host, &rtype)
+            .map(|records| records.join("\n"))
+            .map_err(|e| format!("dns-resolve: {e}"));
+        or_report(records, String::new())
     });
     // --- async sockets + WebSockets (off-thread, callback-driven) ---------
     reg.section("sockets");
@@ -4443,511 +4352,6 @@ pub(crate) fn snap_byte(rope: &Rope, byte: usize) -> usize {
     rope.char_to_byte(rope.byte_to_char(byte))
 }
 
-// --- socket plumbing (the `tcp-*` / `tls-*` / `udp-*` primitives) -----------
-// Process-wide tables of open connections/listeners/sockets, keyed by the ids
-// handed to Scheme. Connections are buffered so `*-recv-line` and exact-length
-// `*-recv-bytes` reads compose (an IMAP literal follows its control line in the
-// same buffer). Only the engine thread calls the blocking primitives, but the
-// Mutexes also let the async socket worker threads (editor side) share the same
-// error slot and id source. Contention is nil in practice.
-
-/// A byte stream that is either plain TCP or TLS-over-TCP. `Read`/`Write`
-/// delegate to the inner stream; `tls-upgrade` swaps a `Plain` for a `Tls` in
-/// place (STARTTLS). Boxed TLS variant keeps the enum small.
-pub(crate) enum Sock {
-    Plain(std::net::TcpStream),
-    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>>),
-}
-
-impl Sock {
-    /// The underlying TCP stream, for timeout/shutdown control.
-    pub(crate) fn tcp(&self) -> &std::net::TcpStream {
-        match self {
-            Sock::Plain(t) => t,
-            Sock::Tls(s) => s.get_ref(),
-        }
-    }
-}
-
-impl std::io::Read for Sock {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Sock::Plain(t) => t.read(buf),
-            Sock::Tls(s) => s.read(buf),
-        }
-    }
-}
-
-impl std::io::Write for Sock {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Sock::Plain(t) => t.write(buf),
-            Sock::Tls(s) => s.write(buf),
-        }
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Sock::Plain(t) => t.flush(),
-            Sock::Tls(s) => s.flush(),
-        }
-    }
-}
-
-pub(crate) type Conn = std::io::BufReader<Sock>;
-
-static SOCK_NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
-
-/// Next connection/listener/socket id (shared across all socket kinds so an id
-/// is globally unambiguous).
-pub(crate) fn sock_next_id() -> usize {
-    SOCK_NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-fn sock_conns() -> &'static Mutex<HashMap<usize, Conn>> {
-    static CONNS: std::sync::OnceLock<Mutex<HashMap<usize, Conn>>> = std::sync::OnceLock::new();
-    CONNS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Bytes a `recv-line`/`recv-bytes` already pulled off connection `id` before
-/// a read timeout (or other error) cut it short. They're handed back first on
-/// the next receive, so a timeout mid-line never loses data.
-fn sock_pending() -> &'static Mutex<HashMap<usize, Vec<u8>>> {
-    static PENDING: std::sync::OnceLock<Mutex<HashMap<usize, Vec<u8>>>> =
-        std::sync::OnceLock::new();
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Take connection `id`'s pending bytes (see [`sock_pending`]).
-fn sock_take_pending(id: usize) -> Vec<u8> {
-    sock_pending()
-        .lock()
-        .unwrap()
-        .remove(&id)
-        .unwrap_or_default()
-}
-
-/// Stash undelivered bytes for connection `id`'s next receive.
-fn sock_put_pending(id: usize, bytes: Vec<u8>) {
-    if !bytes.is_empty() {
-        sock_pending().lock().unwrap().insert(id, bytes);
-    }
-}
-
-/// Bytes as the byte-preserving latin-1 string the socket primitives return.
-fn latin1(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| b as char).collect()
-}
-
-fn sock_listeners() -> &'static Mutex<HashMap<usize, std::net::TcpListener>> {
-    static L: std::sync::OnceLock<Mutex<HashMap<usize, std::net::TcpListener>>> =
-        std::sync::OnceLock::new();
-    L.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn sock_udp() -> &'static Mutex<HashMap<usize, std::net::UdpSocket>> {
-    static U: std::sync::OnceLock<Mutex<HashMap<usize, std::net::UdpSocket>>> =
-        std::sync::OnceLock::new();
-    U.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-// Open SQLite connections, keyed by the id `sqlite-open` hands to Scheme.
-// `Connection` is `Send` (engine-thread only), so a Mutex keeps the static
-// sound. Shares the socket id source so every handle id is globally unique.
-fn sqlite_conns() -> &'static Mutex<HashMap<usize, rusqlite::Connection>> {
-    static C: std::sync::OnceLock<Mutex<HashMap<usize, rusqlite::Connection>>> =
-        std::sync::OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn tls_last_error_slot() -> &'static Mutex<String> {
-    static ERR: std::sync::OnceLock<Mutex<String>> = std::sync::OnceLock::new();
-    ERR.get_or_init(|| Mutex::new(String::new()))
-}
-
-pub(crate) fn tls_set_error(msg: String) {
-    *tls_last_error_slot().lock().unwrap() = msg;
-}
-
-/// Build a rustls client config trusting the platform certificate store. Shared
-/// by `tls-connect`, `tls-upgrade`, and the async/WebSocket socket workers.
-pub(crate) fn tls_client_config() -> std::sync::Arc<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs().certs {
-        let _ = roots.add(cert);
-    }
-    std::sync::Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
-}
-
-/// Open a plain TCP connection with the given timeouts (0 = a sane default).
-fn tcp_connect_impl(
-    host: &str,
-    port: u16,
-    connect_ms: u64,
-    read_ms: u64,
-) -> Result<std::net::TcpStream, String> {
-    use std::net::ToSocketAddrs;
-    let addr = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {host}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("resolve {host}: no addresses"))?;
-    let connect_ms = if connect_ms == 0 { 10_000 } else { connect_ms };
-    let tcp =
-        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(connect_ms))
-            .map_err(|e| format!("connect {host}:{port}: {e}"))?;
-    let read_ms = if read_ms == 0 { 30_000 } else { read_ms };
-    tcp.set_read_timeout(Some(std::time::Duration::from_millis(read_ms)))
-        .map_err(|e| format!("read-timeout: {e}"))?;
-    Ok(tcp)
-}
-
-/// Connect a plain TCP stream with default timeouts, for the async socket /
-/// WebSocket workers (editor side). Thin wrapper over [`tcp_connect_impl`].
-pub(crate) fn tcp_connect_for_async(host: &str, port: u16) -> Result<std::net::TcpStream, String> {
-    tcp_connect_impl(host, port, 0, 0)
-}
-
-/// Wrap an already-connected TCP stream in a rustls client session against
-/// `host` (the SNI / cert name). The handshake completes lazily on the first
-/// read/write, so a bad certificate surfaces as a first-recv error. Shared by
-/// `tls-connect` (fresh socket) and `tls-upgrade` (STARTTLS on a live socket).
-pub(crate) fn tls_wrap(
-    tcp: std::net::TcpStream,
-    host: &str,
-) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("server name {host}: {e}"))?;
-    let conn = rustls::ClientConnection::new(tls_client_config(), name)
-        .map_err(|e| format!("tls session: {e}"))?;
-    Ok(rustls::StreamOwned::new(conn, tcp))
-}
-
-/// Write all of `bytes` to connection `id`; the backing primitive for
-/// `socket-send` / `tls-send`.
-fn socket_send_impl(id: usize, bytes: &[u8]) -> bool {
-    use std::io::Write;
-    let mut conns = sock_conns().lock().unwrap();
-    match conns.get_mut(&id) {
-        Some(reader) => {
-            let s = reader.get_mut();
-            match s.write_all(bytes) {
-                Ok(()) => s.flush().is_ok(),
-                Err(e) => {
-                    tls_set_error(format!("send: {e}"));
-                    false
-                }
-            }
-        }
-        None => {
-            tls_set_error(format!("send: no connection {id}"));
-            false
-        }
-    }
-}
-
-/// Read one line (through `\n`, inclusive) from connection `id` as a
-/// byte-preserving latin-1 string. Backs `socket-recv-line` / `tls-recv-line`.
-fn socket_recv_line_impl(id: usize) -> String {
-    use std::io::BufRead;
-    let mut conns = sock_conns().lock().unwrap();
-    let Some(reader) = conns.get_mut(&id) else {
-        tls_set_error(format!("recv-line: no connection {id}"));
-        return String::new();
-    };
-    let mut buf = sock_take_pending(id);
-    if let Some(i) = buf.iter().position(|&b| b == b'\n') {
-        let rest = buf.split_off(i + 1);
-        sock_put_pending(id, rest);
-        return latin1(&buf);
-    }
-    // `read_until` appends whatever it got before an error to `buf`; those
-    // bytes are already out of the reader, so keep them for the next call.
-    match reader.read_until(b'\n', &mut buf) {
-        Ok(0) if buf.is_empty() => {
-            tls_set_error("recv-line: connection closed".into());
-            String::new()
-        }
-        Ok(_) => latin1(&buf),
-        Err(e) => {
-            sock_put_pending(id, buf);
-            tls_set_error(format!("recv-line: {e}"));
-            String::new()
-        }
-    }
-}
-
-/// Read exactly `n` bytes from connection `id`. Backs `socket-recv-bytes` /
-/// `tls-recv-bytes`.
-/// Ceiling on a single `recv-bytes` (256 MiB). `n` is usually a server-quoted
-/// protocol length (an IMAP `{NNN}` literal); an oversized value would
-/// otherwise `vec![0u8; n]`-abort the whole process. Above the cap we error
-/// rather than pre-allocate.
-const SOCKET_RECV_MAX: usize = 256 * 1024 * 1024;
-
-fn socket_recv_bytes_impl(id: usize, n: usize) -> String {
-    use std::io::Read;
-    if n > SOCKET_RECV_MAX {
-        tls_set_error(format!("recv-bytes: length {n} exceeds cap"));
-        return String::new();
-    }
-    let mut conns = sock_conns().lock().unwrap();
-    let Some(reader) = conns.get_mut(&id) else {
-        tls_set_error(format!("recv-bytes: no connection {id}"));
-        return String::new();
-    };
-    let mut buf = sock_take_pending(id);
-    if buf.len() >= n {
-        let rest = buf.split_off(n);
-        sock_put_pending(id, rest);
-        return latin1(&buf);
-    }
-    // Read the remainder piecewise (not `read_exact`, whose partial bytes are
-    // unspecified on error) so a timeout keeps what already arrived.
-    let mut have = buf.len();
-    buf.resize(n, 0);
-    while have < n {
-        match reader.read(&mut buf[have..]) {
-            Ok(0) => {
-                buf.truncate(have);
-                sock_put_pending(id, buf);
-                tls_set_error("recv-bytes: connection closed".into());
-                return String::new();
-            }
-            Ok(k) => have += k,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => {
-                buf.truncate(have);
-                sock_put_pending(id, buf);
-                tls_set_error(format!("recv-bytes: {e}"));
-                return String::new();
-            }
-        }
-    }
-    latin1(&buf)
-}
-
-/// The `nameserver`s in /etc/resolv.conf, in order, else Google public DNS.
-/// macOS keeps a usable resolv.conf for the primary resolver even though
-/// scutil is the system-of-record; the 8.8.8.8 fallback covers the rare empty
-/// case. Unparseable entries (e.g. a link-local `fe80::1%en0`) are skipped.
-fn dns_nameservers() -> Vec<std::net::IpAddr> {
-    let conf = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-    let mut servers = parse_resolv_conf_nameservers(&conf);
-    if servers.is_empty() {
-        servers.push(std::net::IpAddr::from([8, 8, 8, 8]));
-    }
-    servers
-}
-
-/// The parseable `nameserver` addresses in resolv.conf text, in order.
-pub(crate) fn parse_resolv_conf_nameservers(conf: &str) -> Vec<std::net::IpAddr> {
-    conf.lines()
-        .filter_map(|line| line.trim().strip_prefix("nameserver"))
-        .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
-        .collect()
-}
-
-/// One query/response round trip to nameserver `ns`, from a socket of the
-/// matching address family (an IPv4 socket can't reach an IPv6 server).
-fn dns_query(ns: std::net::IpAddr, msg: &[u8]) -> Result<Vec<u8>, String> {
-    let bind = if ns.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
-    let socket = std::net::UdpSocket::bind(bind).map_err(|e| e.to_string())?;
-    socket
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok();
-    // `connect` filters out datagrams from anyone but the nameserver.
-    socket
-        .connect((ns, 53))
-        .map_err(|e| format!("connect to {ns}: {e}"))?;
-    socket.send(msg).map_err(|e| format!("send to {ns}: {e}"))?;
-    let mut resp = vec![0u8; 4096];
-    let n = socket
-        .recv(&mut resp)
-        .map_err(|e| format!("recv from {ns}: {e}"))?;
-    resp.truncate(n);
-    Ok(resp)
-}
-
-/// A hand-rolled DNS resolver over UDP (one query, one datagram). Builds the
-/// query packet, sends it to the system nameserver, and parses the answer
-/// section — including name compression — for the requested record type.
-fn dns_resolve_impl(host: &str, rtype: &str) -> Result<Vec<String>, String> {
-    let qtype: u16 = match rtype.to_ascii_uppercase().as_str() {
-        "A" => 1,
-        "NS" => 2,
-        "CNAME" => 5,
-        "MX" => 15,
-        "TXT" => 16,
-        "AAAA" => 28,
-        "SRV" => 33,
-        other => return Err(format!("unknown record type {other}")),
-    };
-    // --- build the query -------------------------------------------------
-    let mut msg: Vec<u8> = Vec::with_capacity(64);
-    let id: u16 = 0x4d41; // "MA" — a fixed id is fine for one blocking round trip
-    msg.extend_from_slice(&id.to_be_bytes());
-    msg.extend_from_slice(&0x0100u16.to_be_bytes()); // flags: standard query, RD
-    msg.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
-    msg.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // AN/NS/AR counts = 0
-    for label in host.trim_end_matches('.').split('.') {
-        if label.is_empty() || label.len() > 63 {
-            return Err("bad hostname label".into());
-        }
-        msg.push(label.len() as u8);
-        msg.extend_from_slice(label.as_bytes());
-    }
-    msg.push(0); // root label
-    msg.extend_from_slice(&qtype.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes()); // QCLASS = IN
-    // --- send + receive: each nameserver in turn until one answers ---------
-    let mut last_err = String::from("no nameservers");
-    for ns in dns_nameservers() {
-        match dns_query(ns, &msg).and_then(|resp| dns_parse_answers(&resp, qtype)) {
-            Ok(records) => return Ok(records),
-            Err(e) => last_err = e,
-        }
-    }
-    Err(last_err)
-}
-
-/// Read a (possibly compression-pointer-following) domain name starting at
-/// `pos`; returns the dotted name and the offset just past the name *in the
-/// original stream* (pointers don't advance the outer cursor past the pointer).
-fn dns_read_name(msg: &[u8], mut pos: usize) -> Result<(String, usize), String> {
-    let mut labels = Vec::new();
-    let mut jumped = false;
-    let mut next = pos;
-    let mut guard = 0;
-    loop {
-        guard += 1;
-        if guard > 128 || pos >= msg.len() {
-            return Err("malformed name".into());
-        }
-        let len = msg[pos] as usize;
-        if len & 0xc0 == 0xc0 {
-            // Compression pointer: two bytes, offset in the low 14 bits.
-            if pos + 1 >= msg.len() {
-                return Err("truncated pointer".into());
-            }
-            let ptr = (((len & 0x3f) << 8) | msg[pos + 1] as usize) & 0x3fff;
-            if !jumped {
-                next = pos + 2;
-            }
-            jumped = true;
-            pos = ptr;
-        } else if len == 0 {
-            pos += 1;
-            if !jumped {
-                next = pos;
-            }
-            break;
-        } else {
-            pos += 1;
-            if pos + len > msg.len() {
-                return Err("truncated label".into());
-            }
-            labels.push(String::from_utf8_lossy(&msg[pos..pos + len]).into_owned());
-            pos += len;
-        }
-    }
-    Ok((labels.join("."), next))
-}
-
-/// Parse the answer section, returning the records matching `qtype` formatted
-/// as text (A/AAAA as addresses; CNAME/NS/PTR as names; MX/SRV keep their
-/// numeric fields; TXT concatenates its character-strings).
-fn dns_parse_answers(msg: &[u8], qtype: u16) -> Result<Vec<String>, String> {
-    if msg.len() < 12 {
-        return Err("short response".into());
-    }
-    let qd = u16::from_be_bytes([msg[4], msg[5]]) as usize;
-    let an = u16::from_be_bytes([msg[6], msg[7]]) as usize;
-    let mut pos = 12;
-    // Skip the question section.
-    for _ in 0..qd {
-        let (_, p) = dns_read_name(msg, pos)?;
-        pos = p + 4; // QTYPE + QCLASS
-    }
-    let mut out = Vec::new();
-    for _ in 0..an {
-        let (_, p) = dns_read_name(msg, pos)?;
-        pos = p;
-        if pos + 10 > msg.len() {
-            return Err("truncated RR header".into());
-        }
-        let rtype = u16::from_be_bytes([msg[pos], msg[pos + 1]]);
-        let rdlen = u16::from_be_bytes([msg[pos + 8], msg[pos + 9]]) as usize;
-        pos += 10;
-        if pos + rdlen > msg.len() {
-            return Err("truncated rdata".into());
-        }
-        let rdata = &msg[pos..pos + rdlen];
-        if rtype == qtype {
-            match qtype {
-                1 if rdlen == 4 => {
-                    out.push(format!(
-                        "{}.{}.{}.{}",
-                        rdata[0], rdata[1], rdata[2], rdata[3]
-                    ));
-                }
-                28 if rdlen == 16 => {
-                    let segs: Vec<String> = (0..8)
-                        .map(|i| {
-                            format!("{:x}", u16::from_be_bytes([rdata[i * 2], rdata[i * 2 + 1]]))
-                        })
-                        .collect();
-                    out.push(segs.join(":"));
-                }
-                5 | 2 => {
-                    if let Ok((name, _)) = dns_read_name(msg, pos) {
-                        out.push(name);
-                    }
-                }
-                // rdlen guards: a truncated/hostile MX (<2) or SRV (<6) rdata
-                // would otherwise index a too-short `rdata` slice and panic.
-                // The trailing name is read via the bounds-checked
-                // `dns_read_name`, so only the fixed fields need guarding.
-                15 if rdlen >= 2 => {
-                    let pref = u16::from_be_bytes([rdata[0], rdata[1]]);
-                    if let Ok((name, _)) = dns_read_name(msg, pos + 2) {
-                        out.push(format!("{pref} {name}"));
-                    }
-                }
-                33 if rdlen >= 6 => {
-                    let prio = u16::from_be_bytes([rdata[0], rdata[1]]);
-                    let weight = u16::from_be_bytes([rdata[2], rdata[3]]);
-                    let port = u16::from_be_bytes([rdata[4], rdata[5]]);
-                    if let Ok((name, _)) = dns_read_name(msg, pos + 6) {
-                        out.push(format!("{prio} {weight} {port} {name}"));
-                    }
-                }
-                16 => {
-                    let mut text = String::new();
-                    let mut i = 0;
-                    while i < rdata.len() {
-                        let l = rdata[i] as usize;
-                        i += 1;
-                        if i + l <= rdata.len() {
-                            text.push_str(&String::from_utf8_lossy(&rdata[i..i + l]));
-                            i += l;
-                        } else {
-                            break;
-                        }
-                    }
-                    out.push(text);
-                }
-                _ => {}
-            }
-        }
-        pos += rdlen;
-    }
-    Ok(out)
-}
-
 /// Apply one `textplot-render` drawing op to `canvas`. Coordinates may be ints
 /// or floats (rounded); a face of `#f` (or any non-string) draws uncolored.
 /// Malformed ops are skipped rather than failing the whole render.
@@ -5024,78 +4428,5 @@ fn textplot_op(canvas: &mut crate::textplot::Canvas, op: &SteelVal) {
             }
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-mod dns_tests {
-    use super::{dns_parse_answers, dns_read_name};
-
-    // Build a minimal DNS response: header (qd=1, an=1), a question for name
-    // "a." of `qtype`, then one answer whose owner name is a compression
-    // pointer back to the question, with the given `rtype`/`rdata`.
-    fn response(qtype: u16, rtype: u16, rdata: &[u8]) -> Vec<u8> {
-        let mut m = vec![
-            0x00, 0x00, // id
-            0x81, 0x80, // flags: response, RD, RA
-            0x00, 0x01, // qdcount = 1
-            0x00, 0x01, // ancount = 1
-            0x00, 0x00, 0x00, 0x00, // ns/ar = 0
-        ];
-        // Question: "a." + qtype + IN
-        m.extend_from_slice(&[0x01, b'a', 0x00]);
-        m.extend_from_slice(&qtype.to_be_bytes());
-        m.extend_from_slice(&1u16.to_be_bytes());
-        // Answer: owner = pointer to offset 12 (the question name), type, IN,
-        // ttl=0, rdlen, rdata.
-        m.extend_from_slice(&[0xc0, 0x0c]);
-        m.extend_from_slice(&rtype.to_be_bytes());
-        m.extend_from_slice(&1u16.to_be_bytes());
-        m.extend_from_slice(&[0, 0, 0, 0]); // ttl
-        m.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
-        m.extend_from_slice(rdata);
-        m
-    }
-
-    #[test]
-    fn short_mx_rdata_does_not_panic() {
-        // MX with a 1-byte rdata (< the 2-byte preference) must be skipped,
-        // not indexed — this panicked before the rdlen guard.
-        let msg = response(15, 15, &[0x00]);
-        let out = dns_parse_answers(&msg, 15).expect("parse");
-        assert!(out.is_empty(), "short MX should yield no records: {out:?}");
-    }
-
-    #[test]
-    fn short_srv_rdata_does_not_panic() {
-        // SRV needs 6 fixed bytes; a 5-byte rdata must be skipped.
-        let msg = response(33, 33, &[0, 0, 0, 0, 0]);
-        let out = dns_parse_answers(&msg, 33).expect("parse");
-        assert!(out.is_empty(), "short SRV should yield no records: {out:?}");
-    }
-
-    #[test]
-    fn well_formed_mx_and_a_parse() {
-        // A valid MX: preference 10 + name "mx.a." (label "mx" then pointer).
-        let mut rdata = vec![0x00, 0x0a, 0x02, b'm', b'x', 0xc0, 0x0c];
-        let msg = response(15, 15, &rdata);
-        let out = dns_parse_answers(&msg, 15).expect("parse");
-        assert_eq!(out, vec!["10 mx.a".to_string()]);
-        // A record: 1.2.3.4
-        rdata = vec![1, 2, 3, 4];
-        let msg = response(1, 1, &rdata);
-        assert_eq!(
-            dns_parse_answers(&msg, 1).unwrap(),
-            vec!["1.2.3.4".to_string()]
-        );
-    }
-
-    #[test]
-    fn compression_pointer_loop_terminates() {
-        // A name that is a pointer to itself must error, not hang.
-        let mut msg = vec![0u8; 14];
-        msg[12] = 0xc0;
-        msg[13] = 0x0c; // points at offset 12 == itself
-        assert!(dns_read_name(&msg, 12).is_err());
     }
 }
