@@ -12,6 +12,7 @@
 //! `scheme/grid.scm`; cell insert is a small native line editor (see
 //! [`Editor::key_grid`] and [`Editor::grid_action_key`]).
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1213,6 +1214,459 @@ impl GridDoc {
     }
 }
 
+/// What a grid command did, for the editor to report.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct Outcome {
+    /// For the echo area.
+    pub msg: Option<Cow<'static, str>>,
+    /// Column/row layout changed: save the view sidecar.
+    pub persist_view: bool,
+}
+
+impl Outcome {
+    fn msg(msg: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            msg: Some(msg.into()),
+            persist_view: false,
+        }
+    }
+
+    fn persist() -> Self {
+        Self {
+            msg: None,
+            persist_view: true,
+        }
+    }
+
+    fn and_persist(self) -> Self {
+        Self {
+            persist_view: true,
+            ..self
+        }
+    }
+}
+
+/// What a grid command reads from the editor besides the grid.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CmdEnv {
+    /// The typed count (0 = none).
+    pub count: usize,
+    /// A `C-u` flag (see [`GridCmd::prefix_is_flag`]).
+    pub flag: bool,
+    /// One monospace advance at 100% zoom, for column widths.
+    pub char_w: f64,
+    /// `grid-max-autofit-width`.
+    pub max_fit: f64,
+}
+
+impl Default for CmdEnv {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            flag: false,
+            char_w: 7.0,
+            max_fit: GridOptions::default().max_autofit_width,
+        }
+    }
+}
+
+impl GridDoc {
+    /// Apply a grid command that only touches this grid (motion, selection,
+    /// structure, sizes, view toggles, undo). `Err` is a refusal to report,
+    /// with nothing changed. Commands that need the editor (the clipboard,
+    /// prompts, Scheme) are [`Editor::grid_command`]'s; here they do nothing.
+    pub(super) fn apply(
+        &mut self,
+        cmd: GridCmd,
+        env: &CmdEnv,
+    ) -> Result<Outcome, Cow<'static, str>> {
+        use GridCmd::*;
+        let (r, c) = self.view.cursor;
+        let (rows, cols) = self.used();
+        match cmd {
+            // Across a whole-line selection, step it to take in the next line.
+            Left | Right if self.line_selected(SelKind::Cols) => {
+                self.move_to(r, self.step(Axis::Cols, c, cmd == Right), true)
+            }
+            Up | Down if self.line_selected(SelKind::Rows) => {
+                self.move_to(self.step(Axis::Rows, r, cmd == Down), c, true)
+            }
+            Left if self.step(Axis::Cols, c, false) == c => self.select_line_at_edge(SelKind::Rows),
+            Right if self.leave_line_at_edge(SelKind::Rows) => {}
+            Up if self.step(Axis::Rows, r, false) == r => self.select_line_at_edge(SelKind::Cols),
+            Down if self.leave_line_at_edge(SelKind::Cols) => {}
+            Left => self.move_to(r, self.step(Axis::Cols, c, false), false),
+            Right => self.move_to(r, self.step(Axis::Cols, c, true), false),
+            Up => self.move_to(self.step(Axis::Rows, r, false), c, false),
+            Down => self.move_to(self.step(Axis::Rows, r, true), c, false),
+            ExtendLeft => self.move_to(r, self.step(Axis::Cols, c, false), true),
+            ExtendRight => self.move_to(r, self.step(Axis::Cols, c, true), true),
+            ExtendUp => self.move_to(self.step(Axis::Rows, r, false), c, true),
+            ExtendDown => self.move_to(self.step(Axis::Rows, r, true), c, true),
+            NextCell => {
+                if cols > 0 && c + 1 >= cols && r + 1 < rows.max(r + 2) {
+                    self.move_to(self.step(Axis::Rows, r, true), 0, false);
+                } else {
+                    self.move_to(r, self.step(Axis::Cols, c, true), false);
+                }
+            }
+            PreviousCell => {
+                if c == 0 && r > 0 {
+                    let last = cols.saturating_sub(1);
+                    self.move_to(self.step(Axis::Rows, r, false), last, false);
+                } else {
+                    self.move_to(r, self.step(Axis::Cols, c, false), false);
+                }
+            }
+            EdgeLeft | EdgeRight | EdgeUp | EdgeDown => {
+                let (dr, dc) = match cmd {
+                    EdgeLeft => (0, -1),
+                    EdgeRight => (0, 1),
+                    EdgeUp => (-1, 0),
+                    _ => (1, 0),
+                };
+                let (nr, nc) = self.edge(dr, dc);
+                self.move_to(nr, nc, false);
+            }
+            RowStart => self.move_to(r, 0, false),
+            RowFirstNonEmpty => {
+                let first = (0..cols)
+                    .find(|&k| !self.cell(r, k).is_empty())
+                    .unwrap_or(0);
+                self.move_to(r, first, false);
+            }
+            RowEnd => {
+                let last = self.last_filled_col(r);
+                self.move_to(r, last, false);
+            }
+            GotoFirstRow => self.move_to(0, c, false),
+            GotoLastRow => {
+                let target = if env.count > 0 {
+                    env.count - 1
+                } else {
+                    rows.saturating_sub(1)
+                };
+                self.move_to(target, c, false);
+            }
+            GotoColumn => self.move_to(r, env.count.saturating_sub(1), false),
+            GotoFirstCell => self.move_to(0, 0, false),
+            GotoLastCell => self.move_to(rows.saturating_sub(1), cols.saturating_sub(1), false),
+            PageDown | PageUp | HalfPageDown | HalfPageUp => self.page(cmd),
+            SelectCells | SelectRows | SelectColumns => self.toggle_select(match cmd {
+                SelectCells => SelKind::Cells,
+                SelectRows => SelKind::Rows,
+                _ => SelKind::Cols,
+            }),
+            SelectAll => {
+                self.view.anchor = Some((0, 0));
+                self.view.cursor = (rows.saturating_sub(1), cols.saturating_sub(1));
+                self.view.sel_kind = SelKind::Cells;
+                self.sticky_sel = true;
+            }
+            SelectCancel => self.deselect(),
+            EditStart | EditEnd => {
+                let text = self.source(r, c).to_string();
+                self.view.edit = Some(CellEdit::new(r, c, &text, text.clone(), cmd == EditEnd));
+                self.view.reveal_cursor();
+            }
+            EditReplace => {
+                let text = self.source(r, c).to_string();
+                self.view.edit = Some(CellEdit::new(r, c, &text, String::new(), true));
+                self.view.reveal_cursor();
+            }
+            Clear => self.clear_selection(env.flag),
+            DeleteRow => self.delete_selected_rows(),
+            DeleteColumn => self.delete_selected_cols(),
+            InsertRowBelow | InsertRowAbove => {
+                let at = if cmd == InsertRowBelow { r + 1 } else { r };
+                if at <= rows {
+                    self.model_op(|wb| wb.insert_rows(SHEET, at, 1));
+                }
+                self.move_to(at, c, false);
+            }
+            InsertColumnRight | InsertColumnLeft => {
+                let at = if cmd == InsertColumnRight { c + 1 } else { c };
+                if at <= cols {
+                    self.model_op(|wb| wb.insert_cols(SHEET, at, 1));
+                }
+                self.move_to(r, at, false);
+            }
+            SortAscending | SortDescending => return Ok(self.sort(cmd == SortDescending)),
+            Undo | Redo => return self.undo_redo(cmd == Undo),
+            Repeat => {
+                // (Repeating a command is the editor's: it may need it.)
+                if let Some(RepeatOp::SetText(text)) = self.last_repeat.clone() {
+                    self.set_cells_tracked(&[(r, c, text)]);
+                }
+            }
+            WidenColumn | NarrowColumn => {
+                let w = self.view.cols.size(c);
+                let step = env.char_w.max(1.0);
+                let nw = if cmd == WidenColumn {
+                    w + step
+                } else {
+                    (w - step).max(view::MIN_SIZE)
+                };
+                self.resize(Axis::Cols, c, nw);
+                return Ok(Outcome::persist());
+            }
+            AutofitColumn | AutofitColumnFull => {
+                self.autofit(c, cmd == AutofitColumnFull, env);
+                return Ok(Outcome::persist());
+            }
+            TallerRow | ShorterRow => {
+                let h = self.view.rows.size(r);
+                let nh = if cmd == TallerRow {
+                    h + 5.0
+                } else {
+                    (h - 5.0).max(view::MIN_SIZE)
+                };
+                self.resize(Axis::Rows, r, nh);
+                return Ok(Outcome::persist());
+            }
+            ZoomIn | ZoomOut | ZoomReset => {
+                match cmd {
+                    ZoomIn => self.view.step_zoom(1),
+                    ZoomOut => self.view.step_zoom(-1),
+                    _ => self.view.zoom = 1.0,
+                }
+                self.view.reveal_cursor();
+                let pct = (self.view.zoom * 100.0).round();
+                return Ok(Outcome::msg(format!("Zoom {pct}%")).and_persist());
+            }
+            ToggleHeader => {
+                let h = !self.wb.header(SHEET);
+                self.wb.set_header(SHEET, h);
+                let msg = if h {
+                    "Row 1 is a header"
+                } else {
+                    "Row 1 is data"
+                };
+                return Ok(Outcome::msg(msg).and_persist());
+            }
+            ToggleFreeze => return Ok(self.toggle_freeze().and_persist()),
+            FormulaBar => self.view.bar_visible = !self.view.bar_visible,
+            NextProblem => return Ok(self.next_problem()),
+            ShowFormulas => {
+                self.view.show_formulas = !self.view.show_formulas;
+                return Ok(Outcome::msg(if self.view.show_formulas {
+                    "Showing formulas"
+                } else {
+                    "Showing results"
+                }));
+            }
+            // The editor's (see `Editor::grid_command`).
+            EditPopup | Cut | Yank | Paste | YankPop | Goto | SearchForward | SearchBackward
+            | SearchNext | SearchPrevious | ViewAsText | ExchangeAnchor | Recenter
+            | JumpToColumn | KillToRowEnd | Upcase | Downcase | Capitalize | CopyDown
+            | CompleteCell | MoveRowUp | MoveRowDown | MoveColumnLeft | MoveColumnRight
+            | HideColumn | ShowColumns | NarrowToSelection | Filter | FilterByValue | Widen
+            | CopyAsOrg | CopyAsMarkdown | CopyAsJson | ToggleBold | CycleTextColor
+            | CycleFillColor | ClearFormat | FormatGeneral | FormatNumber | FormatCurrency
+            | FormatPercent | FormatDate | FormatText | IncreaseDecimals | DecreaseDecimals
+            | TracePrecedents | TraceDependents | GridMode | ToggleView | CellPopupCommit
+            | CellPopupAbort | OrgTableToGrid | Recalculate => {}
+        }
+        Ok(Outcome::default())
+    }
+
+    /// A page (or half a page) up or down: the view scrolls with the cursor.
+    fn page(&mut self, cmd: GridCmd) {
+        use GridCmd::*;
+        let (r, c) = self.view.cursor;
+        let page = self.view.page_rows();
+        let n = if matches!(cmd, PageDown | PageUp) {
+            page
+        } else {
+            (page / 2).max(1)
+        };
+        let down = matches!(cmd, PageDown | HalfPageDown);
+        let mut nr = r;
+        for _ in 0..n {
+            nr = self.step(Axis::Rows, nr, down);
+        }
+        let dy = self.view.rows.start(nr) - self.view.rows.start(r);
+        self.view.scroll_y += dy;
+        self.view.clamp_scroll();
+        self.move_to(nr, c, false);
+    }
+
+    /// `v` / `V` / `C-v`: start a sticky selection of `kind`, or end one.
+    fn toggle_select(&mut self, kind: SelKind) {
+        if self.sticky_sel && self.view.sel_kind == kind {
+            self.deselect();
+        } else {
+            self.view.anchor.get_or_insert(self.view.cursor);
+            self.view.sel_kind = kind;
+            self.sticky_sel = true;
+        }
+    }
+
+    /// Empty the selection's shown cells; with `whole_rows` (`C-u C-d`),
+    /// the selection's whole rows.
+    fn clear_selection(&mut self, whole_rows: bool) {
+        let mut sel = self.selection();
+        if whole_rows {
+            sel.c0 = 0;
+            sel.c1 = self.used().1.saturating_sub(1);
+        }
+        let edits: Vec<(usize, usize, String)> = self
+            .visible_cells(&sel)
+            .into_iter()
+            .map(|(r, c)| (r, c, String::new()))
+            .collect();
+        if !edits.is_empty() {
+            self.set_cells_tracked(&edits);
+        }
+    }
+
+    /// Delete the selected rows (or the cursor's).
+    fn delete_selected_rows(&mut self) {
+        let (r, c) = self.view.cursor;
+        let rows = self.used().0;
+        let sel = self.selection();
+        let (r0, n) = if self.view.anchor.is_some() {
+            (sel.r0, sel.rows())
+        } else {
+            (r, 1)
+        };
+        if r0 < rows {
+            let n = n.min(rows - r0);
+            if self.view.rows.only().is_some() {
+                // Under a filter, only the rows on screen go (as in a
+                // spreadsheet): delete them bottom-up, one step.
+                let doomed: Vec<usize> = (r0..r0 + n).filter(|&k| self.row_shown(k)).collect();
+                self.grouped(|g| {
+                    for &k in doomed.iter().rev() {
+                        g.model_op(|wb| wb.delete_rows(SHEET, k, 1));
+                    }
+                });
+            } else {
+                self.model_op(|wb| wb.delete_rows(SHEET, r0, n));
+            }
+        }
+        self.deselect();
+        self.move_to(r0, c, false);
+    }
+
+    /// Delete the selected columns (or the cursor's).
+    fn delete_selected_cols(&mut self) {
+        let (r, c) = self.view.cursor;
+        let cols = self.used().1;
+        let sel = self.selection();
+        let (c0, n) = if self.view.anchor.is_some() {
+            (sel.c0, sel.cols())
+        } else {
+            (c, 1)
+        };
+        if c0 < cols {
+            let n = n.min(cols - c0);
+            self.model_op(|wb| wb.delete_cols(SHEET, c0, n));
+        }
+        self.deselect();
+        self.move_to(r, c0, false);
+    }
+
+    /// Sort the rows by the cursor's column.
+    fn sort(&mut self, descending: bool) -> Outcome {
+        let c = self.view.cursor.1;
+        if c >= self.used().1 {
+            return Outcome::default();
+        }
+        let header = self.wb.header(SHEET);
+        self.model_op(|wb| wb.sort_by_column(SHEET, c, descending, header));
+        let dir = if descending {
+            "descending"
+        } else {
+            "ascending"
+        };
+        Outcome::msg(format!("Sorted by column {} ({dir})", view::col_name(c)))
+    }
+
+    /// Undo (or redo) one history entry, putting the cursor where it
+    /// happened.
+    fn undo_redo(&mut self, undo: bool) -> Result<Outcome, Cow<'static, str>> {
+        let entry = if undo {
+            self.hist.pop()
+        } else {
+            self.redo.pop()
+        };
+        let Some(entry) = entry else {
+            let what = if undo { "undo" } else { "redo" };
+            return Err(format!("No further {what} information").into());
+        };
+        let (pos, layout) = self.replay(&entry, undo);
+        if let Some((pr, pc)) = pos {
+            self.deselect();
+            self.move_to(pr, pc, false);
+        }
+        self.last_batch = None;
+        if undo {
+            self.redo.push(entry);
+        } else {
+            self.hist.push(entry);
+        }
+        Ok(Outcome {
+            msg: None,
+            persist_view: layout,
+        })
+    }
+
+    /// Fit column `c` to its text: every row (`full`), or a sample plus the
+    /// rows on screen.
+    fn autofit(&mut self, c: usize, full: bool, env: &CmdEnv) {
+        let rows = self.used().0;
+        let w = if full {
+            self.fit_width(c, 0..rows, env.char_w, env.max_fit)
+        } else {
+            let top = self.view.top_row();
+            let visible = top..top + self.view.page_rows() + 1;
+            let sample = 0..rows.min(AUTOFIT_SAMPLE);
+            let rows_iter = sample.chain(visible.filter(|&x| x < rows));
+            self.fit_width(c, rows_iter, env.char_w, env.max_fit)
+        };
+        self.resize(Axis::Cols, c, w);
+    }
+
+    /// Freeze panes, by rows: the rows above the cursor, or just row 1 when
+    /// the cursor is on it. Again unfreezes.
+    fn toggle_freeze(&mut self) -> Outcome {
+        if self.view.frozen_rows > 0 {
+            self.view.frozen_rows = 0;
+            return Outcome::msg("Unfrozen");
+        }
+        // The rows above the cursor, within the data.
+        let n = self.view.cursor.0.max(1).min(self.used().0.max(1));
+        self.view.frozen_rows = n;
+        self.view.scroll_y = 0.0;
+        self.view.reveal_cursor();
+        Outcome::msg(if n == 1 {
+            "Froze row 1".to_string()
+        } else {
+            format!("Froze rows 1–{n}")
+        })
+    }
+
+    /// Go to the next malformed row (wrapping).
+    fn next_problem(&mut self) -> Outcome {
+        let r = self.view.cursor.0;
+        let problems = self.wb.problems(SHEET);
+        let next = problems
+            .iter()
+            .copied()
+            .find(|&p| p > r)
+            .or_else(|| problems.first().copied());
+        match next {
+            Some(p) => {
+                let n = problems.len();
+                self.move_to(p, 0, false);
+                Outcome::msg(format!("Malformed row {} ({n} total)", p + 1))
+            }
+            None => Outcome::msg("No malformed rows"),
+        }
+    }
+}
+
 /// `1234567.0` → `1,234,567`; keeps up to two decimals.
 fn fmt_num(n: f64) -> String {
     if n.fract().abs() < 1e-9 {
@@ -2341,333 +2795,43 @@ impl Editor {
         if cmd.edits() {
             g.last_repeat = Some(RepeatOp::Cmd(cmd));
         }
-        let (r, c) = g.view.cursor;
-        let (rows, cols) = g.used();
-        let page = g.view.page_rows();
-        let char_w = self
-            .grid_ui
-            .geom
-            .get(&self.selected_pane)
-            .map_or(7.0, |geo| {
-                geo.char_w as f64 / f64::from(g.view.zoom).max(0.1)
-            });
-        let max_fit = self.grid_ui.opts.max_autofit_width;
+        // Commands that need the editor: the clipboard and kill ring,
+        // prompts, Scheme, other buffers.
+        if cmd == Repeat
+            && let Some(RepeatOp::Cmd(repeat)) = g.last_repeat
+        {
+            return self.grid_command(repeat, cx);
+        }
         match cmd {
-            // Across a whole-line selection, step it to take in the next line.
-            Left | Right if g.line_selected(SelKind::Cols) => {
-                g.move_to(r, g.step(Axis::Cols, c, cmd == Right), true)
-            }
-            Up | Down if g.line_selected(SelKind::Rows) => {
-                g.move_to(g.step(Axis::Rows, r, cmd == Down), c, true)
-            }
-            Left if g.step(Axis::Cols, c, false) == c => g.select_line_at_edge(SelKind::Rows),
-            Right if g.leave_line_at_edge(SelKind::Rows) => {}
-            Up if g.step(Axis::Rows, r, false) == r => g.select_line_at_edge(SelKind::Cols),
-            Down if g.leave_line_at_edge(SelKind::Cols) => {}
-            Left => g.move_to(r, g.step(Axis::Cols, c, false), false),
-            Right => g.move_to(r, g.step(Axis::Cols, c, true), false),
-            Up => g.move_to(g.step(Axis::Rows, r, false), c, false),
-            Down => g.move_to(g.step(Axis::Rows, r, true), c, false),
-            ExtendLeft => g.move_to(r, g.step(Axis::Cols, c, false), true),
-            ExtendRight => g.move_to(r, g.step(Axis::Cols, c, true), true),
-            ExtendUp => g.move_to(g.step(Axis::Rows, r, false), c, true),
-            ExtendDown => g.move_to(g.step(Axis::Rows, r, true), c, true),
-            NextCell => {
-                if cols > 0 && c + 1 >= cols && r + 1 < rows.max(r + 2) {
-                    g.move_to(g.step(Axis::Rows, r, true), 0, false);
-                } else {
-                    g.move_to(r, g.step(Axis::Cols, c, true), false);
-                }
-            }
-            PreviousCell => {
-                if c == 0 && r > 0 {
-                    let last = cols.saturating_sub(1);
-                    g.move_to(g.step(Axis::Rows, r, false), last, false);
-                } else {
-                    g.move_to(r, g.step(Axis::Cols, c, false), false);
-                }
-            }
-            EdgeLeft | EdgeRight | EdgeUp | EdgeDown => {
-                let (dr, dc) = match cmd {
-                    EdgeLeft => (0, -1),
-                    EdgeRight => (0, 1),
-                    EdgeUp => (-1, 0),
-                    _ => (1, 0),
-                };
-                let (nr, nc) = g.edge(dr, dc);
-                g.move_to(nr, nc, false);
-            }
-            RowStart => g.move_to(r, 0, false),
-            RowFirstNonEmpty => {
-                let first = (0..cols).find(|&k| !g.cell(r, k).is_empty()).unwrap_or(0);
-                g.move_to(r, first, false);
-            }
-            RowEnd => {
-                let last = g.last_filled_col(r);
-                g.move_to(r, last, false);
-            }
-            GotoFirstRow => g.move_to(0, c, false),
-            GotoLastRow => {
-                let target = if count > 0 {
-                    count - 1
-                } else {
-                    rows.saturating_sub(1)
-                };
-                g.move_to(target, c, false);
-            }
-            GotoColumn => g.move_to(r, count.saturating_sub(1), false),
-            GotoFirstCell => g.move_to(0, 0, false),
-            GotoLastCell => g.move_to(rows.saturating_sub(1), cols.saturating_sub(1), false),
-            PageDown | PageUp | HalfPageDown | HalfPageUp => {
-                let n = if matches!(cmd, PageDown | PageUp) {
-                    page
-                } else {
-                    (page / 2).max(1)
-                };
-                let down = matches!(cmd, PageDown | HalfPageDown);
-                let mut nr = r;
-                for _ in 0..n {
-                    nr = g.step(Axis::Rows, nr, down);
-                }
-                let dy = g.view.rows.start(nr) - g.view.rows.start(r);
-                g.view.scroll_y += dy;
-                g.view.clamp_scroll();
-                g.move_to(nr, c, false);
-            }
-            SelectCells | SelectRows | SelectColumns => {
-                let kind = match cmd {
-                    SelectCells => SelKind::Cells,
-                    SelectRows => SelKind::Rows,
-                    _ => SelKind::Cols,
-                };
-                if g.sticky_sel && g.view.sel_kind == kind {
-                    g.deselect();
-                } else {
-                    g.view.anchor.get_or_insert(g.view.cursor);
-                    g.view.sel_kind = kind;
-                    g.sticky_sel = true;
-                }
-            }
-            SelectAll => {
-                g.view.anchor = Some((0, 0));
-                g.view.cursor = (rows.saturating_sub(1), cols.saturating_sub(1));
-                g.view.sel_kind = SelKind::Cells;
-                g.sticky_sel = true;
-            }
-            SelectCancel => {
-                g.deselect();
-            }
-            EditStart | EditEnd => {
-                let text = g.source(r, c).to_string();
-                g.view.edit = Some(CellEdit::new(r, c, &text, text.clone(), cmd == EditEnd));
-                g.view.reveal_cursor();
-            }
-            EditReplace => {
-                let text = g.source(r, c).to_string();
-                g.view.edit = Some(CellEdit::new(r, c, &text, String::new(), true));
-                g.view.reveal_cursor();
-            }
-            EditPopup => {
-                self.grid_cell_popup_open(cx);
-                return;
-            }
-            Clear => {
-                let mut sel = g.selection();
-                if flag {
-                    // `C-u C-d`: the selection's whole rows.
-                    sel.c0 = 0;
-                    sel.c1 = cols.saturating_sub(1);
-                }
-                let edits: Vec<(usize, usize, String)> = g
-                    .visible_cells(&sel)
-                    .into_iter()
-                    .map(|(r, c)| (r, c, String::new()))
-                    .collect();
-                if !edits.is_empty() {
-                    g.set_cells_tracked(&edits);
-                }
-            }
+            EditPopup => return self.grid_cell_popup_open(cx),
             Cut => {
                 self.grid_copy_selection(cx);
                 self.grid_command(Clear, cx);
                 if let Some(g) = self.active.grid.as_deref_mut() {
                     g.deselect();
                 }
-                self.grid_after(cx);
-                return;
+                return self.grid_after(cx);
             }
             Yank => {
                 self.grid_copy_selection(cx);
                 if let Some(g) = self.active.grid.as_deref_mut() {
                     g.deselect();
                 }
-                self.grid_after(cx);
-                return;
+                return self.grid_after(cx);
             }
-            Paste => {
-                self.grid_paste(cx);
-                return;
-            }
-            YankPop => {
-                self.grid_yank_pop(cx);
-                return;
-            }
-            DeleteRow => {
-                let sel = g.selection();
-                let (r0, n) = if g.view.anchor.is_some() {
-                    (sel.r0, sel.rows())
-                } else {
-                    (r, 1)
-                };
-                if r0 < rows {
-                    let n = n.min(rows - r0);
-                    if g.view.rows.only().is_some() {
-                        // Under a filter, only the rows on screen go (as in
-                        // a spreadsheet): delete them bottom-up, one step.
-                        let doomed: Vec<usize> = (r0..r0 + n).filter(|&k| g.row_shown(k)).collect();
-                        g.grouped(|g| {
-                            for &k in doomed.iter().rev() {
-                                g.model_op(|wb| wb.delete_rows(SHEET, k, 1));
-                            }
-                        });
-                    } else {
-                        g.model_op(|wb| wb.delete_rows(SHEET, r0, n));
-                    }
-                }
-                g.deselect();
-                g.move_to(r0, c, false);
-            }
-            DeleteColumn => {
-                let sel = g.selection();
-                let (c0, n) = if g.view.anchor.is_some() {
-                    (sel.c0, sel.cols())
-                } else {
-                    (c, 1)
-                };
-                if c0 < cols {
-                    let n = n.min(cols - c0);
-                    g.model_op(|wb| wb.delete_cols(SHEET, c0, n));
-                }
-                g.deselect();
-                g.move_to(r, c0, false);
-            }
-            InsertRowBelow | InsertRowAbove => {
-                let at = if cmd == InsertRowBelow { r + 1 } else { r };
-                if at <= rows {
-                    g.model_op(|wb| wb.insert_rows(SHEET, at, 1));
-                }
-                g.move_to(at, c, false);
-            }
-            InsertColumnRight | InsertColumnLeft => {
-                let at = if cmd == InsertColumnRight { c + 1 } else { c };
-                if at <= cols {
-                    g.model_op(|wb| wb.insert_cols(SHEET, at, 1));
-                }
-                g.move_to(r, at, false);
-            }
+            Paste => return self.grid_paste(cx),
+            YankPop => return self.grid_yank_pop(cx),
             SortAscending | SortDescending if flag => {
                 // `C-u C-c C-s`: ask how to compare (org-table's `C-c ^`).
                 self.publish_point();
                 self.script.dispatch("(grid-sort-prompt)", false);
                 return;
             }
-            SortAscending | SortDescending => {
-                if c < cols {
-                    let header = g.wb.header(SHEET);
-                    let desc = cmd == SortDescending;
-                    g.model_op(|wb| wb.sort_by_column(SHEET, c, desc, header));
-                    let dir = if desc { "descending" } else { "ascending" };
-                    let col = view::col_name(c);
-                    self.echo(format!("Sorted by column {col} ({dir})"), cx);
-                }
-            }
-            Undo | Redo => {
-                let undo = cmd == Undo;
-                let entry = if undo { g.hist.pop() } else { g.redo.pop() };
-                match entry {
-                    None => {
-                        let what = if undo { "undo" } else { "redo" };
-                        self.echo(format!("No further {what} information"), cx);
-                        return;
-                    }
-                    Some(entry) => {
-                        let (pos, layout) = g.replay(&entry, undo);
-                        if let Some((pr, pc)) = pos {
-                            g.deselect();
-                            g.move_to(pr, pc, false);
-                        }
-                        g.last_batch = None;
-                        if undo {
-                            g.redo.push(entry);
-                        } else {
-                            g.hist.push(entry);
-                        }
-                        if layout {
-                            self.grid_persist_view();
-                        }
-                    }
-                }
-            }
-            Repeat => match g.last_repeat.clone() {
-                Some(RepeatOp::Cmd(cmd)) => {
-                    self.grid_command(cmd, cx);
-                    return;
-                }
-                Some(RepeatOp::SetText(text)) => {
-                    g.set_cells_tracked(&[(r, c, text)]);
-                }
-                None => {}
-            },
-            WidenColumn | NarrowColumn => {
-                let w = g.view.cols.size(c);
-                let step = char_w.max(1.0);
-                let nw = if cmd == WidenColumn {
-                    w + step
-                } else {
-                    (w - step).max(view::MIN_SIZE)
-                };
-                g.resize(Axis::Cols, c, nw);
-                self.grid_persist_view();
-            }
-            AutofitColumn | AutofitColumnFull => {
-                let top = g.view.top_row();
-                let visible = top..top + page + 1;
-                let w = if cmd == AutofitColumnFull {
-                    g.fit_width(c, 0..rows, char_w, max_fit)
-                } else {
-                    let sample = 0..rows.min(AUTOFIT_SAMPLE);
-                    let rows_iter = sample.chain(visible.filter(|&x| x < rows));
-                    g.fit_width(c, rows_iter, char_w, max_fit)
-                };
-                g.resize(Axis::Cols, c, w);
-                self.grid_persist_view();
-            }
-            TallerRow | ShorterRow => {
-                let h = g.view.rows.size(r);
-                let nh = if cmd == TallerRow {
-                    h + 5.0
-                } else {
-                    (h - 5.0).max(view::MIN_SIZE)
-                };
-                g.resize(Axis::Rows, r, nh);
-                self.grid_persist_view();
-            }
-            ZoomIn | ZoomOut | ZoomReset => {
-                match cmd {
-                    ZoomIn => g.view.step_zoom(1),
-                    ZoomOut => g.view.step_zoom(-1),
-                    _ => g.view.zoom = 1.0,
-                }
-                g.view.reveal_cursor();
-                let pct = (g.view.zoom * 100.0).round();
-                self.echo(format!("Zoom {pct}%"), cx);
-                self.grid_persist_view();
-            }
             Goto => {
+                let (r, c) = g.view.cursor;
                 let here = cell_name(r, c);
                 self.open_minibuffer("Go to cell: ", MinibufferPurpose::GridGoto, &here, cx);
-                self.grid_after(cx);
-                return;
+                return self.grid_after(cx);
             }
             SearchForward => {
                 self.open_minibuffer("Search cells: ", MinibufferPurpose::GridSearch, "", cx);
@@ -2684,69 +2848,11 @@ impl Editor {
             }
             SearchNext | SearchPrevious => {
                 let Some(pat) = g.search.clone() else {
-                    self.echo("No previous search", cx);
-                    return;
+                    return self.echo("No previous search", cx);
                 };
-                self.grid_search(&pat, cmd == SearchNext, cx);
-                return;
+                return self.grid_search(&pat, cmd == SearchNext, cx);
             }
-            ToggleHeader => {
-                let h = !g.wb.header(SHEET);
-                g.wb.set_header(SHEET, h);
-                self.echo(
-                    if h {
-                        "Row 1 is a header"
-                    } else {
-                        "Row 1 is data"
-                    },
-                    cx,
-                );
-                self.grid_persist_view();
-            }
-            ToggleFreeze => {
-                // Freeze panes, by rows: the rows above the cursor, or just
-                // row 1 when the cursor is on it. Again unfreezes.
-                if g.view.frozen_rows > 0 {
-                    g.view.frozen_rows = 0;
-                    self.echo("Unfrozen", cx);
-                } else {
-                    // The rows above the cursor, within the data.
-                    let n = r.max(1).min(g.used().0.max(1));
-                    g.view.frozen_rows = n;
-                    g.view.scroll_y = 0.0;
-                    g.view.reveal_cursor();
-                    let what = if n == 1 {
-                        "row 1".to_string()
-                    } else {
-                        format!("rows 1–{n}")
-                    };
-                    self.echo(format!("Froze {what}"), cx);
-                }
-                self.grid_persist_view();
-            }
-            FormulaBar => {
-                g.view.bar_visible = !g.view.bar_visible;
-            }
-            ViewAsText => {
-                self.grid_view_as_text(cx);
-                return;
-            }
-            NextProblem => {
-                let problems = g.wb.problems(SHEET);
-                let next = problems
-                    .iter()
-                    .copied()
-                    .find(|&p| p > r)
-                    .or_else(|| problems.first().copied());
-                match next {
-                    Some(p) => {
-                        let n = problems.len();
-                        g.move_to(p, 0, false);
-                        self.echo(format!("Malformed row {} ({n} total)", p + 1), cx);
-                    }
-                    None => self.echo("No malformed rows", cx),
-                }
-            }
+            ViewAsText => return self.grid_view_as_text(cx),
             ExchangeAnchor => return self.grid_exchange_anchor(cx),
             Recenter => return self.grid_recenter(cx),
             JumpToColumn => return self.grid_jump_to_column(cx),
@@ -2774,24 +2880,38 @@ impl Editor {
             FilterByValue => return self.grid_filter_by_value(cx),
             Widen => return self.grid_widen(cx),
             CopyAsOrg | CopyAsMarkdown | CopyAsJson => return self.grid_copy_as(cmd, cx),
-            ShowFormulas => {
-                g.view.show_formulas = !g.view.show_formulas;
-                let on = g.view.show_formulas;
-                self.echo(
-                    if on {
-                        "Showing formulas"
-                    } else {
-                        "Showing results"
-                    },
-                    cx,
-                );
-            }
             TracePrecedents | TraceDependents => {
-                self.grid_trace(cmd == TracePrecedents, cx);
-                return;
+                return self.grid_trace(cmd == TracePrecedents, cx);
             }
-            GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
-            | Recalculate => {}
+            _ => {}
+        }
+        // The rest only touch the grid.
+        let char_w = self
+            .grid_ui
+            .geom
+            .get(&self.selected_pane)
+            .map_or(7.0, |geo| {
+                geo.char_w as f64 / f64::from(g.view.zoom).max(0.1)
+            });
+        let env = CmdEnv {
+            count,
+            flag,
+            char_w,
+            max_fit: self.grid_ui.opts.max_autofit_width,
+        };
+        let Some(g) = self.active.grid.as_deref_mut() else {
+            return;
+        };
+        match g.apply(cmd, &env) {
+            Ok(out) => {
+                if let Some(msg) = out.msg {
+                    self.echo(msg, cx);
+                }
+                if out.persist_view {
+                    self.grid_persist_view();
+                }
+            }
+            Err(refused) => return self.echo(refused, cx),
         }
         self.grid_after(cx);
     }
@@ -4302,5 +4422,78 @@ mod tests {
         });
         let at: Vec<_> = g.formats.positions().collect();
         assert_eq!(at, vec![(3, 0)]);
+    }
+
+    /// A grid over `csv`, with no editor around it.
+    fn doc(csv: &str) -> super::GridDoc {
+        let wb = crate::grid::parse::parse_now(csv.as_bytes().to_vec(), Some("csv")).unwrap();
+        super::GridDoc::new(wb, Some("csv".into()), 0, &Default::default())
+    }
+
+    fn column(g: &super::GridDoc, c: usize) -> Vec<String> {
+        (0..g.used().0).map(|r| g.cell(r, c).to_string()).collect()
+    }
+
+    #[test]
+    fn apply_sorts_and_undoes_without_an_editor() {
+        use super::{CmdEnv, GridCmd, Outcome};
+        let mut g = doc("n\n3\n1\n2\n");
+        let env = CmdEnv::default();
+        assert!(g.apply(GridCmd::Undo, &env).is_err(), "nothing to undo yet");
+        let out = g.apply(GridCmd::SortAscending, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Sorted by column A (ascending)"));
+        assert_eq!(column(&g, 0), ["n", "1", "2", "3"]);
+        assert_eq!(g.apply(GridCmd::Undo, &env), Ok(Outcome::default()));
+        assert_eq!(column(&g, 0), ["n", "3", "1", "2"]);
+        g.apply(GridCmd::Redo, &env).unwrap();
+        assert_eq!(column(&g, 0), ["n", "1", "2", "3"]);
+    }
+
+    #[test]
+    fn apply_resizes_persist_the_view_and_undo_as_layout() {
+        use super::{CmdEnv, GridCmd};
+        let mut g = doc("a,b\n1,2\n");
+        let env = CmdEnv::default();
+        let before = g.view.cols.size(0);
+        let out = g.apply(GridCmd::WidenColumn, &env).unwrap();
+        assert!(out.persist_view);
+        assert_eq!(g.view.cols.size(0), before + env.char_w);
+        let undone = g.apply(GridCmd::Undo, &env).unwrap();
+        assert!(undone.persist_view, "a size change undoes as layout");
+        assert_eq!(g.view.cols.size(0), before);
+    }
+
+    #[test]
+    fn apply_deletes_only_shown_rows_under_a_filter() {
+        use super::{CmdEnv, GridCmd, RowFilter};
+        let mut g = doc("k\na\nb\na\nb\n");
+        g.filters.push(RowFilter::Rows {
+            rows: vec![1, 3],
+            label: "rows".into(),
+        });
+        g.apply_filters();
+        // Select rows 2–5 (all the data), then delete: the hidden b's stay.
+        g.move_to(1, 0, false);
+        g.move_to(4, 0, true);
+        g.apply(GridCmd::DeleteRow, &CmdEnv::default()).unwrap();
+        assert_eq!(column(&g, 0), ["k", "b", "b"]);
+        // …as one undo step.
+        g.apply(GridCmd::Undo, &CmdEnv::default()).unwrap();
+        assert_eq!(column(&g, 0), ["k", "a", "b", "a", "b"]);
+    }
+
+    #[test]
+    fn apply_freeze_toggles_with_a_message() {
+        use super::{CmdEnv, GridCmd};
+        let mut g = doc("h\n1\n2\n3\n");
+        let env = CmdEnv::default();
+        g.move_to(2, 0, false);
+        let out = g.apply(GridCmd::ToggleFreeze, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Froze rows 1–2"));
+        assert!(out.persist_view);
+        assert_eq!(g.view.frozen_rows, 2);
+        let out = g.apply(GridCmd::ToggleFreeze, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Unfrozen"));
+        assert_eq!(g.view.frozen_rows, 0);
     }
 }
