@@ -225,43 +225,24 @@ const TABLES: &[&[FuncDef]] = &[
 /// *inside ranges or arrays* are skipped (`SUM(A1:A3)` ignores a text cell).
 /// Errors anywhere propagate. Returns the collected numbers.
 pub fn numbers(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<f64>, ErrorKind> {
-    let mut out = Vec::new();
-    for arg in args {
-        match arg {
-            Arg::Omitted => {}
-            Arg::Value(v) => match v {
-                Value::Empty => {}
-                v => out.push(v.to_number_in(ctx.date1904())?),
-            },
-            Arg::Array(a) => {
-                for v in &a.data {
-                    match v {
-                        Value::Number(n) => out.push(*n),
-                        Value::Error(e) => return Err(*e),
-                        _ => {}
-                    }
-                }
+    let d1904 = ctx.date1904();
+    args::fold_args(
+        args,
+        ctx,
+        Vec::new(),
+        |out, v| {
+            out.push(v.to_number_in(d1904)?);
+            Ok(())
+        },
+        |out, v| match v {
+            Value::Number(n) => {
+                out.push(*n);
+                Ok(())
             }
-            Arg::Range(r) => {
-                if ctx.extent(r.sheet.as_deref()).is_none() {
-                    return Err(ErrorKind::Ref);
-                }
-                let Some(r) = ctx.data_part(r) else {
-                    continue;
-                };
-                let mut err = None;
-                ctx.for_each(&r, &mut |_, _, v| match v {
-                    Value::Number(n) => out.push(n),
-                    Value::Error(e) if err.is_none() => err = Some(e),
-                    _ => {}
-                });
-                if let Some(e) = err {
-                    return Err(e);
-                }
-            }
-        }
-    }
-    Ok(out)
+            Value::Error(e) => Err(*e),
+            _ => Ok(()),
+        },
+    )
 }
 
 /// A single value from an argument: a range must be one cell (or, for a

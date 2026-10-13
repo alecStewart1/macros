@@ -184,6 +184,54 @@ macro_rules! def {
 }
 pub(crate) use def;
 
+/// Fold every value of every argument into `acc`, the way Excel's
+/// aggregates read them: a value given directly goes to `direct`, each
+/// value inside a range or array to `element` (row-major, reading only the
+/// used part of a range, so `A:A` is one pass over the data). Omitted
+/// arguments and empty values are skipped. A reference to a missing sheet
+/// is one `#REF!` element, as Excel reads a deleted sheet's reference. The
+/// first error a callback returns ends the fold.
+pub fn fold_args<A>(
+    args: &[Arg],
+    ctx: &mut dyn Ctx,
+    mut acc: A,
+    direct: impl Fn(&mut A, &Value) -> Result<(), ErrorKind>,
+    element: impl Fn(&mut A, &Value) -> Result<(), ErrorKind>,
+) -> Result<A, ErrorKind> {
+    for arg in args {
+        match arg {
+            Arg::Omitted | Arg::Value(Value::Empty) => {}
+            Arg::Value(v) => direct(&mut acc, v)?,
+            Arg::Array(a) => {
+                for v in &a.data {
+                    if *v != Value::Empty {
+                        element(&mut acc, v)?;
+                    }
+                }
+            }
+            Arg::Range(r) => {
+                if ctx.extent(r.sheet.as_deref()).is_none() {
+                    element(&mut acc, &Value::Error(ErrorKind::Ref))?;
+                    continue;
+                }
+                let Some(r) = ctx.data_part(r) else {
+                    continue;
+                };
+                let mut err = None;
+                ctx.for_each(&r, &mut |_, _, v| {
+                    if err.is_none() && v != Value::Empty {
+                        err = element(&mut acc, &v).err();
+                    }
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(acc)
+}
+
 /// Every value of an argument, row-major (a lone value as itself; omitted
 /// as nothing). A missing sheet is `#REF!`.
 pub fn arg_values(arg: &Arg, ctx: &dyn Ctx) -> Result<Vec<Value>, ErrorKind> {

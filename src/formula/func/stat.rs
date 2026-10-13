@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::args::{Area, MANY, area, def, opt_num};
+use super::args::{Area, MANY, area, def, fold_args, opt_num};
 use super::{Arg, Ctx, FuncDef, num, numbers, scalar};
 use crate::formula::criteria::Criterion;
 use crate::formula::value::{ErrorKind, Value};
@@ -51,28 +51,25 @@ pub(super) const FUNCS: &[FuncDef] = &[
 /// The `…A` functions' view: like [`numbers`], but inside ranges and arrays
 /// text counts as 0 and booleans as 1/0 (empty cells are still skipped).
 fn numbers_a(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<f64>, ErrorKind> {
-    let mut out = Vec::new();
-    for arg in args {
-        match arg {
-            Arg::Omitted => {}
-            Arg::Value(Value::Empty) => {}
-            Arg::Value(v) => out.push(v.to_number()?),
-            _ => {
-                let ar = area(arg, ctx)?;
-                let (r, c) = ar.data_dims(ctx);
-                for v in ar.window(ctx, r, c) {
-                    match v {
-                        Value::Number(n) => out.push(n),
-                        Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
-                        Value::Text(_) => out.push(0.0),
-                        Value::Error(e) => return Err(e),
-                        Value::Empty => {}
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
+    fold_args(
+        args,
+        ctx,
+        Vec::new(),
+        |out, v| {
+            out.push(v.to_number()?);
+            Ok(())
+        },
+        |out, v| {
+            out.push(match v {
+                Value::Number(n) => *n,
+                Value::Bool(b) => f64::from(u8::from(*b)),
+                Value::Text(_) => 0.0,
+                Value::Error(e) => return Err(*e),
+                Value::Empty => return Ok(()),
+            });
+            Ok(())
+        },
+    )
 }
 
 fn mean(ns: &[f64]) -> Result<f64, ErrorKind> {
@@ -93,52 +90,35 @@ fn averagea(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
 /// COUNT never fails: errors and non-numeric text are simply not counted.
 /// Values typed directly count when they are numbers, booleans or numeric
 /// text; inside ranges and arrays only numbers count.
-fn count(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let mut n = 0usize;
-    for arg in args {
-        match arg {
-            Arg::Omitted => {}
-            Arg::Value(v) => {
-                if !matches!(v, Value::Empty | Value::Error(_)) && v.to_number().is_ok() {
-                    n += 1;
-                }
+fn count(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let n = fold_args(
+        args,
+        ctx,
+        0usize,
+        |n, v| {
+            if !v.is_error() && v.to_number().is_ok() {
+                *n += 1;
             }
-            _ => {
-                let Ok(ar) = area(arg, ctx) else { continue };
-                let (r, c) = ar.data_dims(ctx);
-                n += ar
-                    .window(ctx, r, c)
-                    .iter()
-                    .filter(|v| matches!(v, Value::Number(_)))
-                    .count();
+            Ok(())
+        },
+        |n, v| {
+            if matches!(v, Value::Number(_)) {
+                *n += 1;
             }
-        }
-    }
-    Value::Number(n as f64)
+            Ok(())
+        },
+    )?;
+    Ok(n as f64)
 }
 
-/// Every non-empty value counts, errors and empty text included.
-fn counta(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let mut n = 0usize;
-    for arg in args {
-        match arg {
-            Arg::Omitted | Arg::Value(Value::Empty) => {}
-            Arg::Value(_) => n += 1,
-            _ => {
-                let ar = match area(arg, ctx) {
-                    Ok(a) => a,
-                    Err(e) => return Value::Error(e),
-                };
-                let (r, c) = ar.data_dims(ctx);
-                n += ar
-                    .window(ctx, r, c)
-                    .iter()
-                    .filter(|v| **v != Value::Empty)
-                    .count();
-            }
-        }
-    }
-    Value::Number(n as f64)
+/// Every non-empty value counts, errors and empty text included (a
+/// reference to a missing sheet is one `#REF!`).
+fn counta(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let tally = |n: &mut usize, _: &Value| {
+        *n += 1;
+        Ok(())
+    };
+    Ok(fold_args(args, ctx, 0usize, tally, tally)? as f64)
 }
 
 /// Empty cells and empty text in the range, counting the cells outside the
@@ -523,6 +503,10 @@ mod tests {
                 ("COUNTA(1, \"\", #N/A)", "3"),
                 ("COUNTA(D1:D9)", "0"),
                 ("COUNTA(A1, B3)", "1"),
+                // A missing sheet reads as one #REF!, as the evaluator passes it.
+                ("COUNT(Nope!A1, 1)", "1"),
+                ("COUNTA(Nope!A1, 1)", "2"),
+                ("AVERAGEA(Nope!A1)", "#REF!"),
                 ("COUNTBLANK(B1:B5)", "1"),
                 ("COUNTBLANK(A1:D10)", "26"),
                 ("COUNTBLANK(D1:D3)", "3"),
