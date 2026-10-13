@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::mpsc::Sender;
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use steel::rvals::SteelVal;
 use steel::steel_vm::engine::Engine;
@@ -457,10 +458,6 @@ impl From<WirePos> for (usize, usize) {
     }
 }
 
-fn position(value: &Value) -> (usize, usize) {
-    serde_json::from_value::<WirePos>(value.clone()).map_or((0, 0), Into::into)
-}
-
 /// A `Diagnostic` on the wire — just the fields we consume. A missing/malformed
 /// field takes its default, matching the old per-field `unwrap_or` digs.
 #[derive(serde::Deserialize, Default)]
@@ -480,8 +477,7 @@ pub fn parse_diagnostics(params: &Value) -> (String, Vec<RawDiagnostic>) {
         .map(|arr| {
             arr.iter()
                 .map(|d| {
-                    let wire: WireDiagnostic =
-                        serde_json::from_value(d.clone()).unwrap_or_default();
+                    let wire: WireDiagnostic = WireDiagnostic::deserialize(d).unwrap_or_default();
                     let (start, end) = wire.range.into();
                     RawDiagnostic {
                         start,
@@ -585,7 +581,7 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
     // (`shape_line`, which panics on an embedded newline) — and servers like
     // ocamllsp put multi-line type signatures in `detail`.
     use crate::util::single_line;
-    let wire: WireCompletionItem = serde_json::from_value(item.clone()).ok()?;
+    let wire: WireCompletionItem = WireCompletionItem::deserialize(item).ok()?;
     let detail = wire.signature().map(|d| single_line(&d));
     let raw_label = wire.label?;
     // `insert_text` goes into the buffer, so fall back to the *raw* label; the
@@ -613,7 +609,7 @@ fn parse_completion_item(item: &Value) -> Option<CompletionItem> {
 /// Merge a `completionItem/resolve` result into `item` — servers fill in
 /// `documentation` and `additionalTextEdits` (auto-imports) lazily.
 pub fn merge_resolved_completion(item: &mut CompletionItem, resolved: &Value) {
-    let wire: WireCompletionItem = serde_json::from_value(resolved.clone()).unwrap_or_default();
+    let wire: WireCompletionItem = WireCompletionItem::deserialize(resolved).unwrap_or_default();
     if let Some(doc) = parse_documentation(&wire.documentation) {
         item.documentation = Some(doc);
     }
@@ -648,34 +644,45 @@ pub struct PrepareRename {
     pub range: Option<((usize, usize), (usize, usize))>,
 }
 
+/// A `prepareRename` result on the wire (`null` fails every variant).
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WirePrepareRename {
+    /// `{ defaultBehavior }` — renameable, the client picks the range.
+    #[serde(rename_all = "camelCase")]
+    Default { default_behavior: bool },
+    /// `{ range?, placeholder }`.
+    Placeholder {
+        placeholder: String,
+        range: Option<WireRange>,
+    },
+    /// A bare `Range`.
+    Range {
+        start: WirePos,
+        #[serde(default)]
+        end: WirePos,
+    },
+}
+
 /// Parse a `prepareRename` result: `Range` | `{range, placeholder}` |
 /// `{defaultBehavior:true}` | `null`. `None` ⇒ not renameable here.
 pub fn parse_prepare_rename(result: &Value) -> Option<PrepareRename> {
-    if result.is_null() {
-        return None;
-    }
-    if result.get("defaultBehavior").and_then(Value::as_bool) == Some(true) {
-        return Some(PrepareRename {
+    match WirePrepareRename::deserialize(result).ok()? {
+        WirePrepareRename::Default { default_behavior } => {
+            default_behavior.then_some(PrepareRename {
+                placeholder: None,
+                range: None,
+            })
+        }
+        WirePrepareRename::Placeholder { placeholder, range } => Some(PrepareRename {
+            placeholder: Some(placeholder),
+            range: range.map(Into::into),
+        }),
+        WirePrepareRename::Range { start, end } => Some(PrepareRename {
             placeholder: None,
-            range: None,
-        });
+            range: Some((start.into(), end.into())),
+        }),
     }
-    if let Some(placeholder) = result.get("placeholder").and_then(Value::as_str) {
-        let range = result
-            .get("range")
-            .map(|r| (position(&r["start"]), position(&r["end"])));
-        return Some(PrepareRename {
-            placeholder: Some(placeholder.to_string()),
-            range,
-        });
-    }
-    if result.get("start").is_some() {
-        return Some(PrepareRename {
-            placeholder: None,
-            range: Some((position(&result["start"]), position(&result["end"]))),
-        });
-    }
-    None
 }
 
 /// Whether the server's `renameProvider` advertises `prepareSupport`.
@@ -729,8 +736,7 @@ pub fn parse_code_lenses(result: &Value) -> Vec<CodeLens> {
         .map(|arr| {
             arr.iter()
                 .map(|lens| {
-                    let wire: WireCodeLens =
-                        serde_json::from_value(lens.clone()).unwrap_or_default();
+                    let wire: WireCodeLens = WireCodeLens::deserialize(lens).unwrap_or_default();
                     CodeLens {
                         line: wire.range.start.line,
                         character: wire.range.start.character,
@@ -745,10 +751,7 @@ pub fn parse_code_lenses(result: &Value) -> Vec<CodeLens> {
 
 /// The title of a resolved code lens (`codeLens/resolve` fills in `command`).
 pub fn parse_code_lens_title(resolved: &Value) -> Option<String> {
-    serde_json::from_value::<WireCodeLens>(resolved.clone())
-        .ok()?
-        .command?
-        .title
+    WireCodeLens::deserialize(resolved).ok()?.command?.title
 }
 
 /// Map an LSP `CompletionItemKind` to a short tag.
@@ -776,55 +779,87 @@ pub struct Location {
     pub end: (usize, usize),
 }
 
+/// One definition/references/etc. target on the wire.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WireAnyLocation {
+    /// `LocationLink` (link-support responses): `targetUri` plus a
+    /// `targetSelectionRange` (the identifier) / `targetRange` (the whole def).
+    #[serde(rename_all = "camelCase")]
+    Link {
+        target_uri: String,
+        target_selection_range: Option<WireRange>,
+        #[serde(default)]
+        target_range: WireRange,
+    },
+    /// Plain `Location`.
+    Plain {
+        uri: String,
+        #[serde(default)]
+        range: WireRange,
+    },
+}
+
+impl From<WireAnyLocation> for Location {
+    fn from(wire: WireAnyLocation) -> Location {
+        let (uri, range) = match wire {
+            WireAnyLocation::Link {
+                target_uri,
+                target_selection_range,
+                target_range,
+            } => (target_uri, target_selection_range.unwrap_or(target_range)),
+            WireAnyLocation::Plain { uri, range } => (uri, range),
+        };
+        let (start, end) = range.into();
+        Location { uri, start, end }
+    }
+}
+
 /// Parse a definition/references/etc. result, which may be `null`, a single
-/// `Location`, an array of `Location`, or an array of `LocationLink`.
+/// `Location`, an array of `Location`, or an array of `LocationLink`. A
+/// malformed array entry is skipped.
 pub fn parse_locations(result: &Value) -> Vec<Location> {
-    fn one(v: &Value) -> Option<Location> {
-        // `LocationLink` (link-support responses) uses `targetUri` plus a
-        // `targetSelectionRange` (the identifier) / `targetRange` (the whole def).
-        if let Some(uri) = v.get("targetUri").and_then(Value::as_str) {
-            let range = if v.get("targetSelectionRange").is_some() {
-                &v["targetSelectionRange"]
-            } else {
-                &v["targetRange"]
-            };
-            return Some(Location {
-                uri: uri.to_string(),
-                start: position(&range["start"]),
-                end: position(&range["end"]),
-            });
+    let one = |v: &Value| WireAnyLocation::deserialize(v).ok().map(Location::from);
+    match result {
+        Value::Array(arr) => arr.iter().filter_map(one).collect(),
+        v => one(v).into_iter().collect(),
+    }
+}
+
+/// Hover `contents` on the wire: a string, a `MarkupContent` /
+/// `MarkedString` object, or an array of those. Anything else renders empty.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WireHoverContents {
+    Plain(String),
+    Many(Vec<WireHoverContents>),
+    /// `MarkupContent { kind, value }` or `MarkedString { language, value }`.
+    Markup {
+        #[serde(default)]
+        value: String,
+    },
+    Other(serde::de::IgnoredAny),
+}
+
+impl WireHoverContents {
+    fn render(self) -> String {
+        match self {
+            WireHoverContents::Plain(s) | WireHoverContents::Markup { value: s } => s,
+            WireHoverContents::Many(items) => items
+                .into_iter()
+                .map(WireHoverContents::render)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            WireHoverContents::Other(_) => String::new(),
         }
-        // Plain `Location`.
-        let uri = v.get("uri").and_then(Value::as_str)?;
-        Some(Location {
-            uri: uri.to_string(),
-            start: position(&v["range"]["start"]),
-            end: position(&v["range"]["end"]),
-        })
     }
-    if let Some(arr) = result.as_array() {
-        return arr.iter().filter_map(one).collect();
-    }
-    one(result).into_iter().collect()
 }
 
 /// Plain-text rendering of a `Hover` result (`contents` may be a string, a
 /// `MarkupContent`, a `MarkedString`, or an array of those). `None` when empty.
 pub fn parse_hover(result: &Value) -> Option<String> {
-    fn render(v: &Value) -> String {
-        match v {
-            Value::String(s) => s.clone(),
-            Value::Array(arr) => arr.iter().map(render).collect::<Vec<_>>().join("\n"),
-            // `MarkupContent { kind, value }` or `MarkedString { language, value }`.
-            Value::Object(_) => v
-                .get("value")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            _ => String::new(),
-        }
-    }
-    let text = render(&result["contents"]);
+    let text = WireHoverContents::deserialize(&result["contents"])
+        .map_or_else(|_| String::new(), WireHoverContents::render);
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
 }
@@ -908,7 +943,7 @@ pub fn parse_symbols(result: &Value, fallback_uri: &str) -> Vec<SymbolInfo> {
     let mut out = Vec::new();
     if let Some(arr) = result.as_array() {
         for item in arr {
-            if let Ok(sym) = serde_json::from_value::<WireSymbol>(item.clone()) {
+            if let Ok(sym) = WireSymbol::deserialize(item) {
                 push(sym, fallback_uri, "", 0, &mut out);
             }
         }
@@ -962,7 +997,7 @@ struct WireTextEdit {
 }
 
 fn parse_one_edit(v: &Value) -> Option<TextEdit> {
-    let edit: WireTextEdit = serde_json::from_value(v.clone()).ok()?;
+    let edit: WireTextEdit = WireTextEdit::deserialize(v).ok()?;
     let (start, end) = edit.range.into();
     Some(TextEdit {
         start,
@@ -1048,7 +1083,7 @@ pub fn parse_code_actions(result: &Value) -> Vec<CodeAction> {
     };
     arr.iter()
         .filter_map(|item| {
-            let wire: WireCodeAction = serde_json::from_value(item.clone()).ok()?;
+            let wire: WireCodeAction = WireCodeAction::deserialize(item).ok()?;
             let title = wire.title?;
             // A bare `Command` has a string `command`; a `CodeAction` may have an
             // `edit` and/or a nested `command` object.
@@ -1174,7 +1209,7 @@ pub fn parse_call_hierarchy(result: &Value, key: &str) -> Vec<(String, Location)
     };
     arr.iter()
         .filter_map(|call| {
-            let item: WireHierarchyItem = serde_json::from_value(call.get(key)?.clone()).ok()?;
+            let item: WireHierarchyItem = WireHierarchyItem::deserialize(call.get(key)?).ok()?;
             // Prefer the narrower `selectionRange` (the identifier).
             let range = item.selection_range.unwrap_or(item.range);
             Some((
@@ -2597,6 +2632,22 @@ mod tests {
             }]
         );
 
+        // A link without a selection range falls back to targetRange; a
+        // malformed entry is skipped, not fatal to the rest.
+        let mixed = json!([
+            { "targetUri": "file:///c.rs",
+              "targetRange": { "start": {"line": 2, "character": 0}, "end": {"line": 4, "character": 1} } },
+            { "nope": true },
+        ]);
+        assert_eq!(
+            parse_locations(&mixed),
+            vec![Location {
+                uri: "file:///c.rs".into(),
+                start: (2, 0),
+                end: (4, 1)
+            }]
+        );
+
         // Null → empty.
         assert!(parse_locations(&Value::Null).is_empty());
     }
@@ -2619,6 +2670,12 @@ mod tests {
         );
         assert_eq!(parse_hover(&json!({ "contents": "" })), None);
         assert_eq!(parse_hover(&Value::Null), None);
+        // Unrenderable pieces contribute nothing (but don't sink the rest).
+        assert_eq!(parse_hover(&json!({ "contents": { "kind": "x" } })), None);
+        assert_eq!(
+            parse_hover(&json!({ "contents": [1, "a", { "value": 2 }] })).as_deref(),
+            Some("a")
+        );
     }
 
     #[test]
@@ -2808,8 +2865,13 @@ mod tests {
                 range: None
             })
         );
-        // null → not renameable.
+        // null / defaultBehavior:false / anything else → not renameable.
         assert_eq!(parse_prepare_rename(&Value::Null), None);
+        assert_eq!(
+            parse_prepare_rename(&json!({ "defaultBehavior": false })),
+            None
+        );
+        assert_eq!(parse_prepare_rename(&json!({ "x": 1 })), None);
         // capability flag.
         let init = json!({ "capabilities": { "renameProvider": { "prepareProvider": true } } });
         assert!(parse_prepare_rename_support(&init));
