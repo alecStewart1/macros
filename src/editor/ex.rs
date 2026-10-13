@@ -6,6 +6,8 @@
 //! and apply each command as one edit of the smallest span it touches, so
 //! marks and the jump list ride along.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::input::Handled;
@@ -389,16 +391,17 @@ pub(super) fn sort_lines(lines: &[String], flags: &str, reverse: bool) -> Vec<St
     let icase = flags.contains('i');
     let numeric = flags.contains('n');
     let unique = flags.contains('u');
-    let num_of = |s: &str| -> Option<i64> {
-        let re = Regex::new(r"-?\d+").ok()?;
-        re.find(s).and_then(|m| m.as_str().parse().ok())
-    };
+    static NUMBER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"-?\d+").expect("valid number regex"));
+    let num_of = |s: &str| -> Option<i64> { NUMBER.find(s).and_then(|m| m.as_str().parse().ok()) };
     let mut v: Vec<String> = lines.to_vec();
+    // `sort_by_cached_key` is stable and computes each key once (not once
+    // per comparison).
     if numeric {
         // Lines without a number sort first, in their original order.
-        v.sort_by_key(|l| num_of(l).map_or((0, 0), |n| (1, n)));
+        v.sort_by_cached_key(|l| num_of(l).map_or((0, 0), |n| (1, n)));
     } else if icase {
-        v.sort_by_key(|l| l.to_lowercase());
+        v.sort_by_cached_key(|l| l.to_lowercase());
     } else {
         v.sort();
     }
@@ -739,13 +742,7 @@ impl Editor {
         let span = self.ex_line_block_span(s, e);
         let mut text = self.ex_lines(s, e).join("\n");
         text.push('\n');
-        if reg != Some('_') {
-            self.set_clipboard(&text, cx);
-            self.note_register_kill(registers::KillKind::Delete, reg, &text);
-            self.push_kill(text);
-            self.evil_yank_linewise = true;
-            self.vim.registers.set_linewise_last(true);
-        }
+        self.file_kill(registers::KillKind::Delete, reg, text, true, cx);
         self.edit(span, "");
         let line = (s - 1).min(self.ex_last_line() - 1).max(0) as usize;
         let pos = self.active.buffer.line_range(line).start;
@@ -763,11 +760,7 @@ impl Editor {
         }
         let mut text = self.ex_lines(s, e).join("\n");
         text.push('\n');
-        self.set_clipboard(&text, cx);
-        self.note_register_kill(registers::KillKind::Yank, reg, &text);
-        self.push_kill(text);
-        self.evil_yank_linewise = true;
-        self.vim.registers.set_linewise_last(true);
+        self.file_kill(registers::KillKind::Yank, reg, text, true, cx);
         Ok(())
     }
 
