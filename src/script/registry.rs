@@ -237,13 +237,13 @@ pub(crate) fn build_engine(
         engine: &mut engine,
         names: &mut names,
         api: &mut api,
-        section: "commands",
+        section: Section::Commands,
     };
     for (name, command) in nullary_commands() {
         register_nullary(&mut reg, queue, name, command.clone());
     }
 
-    reg.section("editing");
+    reg.section(Section::Editing);
     // Commands carrying a payload.
     register_unary(&mut reg, queue, "insert", EditorCommand::Insert);
     // Grid buffers: which file extensions open as a grid, and jumping to an
@@ -260,9 +260,9 @@ pub(crate) fn build_engine(
         "grid-goto-address",
         EditorCommand::GridGotoAddress,
     );
-    reg.section("grid");
+    reg.section(Section::Grid);
     register_grid_api(&mut reg, queue, snapshot);
-    reg.section("prompts");
+    reg.section(Section::Prompts);
     // `message` accepts any value, not just strings: strings render verbatim,
     // everything else via its Steel display — so (message (+ 1 2)) shows "3"
     // rather than raising a ConversionError.
@@ -276,7 +276,7 @@ pub(crate) fn build_engine(
             q.lock().unwrap().push(EditorCommand::Message(text));
         });
     }
-    reg.section("keymaps");
+    reg.section(Section::Keymaps);
     // Shadow of every binding (mode, chord, command), for help/discoverability
     // read bridges. Written alongside the DefineKey command; lives on the engine
     // thread with the read fns.
@@ -352,12 +352,12 @@ pub(crate) fn build_engine(
             .iter()
             .map(|s| s.to_string())
             .collect();
-        reg.section("languages");
+        reg.section(Section::Languages);
         reg.register_fn("bundled-languages", move || -> Vec<String> {
             langs.clone()
         });
     }
-    reg.section("faces");
+    reg.section(Section::Faces);
     {
         // `(theme-names)` → every bundled theme name (the stem of each
         // scheme/themes/*.scm). The `load-theme` wrapper in core.scm reads this to
@@ -366,7 +366,7 @@ pub(crate) fn build_engine(
             crate::runtime::theme_names()
         });
     }
-    reg.section("languages");
+    reg.section(Section::Languages);
     {
         // `(installed-languages)` → ids of grammars downloaded + compiled at
         // runtime (M-x install-language). grammar.scm reads this alongside
@@ -425,7 +425,7 @@ pub(crate) fn build_engine(
                 .collect(),
         ));
 
-        reg.section("help");
+        reg.section(Section::Help);
         // `(function-doc name)` → the doc comment, or "".
         let d = docs.clone();
         reg.register_fn("function-doc", move |name: String| -> String {
@@ -499,7 +499,7 @@ pub(crate) fn build_engine(
             env!("CARGO_PKG_VERSION").to_string()
         });
     }
-    reg.section("text");
+    reg.section(Section::Text);
     {
         // `(diff-strings old new)` → line-level diff ops, one per line as
         // "tag\told_start\told_end\tnew_start\tnew_end" with 0-based,
@@ -551,7 +551,7 @@ pub(crate) fn build_engine(
         );
     }
     // --- Text plotting (src/textplot.rs, driven by scheme/plot.scm) --------
-    reg.section("plotting");
+    reg.section(Section::Plotting);
     // Pure functions: no editor state, no command queue.
     {
         // `(textplot-render width height mode ops)` → one `(text spans)` per
@@ -665,7 +665,7 @@ pub(crate) fn build_engine(
                 .unwrap_or_default()
         });
     }
-    reg.section("faces");
+    reg.section(Section::Faces);
     register_binary(&mut reg, queue, "set-face", EditorCommand::SetFace);
     // `(set-face-background name color)` — the background painted behind
     // overlay text using `name` (plot heatmaps' `plot-heat-N-bg`).
@@ -699,7 +699,7 @@ pub(crate) fn build_engine(
         });
     }
     // --- Native spell checking (scheme/spell.scm's 'native backend) -------
-    reg.section("spell");
+    reg.section(Section::Spell);
     // `(spell-native-available?)` → #t where the OS provides a checker.
     reg.register_fn("spell-native-available?", crate::spell::available);
     // `(spell-check-text text callback)` — callback gets "start\tend\tword"
@@ -717,14 +717,14 @@ pub(crate) fn build_engine(
         "spell-learn-word",
         EditorCommand::SpellLearnWord,
     );
-    reg.section("editing");
+    reg.section(Section::Editing);
     register_unary(
         &mut reg,
         queue,
         "clipboard-set",
         EditorCommand::ClipboardSet,
     );
-    reg.section("modal");
+    reg.section(Section::Modal);
     {
         // `(set-count-aware! 'name)` — the modal count loop dispatches `name`
         // ONCE with `(prefix-count)` published instead of running it N times.
@@ -765,7 +765,7 @@ pub(crate) fn build_engine(
     );
     register_unary(&mut reg, queue, "evil-set-mark", EditorCommand::EvilSetMark);
     register_unary(&mut reg, queue, "evil-ex", EditorCommand::EvilEx);
-    reg.section("editing");
+    reg.section(Section::Editing);
     // `(reindent-lines first last)` — Vim `=` over 0-based lines.
     register_binary(
         &mut reg,
@@ -773,7 +773,7 @@ pub(crate) fn build_engine(
         "reindent-lines",
         EditorCommand::ReindentLines,
     );
-    reg.section("modal");
+    reg.section(Section::Modal);
     register_unary(
         &mut reg,
         queue,
@@ -799,7 +799,7 @@ pub(crate) fn build_engine(
             EditorCommand::SetJumpCommand(name)
         });
     }
-    reg.section("tree-sitter");
+    reg.section(Section::TreeSitter);
     // `(buffer-language)` → the highlighting language ("" when none).
     register_snapshot_read(&mut reg, snapshot, "buffer-language", |s| {
         s.language.clone()
@@ -869,7 +869,7 @@ pub(crate) fn build_engine(
             },
         );
     }
-    reg.section("modal");
+    reg.section(Section::Modal);
     {
         // `(mark-position "a")` → byte offset of mark a in this buffer, or -1.
         let shared = snapshot.clone();
@@ -882,7 +882,7 @@ pub(crate) fn build_engine(
                 .map_or(-1, |(_, p)| *p as isize)
         });
     }
-    reg.section("faces");
+    reg.section(Section::Faces);
     {
         // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
         // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
@@ -892,9 +892,9 @@ pub(crate) fn build_engine(
             EditorCommand::LoadTheme(name)
         });
     }
-    reg.section("lsp");
+    reg.section(Section::Lsp);
     register_binary(&mut reg, queue, "set-lsp", EditorCommand::SetLsp);
-    reg.section("languages");
+    reg.section(Section::Languages);
     register_binary(
         &mut reg,
         queue,
@@ -907,7 +907,7 @@ pub(crate) fn build_engine(
         "set-language-id",
         EditorCommand::SetLanguageId,
     );
-    reg.section("options");
+    reg.section(Section::Options);
     {
         // `set-option` accepts a number, boolean, or string; the value is coerced
         // to the option's declared type when applied (see `Settings::set`).
@@ -918,7 +918,7 @@ pub(crate) fn build_engine(
                 .push(EditorCommand::SetOption(key, option_from_steelval(&value)));
         });
     }
-    reg.section("buffers");
+    reg.section(Section::Buffers);
     {
         // Read-side bridge: Scheme can query the open buffers (for pickers).
         let shared = buffers.clone();
@@ -940,7 +940,7 @@ pub(crate) fn build_engine(
                 .unwrap_or_default()
         });
     }
-    reg.section("options");
+    reg.section(Section::Options);
     {
         // Read-side bridge: `(get-option "name")` returns the option's current
         // value as a native bool / number / string, or #f if it isn't set.
@@ -981,7 +981,7 @@ pub(crate) fn build_engine(
             .map(|s| s.to_string())
             .collect()
     });
-    reg.section("buffers");
+    reg.section(Section::Buffers);
     register_unary(
         &mut reg,
         queue,
@@ -1000,9 +1000,9 @@ pub(crate) fn build_engine(
         "set-major-mode",
         EditorCommand::SetMajorMode,
     );
-    reg.section("buffers");
+    reg.section(Section::Buffers);
     register_unary(&mut reg, queue, "open-file", EditorCommand::OpenFile);
-    reg.section("lsp");
+    reg.section(Section::Lsp);
     register_unary(&mut reg, queue, "lsp-rename-to", EditorCommand::LspRename);
     register_unary(
         &mut reg,
@@ -1045,7 +1045,7 @@ pub(crate) fn build_engine(
         "lsp-apply-text-edits",
         EditorCommand::LspApplyTextEdits,
     );
-    reg.section("buffers");
+    reg.section(Section::Buffers);
     register_unary(
         &mut reg,
         queue,
@@ -1064,7 +1064,7 @@ pub(crate) fn build_engine(
         "split-window-right-ratio",
         EditorCommand::SplitWindowRightRatio,
     );
-    reg.section("decorations");
+    reg.section(Section::Decorations);
     {
         // `(set-line-icon line col "folder")` attaches a bundled icon (asset
         // `icons/<name>.svg`) at character column `col` of `line` in the active
@@ -1210,7 +1210,7 @@ pub(crate) fn build_engine(
             EditorCommand::GhostAccept,
         );
     }
-    reg.section("buffers");
+    reg.section(Section::Buffers);
     {
         // `(window-list)` → pane ids in cycle order; `(selected-window)` → the
         // focused pane id. Read bridges over the snapshot.
@@ -1238,7 +1238,7 @@ pub(crate) fn build_engine(
             s.cursor_screen_row as i64
         });
     }
-    reg.section("files");
+    reg.section(Section::Files);
     // State bridges for dynamic sources (run on the engine thread — blocking
     // I/O here never touches the UI). All pure value-returning functions.
     reg.register_fn("current-directory", || -> String {
@@ -1280,7 +1280,7 @@ pub(crate) fn build_engine(
         entries.sort();
         entries
     });
-    reg.section("hooks-timers");
+    reg.section(Section::HooksTimers);
     register_binary(&mut reg, queue, "add-hook", EditorCommand::AddHook);
     register_binary(&mut reg, queue, "remove-hook", EditorCommand::RemoveHook);
     register_unary(
@@ -1289,7 +1289,7 @@ pub(crate) fn build_engine(
         "add-completion-at-point-function",
         EditorCommand::AddCapf,
     );
-    reg.section("files");
+    reg.section(Section::Files);
     {
         // `(watch-directories owner dirs)` — replace `owner`'s watched dir set so
         // a change under any of them fires `directory-changed-hook` (dired-sidebar /
@@ -1318,7 +1318,7 @@ pub(crate) fn build_engine(
             },
         );
     }
-    reg.section("prompts");
+    reg.section(Section::Prompts);
     {
         // `(helm sources)` where sources is a list of `(name candidates action)`.
         let q = queue.clone();
@@ -1337,7 +1337,7 @@ pub(crate) fn build_engine(
         });
     }
     // --- Special buffers / transient (the magit primitives) ---------------
-    reg.section("special-buffers");
+    reg.section(Section::SpecialBuffers);
     // `(render-buffer name mode text faces)` — faces is a list of
     // `(line-number face-name)`. Replaces/creates a read-only buffer. The
     // `-quiet` variant refreshes in place without switching/focusing (sidebar
@@ -1366,14 +1366,14 @@ pub(crate) fn build_engine(
     register_unary(&mut reg, queue, "buffer-clear-highlights", |name| {
         EditorCommand::BufferClearHighlights { name }
     });
-    reg.section("editing");
+    reg.section(Section::Editing);
     register_unary(
         &mut reg,
         queue,
         "snippet-expand",
         EditorCommand::SnippetExpand,
     );
-    reg.section("decorations");
+    reg.section(Section::Decorations);
     register_unary(
         &mut reg,
         queue,
@@ -1386,7 +1386,7 @@ pub(crate) fn build_engine(
         "avy-clear-hints",
         EditorCommand::AvyClearHints,
     );
-    reg.section("special-buffers");
+    reg.section(Section::SpecialBuffers);
     {
         // `(buffer-copy-lines src ss se dst ds de)` — copy a line range between
         // named buffers (ediff hunk copy). Six args, so registered directly.
@@ -1434,7 +1434,7 @@ pub(crate) fn build_engine(
         "transient-quit",
         EditorCommand::TransientQuit,
     );
-    reg.section("editing");
+    reg.section(Section::Editing);
     register_unary(&mut reg, queue, "goto-char", |n: isize| {
         EditorCommand::GotoChar(scheme_pos(n))
     });
@@ -1475,7 +1475,7 @@ pub(crate) fn build_engine(
             q.lock().unwrap().push(EditorCommand::SetSelections(pairs));
         });
     }
-    reg.section("lsp");
+    reg.section(Section::Lsp);
     register_binary(
         &mut reg,
         queue,
@@ -1488,7 +1488,7 @@ pub(crate) fn build_engine(
         "lsp-semantic-tokens",
         EditorCommand::LspSemanticTokens,
     );
-    reg.section("editing");
+    reg.section(Section::Editing);
     register_ternary(
         &mut reg,
         queue,
@@ -1505,7 +1505,7 @@ pub(crate) fn build_engine(
             text,
         }
     });
-    reg.section("lsp");
+    reg.section(Section::Lsp);
     register_unary(
         &mut reg,
         queue,
@@ -1518,7 +1518,7 @@ pub(crate) fn build_engine(
         "lsp-semantic-tokens-delta",
         EditorCommand::LspSemanticTokensDelta,
     );
-    reg.section("tree-sitter");
+    reg.section(Section::TreeSitter);
     register_binary(
         &mut reg,
         queue,
@@ -1537,7 +1537,7 @@ pub(crate) fn build_engine(
             callback: callback.0,
         },
     );
-    reg.section("editing");
+    reg.section(Section::Editing);
     register_nullary(
         &mut reg,
         queue,
@@ -1558,7 +1558,7 @@ pub(crate) fn build_engine(
         "undo-amalgamate-end",
         EditorCommand::UndoAmalgamateEnd,
     );
-    reg.section("special-buffers");
+    reg.section(Section::SpecialBuffers);
     // `(set-special-mode "occur-mode")` makes the active buffer a read-only
     // special buffer on that keymap; `(set-special-mode "")` makes it editable.
     register_unary(
@@ -1567,18 +1567,18 @@ pub(crate) fn build_engine(
         "set-special-mode",
         EditorCommand::SetSpecialMode,
     );
-    reg.section("editing");
+    reg.section(Section::Editing);
     register_unary(
         &mut reg,
         queue,
         "undo-tree-dump",
         EditorCommand::UndoTreeDump,
     );
-    reg.section("buffers");
+    reg.section(Section::Buffers);
     register_binary(&mut reg, queue, "buffer-local-set", |key, value| {
         EditorCommand::BufferLocalSet { key, value }
     });
-    reg.section("prompts");
+    reg.section(Section::Prompts);
     {
         // Backing primitive for the `completing-read` Scheme wrapper (which makes
         // `initial` optional). `candidates` may be a static list OR a Scheme fn
@@ -1617,7 +1617,7 @@ pub(crate) fn build_engine(
     // must resolve a pending request (a dropped read can't strand the requester).
     register_y_or_n_p(&mut reg, queue, "y-or-n-p", false);
     register_y_or_n_p(&mut reg, queue, "y-or-n-p-sticky", true);
-    reg.section("buffers");
+    reg.section(Section::Buffers);
     {
         // Value of buffer-local `key` on the active buffer, or "".
         let shared = snapshot.clone();
@@ -1630,7 +1630,7 @@ pub(crate) fn build_engine(
                 .unwrap_or_default()
         });
     }
-    reg.section("prompts");
+    reg.section(Section::Prompts);
     // Backing primitive for the `read-string` Scheme wrapper (which makes the
     // initial value optional). Callback is a Steel fn run with the entered text.
     register_ternary(
@@ -1682,9 +1682,9 @@ pub(crate) fn build_engine(
             callback: callback.0,
         },
     );
-    reg.section("prompts");
+    reg.section(Section::Prompts);
     register_nullary(&mut reg, queue, "read-key-stop", EditorCommand::ReadKeyStop);
-    reg.section("modal");
+    reg.section(Section::Modal);
     // `(select-to pos)` — extend the selection to byte `pos` (goto-char
     // collapses; this is its extend-flavored twin for visual-mode motions).
     register_unary(&mut reg, queue, "select-to", |n: isize| {
@@ -1696,18 +1696,18 @@ pub(crate) fn build_engine(
     register_binary(&mut reg, queue, "set-search-query", |query, forward| {
         EditorCommand::SetSearchQuery { query, forward }
     });
-    reg.section("editing");
+    reg.section(Section::Editing);
     register_binary(&mut reg, queue, "append-to-buffer", |name, text| {
         EditorCommand::AppendToBuffer { name, text }
     });
-    reg.section("decorations");
+    reg.section(Section::Decorations);
     register_unary(
         &mut reg,
         queue,
         "fontify-org-buffer",
         EditorCommand::FontifyOrgBuffer,
     );
-    reg.section("ui");
+    reg.section(Section::Ui);
     register_unary(
         &mut reg,
         queue,
@@ -1728,7 +1728,7 @@ pub(crate) fn build_engine(
         "set-mode-line-slot",
         EditorCommand::SetModeLineSlot,
     );
-    reg.section("ui");
+    reg.section(Section::Ui);
     {
         // `(set-mode-line-format segs)` — replace the mode-line layout. `segs` is
         // a list of segment tokens (bare strings = literals, or `ml-field`/
@@ -1762,7 +1762,7 @@ pub(crate) fn build_engine(
         );
     }
     // --- Overlays / text properties / folds -------------------------------
-    reg.section("overlays");
+    reg.section(Section::Overlays);
     register_ternary(&mut reg, queue, "overlay-set-face", |start, end, face| {
         EditorCommand::OverlayFace { start, end, face }
     });
@@ -1862,7 +1862,7 @@ pub(crate) fn build_engine(
         );
     }
     // --- File-system primitives (pure, run on the engine thread) ----------
-    reg.section("files");
+    reg.section(Section::Files);
     reg.register_fn("file-exists?", |path: String| -> bool {
         std::path::Path::new(&path).exists()
     });
@@ -1957,7 +1957,7 @@ pub(crate) fn build_engine(
         std::fs::write(&path, bytes).is_ok()
     });
     // --- Identity + time (org-roam node IDs, timestamps) ------------------
-    reg.section("time-ids");
+    reg.section(Section::TimeIds);
     // `(org-id-new)` → a fresh v4 UUID string (org-roam node IDs).
     reg.register_fn("org-id-new", || -> String {
         uuid::Uuid::new_v4().to_string()
@@ -1973,7 +1973,7 @@ pub(crate) fn build_engine(
         out
     });
     // --- Fast search (ripgrep as a library, Scheme-configurable) ----------
-    reg.section("search");
+    reg.section(Section::Search);
     // The config lives entirely on this (engine) thread; the register_fns share
     // it. Users tune it in init.scm: (search-exclude "target"),
     // (set-search-option "hidden" "true"), etc.
@@ -2058,7 +2058,7 @@ pub(crate) fn build_engine(
             );
         }
     }
-    reg.section("git");
+    reg.section(Section::Git);
     // gix bridge: pure-Rust git queries (no `git` subprocess), exposed the same
     // blocking-on-the-engine-thread way as `walk-files`/`grep-files`. Errors
     // (not a repo, unborn HEAD, untracked file) collapse to an empty list.
@@ -2169,7 +2169,7 @@ pub(crate) fn build_engine(
             gix_status(&dir).unwrap_or_default()
         });
     }
-    reg.section("processes");
+    reg.section(Section::Processes);
     // `(call-process program args)` — run a subprocess, return stdout. Blocks on
     // the engine thread (never the UI), the same model as `list-directory`.
     reg.register_fn(
@@ -2305,7 +2305,7 @@ pub(crate) fn build_engine(
         EditorCommand::SetProcessBuffer { id, name }
     });
     // --- DAP (Debug Adapter Protocol) --------------------------------------
-    reg.section("dap");
+    reg.section(Section::Dap);
     {
         // `(dap-start program args cwd on-message on-exit)` → a session id
         // (used by dap-send / dap-kill). The adapter speaks Content-Length-
@@ -2377,7 +2377,7 @@ pub(crate) fn build_engine(
     register_unary(&mut reg, queue, "dap-kill", |id| EditorCommand::DapKill {
         id,
     });
-    reg.section("http");
+    reg.section(Section::Http);
     {
         // `(make-http-stream url headers body on-line on-done)` → a stream id
         // (used by http-stream-cancel). `headers` is a flat list of alternating
@@ -2513,7 +2513,7 @@ pub(crate) fn build_engine(
         EditorCommand::HttpServerStop { port }
     });
     // --- Crypto / encoding (OAuth PKCE + general use) ---------------------
-    reg.section("crypto");
+    reg.section(Section::Crypto);
     // Binary is exchanged with Scheme as hex strings (always valid UTF-8);
     // `hex->base64url` bridges hex into base64url so PKCE composes cleanly:
     //   (define verifier  (hex->base64url (random-bytes 32)))
@@ -2580,7 +2580,7 @@ pub(crate) fn build_engine(
         let (text, _, _) = encoding.decode(&bytes);
         text.into_owned()
     });
-    reg.section("http");
+    reg.section(Section::Http);
     // `(url-decode s)` → `s` with %XX escapes decoded (RFC 3986; `+` stays a
     // plus — this is for URL components, not form bodies). Bytes are
     // reassembled as UTF-8 (lossy), so a percent-encoded multibyte character
@@ -2608,7 +2608,7 @@ pub(crate) fn build_engine(
         crate::update::open_url(&url).is_ok()
     });
     // --- client sockets (blocking, engine thread) ------------------------
-    reg.section("sockets");
+    reg.section(Section::Sockets);
     // Synchronous TCP/TLS/UDP for Scheme protocol code (IMAP, SMTP, NNTP,
     // Redis, DNS …). Blocking is deliberate: protocol scripts read like prose,
     // and the engine thread already hosts blocking primitives
@@ -2828,7 +2828,7 @@ pub(crate) fn build_engine(
     });
     reg.register_fn("udp-close", |id: usize| -> bool { UDP.remove(id) });
     // --- SQLite (generic embedded database; bundled, with FTS5) -----------
-    reg.section("sqlite");
+    reg.section(Section::Sqlite);
     // A real database for Scheme packages — a full-text search index, a
     // relational store, whatever. Blocking, engine-thread (like the socket
     // family). Bundled SQLite ships FTS5, so `CREATE VIRTUAL TABLE … USING
@@ -2912,7 +2912,7 @@ pub(crate) fn build_engine(
     );
     reg.register_fn("sqlite-close", |id: usize| -> bool { SQLITE.remove(id) });
     reg.register_fn("sqlite-last-error", last_error);
-    reg.section("sockets");
+    reg.section(Section::Sockets);
     // DNS: resolve `host` for a record `type` ("A" "AAAA" "MX" "TXT" "SRV"
     // "CNAME" "NS"). Returns newline-separated records ("" = none/failure);
     // MX/SRV keep their priority/weight fields space-separated. Hand-rolled
@@ -2924,7 +2924,7 @@ pub(crate) fn build_engine(
         or_report(records, String::new())
     });
     // --- async sockets + WebSockets (off-thread, callback-driven) ---------
-    reg.section("sockets");
+    reg.section(Section::Sockets);
     // For long-lived or push-driven connections where blocking recv is wrong:
     // IMAP IDLE, chat gateways, CDP, market feeds. A worker thread owns the
     // connection and delivers inbound data to a named callback (the socket
@@ -3028,7 +3028,7 @@ pub(crate) fn build_engine(
         });
     }
     // --- ANVIL REPL (a second, independent Steel interpreter) -------------
-    reg.section("anvil");
+    reg.section(Section::Anvil);
     {
         // `(anvil-eval source on-result)` evaluates `source` in the separate
         // REPL image; the printed result is delivered to the Scheme function
@@ -3082,7 +3082,7 @@ pub(crate) fn build_engine(
             EditorCommand::AnvilSignature,
         );
     }
-    reg.section("terminal");
+    reg.section(Section::Terminal);
     {
         // `(make-terminal name program args directory)` → a terminal id. Empty
         // `program` runs the user's login shell; empty `directory` uses the
@@ -3112,11 +3112,11 @@ pub(crate) fn build_engine(
             },
         );
     }
-    reg.section("hooks-timers");
+    reg.section(Section::HooksTimers);
     register_binary(&mut reg, queue, "run-with-timer", |ms, callback| {
         EditorCommand::RunWithTimer { ms, callback }
     });
-    reg.section("buffer-reads");
+    reg.section(Section::BufferReads);
     // Read bridges over the editor's published snapshot (see `set_snapshot`).
     register_snapshot_read(&mut reg, snapshot, "buffer-line", |s| s.line);
     register_snapshot_read(&mut reg, snapshot, "current-buffer", |s| s.name.clone());
@@ -3175,7 +3175,7 @@ pub(crate) fn build_engine(
     }
     // `(lsp-server-ready?)` → #t if the active buffer has a ready LSP server.
     register_snapshot_read(&mut reg, snapshot, "lsp-server-ready?", |s| s.lsp_ready);
-    reg.section("modal");
+    reg.section(Section::Modal);
     // `(evil-enabled?)` → #t when modal (evil) editing is active.
     register_snapshot_read(&mut reg, snapshot, "evil-enabled?", |s| s.evil_enabled);
     // `(evil-state)` → "normal" / "insert" / "visual" / "visual-line" /
@@ -3198,11 +3198,11 @@ pub(crate) fn build_engine(
     register_snapshot_read(&mut reg, snapshot, "kbd-macro-recording?", |s| {
         s.kbd_macro_recording
     });
-    reg.section("lsp");
+    reg.section(Section::Lsp);
     // `(diagnostics)` → the active buffer's LSP diagnostics, each a record
     // "line\tcol\tseverity\tmessage" (line/col 0-based). The library splits it.
     register_snapshot_read(&mut reg, snapshot, "diagnostics", |s| s.diagnostics.clone());
-    reg.section("buffer-reads");
+    reg.section(Section::BufferReads);
     {
         // `(line-bounds)` → `(start end)` byte offsets of the line at point
         // (end points at the line's terminating newline, or buffer end).
@@ -3247,7 +3247,7 @@ pub(crate) fn build_engine(
             -1
         });
     }
-    reg.section("text");
+    reg.section(Section::Text);
     // Escape a string for literal use in a regexp (Emacs `regexp-quote`).
     reg.register_fn("regexp-quote", |s: String| -> String { regex::escape(&s) });
     // `(fuzzy-match pattern candidates)` — rank `candidates` against `pattern`
@@ -3260,7 +3260,7 @@ pub(crate) fn build_engine(
             fuzzy_rank(&pattern, &candidates)
         },
     );
-    reg.section("buffer-reads");
+    reg.section(Section::BufferReads);
     {
         // Bytes `[a, b)` of the buffer, clamped (Emacs `(buffer-substring a b)`).
         let shared = snapshot.clone();
@@ -3326,7 +3326,7 @@ pub(crate) fn build_engine(
         });
     }
     // --- Markers (positions that move with edits) -------------------------
-    reg.section("markers");
+    reg.section(Section::Markers);
     {
         // `(make-marker pos)` → a marker id (allocated synchronously).
         let m = markers.clone();
@@ -3374,7 +3374,7 @@ pub(crate) fn build_engine(
             });
         }};
     }
-    reg.section("motions");
+    reg.section(Section::Motions);
     register_pos_fn!("grapheme-forward", |b, p| b.next_grapheme(p));
     register_pos_fn!("grapheme-backward", |b, p| b.prev_grapheme(p));
     register_pos_fn!("word-forward", |b, p| b.forward_word(p));
@@ -3465,7 +3465,7 @@ pub(crate) fn build_engine(
         );
     }
     // --- Regexp (over strings, and over the buffer from point) ------------
-    reg.section("regexp");
+    reg.section(Section::Regexp);
     reg.register_fn("string-match", move |pattern: String, s: String| -> isize {
         regex(&pattern)
             .ok()
@@ -3565,10 +3565,10 @@ pub(crate) fn build_engine(
         });
     }
     // Session persistence (savehist / desktop) — see src/script/session.rs.
-    reg.section("session");
+    reg.section(Section::Session);
     register_session(&mut reg, queue, session);
     // The unlocked authinfo.gpg store behind scheme/secrets.scm.
-    reg.section("secrets");
+    reg.section(Section::Secrets);
     crate::authinfo::register(&mut reg);
     let _ = api_cell.set(api);
     (engine, names)
@@ -3666,7 +3666,7 @@ pub(crate) struct Registrar<'a> {
     engine: &'a mut Engine,
     names: &'a mut Vec<String>,
     api: &'a mut Vec<ApiEntry>,
-    section: &'static str,
+    section: Section,
 }
 
 impl Registrar<'_> {
@@ -3684,10 +3684,9 @@ impl Registrar<'_> {
         self.engine.register_fn(name, func);
     }
 
-    /// File every following registration under `name` in the API reference
-    /// (see `SECTIONS` in api.rs for the categories and their blurbs).
-    pub(crate) fn section(&mut self, name: &'static str) {
-        self.section = name;
+    /// File every following registration under `section` in the API reference.
+    pub(crate) fn section(&mut self, section: Section) {
+        self.section = section;
     }
 }
 

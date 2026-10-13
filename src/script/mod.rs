@@ -20,7 +20,7 @@ mod session;
 mod sockets;
 mod state;
 
-pub(crate) use api::{ApiEntry, render as render_api};
+pub(crate) use api::{ApiEntry, Section, render as render_api};
 pub use commands::*;
 pub(crate) use convert::*;
 pub use engine::*;

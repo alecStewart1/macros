@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone)]
 pub(crate) struct ApiEntry {
     pub(crate) name: String,
-    pub(crate) section: &'static str,
+    pub(crate) section: Section,
     pub(crate) args: Vec<String>,
     pub(crate) ret: String,
 }
@@ -25,7 +25,7 @@ pub(crate) struct ApiEntry {
 impl ApiEntry {
     /// Build an entry from the `std::any::type_name`s of steel's `RegisterFn`
     /// marker (`Wrapper<(A, B)>`) and the closure's return type.
-    pub(crate) fn new(name: &str, section: &'static str, args_ty: &str, ret_ty: &str) -> Self {
+    pub(crate) fn new(name: &str, section: Section, args_ty: &str, ret_ty: &str) -> Self {
         ApiEntry {
             name: name.to_string(),
             section,
@@ -38,94 +38,79 @@ impl ApiEntry {
     }
 }
 
-/// Every category, in display order, with a one-line description. A
-/// `reg.section` name missing from here still works; it just has no blurb.
-const SECTIONS: &[(&str, &str)] = &[
-    (
-        "commands",
-        "Nullary editor commands (motions, edits, UI toggles); call for effect",
-    ),
-    (
-        "editing",
-        "Mutate the current buffer: insert, goto, regions, selections",
-    ),
-    (
-        "buffer-reads",
-        "Read the current buffer: point, text, lines, regions",
-    ),
-    (
-        "motions",
-        "Pure position math: compute a new byte offset without moving",
-    ),
-    ("markers", "Positions that move with edits"),
-    ("regexp", "Regex over strings and over the buffer"),
-    ("text", "Pure string utilities: diffs, fuzzy match, quoting"),
-    (
-        "buffers",
-        "Buffers and windows: names, files, buffer-locals, window layout",
-    ),
-    (
-        "special-buffers",
-        "Read-only rendered buffers (magit-style) and their highlights",
-    ),
-    (
-        "overlays",
-        "Overlays, text properties, folds, line suffixes",
-    ),
-    (
-        "decorations",
-        "Per-line icons/images/indent/scale, ghost text, staleness guards",
-    ),
-    ("faces", "Faces (colors, fonts, underline) and themes"),
-    (
-        "prompts",
-        "Messages, minibuffer reads, pickers (helm), y-or-n-p, transients",
-    ),
-    (
-        "grid",
-        "Grid (CSV) buffers: read cells and state, edit, view, and style",
-    ),
-    ("ui", "Mode line and titlebar"),
-    ("keymaps", "Key bindings and the command list"),
-    ("modal", "Evil/Helix state: marks, ex, counts, search query"),
-    ("hooks-timers", "Hooks and timers"),
-    ("options", "Editor options (get/set/list)"),
-    ("help", "Introspection: docs, versions, this API reference"),
-    ("languages", "Bundled/installed tree-sitter grammars"),
-    ("tree-sitter", "Syntax-tree queries over the current buffer"),
-    ("lsp", "Language-server requests and diagnostics"),
-    ("spell", "Native spell checking"),
-    ("plotting", "Text plotting: charts rendered to text + faces"),
-    ("files", "File system: read/write/list/watch, directories"),
-    ("search", "ripgrep-backed file walking and grep"),
-    (
-        "git",
-        "gix-backed git reads (log, diff, status, blame, refs)",
-    ),
-    (
-        "processes",
-        "Subprocesses (sync and streaming) and the environment",
-    ),
-    (
-        "http",
-        "HTTP client (streaming), loopback HTTP server, open-url",
-    ),
-    (
-        "sockets",
-        "TCP/TLS/UDP sockets, async sockets, WebSockets, DNS",
-    ),
-    ("sqlite", "Embedded SQLite (with FTS5)"),
-    (
-        "crypto",
-        "Random bytes, sha256, base64url/hex, charset decoding",
-    ),
-    ("time-ids", "Timestamps and unique IDs"),
-    ("dap", "Debug Adapter Protocol transport"),
-    ("anvil", "ANVIL: a second, independent Steel interpreter"),
-    ("terminal", "Embedded terminals"),
-    ("session", "Session persistence (savehist / desktop)"),
-    ("secrets", "The unlocked authinfo.gpg secrets store"),
-];
+/// The API reference's categories. `reg.section(…)` files every following
+/// registration under one ([`super::Registrar::section`]).
+macro_rules! sections {
+    ($($variant:ident = $name:literal, $blurb:literal;)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub(crate) enum Section {
+            $($variant,)*
+        }
+
+        impl Section {
+            /// Every category, in display order.
+            pub(crate) const ALL: &'static [Section] = &[$(Section::$variant,)*];
+
+            /// The category's name, as `(api-reference category …)` takes it.
+            pub(crate) fn name(self) -> &'static str {
+                match self {
+                    $(Section::$variant => $name,)*
+                }
+            }
+
+            /// A one-line description for the category index.
+            pub(crate) fn blurb(self) -> &'static str {
+                match self {
+                    $(Section::$variant => $blurb,)*
+                }
+            }
+        }
+    };
+}
+
+// Display order, with each category's one-line description.
+sections! {
+    Commands = "commands", "Nullary editor commands (motions, edits, UI toggles); call for effect";
+    Editing = "editing", "Mutate the current buffer: insert, goto, regions, selections";
+    BufferReads = "buffer-reads", "Read the current buffer: point, text, lines, regions";
+    Motions = "motions", "Pure position math: compute a new byte offset without moving";
+    Markers = "markers", "Positions that move with edits";
+    Regexp = "regexp", "Regex over strings and over the buffer";
+    Text = "text", "Pure string utilities: diffs, fuzzy match, quoting";
+    Buffers = "buffers", "Buffers and windows: names, files, buffer-locals, window layout";
+    SpecialBuffers = "special-buffers",
+        "Read-only rendered buffers (magit-style) and their highlights";
+    Overlays = "overlays", "Overlays, text properties, folds, line suffixes";
+    Decorations = "decorations", "Per-line icons/images/indent/scale, ghost text, staleness guards";
+    Faces = "faces", "Faces (colors, fonts, underline) and themes";
+    Prompts = "prompts", "Messages, minibuffer reads, pickers (helm), y-or-n-p, transients";
+    Grid = "grid", "Grid (CSV) buffers: read cells and state, edit, view, and style";
+    Ui = "ui", "Mode line and titlebar";
+    Keymaps = "keymaps", "Key bindings and the command list";
+    Modal = "modal", "Evil/Helix state: marks, ex, counts, search query";
+    HooksTimers = "hooks-timers", "Hooks and timers";
+    Options = "options", "Editor options (get/set/list)";
+    Help = "help", "Introspection: docs, versions, this API reference";
+    Languages = "languages", "Bundled/installed tree-sitter grammars";
+    TreeSitter = "tree-sitter", "Syntax-tree queries over the current buffer";
+    Lsp = "lsp", "Language-server requests and diagnostics";
+    Spell = "spell", "Native spell checking";
+    Plotting = "plotting", "Text plotting: charts rendered to text + faces";
+    Files = "files", "File system: read/write/list/watch, directories";
+    Search = "search", "ripgrep-backed file walking and grep";
+    Git = "git", "gix-backed git reads (log, diff, status, blame, refs)";
+    Processes = "processes", "Subprocesses (sync and streaming) and the environment";
+    Http = "http", "HTTP client (streaming), loopback HTTP server, open-url";
+    Sockets = "sockets", "TCP/TLS/UDP sockets, async sockets, WebSockets, DNS";
+    Sqlite = "sqlite", "Embedded SQLite (with FTS5)";
+    Crypto = "crypto", "Random bytes, sha256, base64url/hex, charset decoding";
+    TimeIds = "time-ids", "Timestamps and unique IDs";
+    Dap = "dap", "Debug Adapter Protocol transport";
+    Anvil = "anvil", "ANVIL: a second, independent Steel interpreter";
+    Terminal = "terminal", "Embedded terminals";
+    Session = "session", "Session persistence (savehist / desktop)";
+    Secrets = "secrets", "The unlocked authinfo.gpg secrets store";
+}
 
 const TYPES_LEGEND: &str = "Types: string, int, number, bool, any (any Steel value), \
 callback (a 'symbol or \"string\" naming a global function — not a lambda), \
@@ -363,16 +348,16 @@ pub(crate) fn render(entries: &[ApiEntry], category: &str, search: &str) -> Stri
     let mut hits = 0;
     let in_cat = |c: &str| category.is_empty() || c == category;
 
-    let mut last = "";
-    for e in entries.iter().filter(|e| in_cat(e.section)) {
+    let mut last = None;
+    for e in entries.iter().filter(|e| in_cat(e.section.name())) {
         let doc = docs.get(&e.name).map(String::as_str).unwrap_or("");
         let sig = rust_signature(e);
         if !matches(&words, &format!("{sig} {doc}")) {
             continue;
         }
-        if e.section != last {
-            out.push_str(&format!("\n== {} (Rust primitives) ==\n", e.section));
-            last = e.section;
+        if last != Some(e.section) {
+            out.push_str(&format!("\n== {} (Rust primitives) ==\n", e.section.name()));
+            last = Some(e.section);
         }
         push_entry(&mut out, &sig, doc);
         hits += 1;
@@ -403,7 +388,7 @@ pub(crate) fn render(entries: &[ApiEntry], category: &str, search: &str) -> Stri
 }
 
 fn render_index(entries: &[ApiEntry]) -> String {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut counts: HashMap<Section, usize> = HashMap::new();
     for e in entries {
         *counts.entry(e.section).or_default() += 1;
     }
@@ -417,15 +402,10 @@ fn render_index(entries: &[ApiEntry]) -> String {
     let mut row = |name: &str, n: usize, blurb: &str| {
         out.push_str(&format!("  {name:<16} {n:>4}  {blurb}\n"));
     };
-    for (name, blurb) in SECTIONS {
-        if let Some(n) = counts.remove(name) {
-            row(name, n, blurb);
+    for &section in Section::ALL {
+        if let Some(&n) = counts.get(&section) {
+            row(section.name(), n, section.blurb());
         }
-    }
-    let mut rest: Vec<_> = counts.into_iter().collect();
-    rest.sort();
-    for (name, n) in rest {
-        row(name, n, "");
     }
 
     out.push_str(
@@ -471,7 +451,7 @@ mod tests {
     fn entry<A: 'static, R: 'static>(name: &str) -> ApiEntry {
         ApiEntry::new(
             name,
-            "test",
+            Section::Faces,
             std::any::type_name::<steel::steel_vm::register_fn::Wrapper<A>>(),
             std::any::type_name::<R>(),
         )
@@ -576,7 +556,12 @@ mod tests {
     fn render_index_category_and_search() {
         let entries = vec![
             entry::<(String,), ()>("set-face-font"),
-            ApiEntry::new("tcp-connect", "sockets", "Wrapper<(String, u16)>", "usize"),
+            ApiEntry::new(
+                "tcp-connect",
+                Section::Sockets,
+                "Wrapper<(String, u16)>",
+                "usize",
+            ),
         ];
         let idx = render(&entries, "", "");
         assert!(idx.contains("2 Rust primitives"));
