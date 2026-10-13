@@ -69,8 +69,11 @@ use helm::{HelmAction, HelmSession, HelmSource, helm_sources_from_specs, wrap_in
 use input::UargState;
 use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
+use minibuffer::MinibufferHistory;
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
-use panes::{WindowLayout, layout_leaves, node_at, set_ratio_at, union_bounds};
+use overlays::{Overlays, shift_line_map};
+use panes::{Child, SplitAxis, WindowLayout, union_bounds};
+use session::BoundedRing;
 use terminal::{ProcessHandle, keystroke_to_bytes};
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
@@ -138,6 +141,29 @@ enum PendingAction {
     OpenLargeGrid(String),
 }
 
+/// Which way a search or a selection cycle moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Direction {
+    Forward,
+    Backward,
+}
+
+impl Direction {
+    /// `Forward` when `forward`, else `Backward` — for callers that still hold
+    /// a `bool` direction.
+    pub(super) fn from_forward(forward: bool) -> Self {
+        if forward {
+            Self::Forward
+        } else {
+            Self::Backward
+        }
+    }
+
+    pub(super) fn is_forward(self) -> bool {
+        self == Self::Forward
+    }
+}
+
 /// What a minibuffer read is for, deciding completion candidates and what
 /// happens on submit.
 #[derive(Clone)]
@@ -157,13 +183,10 @@ enum MinibufferPurpose {
     QuitSave { relaunch: bool },
     /// LSP completion: replace the word at `completion_range` with the choice.
     CompleteAtPoint,
-    /// evil `/` — regex search forward.
-    SearchForward,
-    /// evil `?` — regex search backward.
-    SearchBackward,
-    /// evil `d/pat` / `d?pat`: the search motion of a pending operator
-    /// (true = forward).
-    OperatorSearch(bool),
+    /// evil `/` (forward) / `?` (backward) — regex search.
+    Search(Direction),
+    /// evil `d/pat` / `d?pat`: the search motion of a pending operator.
+    OperatorSearch(Direction),
     /// Emacs `C-s` / `C-r` — incremental search. The query is read in the
     /// minibuffer and matched live on every keystroke (see `isearch_*`).
     Isearch,
@@ -171,12 +194,11 @@ enum MinibufferPurpose {
     ExCommand,
     /// Grid `gn` / `C-x g`: jump to a cell address (`C7`, `B2:D9`).
     GridGoto,
-    /// Grid `/`: search cell contents (regex).
-    GridSearch,
+    /// Grid `/` (forward) / `C-r` / `?` (backward): search cell contents
+    /// (regex).
+    GridSearch(Direction),
     /// Saving a CSV grid that holds formulas: the `.xlsx` path to save as.
     GridSaveAsXlsx,
-    /// Grid `C-r` / `?`: search cell contents backward.
-    GridSearchBackward,
     /// Grid `grid-filter`: a filter for column `.0`.
     GridFilter(usize),
     /// Grid `grid-complete-cell`: the new value of cell `(row, col)`,
@@ -390,19 +412,6 @@ pub struct MinibufferView {
     pub message: String,
 }
 
-/// Mutable access to every per-buffer decoration store of the buffer a
-/// decoration command should land on — resolved once by
-/// [`Editor::redirect_target`] so the [`Editor::render_redirect`] decision
-/// lives in one place.
-struct DecorationTarget<'a> {
-    /// The target's text, for clamping byte-range overlays.
-    buffer: &'a Buffer,
-    overlays: &'a mut Overlays,
-    line_icons: &'a mut HashMap<usize, (usize, SharedString)>,
-    gutter_dots: &'a mut HashMap<usize, SharedString>,
-    line_images: &'a mut HashMap<usize, (PathBuf, usize)>,
-}
-
 /// Filesystem watching (auto-revert + dired-sidebar/dired live refresh),
 /// reconciled as a unit by [`Editor::reconcile_watches`].
 struct FsWatchState {
@@ -501,14 +510,14 @@ pub struct Editor {
     autoscroll: AutoscrollState,
     /// Scrollback of echo-area messages (Emacs `*Messages*`), capped. Every
     /// `echo` appends here so transient status can be reviewed later.
-    messages: Vec<String>,
+    messages: BoundedRing,
     /// The MCP server (src/mcp.rs), when the `mcp-server` option is on.
     mcp: Option<mcp::McpState>,
     /// Its request log, shown by `M-x mcp-server-info` (capped).
-    mcp_log: Vec<String>,
+    mcp_log: BoundedRing,
     /// Captured stderr from external language servers (Emacs-style `*lsp-log*`),
     /// capped — the only window into why a server failed/crashed.
-    lsp_log: Vec<String>,
+    lsp_log: BoundedRing,
     /// The diagnostic message currently echoed because the pointer is hovering
     /// it — so a later move off the diagnostic clears only our own echo.
     hover_message: Option<SharedString>,
@@ -570,16 +579,11 @@ pub struct Editor {
     modal_count: Option<usize>,
     /// The active minibuffer prompt, if a read is in progress.
     minibuffer: Option<Minibuffer>,
-    /// Candidates for an active `completing-read` minibuffer.
+    /// Candidates for an active completing minibuffer (`completing-read`, the
+    /// grid's cell/column reads, LSP `CompleteAtPoint`).
     completing_candidates: Vec<String>,
-    /// Shared minibuffer input history (most recent last), recalled with Up/Down
-    /// or `M-p`/`M-n` while a read is open (Emacs minibuffer history).
-    minibuffer_history: Vec<String>,
-    /// Position while browsing history: `None` = editing a fresh input; `Some(i)`
-    /// = showing `history[len-1-i]`. `minibuffer_stash` holds the fresh input so
-    /// returning past the newest entry restores it.
-    minibuffer_history_pos: Option<usize>,
-    minibuffer_stash: String,
+    /// Shared minibuffer input history — see [`MinibufferHistory`].
+    minibuffer_history: MinibufferHistory,
     /// For a dynamic `completing-read` (candidates from a Scheme fn): the fn name
     /// and the latest query id, re-dispatched per keystroke. `None` otherwise.
     mb_dynamic: Option<(String, u64)>,
@@ -663,8 +667,8 @@ pub struct Editor {
     /// In-flight `$/progress` reports, `(language:token, title, text)` in
     /// begin order; the newest is shown in the `lsp-progress` mode-line slot.
     lsp_progress: Vec<(String, String, String)>,
-    /// Candidates + replacement range for the active completion minibuffer.
-    completion_items: Vec<String>,
+    /// Replacement range for the active completion minibuffer (its candidates
+    /// are in `completing_candidates`).
     completion_range: Option<Range<usize>>,
     /// The in-buffer completion popup (corfu-style), when active.
     completion_popup: Option<CompletionPopup>,
@@ -677,10 +681,9 @@ pub struct Editor {
     /// The active Helm selection session, if any.
     helm: Option<HelmSession>,
     /// Monotonic id for dynamic-candidate queries (stale results are dropped).
+    /// Shared by Helm sessions and dynamic `completing-read`s, so it outlives
+    /// any one session.
     helm_query_counter: u64,
-    /// While the TAB action menu is open: the candidate it acts on + the
-    /// `(label, fn)` actions to choose among.
-    helm_action_context: Option<(String, Vec<(String, String)>)>,
     /// Modal-editing (evil) state.
     evil: EvilState,
     /// Vim `r` replace-pending: armed by `evil-replace-char`, it makes the very
@@ -869,10 +872,11 @@ pub struct Editor {
     fs: FsWatchState,
     /// While `render-buffer` refreshes a special buffer that's shown in a
     /// *non-selected* pane (the dired-sidebar/dired view during an auto-refresh), the
-    /// index of that inactive [`Document`] — so the icon/overlay commands in the
+    /// name of that inactive [`Document`] — so the icon/overlay commands in the
     /// same batch target it instead of the active buffer, and focus never moves.
-    /// Reset to `None` after each applied command batch.
-    render_redirect: Option<usize>,
+    /// Resolved by name ([`Editor::redirect_index`]) so reshuffling `inactive`
+    /// can't retarget it. Reset to `None` after each applied command batch.
+    render_redirect: Option<String>,
     /// Set by a failed `GuardBufferUnchanged` (the buffer was edited after the
     /// script snapshotted it); `apply_script_outcome` drops the rest of that
     /// batch — its byte-offset decorations are stale. Reset around every batch.
@@ -976,103 +980,6 @@ enum MacroEvent {
     Key(String),
 }
 
-/// Overlays / text properties on a buffer (the Emacs overlay + text-property
-/// model). Sub-line face ranges layer over tree-sitter highlighting; folded line
-/// ranges are hidden from display; text properties carry arbitrary metadata
-/// Scheme can read back. All are byte/line-range based and reset only when the
-/// buffer itself is replaced.
-#[derive(Default)]
-struct Overlays {
-    /// `(byte_range, face)` — overrides syntax highlighting in that range.
-    faces: Vec<(Range<usize>, SharedString)>,
-    /// Byte ranges hidden from display, without changing the buffer text.
-    hidden: Vec<Range<usize>>,
-    /// Folded line ranges (`start..end`, end-exclusive) — hidden from display.
-    folds: Vec<Range<usize>>,
-    /// `(byte_range, key, value)` text properties (Emacs `put-text-property`).
-    props: Vec<(Range<usize>, String, String)>,
-    /// `line -> (suffix_text, face)` virtual text appended after a line (inlay
-    /// hints, blame, inline diagnostics).
-    suffixes: HashMap<usize, (SharedString, SharedString)>,
-    /// `line -> columns` of virtual left indentation (display-only), the Org
-    /// `org-indent-mode` look. The buffer text is untouched.
-    indents: HashMap<usize, usize>,
-    /// `line -> font-size multiplier` for whole-line scaling (markdown/org
-    /// headings render larger). A scaled line reserves extra display rows the
-    /// same way an inline image does, so cursor/scroll math stays correct.
-    scales: HashMap<usize, f32>,
-    /// `line -> is_open` fold chevrons painted in the gutter. Scheme declares a
-    /// marker on each foldable header line (`set-fold-marker`); the value is the
-    /// glyph state (open = expanded). A click on the chevron is hit-tested and
-    /// routed to Scheme's `fold-toggle-at-line`, which mutates `folds` to match.
-    fold_markers: HashMap<usize, bool>,
-}
-
-/// Re-key a line-indexed overlay map after `line_delta` lines were inserted
-/// (positive) or removed (negative) starting just after `start_line`. Entries on
-/// or before `start_line` keep their line; later ones shift; any that would land
-/// at/before `start_line` (deleted out) are dropped.
-fn shift_line_map<V>(
-    map: &mut HashMap<usize, V>,
-    start_line: usize,
-    line_delta: isize,
-    carry_start_line: bool,
-) {
-    if line_delta == 0 {
-        return;
-    }
-    // Lines inserted at column 0 of `start_line`: its entry moves with its text.
-    // No entry can sit in the freshly inserted lines, so this can't collide.
-    let carried = if carry_start_line && line_delta > 0 {
-        map.remove(&start_line)
-    } else {
-        None
-    };
-    // Re-key only the entries past the edit, in place. Process in an order that
-    // never overwrites an entry we haven't moved yet: highest-first when shifting
-    // up, lowest-first when shifting down. Entries shifted to at/before
-    // `start_line` (deleted out) are dropped.
-    let mut movers: Vec<usize> = map.keys().copied().filter(|&l| l > start_line).collect();
-    if line_delta > 0 {
-        movers.sort_unstable_by(|a, b| b.cmp(a));
-    } else {
-        movers.sort_unstable();
-    }
-    for line in movers {
-        let Some(v) = map.remove(&line) else { continue };
-        let shifted = line as isize + line_delta;
-        if shifted > start_line as isize {
-            map.insert(shifted as usize, v);
-        }
-    }
-    if let Some(v) = carried {
-        map.insert(start_line + line_delta as usize, v);
-    }
-}
-
-/// Shift folded line ranges to track an edit that added/removed `line_delta`
-/// lines beginning on `start_line`. A line at/before `start_line` is fixed; a
-/// later line moves by `line_delta` (clamped to `start_line`) — the line-space
-/// twin of `adjust_overlays`'s byte shift. Ranges that collapse to empty are
-/// dropped. Without this, editing above a folded subtree (e.g. RET to push an
-/// Org heading down) leaves the fold hiding stale line numbers.
-fn shift_fold_ranges(folds: &mut Vec<Range<usize>>, start_line: usize, line_delta: isize) {
-    if line_delta == 0 {
-        return;
-    }
-    let shift = |l: usize| -> usize {
-        if l <= start_line {
-            l
-        } else {
-            (l as isize + line_delta).max(start_line as isize) as usize
-        }
-    };
-    folds.retain_mut(|r| {
-        *r = shift(r.start)..shift(r.end);
-        r.end > r.start
-    });
-}
-
 /// Merge runs of consecutive [`EditorCommand::Insert`] into a single insert.
 /// Each applied insert triggers a tree-sitter reparse and an LSP incremental
 /// change, so a script inserting one character at a time otherwise pays that
@@ -1093,11 +1000,12 @@ fn coalesce_inserts(commands: Vec<EditorCommand>) -> Vec<EditorCommand> {
 }
 
 /// An in-progress divider drag: which split (by path from the layout root) and
-/// its axis (`vertical` = the divider is horizontal / stacked split).
+/// its axis ([`SplitAxis::Vertical`] = the divider is horizontal / stacked
+/// split).
 #[derive(Clone)]
 struct ResizeDrag {
-    path: Vec<bool>,
-    vertical: bool,
+    path: Vec<Child>,
+    axis: SplitAxis,
 }
 
 /// One window pane: a view onto a buffer with its own point and scroll. The
@@ -1295,6 +1203,21 @@ enum EvilState {
     VisualBlock,
 }
 
+impl EvilState {
+    /// The state's name as Scheme's `(evil-state)` reports it (`""` when
+    /// modal editing is off).
+    fn as_str(self) -> &'static str {
+        match self {
+            EvilState::Disabled => "",
+            EvilState::Normal => "normal",
+            EvilState::Insert => "insert",
+            EvilState::Visual => "visual",
+            EvilState::VisualLine => "visual-line",
+            EvilState::VisualBlock => "visual-block",
+        }
+    }
+}
+
 /// A single running language server and the per-server state we track for it.
 struct LspServer {
     client: LspBackend,
@@ -1414,9 +1337,7 @@ impl Editor {
         // Keymaps are populated from Scheme at startup; the modes just need to
         // exist. `steel-mode` (the major mode) declares the highlighting
         // language and stacks on the always-present `fundamental` base.
-        let mut modes = ModeStack::default();
-        modes.push(Mode::new("fundamental"));
-        modes.push(Mode::new("steel").with_language("scheme"));
+        let modes = scheme_mode_stack(false);
 
         // The active highlighter follows the active mode's language.
         let highlighter = modes.active_language().and_then(Highlighter::for_language);
@@ -1466,10 +1387,10 @@ impl Editor {
             keymap: Keymap::default(),
             status: "Macros ready".into(),
             is_selecting: false,
-            messages: Vec::new(),
+            messages: BoundedRing::new(MESSAGES_CAP),
             mcp: None,
-            mcp_log: Vec::new(),
-            lsp_log: Vec::new(),
+            mcp_log: BoundedRing::new(mcp::MCP_LOG_CAP),
+            lsp_log: BoundedRing::new(lsp_methods::LSP_LOG_CAP),
             hover_message: None,
             electric_pair: false,
             snippet_fields: Vec::new(),
@@ -1491,9 +1412,7 @@ impl Editor {
             pending_keys: Vec::new(),
             minibuffer: None,
             completing_candidates: Vec::new(),
-            minibuffer_history: Vec::new(),
-            minibuffer_history_pos: None,
-            minibuffer_stash: String::new(),
+            minibuffer_history: MinibufferHistory::default(),
             mb_dynamic: None,
             uarg: UargState::default(),
             modal_count: None,
@@ -1530,14 +1449,12 @@ impl Editor {
             formatting_for_save: HashMap::new(),
             format_save_seq: 0,
             lsp_progress: Vec::new(),
-            completion_items: Vec::new(),
             completion_range: None,
             completion_popup: None,
             completion_auto_pending: false,
             completion_stamp: None,
             helm: None,
             helm_query_counter: 0,
-            helm_action_context: None,
             evil: EvilState::Disabled,
             evil_replace_pending: false,
             evil_replace_count: 1,
@@ -2196,12 +2113,13 @@ impl Editor {
 
     // --- Editing primitives (all edits funnel through `edit` for undo) -----
 
-    /// Shift overlays to track an edit that replaced `[start, old_end)` with
-    /// `new_len` bytes (`line_delta` net newlines, the edit beginning on
-    /// `start_line`). Byte-range overlays (faces, hidden, props) move with the
-    /// text; whole-line overlays (indents, suffixes) shift by the line delta when
-    /// lines were added/removed. Without this they'd point at stale positions
-    /// until the debounced re-fontify, making content below an edit flicker.
+    /// Shift the active buffer's decorations to track an edit that replaced
+    /// `[start, old_end)` with `new_len` bytes (`line_delta` net newlines, the
+    /// edit beginning on `start_line`): its [`Overlays`] (see
+    /// [`Overlays::adjust_for_edit`]) plus the line-keyed gutter dots and
+    /// inline images, which otherwise stay on stale line numbers — a
+    /// breakpoint dot or an Org inline image would sit beside the wrong line
+    /// after a line is added above it, and nothing repaints them on edit.
     fn adjust_overlays(
         &mut self,
         start: usize,
@@ -2210,61 +2128,18 @@ impl Editor {
         line_delta: isize,
         start_line: usize,
     ) {
-        let delta = new_len as isize - (old_end - start) as isize;
-        let insertion = old_end == start;
-        // A byte offset, mapped past the edit: before it is fixed, inside it
-        // collapses to its start, after it shifts by the size delta.
-        let shift = |pos: usize| -> usize {
-            if pos <= start {
-                pos
-            } else if pos >= old_end {
-                (pos as isize + delta).max(start as isize) as usize
-            } else {
-                start
-            }
-        };
-        if delta != 0 {
-            self.active.overlays.faces.retain_mut(|(r, _)| {
-                *r = shift(r.start)..shift(r.end);
-                r.end > r.start
-            });
-            // A pure insertion exactly at a hide's start lands BEFORE it: the
-            // hide is concealment of the text that was there (a heading's `## `),
-            // not of whatever is typed in front of it. Anchoring the start would
-            // stretch the hide over the new text — typing at column 0 of a
-            // heading, or pressing Enter there, made the whole line vanish.
-            self.active.overlays.hidden.retain_mut(|r| {
-                let s = if insertion && r.start == start {
-                    start + new_len
-                } else {
-                    shift(r.start)
-                };
-                *r = s..shift(r.end);
-                r.end > r.start
-            });
-            self.active.overlays.props.retain_mut(|(r, _, _)| {
-                *r = shift(r.start)..shift(r.end);
-                r.end > r.start
-            });
-        }
-        if line_delta != 0 {
-            // Newlines inserted at column 0 push `start_line`'s own text down, so
-            // its line overlays go with it — else Enter at the start of a heading
-            // leaves the heading's scale/chevron on the now-empty line above.
-            let carry = insertion && self.active.buffer.line_range(start_line).start == start;
-            let o = &mut self.active.overlays;
-            shift_line_map(&mut o.indents, start_line, line_delta, carry);
-            shift_line_map(&mut o.scales, start_line, line_delta, carry);
-            shift_line_map(&mut o.suffixes, start_line, line_delta, carry);
-            shift_line_map(&mut o.fold_markers, start_line, line_delta, carry);
-            // Folded line ranges shift too, else editing above a folded subtree
-            // (e.g. pressing RET to push an Org heading down) leaves the fold
-            // hiding stale line numbers — the content lands on lines the fold no
-            // longer covers while old lines stay hidden. Nothing reapplies folds
-            // on edit, so without this the mis-hidden content persists until the
-            // next fold cycle.
-            shift_fold_ranges(&mut self.active.overlays.folds, start_line, line_delta);
-        }
+        // Newlines inserted at column 0 push `start_line`'s own text down, so
+        // its line decorations go with it — else Enter at the start of a
+        // heading leaves the heading's scale/chevron on the now-empty line
+        // above.
+        let carry = line_delta != 0
+            && old_end == start
+            && self.active.buffer.line_range(start_line).start == start;
+        let doc = &mut self.active;
+        doc.overlays
+            .adjust_for_edit(start, old_end, new_len, line_delta, start_line, carry);
+        shift_line_map(&mut doc.gutter_dots, start_line, line_delta, carry);
+        shift_line_map(&mut doc.line_images, start_line, line_delta, carry);
     }
 
     /// Whether replacing bytes `[a, b)` would touch a `read-only` text property
@@ -3465,7 +3340,7 @@ impl Editor {
     fn echo(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.status = message.into();
         let line = self.status.to_string();
-        push_capped(&mut self.messages, line.clone(), MESSAGES_CAP);
+        self.messages.push(line.clone());
         // Append live to `*Messages*` if it's open (active or any pane/inactive),
         // so the buffer accumulates like Emacs's `*Messages*`.
         self.append_to_log_buffer("*Messages*", &line);
@@ -3525,11 +3400,12 @@ impl Editor {
     /// to it or steals focus.
     fn append_to_log_buffer(&mut self, name: &str, line: &str) {
         let entry = format!("{line}\n");
+        let lh = f32::from(self.line_height);
         if self.active.name == name {
             let end = self.active.buffer.len();
             self.active.buffer.replace(end..end, &entry);
             self.lines.clear();
-        } else if let Some(doc) = self.inactive.iter_mut().find(|d| d.name == name) {
+        } else if let Some(doc) = self.inactive_doc_mut(name) {
             let end = doc.buffer.len();
             doc.buffer.replace(end..end, &entry);
             // Bound growth (only while not being viewed): keep the last N lines.
@@ -3546,7 +3422,6 @@ impl Editor {
                 doc.selected_range = doc
                     .buffer
                     .clamp_range(r.start.saturating_sub(cut)..r.end.saturating_sub(cut));
-                let lh = f32::from(self.line_height);
                 let scroll = f32::from(doc.scroll_offset) - dropped as f32 * lh;
                 doc.scroll_offset = px(scroll.max(0.0));
             }
@@ -3557,44 +3432,29 @@ impl Editor {
         }
     }
 
-    /// `C-h e`: switch to the editable `*Messages*` buffer (creating it from the
-    /// scrollback ring if it doesn't exist yet). New messages append live.
-    fn list_messages(&mut self, cx: &mut Context<Self>) {
-        if self.active.name == "*Messages*" {
+    /// Switch to the editable log buffer `name`, creating it from the
+    /// scrollback ring `ring` selects if it doesn't exist yet (`C-h e`:
+    /// `*Messages*`; `C-h l`: `*lsp-log*`, the captured server stderr). New
+    /// lines append live (see [`Self::append_to_log_buffer`]).
+    fn open_log_buffer(
+        &mut self,
+        name: &str,
+        ring: fn(&Self) -> &BoundedRing,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active.name == name {
             return;
         }
-        if let Some(index) = self.inactive.iter().position(|d| d.name == "*Messages*") {
+        if let Some(index) = self.inactive_index(name) {
             self.activate(index, true, cx);
         } else {
-            let text = if self.messages.is_empty() {
+            let ring = ring(self);
+            let text = if ring.is_empty() {
                 String::new()
             } else {
-                format!("{}\n", self.messages.join("\n"))
+                format!("{}\n", ring.join("\n"))
             };
-            let current = self.snapshot_active();
-            self.inactive.push(current);
-            self.install_active(make_log_document("*Messages*".to_string(), &text));
-            self.move_to(self.active.buffer.len(), cx);
-        }
-    }
-
-    /// `C-h l`: switch to the editable `*lsp-log*` buffer (creating it from the
-    /// captured stderr if needed). New server output appends live.
-    fn list_lsp_log(&mut self, cx: &mut Context<Self>) {
-        if self.active.name == "*lsp-log*" {
-            return;
-        }
-        if let Some(index) = self.inactive.iter().position(|d| d.name == "*lsp-log*") {
-            self.activate(index, true, cx);
-        } else {
-            let text = if self.lsp_log.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", self.lsp_log.join("\n"))
-            };
-            let current = self.snapshot_active();
-            self.inactive.push(current);
-            self.install_active(make_log_document("*lsp-log*".to_string(), &text));
+            self.switch_to_doc(make_log_document(name.to_string(), &text));
             self.move_to(self.active.buffer.len(), cx);
         }
     }
@@ -3609,9 +3469,9 @@ impl Editor {
         const LSP_LOG_SPLIT_RATIO: f32 = 0.75;
         let origin = self.selected_pane;
         let new_id = self.next_pane_id;
-        self.split_window_ratio(true, LSP_LOG_SPLIT_RATIO, cx);
+        self.split_window_ratio(SplitAxis::Vertical, LSP_LOG_SPLIT_RATIO, cx);
         self.select_pane(new_id, cx);
-        self.list_lsp_log(cx); // render into the new (selected) pane
+        self.open_log_buffer("*lsp-log*", |e| &e.lsp_log, cx); // render into the new (selected) pane
         self.select_pane(origin, cx); // hand focus back to the file
     }
 
@@ -3679,16 +3539,12 @@ impl Editor {
             .into_iter()
             .map(|d| {
                 let (line, col) = self.active.buffer.byte_to_position(d.range.start);
-                let sev = match d.severity {
-                    lsp::Severity::Error => "error",
-                    lsp::Severity::Warning => "warning",
-                    lsp::Severity::Info => "info",
-                    lsp::Severity::Hint => "hint",
-                };
+                let sev = d.severity.as_str();
                 let msg = d.message.replace(['\t', '\n'], " ");
                 format!("{line}\t{col}\t{sev}\t{msg}")
             })
             .collect();
+        let windows = self.layout.leaves();
         self.script.set_snapshot(crate::script::EditorSnapshot {
             name: self.active.name.clone(),
             line: self.active.buffer.line_index_at_byte(point),
@@ -3708,31 +3564,23 @@ impl Editor {
             props,
             locals,
             diagnostics,
-            windows: {
-                let mut leaves = Vec::new();
-                layout_leaves(&self.layout, &mut leaves);
-                leaves
-            },
-            window_buffers: {
-                let mut leaves = Vec::new();
-                layout_leaves(&self.layout, &mut leaves);
-                leaves
-                    .into_iter()
-                    .map(|id| {
-                        // The selected pane shows the live active buffer; others
-                        // show whatever their `pane.buffer` records.
-                        let name = if id == self.selected_pane {
-                            self.active.name.clone()
-                        } else {
-                            self.panes
-                                .iter()
-                                .find(|p| p.id == id)
-                                .map_or_else(|| self.active.name.clone(), |p| p.buffer.clone())
-                        };
-                        (id, name)
-                    })
-                    .collect()
-            },
+            window_buffers: windows
+                .iter()
+                .map(|&id| {
+                    // The selected pane shows the live active buffer; others
+                    // show whatever their `pane.buffer` records.
+                    let name = if id == self.selected_pane {
+                        self.active.name.clone()
+                    } else {
+                        self.panes
+                            .iter()
+                            .find(|p| p.id == id)
+                            .map_or_else(|| self.active.name.clone(), |p| p.buffer.clone())
+                    };
+                    (id, name)
+                })
+                .collect(),
+            windows,
             selected_window: self.selected_pane,
             lsp_ready: self.active_lsp_ready(),
             visible_lines: self.visible_line_range(),
@@ -3741,15 +3589,7 @@ impl Editor {
             helix_enabled: self.modal_helix,
             kbd_macro_recording: self.macro_recording.is_some(),
             prefix_count: self.prefix_count,
-            evil_state: match self.evil {
-                EvilState::Disabled => "",
-                EvilState::Normal => "normal",
-                EvilState::Insert => "insert",
-                EvilState::Visual => "visual",
-                EvilState::VisualLine => "visual-line",
-                EvilState::VisualBlock => "visual-block",
-            }
-            .to_string(),
+            evil_state: self.evil.as_str().to_string(),
             search_query: self.search_query.clone().unwrap_or_default(),
             search_forward: self.evil_search_forward,
             marks: self.active_marks(),
@@ -3872,27 +3712,12 @@ impl Editor {
     /// writes must follow it — otherwise the active buffer. EVERY decoration
     /// command arm must resolve its stores through this, so a redirected batch
     /// can never write into the wrong buffer.
-    fn redirect_target(&mut self) -> DecorationTarget<'_> {
-        // Out-of-range (a stale redirect) falls back to the active buffer
-        // rather than panicking.
-        match self.render_redirect.filter(|&i| i < self.inactive.len()) {
-            Some(i) => {
-                let doc = &mut self.inactive[i];
-                DecorationTarget {
-                    buffer: &doc.buffer,
-                    overlays: &mut doc.overlays,
-                    line_icons: &mut doc.line_icons,
-                    gutter_dots: &mut doc.gutter_dots,
-                    line_images: &mut doc.line_images,
-                }
-            }
-            None => DecorationTarget {
-                buffer: &self.active.buffer,
-                overlays: &mut self.active.overlays,
-                line_icons: &mut self.active.line_icons,
-                gutter_dots: &mut self.active.gutter_dots,
-                line_images: &mut self.active.line_images,
-            },
+    fn redirect_target(&mut self) -> &mut Document {
+        // A redirect whose buffer is no longer inactive falls back to the
+        // active buffer.
+        match self.redirect_index() {
+            Some(i) => &mut self.inactive[i],
+            None => &mut self.active,
         }
     }
 
@@ -4551,7 +4376,7 @@ impl Editor {
             .to_string();
         if style == "minibuffer" {
             let prefix = self.active.buffer.slice_to_string(word_range.clone());
-            self.completion_items = items.iter().map(|i| i.label.clone()).collect();
+            self.completing_candidates = items.iter().map(|i| i.label.clone()).collect();
             self.completion_range = Some(word_range);
             self.open_minibuffer(
                 "Complete: ",
@@ -4626,14 +4451,15 @@ impl Editor {
         if let Some(commands) = self.script.builtins_for(source) {
             // One builtin: apply directly (motions/edits manage their own undo).
             // A sequence: group it so the compound binding undoes as one unit.
-            if commands.len() == 1 {
-                self.apply_command(commands.into_iter().next().unwrap(), cx);
-            } else {
-                self.begin_undo_group();
-                for command in commands {
-                    self.apply_command(command, cx);
+            match <[EditorCommand; 1]>::try_from(commands) {
+                Ok([command]) => self.apply_command(command, cx),
+                Err(commands) => {
+                    self.begin_undo_group();
+                    for command in commands {
+                        self.apply_command(command, cx);
+                    }
+                    self.end_undo_group();
                 }
-                self.end_undo_group();
             }
             self.evil_clamp_cursor();
         } else {
@@ -4956,15 +4782,6 @@ fn language_for_path(path: &Path) -> Option<&'static str> {
         .or_else(|| crate::grammar::language_for_extension(ext))
 }
 
-/// Append `item` to a capped ring buffer, dropping the oldest entries on
-/// overflow (used by the `*Messages*` and `*lsp-log*` rings).
-fn push_capped(ring: &mut Vec<String>, item: String, cap: usize) {
-    ring.push(item);
-    if ring.len() > cap {
-        ring.drain(0..ring.len() - cap);
-    }
-}
-
 /// A blank document with the shared default editing state (empty selection, a
 /// fresh undo tree, no overlays/locals/faces). The `make_*` constructors layer
 /// the buffer contents, mode stack, and any special/hooks flags on top via
@@ -5004,34 +4821,36 @@ fn blank_document(
     }
 }
 
+/// The mode stack of a Scheme buffer. Scheme keeps the `steel` major mode
+/// (keymaps, hooks, built-in LSP); config / extension Scheme (`macros`: under
+/// the config dir, or `*.macros.scm`) instead gets the editor-aware
+/// `macros-steel` mode and `macros-scheme` server — completion/hover/
+/// diagnostics over the editor API. Both highlight with Scheme's grammar.
+fn scheme_mode_stack(macros: bool) -> ModeStack {
+    ModeStack::with_major(if macros {
+        Mode::new("macros-steel").with_language("macros-scheme")
+    } else {
+        Mode::new("steel").with_language("scheme")
+    })
+}
+
 /// Build a fresh document for `contents`, choosing modes/highlighter by file type.
 fn make_document(name: String, path: Option<PathBuf>, contents: &str) -> Document {
     let language = path.as_deref().and_then(language_for_path);
-    let mut modes = ModeStack::default();
-    modes.push(Mode::new("fundamental"));
-    let highlighter = match language {
-        // Scheme keeps the `steel` major mode (keymaps, hooks, built-in LSP).
-        // Config / extension Scheme (under the config dir, or `*.macros.scm`)
-        // instead gets the editor-aware `macros-steel` mode and `macros-scheme`
-        // server — completion/hover/diagnostics over the editor API.
+    let (modes, highlighter) = match language {
         Some("scheme") => {
-            if path
+            let macros = path
                 .as_deref()
-                .is_some_and(crate::runtime::is_macros_scheme_path)
-            {
-                modes.push(Mode::new("macros-steel").with_language("macros-scheme"));
-            } else {
-                modes.push(Mode::new("steel").with_language("scheme"));
-            }
-            Highlighter::scheme()
+                .is_some_and(crate::runtime::is_macros_scheme_path);
+            (scheme_mode_stack(macros), Highlighter::scheme())
         }
         // Other languages: a major mode named after the language, with its
         // bundled tree-sitter grammar (if any) for highlighting.
-        Some(lang) => {
-            modes.push(Mode::new(lang).with_language(lang));
-            Highlighter::for_language(lang)
-        }
-        None => None,
+        Some(lang) => (
+            ModeStack::with_major(Mode::new(lang).with_language(lang)),
+            Highlighter::for_language(lang),
+        ),
+        None => (ModeStack::fundamental(), None),
     };
     Document {
         highlighter,
@@ -5043,9 +4862,7 @@ fn make_document(name: String, path: Option<PathBuf>, contents: &str) -> Documen
 /// it can be edited/copied, `messages-mode` (no language) so no LSP/highlighter
 /// runs on it, `hooks_ran` so it never tries to start a server.
 fn make_log_document(name: String, contents: &str) -> Document {
-    let mut modes = ModeStack::default();
-    modes.push(Mode::new("fundamental"));
-    modes.push(Mode::new("messages-mode"));
+    let modes = ModeStack::with_major(Mode::new("messages-mode"));
     Document {
         hooks_ran: true,
         ..blank_document(name, None, contents, modes)
@@ -5056,9 +4873,7 @@ fn make_log_document(name: String, contents: &str) -> Document {
 /// highlighter, major mode `mode` stacked on `fundamental` so its keymap
 /// resolves. Hooks are marked run (these buffers don't take mode hooks).
 fn make_special_document(name: String, mode: &str, contents: &str) -> Document {
-    let mut modes = ModeStack::default();
-    modes.push(Mode::new("fundamental"));
-    modes.push(Mode::new(mode));
+    let modes = ModeStack::with_major(Mode::new(mode));
     Document {
         hooks_ran: true,
         special: Some(mode.to_string()),
@@ -5344,37 +5159,6 @@ fn prefix_arg_value(digits: Option<i64>, cu: u32) -> i64 {
         None => 1,
     };
     n.min(MAX_PREFIX_REPEAT)
-}
-
-/// Whether a command should repeat under a universal-argument (Emacs `C-u N`).
-/// Limited to motions and simple edits, where "do it N times" is the meaning;
-/// modal/meta commands (`M-x`, eval, quit, toggles, …) run once regardless.
-fn is_repeatable(command: &EditorCommand) -> bool {
-    use EditorCommand::*;
-    matches!(
-        command,
-        ForwardChar
-            | BackwardChar
-            | NextLine
-            | PreviousLine
-            | ForwardWord
-            | BackwardWord
-            | ScrollUp
-            | ScrollDown
-            | EvilScrollUp
-            | EvilScrollDown
-            | DeleteChar
-            | DeleteBackwardChar
-            | KillWord
-            | BackwardKillWord
-            | KillLine
-            | Newline
-            | OpenLine
-            | TransposeChars
-            | Yank
-            | Undo
-            | Redo
-    )
 }
 
 impl Focusable for Editor {
@@ -5724,9 +5508,8 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
-        file_completions, is_repeatable, language_for_path, last_sexp, line_span, prefix_arg_value,
-        push_capped, scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at,
-        top_level_form_at,
+        file_completions, language_for_path, last_sexp, line_span, prefix_arg_value,
+        scheme_symbol_token, symbol_at, top_level_form_at,
     };
 
     #[test]
@@ -5766,7 +5549,6 @@ mod tests {
         assert_eq!(char_col_byte(s, 2), 3); // start of 'b'
         assert_eq!(char_col_byte(s, 3), 4); // end
     }
-    use std::collections::HashMap;
 
     #[test]
     fn universal_argument_value() {
@@ -5789,14 +5571,14 @@ mod tests {
     #[test]
     fn prefix_arg_repeats_motions_and_edits_not_meta() {
         use EditorCommand::*;
-        assert!(is_repeatable(&NextLine));
-        assert!(is_repeatable(&ForwardChar));
-        assert!(is_repeatable(&KillLine));
-        assert!(is_repeatable(&Yank));
+        assert!(NextLine.is_repeatable());
+        assert!(ForwardChar.is_repeatable());
+        assert!(KillLine.is_repeatable());
+        assert!(Yank.is_repeatable());
         // Meta/modal commands must run once regardless of the argument.
-        assert!(!is_repeatable(&ExecuteExtendedCommand));
-        assert!(!is_repeatable(&Quit));
-        assert!(!is_repeatable(&SaveBuffer));
+        assert!(!ExecuteExtendedCommand.is_repeatable());
+        assert!(!Quit.is_repeatable());
+        assert!(!SaveBuffer.is_repeatable());
     }
 
     #[test]
@@ -5812,67 +5594,6 @@ mod tests {
         assert_eq!(scheme_symbol_token("("), (1, ""));
         // A string literal opens a fresh delimiter boundary.
         assert_eq!(scheme_symbol_token("(load-theme \"mac"), (13, "mac"));
-    }
-
-    #[test]
-    fn shift_line_map_tracks_inserted_and_deleted_lines() {
-        let base: HashMap<usize, usize> = [(0, 10), (3, 20), (5, 30)].into_iter().collect();
-        // Insert 2 lines after line 3: keys <=3 stay, keys >3 shift by +2.
-        let mut ins = base.clone();
-        shift_line_map(&mut ins, 3, 2, false);
-        assert_eq!(ins.get(&0), Some(&10));
-        assert_eq!(ins.get(&3), Some(&20));
-        assert_eq!(ins.get(&7), Some(&30)); // 5 -> 7
-        assert_eq!(ins.get(&5), None);
-        // Delete 2 lines after line 0: key 3 -> 1, key 5 -> 3.
-        let mut del = base.clone();
-        shift_line_map(&mut del, 0, -2, false);
-        assert_eq!(del.get(&0), Some(&10));
-        assert_eq!(del.get(&1), Some(&20));
-        assert_eq!(del.get(&3), Some(&30));
-        // A key that would collapse into the deleted region is dropped.
-        let mut collapse = base.clone();
-        shift_line_map(&mut collapse, 0, -4, false);
-        assert_eq!(collapse.get(&0), Some(&10)); // 0 stays
-        assert!(!collapse.values().any(|&v| v == 20)); // 3 -> -1 -> dropped
-    }
-
-    #[test]
-    // These fixtures really are one-element vectors OF ranges (fold spans),
-    // which the lint would reject as a probable typo for `(a..b).collect()`.
-    #[allow(clippy::single_range_in_vec_init)]
-    fn shift_fold_ranges_tracks_edits_above_and_within_a_fold() {
-        use std::ops::Range;
-        // A folded Org subtree hiding body lines 1..4 (heading on line 0).
-        let base: Vec<Range<usize>> = vec![1..4];
-        // Press RET above the heading: +1 line at line 0 pushes the fold down.
-        // This is the reported bug — content must stay hidden at its NEW lines.
-        let mut ins = base.clone();
-        shift_fold_ranges(&mut ins, 0, 1);
-        assert_eq!(ins, vec![2..5]);
-        // Edit on the heading line (== fold start - 1) still counts as "before"
-        // the hidden range, so the whole range shifts by the delta.
-        let mut on_heading = base.clone();
-        shift_fold_ranges(&mut on_heading, 0, 2);
-        assert_eq!(on_heading, vec![3..6]);
-        // Delete a line above: the fold moves up to keep covering the body.
-        let mut del = vec![3..6];
-        shift_fold_ranges(&mut del, 0, -1);
-        assert_eq!(del, vec![2..5]);
-        // An edit inside the folded region grows only the end (start is fixed).
-        let mut within = vec![1..4];
-        shift_fold_ranges(&mut within, 2, 1);
-        assert_eq!(within, vec![1..5]);
-        // Deleting through the whole folded body collapses the range (both ends
-        // clamp back to the edit line) so it is dropped rather than left hiding
-        // the wrong lines.
-        let mut collapse = vec![1..4];
-        shift_fold_ranges(&mut collapse, 0, -4);
-        assert!(collapse.is_empty());
-        // A fold entirely below the edit still shifts; delta 0 is a no-op.
-        let mut noop = vec![1..4];
-        shift_fold_ranges(&mut noop, 0, 0);
-        assert_eq!(noop, vec![1..4]);
     }
 
     #[test]
@@ -5901,18 +5622,6 @@ mod tests {
         assert_eq!(line_span(&buf, 2, 99), (5, 9));
     }
 
-    #[test]
-    fn push_capped_drops_oldest_over_cap() {
-        let mut ring = Vec::new();
-        for i in 0..5 {
-            push_capped(&mut ring, format!("m{i}"), 3);
-        }
-        // Keeps the newest `cap`, oldest dropped, order preserved.
-        assert_eq!(
-            ring,
-            vec!["m2".to_string(), "m3".to_string(), "m4".to_string()]
-        );
-    }
     use std::path::Path;
 
     #[test]

@@ -298,11 +298,11 @@ impl Editor {
             cx.stop_propagation();
         } else if self.is_isearch() && ks.modifiers.control && ks.key == "s" {
             // C-s within isearch: repeat forward (Emacs).
-            self.isearch_repeat(true, cx);
+            self.isearch_repeat(Direction::Forward, cx);
             cx.stop_propagation();
         } else if self.is_isearch() && ks.modifiers.control && ks.key == "r" {
             // C-r within isearch: repeat backward.
-            self.isearch_repeat(false, cx);
+            self.isearch_repeat(Direction::Backward, cx);
             cx.stop_propagation();
         } else if ks.modifiers.platform
             && ks.key == "v"
@@ -1079,10 +1079,11 @@ impl Editor {
         // Dragging a split divider: set the split's ratio from the pointer's
         // position within the split's bounds (union of the panes under it).
         if let Some(drag) = self.resizing.clone() {
-            let mut leaves = Vec::new();
-            if let Some(node) = node_at(&self.layout, &drag.path) {
-                layout_leaves(node, &mut leaves);
-            }
+            let leaves = self
+                .layout
+                .node_at(&drag.path)
+                .map(WindowLayout::leaves)
+                .unwrap_or_default();
             let rects: Vec<Bounds<Pixels>> = leaves
                 .iter()
                 .filter_map(|id| {
@@ -1094,14 +1095,14 @@ impl Editor {
                 .collect();
             if let Some(area) = union_bounds(&rects) {
                 let pos = event.position;
-                let ratio = if drag.vertical {
+                let ratio = if drag.axis == SplitAxis::Vertical {
                     (f32::from(pos.y) - f32::from(area.top()))
                         / f32::from(area.size.height).max(1.0)
                 } else {
                     (f32::from(pos.x) - f32::from(area.left()))
                         / f32::from(area.size.width).max(1.0)
                 };
-                if set_ratio_at(&mut self.layout, &drag.path, ratio) {
+                if self.layout.set_ratio_at(&drag.path, ratio) {
                     cx.notify();
                 }
             }

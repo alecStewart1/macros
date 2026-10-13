@@ -10,6 +10,216 @@ use gpui::{Context, RenderImage, SharedString};
 
 use super::*;
 
+/// Overlays / text properties on a buffer (the Emacs overlay + text-property
+/// model). Sub-line face ranges layer over tree-sitter highlighting; folded line
+/// ranges are hidden from display; text properties carry arbitrary metadata
+/// Scheme can read back. All are byte/line-range based and reset only when the
+/// buffer itself is replaced.
+#[derive(Default)]
+pub(super) struct Overlays {
+    /// `(byte_range, face)` — overrides syntax highlighting in that range.
+    pub(super) faces: Vec<(Range<usize>, SharedString)>,
+    /// Byte ranges hidden from display, without changing the buffer text.
+    pub(super) hidden: Vec<Range<usize>>,
+    /// Folded line ranges (`start..end`, end-exclusive) — hidden from display.
+    pub(super) folds: Vec<Range<usize>>,
+    /// `(byte_range, key, value)` text properties (Emacs `put-text-property`).
+    pub(super) props: Vec<(Range<usize>, String, String)>,
+    /// `line -> (suffix_text, face)` virtual text appended after a line (inlay
+    /// hints, blame, inline diagnostics).
+    pub(super) suffixes: HashMap<usize, (SharedString, SharedString)>,
+    /// `line -> columns` of virtual left indentation (display-only), the Org
+    /// `org-indent-mode` look. The buffer text is untouched.
+    pub(super) indents: HashMap<usize, usize>,
+    /// `line -> font-size multiplier` for whole-line scaling (markdown/org
+    /// headings render larger). A scaled line reserves extra display rows the
+    /// same way an inline image does, so cursor/scroll math stays correct.
+    pub(super) scales: HashMap<usize, f32>,
+    /// `line -> is_open` fold chevrons painted in the gutter. Scheme declares a
+    /// marker on each foldable header line (`set-fold-marker`); the value is the
+    /// glyph state (open = expanded). A click on the chevron is hit-tested and
+    /// routed to Scheme's `fold-toggle-at-line`, which mutates `folds` to match.
+    pub(super) fold_markers: HashMap<usize, bool>,
+}
+
+impl Overlays {
+    /// Shift the overlays to track an edit that replaced `[start, old_end)`
+    /// with `new_len` bytes (`line_delta` net newlines, the edit beginning on
+    /// `start_line`; `carry`: newlines were inserted at column 0 of
+    /// `start_line`, so its line entries move down with its text). Byte-range
+    /// overlays (faces, hidden, props) move with the text; whole-line overlays
+    /// (indents, suffixes, scales, chevrons, folds) shift by the line delta
+    /// when lines were added/removed. Without this they'd point at stale
+    /// positions until the debounced re-fontify, making content below an edit
+    /// flicker.
+    pub(super) fn adjust_for_edit(
+        &mut self,
+        start: usize,
+        old_end: usize,
+        new_len: usize,
+        line_delta: isize,
+        start_line: usize,
+        carry: bool,
+    ) {
+        let delta = new_len as isize - (old_end - start) as isize;
+        let insertion = old_end == start;
+        // A byte offset, mapped past the edit: before it is fixed, inside it
+        // collapses to its start, after it shifts by the size delta.
+        let shift = |pos: usize| -> usize {
+            if pos <= start {
+                pos
+            } else if pos >= old_end {
+                (pos as isize + delta).max(start as isize) as usize
+            } else {
+                start
+            }
+        };
+        if delta != 0 {
+            self.faces.retain_mut(|(r, _)| {
+                *r = shift(r.start)..shift(r.end);
+                r.end > r.start
+            });
+            // A pure insertion exactly at a hide's start lands BEFORE it: the
+            // hide is concealment of the text that was there (a heading's `## `),
+            // not of whatever is typed in front of it. Anchoring the start would
+            // stretch the hide over the new text — typing at column 0 of a
+            // heading, or pressing Enter there, made the whole line vanish.
+            self.hidden.retain_mut(|r| {
+                let s = if insertion && r.start == start {
+                    start + new_len
+                } else {
+                    shift(r.start)
+                };
+                *r = s..shift(r.end);
+                r.end > r.start
+            });
+            self.props.retain_mut(|(r, _, _)| {
+                *r = shift(r.start)..shift(r.end);
+                r.end > r.start
+            });
+        }
+        if line_delta != 0 {
+            shift_line_map(&mut self.indents, start_line, line_delta, carry);
+            shift_line_map(&mut self.scales, start_line, line_delta, carry);
+            shift_line_map(&mut self.suffixes, start_line, line_delta, carry);
+            shift_line_map(&mut self.fold_markers, start_line, line_delta, carry);
+            // Folded line ranges shift too, else editing above a folded subtree
+            // (e.g. pressing RET to push an Org heading down) leaves the fold
+            // hiding stale line numbers — the content lands on lines the fold no
+            // longer covers while old lines stay hidden. Nothing reapplies folds
+            // on edit, so without this the mis-hidden content persists until the
+            // next fold cycle.
+            shift_fold_ranges(&mut self.folds, start_line, line_delta);
+        }
+    }
+
+    /// Hidden ranges intersecting the line spanning bytes `line`, as
+    /// `(start, end)` offsets relative to the line start, sorted and merged.
+    fn holes_in_line(&self, line: Range<usize>) -> Vec<(usize, usize)> {
+        let mut holes: Vec<(usize, usize)> = self
+            .hidden
+            .iter()
+            .filter_map(|r| {
+                let s = r.start.max(line.start);
+                let e = r.end.min(line.end);
+                (s < e).then(|| (s - line.start, e - line.start))
+            })
+            .collect();
+        if holes.len() > 1 {
+            holes.sort_unstable();
+            let mut merged: Vec<(usize, usize)> = Vec::with_capacity(holes.len());
+            for (s, e) in holes {
+                match merged.last_mut() {
+                    Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                    _ => merged.push((s, e)),
+                }
+            }
+            holes = merged;
+        }
+        holes
+    }
+
+    /// Whether buffer line `line` is hidden by a fold.
+    pub(super) fn is_line_folded(&self, line: usize) -> bool {
+        self.folds.iter().any(|r| r.contains(&line))
+    }
+
+    /// Virtual left indentation (in columns) for `line`, 0 if none.
+    fn indent(&self, line: usize) -> usize {
+        self.indents.get(&line).copied().unwrap_or(0)
+    }
+
+    /// The font-size multiplier for `line` (1.0 = unscaled).
+    fn scale(&self, line: usize) -> f32 {
+        self.scales.get(&line).copied().unwrap_or(1.0)
+    }
+}
+
+/// Re-key a line-indexed overlay map after `line_delta` lines were inserted
+/// (positive) or removed (negative) starting just after `start_line`. Entries on
+/// or before `start_line` keep their line; later ones shift; any that would land
+/// at/before `start_line` (deleted out) are dropped.
+pub(super) fn shift_line_map<V>(
+    map: &mut HashMap<usize, V>,
+    start_line: usize,
+    line_delta: isize,
+    carry_start_line: bool,
+) {
+    if line_delta == 0 {
+        return;
+    }
+    // Lines inserted at column 0 of `start_line`: its entry moves with its text.
+    // No entry can sit in the freshly inserted lines, so this can't collide.
+    let carried = if carry_start_line && line_delta > 0 {
+        map.remove(&start_line)
+    } else {
+        None
+    };
+    // Re-key only the entries past the edit, in place. Process in an order that
+    // never overwrites an entry we haven't moved yet: highest-first when shifting
+    // up, lowest-first when shifting down. Entries shifted to at/before
+    // `start_line` (deleted out) are dropped.
+    let mut movers: Vec<usize> = map.keys().copied().filter(|&l| l > start_line).collect();
+    if line_delta > 0 {
+        movers.sort_unstable_by(|a, b| b.cmp(a));
+    } else {
+        movers.sort_unstable();
+    }
+    for line in movers {
+        let Some(v) = map.remove(&line) else { continue };
+        let shifted = line as isize + line_delta;
+        if shifted > start_line as isize {
+            map.insert(shifted as usize, v);
+        }
+    }
+    if let Some(v) = carried {
+        map.insert(start_line + line_delta as usize, v);
+    }
+}
+
+/// Shift folded line ranges to track an edit that added/removed `line_delta`
+/// lines beginning on `start_line`. A line at/before `start_line` is fixed; a
+/// later line moves by `line_delta` (clamped to `start_line`) — the line-space
+/// twin of [`Overlays::adjust_for_edit`]'s byte shift. Ranges that collapse to empty are
+/// dropped. Without this, editing above a folded subtree (e.g. RET to push an
+/// Org heading down) leaves the fold hiding stale line numbers.
+fn shift_fold_ranges(folds: &mut Vec<Range<usize>>, start_line: usize, line_delta: isize) {
+    if line_delta == 0 {
+        return;
+    }
+    let shift = |l: usize| -> usize {
+        if l <= start_line {
+            l
+        } else {
+            (l as isize + line_delta).max(start_line as isize) as usize
+        }
+    };
+    folds.retain_mut(|r| {
+        *r = shift(r.start)..shift(r.end);
+        r.end > r.start
+    });
+}
+
 impl Editor {
     /// Sub-line face ranges, for the element to layer over syntax highlighting.
     pub fn range_faces(&self) -> &[(Range<usize>, SharedString)] {
@@ -27,29 +237,7 @@ impl Editor {
             return Vec::new();
         }
         let lr = self.active.buffer.line_range(line);
-        let mut holes: Vec<(usize, usize)> = self
-            .active
-            .overlays
-            .hidden
-            .iter()
-            .filter_map(|r| {
-                let s = r.start.max(lr.start);
-                let e = r.end.min(lr.end);
-                (s < e).then(|| (s - lr.start, e - lr.start))
-            })
-            .collect();
-        if holes.len() > 1 {
-            holes.sort_unstable();
-            let mut merged: Vec<(usize, usize)> = Vec::with_capacity(holes.len());
-            for (s, e) in holes {
-                match merged.last_mut() {
-                    Some(last) if s <= last.1 => last.1 = last.1.max(e),
-                    _ => merged.push((s, e)),
-                }
-            }
-            holes = merged;
-        }
-        holes
+        self.active.overlays.holes_in_line(lr)
     }
 
     /// Whether any line is folded (the element's fast path skips fold handling).
@@ -59,7 +247,7 @@ impl Editor {
 
     /// Whether buffer line `line` is hidden by a fold.
     pub fn is_line_invisible(&self, line: usize) -> bool {
-        self.active.overlays.folds.iter().any(|r| r.contains(&line))
+        self.active.overlays.is_line_folded(line)
     }
 
     /// Whether any gutter fold chevron is set (element's fast path skips them).
@@ -140,12 +328,7 @@ impl Editor {
     /// Virtual left indentation (in columns) for buffer `line`, 0 if none.
     /// Display-only — the Org `org-indent-mode` look.
     pub fn line_indent(&self, line: usize) -> usize {
-        self.active
-            .overlays
-            .indents
-            .get(&line)
-            .copied()
-            .unwrap_or(0)
+        self.active.overlays.indent(line)
     }
 
     /// Whether the active buffer is an Org buffer (set by `org-mode`). The
@@ -221,12 +404,7 @@ impl Editor {
 
     /// The font-size multiplier for `line` (1.0 = unscaled).
     pub fn line_scale(&self, line: usize) -> f32 {
-        self.active
-            .overlays
-            .scales
-            .get(&line)
-            .copied()
-            .unwrap_or(1.0)
+        self.active.overlays.scale(line)
     }
 
     /// Extra display rows a scaled line reserves beyond its own — so a heading
@@ -287,7 +465,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let path = PathBuf::from(expand_path(&path));
-        let redirected = self.render_redirect.is_some();
+        let redirected = self.redirect_index().is_some();
         self.redirect_target()
             .line_images
             .insert(line, (path.clone(), max_width));
@@ -373,4 +551,117 @@ impl Editor {
     }
 
     // --- Async (subprocess streaming, timers) -----------------------------
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{shift_fold_ranges, shift_line_map};
+
+    #[test]
+    fn shift_line_map_tracks_inserted_and_deleted_lines() {
+        let base: HashMap<usize, usize> = [(0, 10), (3, 20), (5, 30)].into_iter().collect();
+        // Insert 2 lines after line 3: keys <=3 stay, keys >3 shift by +2.
+        let mut ins = base.clone();
+        shift_line_map(&mut ins, 3, 2, false);
+        assert_eq!(ins.get(&0), Some(&10));
+        assert_eq!(ins.get(&3), Some(&20));
+        assert_eq!(ins.get(&7), Some(&30)); // 5 -> 7
+        assert_eq!(ins.get(&5), None);
+        // Delete 2 lines after line 0: key 3 -> 1, key 5 -> 3.
+        let mut del = base.clone();
+        shift_line_map(&mut del, 0, -2, false);
+        assert_eq!(del.get(&0), Some(&10));
+        assert_eq!(del.get(&1), Some(&20));
+        assert_eq!(del.get(&3), Some(&30));
+        // A key that would collapse into the deleted region is dropped.
+        let mut collapse = base.clone();
+        shift_line_map(&mut collapse, 0, -4, false);
+        assert_eq!(collapse.get(&0), Some(&10)); // 0 stays
+        assert!(!collapse.values().any(|&v| v == 20)); // 3 -> -1 -> dropped
+    }
+
+    #[test]
+    // These fixtures really are one-element vectors OF ranges (fold spans),
+    // which the lint would reject as a probable typo for `(a..b).collect()`.
+    #[allow(clippy::single_range_in_vec_init)]
+    fn shift_fold_ranges_tracks_edits_above_and_within_a_fold() {
+        use std::ops::Range;
+        // A folded Org subtree hiding body lines 1..4 (heading on line 0).
+        let base: Vec<Range<usize>> = vec![1..4];
+        // Press RET above the heading: +1 line at line 0 pushes the fold down.
+        // This is the reported bug — content must stay hidden at its NEW lines.
+        let mut ins = base.clone();
+        shift_fold_ranges(&mut ins, 0, 1);
+        assert_eq!(ins, vec![2..5]);
+        // Edit on the heading line (== fold start - 1) still counts as "before"
+        // the hidden range, so the whole range shifts by the delta.
+        let mut on_heading = base.clone();
+        shift_fold_ranges(&mut on_heading, 0, 2);
+        assert_eq!(on_heading, vec![3..6]);
+        // Delete a line above: the fold moves up to keep covering the body.
+        let mut del = vec![3..6];
+        shift_fold_ranges(&mut del, 0, -1);
+        assert_eq!(del, vec![2..5]);
+        // An edit inside the folded region grows only the end (start is fixed).
+        let mut within = vec![1..4];
+        shift_fold_ranges(&mut within, 2, 1);
+        assert_eq!(within, vec![1..5]);
+        // Deleting through the whole folded body collapses the range (both ends
+        // clamp back to the edit line) so it is dropped rather than left hiding
+        // the wrong lines.
+        let mut collapse = vec![1..4];
+        shift_fold_ranges(&mut collapse, 0, -4);
+        assert!(collapse.is_empty());
+        // A fold entirely below the edit still shifts; delta 0 is a no-op.
+        let mut noop = vec![1..4];
+        shift_fold_ranges(&mut noop, 0, 0);
+        assert_eq!(noop, vec![1..4]);
+    }
+}
+
+/// Line-keyed decorations that live on the [`Document`] rather than in
+/// [`Overlays`] follow edits too.
+#[cfg(test)]
+mod editor_tests {
+    use gpui::{SharedString, TestAppContext};
+
+    use super::*;
+
+    #[gpui::test]
+    fn gutter_dots_and_line_images_follow_line_edits(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let editor = cx.new(Editor::new);
+        editor.update(cx, |e, _| {
+            e.switch_to_doc(make_document("t".into(), None, "a\nb\nc\n"));
+            e.active
+                .gutter_dots
+                .insert(1, SharedString::from("dap-breakpoint"));
+            e.active
+                .line_images
+                .insert(2, (PathBuf::from("/tmp/x.png"), 0));
+            // A line added above both: they move down with their text.
+            e.edit(0..0, "new\n");
+            assert_eq!(
+                e.active.gutter_dots.keys().copied().collect::<Vec<_>>(),
+                [2]
+            );
+            assert_eq!(
+                e.active.line_images.keys().copied().collect::<Vec<_>>(),
+                [3]
+            );
+            // Deleting that line moves them back up.
+            e.edit(0..4, "");
+            assert!(e.active.gutter_dots.contains_key(&1));
+            assert!(e.active.line_images.contains_key(&2));
+            // An edit within a line leaves them put.
+            e.edit(0..1, "xyz");
+            assert!(e.active.gutter_dots.contains_key(&1));
+            assert!(e.active.line_images.contains_key(&2));
+        });
+    }
 }

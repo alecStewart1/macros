@@ -1502,7 +1502,12 @@ impl Editor {
                 self.vim.op = Some(op);
                 self.vim.search_count = count;
                 let prompt = if forward { "/" } else { "?" };
-                self.open_minibuffer(prompt, MinibufferPurpose::OperatorSearch(forward), "", cx);
+                self.open_minibuffer(
+                    prompt,
+                    MinibufferPurpose::OperatorSearch(Direction::from_forward(forward)),
+                    "",
+                    cx,
+                );
             } else {
                 self.evil_run_operator(op, count, &expr, cx);
             }

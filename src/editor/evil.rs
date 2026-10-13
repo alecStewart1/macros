@@ -608,11 +608,11 @@ impl Editor {
     // --- evil search (`/` `?` `n` `N`) and ex commands (`:`) --------------
 
     pub(super) fn evil_search_forward(&mut self, cx: &mut Context<Self>) {
-        self.open_minibuffer("/", MinibufferPurpose::SearchForward, "", cx);
+        self.open_minibuffer("/", MinibufferPurpose::Search(Direction::Forward), "", cx);
     }
 
     pub(super) fn evil_search_backward(&mut self, cx: &mut Context<Self>) {
-        self.open_minibuffer("?", MinibufferPurpose::SearchBackward, "", cx);
+        self.open_minibuffer("?", MinibufferPurpose::Search(Direction::Backward), "", cx);
     }
 
     /// `n` — repeat the last search in its original direction (vim semantics:
@@ -765,11 +765,11 @@ impl Editor {
                 "bp" | "bN" | "bprev" | "bprevious" | "bNext" => self.previous_buffer(cx),
                 "bd" | "bdel" | "bdelete" => self.kill_buffer(cx),
                 // Windows (Vim abbreviations): :split / :vsplit and friends.
-                "split" | "sp" | "spl" => self.split_window(true, cx),
-                "vsplit" | "vs" | "vsp" | "vspl" => self.split_window(false, cx),
+                "split" | "sp" | "spl" => self.split_window(SplitAxis::Vertical, cx),
+                "vsplit" | "vs" | "vsp" | "vspl" => self.split_window(SplitAxis::Horizontal, cx),
                 "only" | "on" => self.delete_other_windows(cx),
-                "new" => self.new_window_buffer(true, cx),
-                "vne" | "vnew" => self.new_window_buffer(false, cx),
+                "new" => self.new_window_buffer(SplitAxis::Vertical, cx),
+                "vne" | "vnew" => self.new_window_buffer(SplitAxis::Horizontal, cx),
                 "winc" | "wincmd" => self.run_wincmd(arg, cx),
                 "close" | "clo" => self.delete_window(cx),
                 "reg" | "registers" | "di" | "display" => self.show_registers(arg, cx),
