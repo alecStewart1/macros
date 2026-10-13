@@ -22,6 +22,7 @@ use gpui::{Context, Keystroke, MouseButton, Pixels, Point, SharedString};
 
 use super::input::Handled;
 use super::*;
+use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt, CellFormats, NumCode};
 use crate::grid::cmd::{GridCmd, GridInvocation, GridOp};
 use crate::grid::infer::ColType;
@@ -190,8 +191,9 @@ enum Hist {
     },
     /// Formatting set by hand: `(row, col, before, after)` per cell.
     Format(Vec<(usize, usize, CellFmt, CellFmt)>),
+    /// A column's width or a row's height set.
     Resize {
-        cols: bool,
+        axis: Axis,
         idx: usize,
         old: f64,
         new: f64,
@@ -539,24 +541,16 @@ impl GridDoc {
         Some(cells)
     }
 
-    /// One shown row up or down from `r` (staying put at the edge).
-    pub(super) fn row_step(&self, r: usize, down: bool) -> usize {
-        if down {
-            self.view.rows.next_visible(r + 1)
+    /// One shown row (column) on from `i` — down (right) when `forward`,
+    /// else up (left) — staying put at the edge.
+    pub(super) fn step(&self, axis: Axis, i: usize, forward: bool) -> usize {
+        let a = self.view.axis(axis);
+        if forward {
+            a.next_visible(i + 1)
         } else {
-            r.checked_sub(1)
-                .and_then(|p| self.view.rows.prev_visible(p))
-                .unwrap_or(r)
-        }
-    }
-
-    pub(super) fn col_step(&self, c: usize, right: bool) -> usize {
-        if right {
-            self.view.cols.next_visible(c + 1)
-        } else {
-            c.checked_sub(1)
-                .and_then(|p| self.view.cols.prev_visible(p))
-                .unwrap_or(c)
+            i.checked_sub(1)
+                .and_then(|p| a.prev_visible(p))
+                .unwrap_or(i)
         }
     }
 
@@ -792,17 +786,14 @@ impl GridDoc {
                 (cells.first().map(|&(r, c, ..)| (r, c)), false)
             }
             Hist::Resize {
-                cols,
+                axis,
                 idx,
                 old,
                 new,
             } => {
-                let axis = if *cols {
-                    &mut self.view.cols
-                } else {
-                    &mut self.view.rows
-                };
-                axis.set(*idx, if undo { *old } else { *new });
+                self.view
+                    .axis_mut(*axis)
+                    .set(*idx, if undo { *old } else { *new });
                 (None, true)
             }
             Hist::Hide { cols, hidden } => {
@@ -881,18 +872,15 @@ impl GridDoc {
         self.hist.len()
     }
 
-    fn resize(&mut self, cols: bool, idx: usize, size: f64) {
-        let axis = if cols {
-            &mut self.view.cols
-        } else {
-            &mut self.view.rows
-        };
-        let old = axis.size(idx);
-        axis.set(idx, size);
-        let new = axis.size(idx);
+    /// Set column (or row) `idx`'s size, as an undo step.
+    fn resize(&mut self, axis: Axis, idx: usize, size: f64) {
+        let sizes = self.view.axis_mut(axis);
+        let old = sizes.size(idx);
+        sizes.set(idx, size);
+        let new = sizes.size(idx);
         if (old - new).abs() > f64::EPSILON {
             self.record(Hist::Resize {
-                cols,
+                axis,
                 idx,
                 old,
                 new,
@@ -950,8 +938,8 @@ impl GridDoc {
     /// where it was. True when it did.
     fn leave_line_at_edge(&mut self, kind: SelKind) -> bool {
         let at_edge = match kind {
-            SelKind::Cols => self.row_step(self.view.cursor.0, false) == self.view.cursor.0,
-            _ => self.col_step(self.view.cursor.1, false) == self.view.cursor.1,
+            SelKind::Cols => self.step(Axis::Rows, self.view.cursor.0, false) == self.view.cursor.0,
+            _ => self.step(Axis::Cols, self.view.cursor.1, false) == self.view.cursor.1,
         };
         let line = !self.sticky_sel && self.line_selected(kind);
         if at_edge && line {
@@ -1289,11 +1277,11 @@ impl GridGeom {
 pub(super) enum GridDrag {
     /// Extending a cell/row/column selection.
     Select { pane: usize },
-    /// Resizing a column (`cols`) or row: index, its start (screen px), and
-    /// the live size (unzoomed) shown by the guide line.
+    /// Resizing a column or row: index, its start (screen px), and the live
+    /// size (unzoomed) shown by the guide line.
     Resize {
         pane: usize,
-        cols: bool,
+        axis: Axis,
         idx: usize,
         start: f32,
         size: f64,
@@ -1989,11 +1977,11 @@ impl Editor {
                 error = Some("grid-set-zoom: zoom must be a percentage".into());
             }
             ColumnWidth { col: Some(c), px } => {
-                g.resize(true, c, px.max(0.0));
+                g.resize(Axis::Cols, c, px.max(0.0));
                 persist = true;
             }
             RowHeight { row: Some(r), px } => {
-                g.resize(false, r, px.max(0.0));
+                g.resize(Axis::Rows, r, px.max(0.0));
                 persist = true;
             }
             ColumnWidth { .. } | RowHeight { .. } => {
@@ -2374,36 +2362,36 @@ impl Editor {
         match cmd {
             // Across a whole-line selection, step it to take in the next line.
             Left | Right if g.line_selected(SelKind::Cols) => {
-                g.move_to(r, g.col_step(c, cmd == Right), true)
+                g.move_to(r, g.step(Axis::Cols, c, cmd == Right), true)
             }
             Up | Down if g.line_selected(SelKind::Rows) => {
-                g.move_to(g.row_step(r, cmd == Down), c, true)
+                g.move_to(g.step(Axis::Rows, r, cmd == Down), c, true)
             }
-            Left if g.col_step(c, false) == c => g.select_line_at_edge(SelKind::Rows),
+            Left if g.step(Axis::Cols, c, false) == c => g.select_line_at_edge(SelKind::Rows),
             Right if g.leave_line_at_edge(SelKind::Rows) => {}
-            Up if g.row_step(r, false) == r => g.select_line_at_edge(SelKind::Cols),
+            Up if g.step(Axis::Rows, r, false) == r => g.select_line_at_edge(SelKind::Cols),
             Down if g.leave_line_at_edge(SelKind::Cols) => {}
-            Left => g.move_to(r, g.col_step(c, false), false),
-            Right => g.move_to(r, g.col_step(c, true), false),
-            Up => g.move_to(g.row_step(r, false), c, false),
-            Down => g.move_to(g.row_step(r, true), c, false),
-            ExtendLeft => g.move_to(r, g.col_step(c, false), true),
-            ExtendRight => g.move_to(r, g.col_step(c, true), true),
-            ExtendUp => g.move_to(g.row_step(r, false), c, true),
-            ExtendDown => g.move_to(g.row_step(r, true), c, true),
+            Left => g.move_to(r, g.step(Axis::Cols, c, false), false),
+            Right => g.move_to(r, g.step(Axis::Cols, c, true), false),
+            Up => g.move_to(g.step(Axis::Rows, r, false), c, false),
+            Down => g.move_to(g.step(Axis::Rows, r, true), c, false),
+            ExtendLeft => g.move_to(r, g.step(Axis::Cols, c, false), true),
+            ExtendRight => g.move_to(r, g.step(Axis::Cols, c, true), true),
+            ExtendUp => g.move_to(g.step(Axis::Rows, r, false), c, true),
+            ExtendDown => g.move_to(g.step(Axis::Rows, r, true), c, true),
             NextCell => {
                 if cols > 0 && c + 1 >= cols && r + 1 < rows.max(r + 2) {
-                    g.move_to(g.row_step(r, true), 0, false);
+                    g.move_to(g.step(Axis::Rows, r, true), 0, false);
                 } else {
-                    g.move_to(r, g.col_step(c, true), false);
+                    g.move_to(r, g.step(Axis::Cols, c, true), false);
                 }
             }
             PreviousCell => {
                 if c == 0 && r > 0 {
                     let last = cols.saturating_sub(1);
-                    g.move_to(g.row_step(r, false), last, false);
+                    g.move_to(g.step(Axis::Rows, r, false), last, false);
                 } else {
-                    g.move_to(r, g.col_step(c, false), false);
+                    g.move_to(r, g.step(Axis::Cols, c, false), false);
                 }
             }
             EdgeLeft | EdgeRight | EdgeUp | EdgeDown => {
@@ -2446,7 +2434,7 @@ impl Editor {
                 let down = matches!(cmd, PageDown | HalfPageDown);
                 let mut nr = r;
                 for _ in 0..n {
-                    nr = g.row_step(nr, down);
+                    nr = g.step(Axis::Rows, nr, down);
                 }
                 let dy = g.view.rows.start(nr) - g.view.rows.start(r);
                 g.view.scroll_y += dy;
@@ -2645,7 +2633,7 @@ impl Editor {
                 } else {
                     (w - step).max(view::MIN_SIZE)
                 };
-                g.resize(true, c, nw);
+                g.resize(Axis::Cols, c, nw);
                 self.grid_persist_view();
             }
             AutofitColumn | AutofitColumnFull => {
@@ -2658,7 +2646,7 @@ impl Editor {
                     let rows_iter = sample.chain(visible.filter(|&x| x < rows));
                     g.fit_width(c, rows_iter, char_w, max_fit)
                 };
-                g.resize(true, c, w);
+                g.resize(Axis::Cols, c, w);
                 self.grid_persist_view();
             }
             TallerRow | ShorterRow => {
@@ -2668,7 +2656,7 @@ impl Editor {
                 } else {
                     (h - 5.0).max(view::MIN_SIZE)
                 };
-                g.resize(false, r, nh);
+                g.resize(Axis::Rows, r, nh);
                 self.grid_persist_view();
             }
             ZoomIn | ZoomOut | ZoomReset => {
@@ -4057,11 +4045,11 @@ impl Editor {
                     });
                     let top = g.view.top_row();
                     let page = g.view.page_rows();
-                    for c in selected_or(g, col, true) {
+                    for c in selected_or(g, col, Axis::Cols) {
                         let sample = (0..rows.min(AUTOFIT_SAMPLE))
                             .chain((top..top + page + 1).filter(|&x| x < rows));
                         let w = g.fit_width(c, sample, char_w, self.grid_ui.opts.max_autofit_width);
-                        g.resize(true, c, w);
+                        g.resize(Axis::Cols, c, w);
                     }
                     self.grid_persist_view();
                 } else {
@@ -4072,7 +4060,7 @@ impl Editor {
                     };
                     self.grid_ui.drag = Some(GridDrag::Resize {
                         pane,
-                        cols: is_col,
+                        axis: if is_col { Axis::Cols } else { Axis::Rows },
                         idx: col,
                         start,
                         size,
@@ -4160,11 +4148,12 @@ impl Editor {
             }
             GridDrag::Resize {
                 pane,
-                cols,
+                axis,
                 idx,
                 start,
                 ..
             } => {
+                let cols = axis == Axis::Cols;
                 let Some(geo) = self.grid_ui.geom.get(&pane).copied() else {
                     return true;
                 };
@@ -4178,7 +4167,7 @@ impl Editor {
                 let size = (((edge - start) / zoom) as f64).max(0.0);
                 self.grid_ui.drag = Some(GridDrag::Resize {
                     pane,
-                    cols,
+                    axis,
                     idx,
                     start,
                     size,
@@ -4204,15 +4193,15 @@ impl Editor {
         };
         if let GridDrag::Resize {
             pane,
-            cols,
+            axis,
             idx,
             size,
             ..
         } = drag
         {
             if let Some(g) = self.pane_grid_mut(pane) {
-                for i in selected_or(g, idx, cols) {
-                    g.resize(cols, i, size);
+                for i in selected_or(g, idx, axis) {
+                    g.resize(axis, i, size);
                 }
             }
             self.status = SharedString::default();
@@ -4269,15 +4258,13 @@ enum GridKey {
 
 /// The columns (or rows) a header-border action applies to: every selected
 /// one when `idx` is part of a whole-column (row) selection, else just `idx`.
-fn selected_or(g: &GridDoc, idx: usize, cols: bool) -> Vec<usize> {
-    let kind = if cols { SelKind::Cols } else { SelKind::Rows };
+fn selected_or(g: &GridDoc, idx: usize, axis: Axis) -> Vec<usize> {
+    let kind = match axis {
+        Axis::Cols => SelKind::Cols,
+        Axis::Rows => SelKind::Rows,
+    };
     if g.view.anchor.is_some() && g.view.sel_kind == kind {
-        let sel = g.view.selection((usize::MAX, usize::MAX));
-        let (a, b) = if cols {
-            (sel.c0, sel.c1)
-        } else {
-            (sel.r0, sel.r1)
-        };
+        let (a, b) = g.view.selection((usize::MAX, usize::MAX)).span(axis);
         if (a..=b).contains(&idx) {
             return (a..=b).collect();
         }

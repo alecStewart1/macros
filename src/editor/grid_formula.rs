@@ -777,13 +777,10 @@ impl Editor {
             _ => ((e.row, e.col), (e.row, e.col)),
         };
         // Step over hidden columns and filtered rows, as the cursor does.
-        let step = |i: usize, d: isize, f: &dyn Fn(usize, bool) -> usize| {
-            (0..d.unsigned_abs()).fold(i, |i, _| f(i, d > 0))
+        let step = |i: usize, d: isize, axis: Axis| {
+            (0..d.unsigned_abs()).fold(i, |i, _| g.step(axis, i, d > 0))
         };
-        let at = (
-            step(at.0, dr, &|r, down| g.row_step(r, down)),
-            step(at.1, dc, &|c, right| g.col_step(c, right)),
-        );
+        let at = (step(at.0, dr, Axis::Rows), step(at.1, dc, Axis::Cols));
         let Some(e) = g.view.edit.as_mut() else {
             return false;
         };

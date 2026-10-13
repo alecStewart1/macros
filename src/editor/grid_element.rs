@@ -906,13 +906,14 @@ impl Element for GridElement {
         // --- resize guide ------------------------------------------------------
         if let Some(GridDrag::Resize {
             pane,
-            cols: is_col,
+            axis,
             start,
             size: sz,
             ..
         }) = drag
             && pane == self.pane
         {
+            let is_col = axis == crate::formula::refs::Axis::Cols;
             let at = start + (sz as f32) * zoom;
             let guide = if is_col {
                 Bounds::new(

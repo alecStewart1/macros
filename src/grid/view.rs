@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::formula::refs;
+
 /// Excel's default column width at 100% zoom: 8.43 characters of Calibri 11,
 /// which Excel renders as 64 px.
 pub const DEFAULT_COL_WIDTH: f64 = 64.0;
@@ -580,6 +582,14 @@ impl CellRange {
     pub fn cols(&self) -> usize {
         self.c1 - self.c0 + 1
     }
+
+    /// The first and last row, or column, it spans.
+    pub fn span(&self, axis: refs::Axis) -> (usize, usize) {
+        match axis {
+            refs::Axis::Rows => (self.r0, self.r1),
+            refs::Axis::Cols => (self.c0, self.c1),
+        }
+    }
 }
 
 impl GridView {
@@ -609,6 +619,21 @@ impl GridView {
             }
         }
         range
+    }
+
+    /// The rows' or the columns' geometry.
+    pub fn axis(&self, which: refs::Axis) -> &Axis {
+        match which {
+            refs::Axis::Rows => &self.rows,
+            refs::Axis::Cols => &self.cols,
+        }
+    }
+
+    pub fn axis_mut(&mut self, which: refs::Axis) -> &mut Axis {
+        match which {
+            refs::Axis::Rows => &mut self.rows,
+            refs::Axis::Cols => &mut self.cols,
+        }
     }
 
     /// Zoomed size of column `c` / row `r`, in screen px.
@@ -745,6 +770,21 @@ pub fn parse_cell_name(s: &str) -> Option<(usize, usize)> {
 
 /// A `(row, col)` cell position.
 pub type Pos = (usize, usize);
+
+/// `p`'s coordinate along `axis`: its row or its column.
+pub fn coord(p: Pos, axis: refs::Axis) -> usize {
+    match axis {
+        refs::Axis::Rows => p.0,
+        refs::Axis::Cols => p.1,
+    }
+}
+
+pub fn coord_mut(p: &mut Pos, axis: refs::Axis) -> &mut usize {
+    match axis {
+        refs::Axis::Rows => &mut p.0,
+        refs::Axis::Cols => &mut p.1,
+    }
+}
 
 /// Parse an address or range: `C7`, `B2:D9`. A range returns both corners.
 pub fn parse_address(s: &str) -> Option<(Pos, Option<Pos>)> {

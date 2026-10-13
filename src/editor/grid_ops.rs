@@ -8,6 +8,7 @@ use gpui::Context;
 
 use super::grid::{GridDoc, RowFilter, SHEET, YankState};
 use super::*;
+use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt, NumCode};
 use crate::grid::cmd::GridCmd;
 use crate::grid::export;
@@ -91,38 +92,25 @@ pub(super) fn parse_filter(input: &str) -> Result<(RuleTest, String), String> {
 }
 
 impl GridDoc {
-    /// The rows a structure command acts on: the selection's, or the cursor's.
-    fn target_rows(&self) -> (usize, usize) {
+    /// The rows (columns) a structure command acts on: the selection's, or
+    /// the cursor's.
+    fn target(&self, axis: Axis) -> (usize, usize) {
         if self.view.anchor.is_some() {
-            let s = self.selection();
-            (s.r0, s.r1)
+            self.selection().span(axis)
         } else {
-            (self.view.cursor.0, self.view.cursor.0)
+            let i = view::coord(self.view.cursor, axis);
+            (i, i)
         }
     }
 
-    fn target_cols(&self) -> (usize, usize) {
-        if self.view.anchor.is_some() {
-            let s = self.selection();
-            (s.c0, s.c1)
-        } else {
-            (self.view.cursor.1, self.view.cursor.1)
-        }
-    }
-
-    /// Shift the cursor and anchor rows by `d` (after moving a block).
-    fn shift_rows(&mut self, d: isize) {
-        self.view.cursor.0 = self.view.cursor.0.saturating_add_signed(d);
+    /// Shift the cursor and anchor rows (columns) by `d` (after moving a
+    /// block).
+    fn shift(&mut self, axis: Axis, d: isize) {
+        let i = view::coord_mut(&mut self.view.cursor, axis);
+        *i = i.saturating_add_signed(d);
         if let Some(a) = self.view.anchor.as_mut() {
-            a.0 = a.0.saturating_add_signed(d);
-        }
-        self.view.reveal_cursor();
-    }
-
-    fn shift_cols(&mut self, d: isize) {
-        self.view.cursor.1 = self.view.cursor.1.saturating_add_signed(d);
-        if let Some(a) = self.view.anchor.as_mut() {
-            a.1 = a.1.saturating_add_signed(d);
+            let i = view::coord_mut(a, axis);
+            *i = i.saturating_add_signed(d);
         }
         self.view.reveal_cursor();
     }
@@ -246,7 +234,7 @@ impl Editor {
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
-        let (r0, r1) = g.target_rows();
+        let (r0, r1) = g.target(Axis::Rows);
         let (rows, _) = g.used();
         let first = usize::from(g.wb.header(SHEET));
         if r1 >= rows || r0 < first {
@@ -265,7 +253,7 @@ impl Editor {
             perm.extend(r0..=r1);
             let ok = g.model_op(|wb| wb.permute_rows(SHEET, r0, perm, col));
             if ok {
-                g.shift_rows((next - r1) as isize);
+                g.shift(Axis::Rows, (next - r1) as isize);
             }
             ok
         } else {
@@ -283,7 +271,7 @@ impl Editor {
             perm.extend(prev..r0);
             let ok = g.model_op(|wb| wb.permute_rows(SHEET, prev, perm, col));
             if ok {
-                g.shift_rows(-((r0 - prev) as isize));
+                g.shift(Axis::Rows, -((r0 - prev) as isize));
             }
             ok
         };
@@ -300,7 +288,7 @@ impl Editor {
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
-        let (c0, c1) = g.target_cols();
+        let (c0, c1) = g.target(Axis::Cols);
         let (_, cols) = g.used();
         if c1 >= cols {
             self.echo("Past the data", cx);
@@ -322,7 +310,7 @@ impl Editor {
         };
         // Widths and hidden flags move with the columns (`model_op`).
         if g.model_op(|wb| wb.move_col(SHEET, from, to)) {
-            g.shift_cols(d);
+            g.shift(Axis::Cols, d);
             self.grid_persist_view();
         }
         self.grid_after(cx);
@@ -493,7 +481,7 @@ impl Editor {
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
-        let (c0, c1) = g.target_cols();
+        let (c0, c1) = g.target(Axis::Cols);
         g.set_cols_hidden(c0..=c1, true);
         g.view.anchor = None;
         let (r, c) = g.view.cursor;
@@ -515,7 +503,7 @@ impl Editor {
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
-        let range = g.view.anchor.is_some().then(|| g.target_cols());
+        let range = g.view.anchor.is_some().then(|| g.target(Axis::Cols));
         let hidden: Vec<usize> = g
             .view
             .cols
@@ -554,7 +542,7 @@ impl Editor {
         let Some(g) = self.active.grid.as_deref() else {
             return;
         };
-        let (r0, r1) = g.target_rows();
+        let (r0, r1) = g.target(Axis::Rows);
         let rows: Vec<usize> = (r0..=r1.min(g.used().0.saturating_sub(1)))
             .filter(|&r| g.row_shown(r))
             .collect();
