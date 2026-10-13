@@ -129,38 +129,79 @@ fn unclosed_parens(text: &str) -> usize {
     depth.max(0) as usize
 }
 
-/// Where row/column `i` lands after a change, or `None` if it was deleted.
-fn map_index(i: usize, change: &Change, axis: Axis) -> Option<usize> {
-    match (change, axis) {
-        (Change::RowsInserted { at, n }, Axis::Rows)
-        | (Change::ColsInserted { at, n }, Axis::Cols) => Some(if i >= *at { i + n } else { i }),
-        (Change::RowsDeleted { at, n }, Axis::Rows)
-        | (Change::ColsDeleted { at, n }, Axis::Cols) => {
-            if i >= at + n {
-                Some(i - n)
-            } else if i >= *at {
-                None
+/// `n` rows or columns inserted (`insert`) or deleted at `at`, if that is
+/// what `change` did.
+fn lines_changed(change: &Change) -> Option<(Axis, usize, usize, bool)> {
+    match *change {
+        Change::RowsInserted { at, n } => Some((Axis::Rows, at, n, true)),
+        Change::ColsInserted { at, n } => Some((Axis::Cols, at, n, true)),
+        Change::RowsDeleted { at, n } => Some((Axis::Rows, at, n, false)),
+        Change::ColsDeleted { at, n } => Some((Axis::Cols, at, n, false)),
+        _ => None,
+    }
+}
+
+/// Where each row and column lands after one change. Built once per
+/// change: a sort's permutation is inverted up front, so following every
+/// formula and format through it is linear rather than a search per index.
+struct IndexMap<'a> {
+    change: &'a Change,
+    /// For a sort or row move: `inverse[old - start]` is the old row's new
+    /// row (`usize::MAX` where none).
+    inverse: Vec<usize>,
+}
+
+impl<'a> IndexMap<'a> {
+    fn new(change: &'a Change) -> Self {
+        let inverse = match change {
+            Change::Sorted { start, perm } | Change::RowsMoved { start, perm } => {
+                // perm[k] = old row of new row start+k.
+                let mut inverse = vec![usize::MAX; perm.len()];
+                for (k, &old) in perm.iter().enumerate() {
+                    if let Some(slot) = old.checked_sub(*start).and_then(|o| inverse.get_mut(o))
+                        && *slot == usize::MAX
+                    {
+                        *slot = start + k;
+                    }
+                }
+                inverse
+            }
+            _ => Vec::new(),
+        };
+        Self { change, inverse }
+    }
+
+    /// Where row/column `i` lands, or `None` if it was deleted.
+    fn map(&self, i: usize, axis: Axis) -> Option<usize> {
+        if let Some((along, at, n, insert)) = lines_changed(self.change) {
+            return Some(if along != axis || i < at {
+                i
+            } else if insert {
+                i + n
+            } else if i >= at + n {
+                i - n
             } else {
-                Some(i)
-            }
+                return None;
+            });
         }
-        (Change::Sorted { start, perm } | Change::RowsMoved { start, perm }, Axis::Rows) => {
-            if i < *start || i >= start + perm.len() {
-                return Some(i);
+        match (self.change, axis) {
+            (Change::Sorted { start, .. } | Change::RowsMoved { start, .. }, Axis::Rows) => {
+                if i < *start || i >= start + self.inverse.len() {
+                    return Some(i);
+                }
+                Some(self.inverse[i - start]).filter(|&new| new != usize::MAX)
             }
-            // perm[k] = old row of new row start+k.
-            perm.iter().position(|&old| old == i).map(|k| start + k)
+            (Change::ColMoved { from, to }, Axis::Cols) => Some(if i == *from {
+                *to
+            } else if from < to && i > *from && i <= *to {
+                i - 1
+            } else if from > to && i >= *to && i < *from {
+                i + 1
+            } else {
+                i
+            }),
+            _ => Some(i),
         }
-        (Change::ColMoved { from, to }, Axis::Cols) => Some(if i == *from {
-            *to
-        } else if from < to && i > *from && i <= *to {
-            i - 1
-        } else if from > to && i >= *to && i < *from {
-            i + 1
-        } else {
-            i
-        }),
-        _ => Some(i),
     }
 }
 
@@ -278,59 +319,43 @@ impl GridDoc {
         // References to other sheets are left alone: their cells didn't move.
         let sheet = self.wb.sheet(SHEET).name.clone();
         for change in changes {
-            match change {
-                Change::Cells(_) | Change::Reshaped => continue,
-                Change::RowsInserted { at, n } => {
-                    for it in &mut items {
-                        it.dirty |= refs::insert(&mut it.expr, &sheet, Axis::Rows, *at, *n);
+            if matches!(change, Change::Cells(_) | Change::Reshaped) {
+                continue;
+            }
+            let map = IndexMap::new(change);
+            if let Some((axis, at, n, insert)) = lines_changed(change) {
+                for it in &mut items {
+                    it.dirty |= if insert {
+                        refs::insert(&mut it.expr, &sheet, axis, at, n)
+                    } else {
+                        refs::delete(&mut it.expr, &sheet, axis, at, n)
+                    };
+                }
+            } else if let Change::Sorted { .. } = change {
+                // A sort moves formulas like a copy: their relative
+                // references follow them (Excel's sort behaviour).
+                for it in &mut items {
+                    if let Some(new) = map.map(it.pos.0, Axis::Rows)
+                        && new != it.pos.0
+                    {
+                        it.dirty |=
+                            refs::translate(&mut it.expr, new as isize - it.pos.0 as isize, 0);
                     }
                 }
-                Change::ColsInserted { at, n } => {
-                    for it in &mut items {
-                        it.dirty |= refs::insert(&mut it.expr, &sheet, Axis::Cols, *at, *n);
-                    }
-                }
-                Change::RowsDeleted { at, n } => {
-                    for it in &mut items {
-                        it.dirty |= refs::delete(&mut it.expr, &sheet, Axis::Rows, *at, *n);
-                    }
-                }
-                Change::ColsDeleted { at, n } => {
-                    for it in &mut items {
-                        it.dirty |= refs::delete(&mut it.expr, &sheet, Axis::Cols, *at, *n);
-                    }
-                }
-                Change::Sorted { .. } => {
-                    // A sort moves formulas like a copy: their relative
-                    // references follow them (Excel's sort behaviour).
-                    for it in &mut items {
-                        if let Some(new) = map_index(it.pos.0, change, Axis::Rows)
-                            && new != it.pos.0
-                        {
-                            it.dirty |=
-                                refs::translate(&mut it.expr, new as isize - it.pos.0 as isize, 0);
-                        }
-                    }
-                }
-                Change::RowsMoved { .. } => {
-                    let map = |i: usize| map_index(i, change, Axis::Rows).unwrap_or(i);
-                    for it in &mut items {
-                        it.dirty |= refs::remap(&mut it.expr, &sheet, Axis::Rows, &map);
-                    }
-                }
-                Change::ColMoved { .. } => {
-                    let map = |i: usize| map_index(i, change, Axis::Cols).unwrap_or(i);
-                    for it in &mut items {
-                        it.dirty |= refs::remap(&mut it.expr, &sheet, Axis::Cols, &map);
-                    }
+            } else {
+                // Rows or a column moved as cells: references to them follow.
+                let axis = match change {
+                    Change::ColMoved { .. } => Axis::Cols,
+                    _ => Axis::Rows,
+                };
+                let follow = |i: usize| map.map(i, axis).unwrap_or(i);
+                for it in &mut items {
+                    it.dirty |= refs::remap(&mut it.expr, &sheet, axis, &follow);
                 }
             }
             // Positions move with the edit; deleted formulas are gone.
             items.retain_mut(|it| {
-                match (
-                    map_index(it.pos.0, change, Axis::Rows),
-                    map_index(it.pos.1, change, Axis::Cols),
-                ) {
+                match (map.map(it.pos.0, Axis::Rows), map.map(it.pos.1, Axis::Cols)) {
                     (Some(r), Some(c)) => {
                         it.pos = (r, c);
                         true
@@ -360,8 +385,9 @@ impl GridDoc {
             if matches!(change, Change::Cells(_) | Change::Reshaped) {
                 continue;
             }
-            let rows = |r| map_index(r, change, Axis::Rows);
-            let cols = |c| map_index(c, change, Axis::Cols);
+            let map = IndexMap::new(change);
+            let rows = |r| map.map(r, Axis::Rows);
+            let cols = |c| map.map(c, Axis::Cols);
             self.formats.remap(rows, cols);
             self.view.rows.remap(rows);
             self.view.cols.remap(cols);
@@ -1096,22 +1122,28 @@ mod tests {
     #[test]
     fn index_mapping() {
         let ins = Change::RowsInserted { at: 2, n: 3 };
-        assert_eq!(map_index(1, &ins, Axis::Rows), Some(1));
-        assert_eq!(map_index(2, &ins, Axis::Rows), Some(5));
-        assert_eq!(map_index(2, &ins, Axis::Cols), Some(2));
+        assert_eq!(IndexMap::new(&ins).map(1, Axis::Rows), Some(1));
+        assert_eq!(IndexMap::new(&ins).map(2, Axis::Rows), Some(5));
+        assert_eq!(IndexMap::new(&ins).map(2, Axis::Cols), Some(2));
         let del = Change::ColsDeleted { at: 1, n: 2 };
-        assert_eq!(map_index(1, &del, Axis::Cols), None);
-        assert_eq!(map_index(4, &del, Axis::Cols), Some(2));
+        assert_eq!(IndexMap::new(&del).map(1, Axis::Cols), None);
+        assert_eq!(IndexMap::new(&del).map(4, Axis::Cols), Some(2));
         let sort = Change::Sorted {
             start: 1,
             perm: vec![3, 1, 2],
         };
-        assert_eq!(map_index(3, &sort, Axis::Rows), Some(1));
-        assert_eq!(map_index(1, &sort, Axis::Rows), Some(2));
-        assert_eq!(map_index(0, &sort, Axis::Rows), Some(0));
+        assert_eq!(IndexMap::new(&sort).map(3, Axis::Rows), Some(1));
+        assert_eq!(IndexMap::new(&sort).map(1, Axis::Rows), Some(2));
+        assert_eq!(IndexMap::new(&sort).map(0, Axis::Rows), Some(0));
+        assert_eq!(IndexMap::new(&sort).map(4, Axis::Rows), Some(4));
+        assert_eq!(IndexMap::new(&sort).map(3, Axis::Cols), Some(3));
+        let del_rows = Change::RowsDeleted { at: 2, n: 2 };
+        assert_eq!(IndexMap::new(&del_rows).map(1, Axis::Rows), Some(1));
+        assert_eq!(IndexMap::new(&del_rows).map(3, Axis::Rows), None);
+        assert_eq!(IndexMap::new(&del_rows).map(4, Axis::Rows), Some(2));
         let mv = Change::ColMoved { from: 0, to: 2 };
-        assert_eq!(map_index(0, &mv, Axis::Cols), Some(2));
-        assert_eq!(map_index(2, &mv, Axis::Cols), Some(1));
+        assert_eq!(IndexMap::new(&mv).map(0, Axis::Cols), Some(2));
+        assert_eq!(IndexMap::new(&mv).map(2, Axis::Cols), Some(1));
     }
 
     #[test]
@@ -1122,7 +1154,8 @@ mod tests {
             perm: vec![2, 1],
         };
         let mut e = crate::formula::parse::parse("=SUM(A1:A3)").unwrap();
-        let map = |i: usize| map_index(i, &change, Axis::Rows).unwrap_or(i);
+        let moved = IndexMap::new(&change);
+        let map = |i: usize| moved.map(i, Axis::Rows).unwrap_or(i);
         refs::remap(&mut e, "Sheet1", Axis::Rows, &map);
         assert_eq!(crate::formula::print::print(&e), "=SUM(A1:A3)");
     }
