@@ -217,10 +217,7 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
 /// the engine thread (the engine is `!Send`).
 pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     let EngineShared {
-        queue,
-        snapshot,
-        markers,
-        ..
+        queue, snapshot, ..
     } = shared;
     let mut engine = Engine::new();
     let mut names: Vec<String> = Vec::new();
@@ -272,38 +269,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::sqlite::register(&mut reg, shared);
     prims::anvil::register(&mut reg, shared);
     prims::buffer_reads::register(&mut reg, shared);
-    // --- Markers (positions that move with edits) -------------------------
-    reg.section(Section::Markers);
-    {
-        // `(make-marker pos)` → a marker id (allocated synchronously).
-        let m = markers.clone();
-        reg.register_fn("make-marker", move |pos: isize| -> usize {
-            m.lock().unwrap().alloc(scheme_pos(pos)) as usize
-        });
-    }
-    {
-        // `(marker-position id)` → its current byte position, or -1.
-        let m = markers.clone();
-        reg.register_fn("marker-position", move |id: u64| -> isize {
-            m.lock()
-                .unwrap()
-                .positions
-                .get(&id)
-                .map_or(-1, |p| *p as isize)
-        });
-    }
-    {
-        let m = markers.clone();
-        reg.register_fn("set-marker", move |id: u64, pos: isize| {
-            m.lock().unwrap().positions.insert(id, scheme_pos(pos));
-        });
-    }
-    {
-        let m = markers.clone();
-        reg.register_fn("delete-marker", move |id: u64| {
-            m.lock().unwrap().positions.remove(&id);
-        });
-    }
+    prims::markers::register(&mut reg, shared);
     // --- Pure position motions (compute, don't move) ----------------------
     // These resolve a *new byte offset* from a given one against the published
     // buffer, reusing the editor's grapheme/word/line logic. Plain motions
