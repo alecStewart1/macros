@@ -5,44 +5,40 @@
 
 use std::collections::HashSet;
 
-use super::args::{
-    arg_values, current_year, date_arg, def, opt_int, to_serial, trunc_i64, volatile,
-};
-use super::{Arg, Ctx, FuncDef, num, ok, scalar, text};
+use super::args::{arg_values, current_year, date_arg, def, opt_int, to_serial, trunc_i64};
+use super::{Arg, Ctx, FuncDef, num, scalar, text};
 use crate::formula::date::{self, days_from_civil, days_in_month, is_leap};
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("DATE", 3, 3, date_fn),
-    volatile("TODAY", 0, 0, today),
-    volatile("NOW", 0, 0, now),
-    def("YEAR", 1, 1, year),
-    def("MONTH", 1, 1, month),
-    def("DAY", 1, 1, day),
-    def("HOUR", 1, 1, hour),
-    def("MINUTE", 1, 1, minute),
-    def("SECOND", 1, 1, second),
-    def("TIME", 3, 3, time),
-    def("WEEKDAY", 1, 2, weekday),
-    def("WEEKNUM", 1, 2, weeknum),
-    def("EDATE", 2, 2, edate),
-    def("EOMONTH", 2, 2, eomonth),
-    def("DATEDIF", 3, 3, datedif),
-    def("DAYS", 2, 2, days),
-    def("NETWORKDAYS", 2, 3, networkdays),
-    def("WORKDAY", 2, 3, workday),
-    def("DATEVALUE", 1, 1, datevalue),
-    def("TIMEVALUE", 1, 1, timevalue),
-    def("YEARFRAC", 2, 3, yearfrac),
+    def!("DATE", 3, 3, date_fn),
+    def!(volatile "TODAY", 0, 0, today),
+    def!(volatile "NOW", 0, 0, now),
+    def!("YEAR", 1, 1, year),
+    def!("MONTH", 1, 1, month),
+    def!("DAY", 1, 1, day),
+    def!("HOUR", 1, 1, hour),
+    def!("MINUTE", 1, 1, minute),
+    def!("SECOND", 1, 1, second),
+    def!("TIME", 3, 3, time),
+    def!("WEEKDAY", 1, 2, weekday),
+    def!("WEEKNUM", 1, 2, weeknum),
+    def!("EDATE", 2, 2, edate),
+    def!("EOMONTH", 2, 2, eomonth),
+    def!("DATEDIF", 3, 3, datedif),
+    def!("DAYS", 2, 2, days),
+    def!("NETWORKDAYS", 2, 3, networkdays),
+    def!("WORKDAY", 2, 3, workday),
+    def!("DATEVALUE", 1, 1, datevalue),
+    def!("TIMEVALUE", 1, 1, timevalue),
+    def!("YEARFRAC", 2, 3, yearfrac),
 ];
 
-fn date_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let y = trunc_i64(num(&args[0], ctx)?)?;
-        let m = trunc_i64(num(&args[1], ctx)?)?;
-        let d = trunc_i64(num(&args[2], ctx)?)?;
-        date::date_serial(y, m, d, ctx.date1904()).ok_or(ErrorKind::Num)
-    })())
+fn date_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let y = trunc_i64(num(&args[0], ctx)?)?;
+    let m = trunc_i64(num(&args[1], ctx)?)?;
+    let d = trunc_i64(num(&args[2], ctx)?)?;
+    date::date_serial(y, m, d, ctx.date1904()).ok_or(ErrorKind::Num)
 }
 
 fn today(_: &[Arg], ctx: &mut dyn Ctx) -> Value {
@@ -58,53 +54,51 @@ fn ymd(args: &[Arg], ctx: &mut dyn Ctx) -> Result<(i64, u32, u32), ErrorKind> {
     date::serial_to_ymd(s, ctx.date1904()).ok_or(ErrorKind::Num)
 }
 
-fn year(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(ymd(args, ctx).map(|(y, _, _)| y as f64))
+fn year(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    ymd(args, ctx).map(|(y, _, _)| y as f64)
 }
 
-fn month(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(ymd(args, ctx).map(|(_, m, _)| m as f64))
+fn month(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    ymd(args, ctx).map(|(_, m, _)| m as f64)
 }
 
-fn day(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(ymd(args, ctx).map(|(_, _, d)| d as f64))
+fn day(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    ymd(args, ctx).map(|(_, _, d)| d as f64)
 }
 
 fn hms(args: &[Arg], ctx: &mut dyn Ctx) -> Result<(u32, u32, u32), ErrorKind> {
     Ok(date::hms(date_arg(&args[0], ctx)?))
 }
 
-fn hour(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(hms(args, ctx).map(|t| t.0 as f64))
+fn hour(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    hms(args, ctx).map(|t| t.0 as f64)
 }
 
-fn minute(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(hms(args, ctx).map(|t| t.1 as f64))
+fn minute(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    hms(args, ctx).map(|t| t.1 as f64)
 }
 
-fn second(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(hms(args, ctx).map(|t| t.2 as f64))
+fn second(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    hms(args, ctx).map(|t| t.2 as f64)
 }
 
 /// TIME(h, m, s): components roll over (`TIME(0,750,0)` is 12:30) and the
 /// result wraps at a day; each component past 32767 or a negative total is
 /// `#NUM!`.
-fn time(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let mut total = 0i64;
-        for (a, mult) in args.iter().zip([3600, 60, 1]) {
-            let v = trunc_i64(num(a, ctx)?)?;
-            // Bounded both ways (and so the sum can't overflow).
-            if !(-32_767..=32_767).contains(&v) {
-                return Err(ErrorKind::Num);
-            }
-            total += v * mult;
-        }
-        if total < 0 {
+fn time(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let mut total = 0i64;
+    for (a, mult) in args.iter().zip([3600, 60, 1]) {
+        let v = trunc_i64(num(a, ctx)?)?;
+        // Bounded both ways (and so the sum can't overflow).
+        if !(-32_767..=32_767).contains(&v) {
             return Err(ErrorKind::Num);
         }
-        Ok((total % 86_400) as f64 / 86_400.0)
-    })())
+        total += v * mult;
+    }
+    if total < 0 {
+        return Err(ErrorKind::Num);
+    }
+    Ok((total % 86_400) as f64 / 86_400.0)
 }
 
 /// 0 = Sunday … 6 = Saturday, from a date argument.
@@ -115,50 +109,46 @@ fn weekday0_arg(arg: &Arg, ctx: &mut dyn Ctx) -> Result<(f64, u32), ErrorKind> {
 
 /// WEEKDAY return types: 1 Sun=1…Sat=7, 2 Mon=1…Sun=7, 3 Mon=0…Sun=6,
 /// 11–17 = 1 on Mon…Sun.
-fn weekday(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let (_, w) = weekday0_arg(&args[0], ctx)?;
-        let t = opt_int(args.get(1), ctx, 1)?;
-        let w = w as i64;
-        let r = match t {
-            1 | 17 => w + 1,
-            2 | 11 => (w + 6) % 7 + 1,
-            3 => (w + 6) % 7,
-            12..=16 => {
-                let start = t - 10; // 2 = Tuesday … 6 = Saturday
-                (w - start).rem_euclid(7) + 1
-            }
-            _ => return Err(ErrorKind::Num),
-        };
-        Ok(r as f64)
-    })())
+fn weekday(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let (_, w) = weekday0_arg(&args[0], ctx)?;
+    let t = opt_int(args.get(1), ctx, 1)?;
+    let w = w as i64;
+    let r = match t {
+        1 | 17 => w + 1,
+        2 | 11 => (w + 6) % 7 + 1,
+        3 => (w + 6) % 7,
+        12..=16 => {
+            let start = t - 10; // 2 = Tuesday … 6 = Saturday
+            (w - start).rem_euclid(7) + 1
+        }
+        _ => return Err(ErrorKind::Num),
+    };
+    Ok(r as f64)
 }
 
 /// WEEKNUM: system 1 (the week holding 1 January is week 1, weeks start on
 /// the given day: 1/17 Sun, 2/11 Mon, 12–16 Tue–Sat) or 21 (ISO 8601).
-fn weeknum(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let s = date_arg(&args[0], ctx)?.floor();
-        let t = opt_int(args.get(1), ctx, 1)?;
-        let d1904 = ctx.date1904();
-        let (y, m, d) = date::serial_to_ymd(s, d1904).ok_or(ErrorKind::Num)?;
-        // Day 0 (Excel's 1900-01-00) counts as the day before 1 January.
-        let doy0 = days_from_civil(y, m, d.max(1)) - days_from_civil(y, 1, 1) - (d == 0) as i64;
-        if t == 21 {
-            return Ok(iso_week(y, m, d.max(1)) as f64);
-        }
-        let start: i64 = match t {
-            1 | 17 => 0,
-            2 | 11 => 1,
-            12..=16 => t - 10,
-            _ => return Err(ErrorKind::Num),
-        };
-        // Weekday of 1 January in the real calendar (Excel's fake 1900 leap
-        // day only shifts January/February 1900).
-        let jan1 = (days_from_civil(y, 1, 1) + 4).rem_euclid(7); // 0 = Sunday
-        let offset = (jan1 - start).rem_euclid(7);
-        Ok(((doy0 + offset) / 7 + 1) as f64)
-    })())
+fn weeknum(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let s = date_arg(&args[0], ctx)?.floor();
+    let t = opt_int(args.get(1), ctx, 1)?;
+    let d1904 = ctx.date1904();
+    let (y, m, d) = date::serial_to_ymd(s, d1904).ok_or(ErrorKind::Num)?;
+    // Day 0 (Excel's 1900-01-00) counts as the day before 1 January.
+    let doy0 = days_from_civil(y, m, d.max(1)) - days_from_civil(y, 1, 1) - (d == 0) as i64;
+    if t == 21 {
+        return Ok(iso_week(y, m, d.max(1)) as f64);
+    }
+    let start: i64 = match t {
+        1 | 17 => 0,
+        2 | 11 => 1,
+        12..=16 => t - 10,
+        _ => return Err(ErrorKind::Num),
+    };
+    // Weekday of 1 January in the real calendar (Excel's fake 1900 leap
+    // day only shifts January/February 1900).
+    let jan1 = (days_from_civil(y, 1, 1) + 4).rem_euclid(7); // 0 = Sunday
+    let offset = (jan1 - start).rem_euclid(7);
+    Ok(((doy0 + offset) / 7 + 1) as f64)
 }
 
 fn iso_week(y: i64, m: u32, d: u32) -> i64 {
@@ -187,20 +177,16 @@ fn months_arg(arg: &Arg, ctx: &mut dyn Ctx) -> Result<i64, ErrorKind> {
     trunc_i64(num(arg, ctx)?)
 }
 
-fn edate(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let s = date_arg(&args[0], ctx)?;
-        let m = months_arg(&args[1], ctx)?;
-        date::edate(s, m, ctx.date1904()).ok_or(ErrorKind::Num)
-    })())
+fn edate(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let s = date_arg(&args[0], ctx)?;
+    let m = months_arg(&args[1], ctx)?;
+    date::edate(s, m, ctx.date1904()).ok_or(ErrorKind::Num)
 }
 
-fn eomonth(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let s = date_arg(&args[0], ctx)?;
-        let m = months_arg(&args[1], ctx)?;
-        date::eomonth(s, m, ctx.date1904()).ok_or(ErrorKind::Num)
-    })())
+fn eomonth(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let s = date_arg(&args[0], ctx)?;
+    let m = months_arg(&args[1], ctx)?;
+    date::eomonth(s, m, ctx.date1904()).ok_or(ErrorKind::Num)
 }
 
 /// DATEDIF(start, end, unit) with Excel's arithmetic, quirks included:
@@ -208,56 +194,51 @@ fn eomonth(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
 /// negative (`DATEDIF(31-Jan, 1-Mar, "MD")` is -2 in a non-leap year), and
 /// `"YD"` moves `start` into `end`'s year with DATE's roll-over (29 Feb in a
 /// common year becomes 1 March).
-fn datedif(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let s = date_arg(&args[0], ctx)?.floor();
-        let e = date_arg(&args[1], ctx)?.floor();
-        let unit = text(&args[2], ctx)?.to_ascii_uppercase();
-        if s > e {
-            return Err(ErrorKind::Num);
-        }
-        let d1904 = ctx.date1904();
-        let (y1, m1, d1) = date::serial_to_ymd(s, d1904).ok_or(ErrorKind::Num)?;
-        let (y2, m2, d2) = date::serial_to_ymd(e, d1904).ok_or(ErrorKind::Num)?;
-        let mut months = (y2 - y1) * 12 + (m2 as i64 - m1 as i64);
-        if d2 < d1 {
-            months -= 1;
-        }
-        Ok(match unit.as_str() {
-            "D" => e - s,
-            "M" => months as f64,
-            "Y" => (months / 12) as f64,
-            "YM" => (months % 12) as f64,
-            "MD" => {
-                if d2 >= d1 {
-                    (d2 - d1) as f64
-                } else {
-                    let (py, pm) = date::add_months(y2, m2, -1);
-                    let dim = date::days_in_month_excel(py, pm, d1904) as i64;
-                    (d2 as i64 + dim - d1 as i64) as f64
-                }
+fn datedif(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let s = date_arg(&args[0], ctx)?.floor();
+    let e = date_arg(&args[1], ctx)?.floor();
+    let unit = text(&args[2], ctx)?.to_ascii_uppercase();
+    if s > e {
+        return Err(ErrorKind::Num);
+    }
+    let d1904 = ctx.date1904();
+    let (y1, m1, d1) = date::serial_to_ymd(s, d1904).ok_or(ErrorKind::Num)?;
+    let (y2, m2, d2) = date::serial_to_ymd(e, d1904).ok_or(ErrorKind::Num)?;
+    let mut months = (y2 - y1) * 12 + (m2 as i64 - m1 as i64);
+    if d2 < d1 {
+        months -= 1;
+    }
+    Ok(match unit.as_str() {
+        "D" => e - s,
+        "M" => months as f64,
+        "Y" => (months / 12) as f64,
+        "YM" => (months % 12) as f64,
+        "MD" => {
+            if d2 >= d1 {
+                (d2 - d1) as f64
+            } else {
+                let (py, pm) = date::add_months(y2, m2, -1);
+                let dim = date::days_in_month_excel(py, pm, d1904) as i64;
+                (d2 as i64 + dim - d1 as i64) as f64
             }
-            "YD" => {
-                let shift = |y| {
-                    date::serial_from_parts(y, m1 as i64, d1 as i64, d1904).ok_or(ErrorKind::Num)
-                };
-                let mut shifted = shift(y2)?;
-                if shifted > e {
-                    shifted = shift(y2 - 1)?;
-                }
-                e - shifted
+        }
+        "YD" => {
+            let shift =
+                |y| date::serial_from_parts(y, m1 as i64, d1 as i64, d1904).ok_or(ErrorKind::Num);
+            let mut shifted = shift(y2)?;
+            if shifted > e {
+                shifted = shift(y2 - 1)?;
             }
-            _ => return Err(ErrorKind::Num),
-        })
-    })())
+            e - shifted
+        }
+        _ => return Err(ErrorKind::Num),
+    })
 }
 
-fn days(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let e = date_arg(&args[0], ctx)?.floor();
-        let s = date_arg(&args[1], ctx)?.floor();
-        Ok(e - s)
-    })())
+fn days(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let e = date_arg(&args[0], ctx)?.floor();
+    let s = date_arg(&args[1], ctx)?.floor();
+    Ok(e - s)
 }
 
 /// The holiday serials of an optional holidays argument.
@@ -287,57 +268,53 @@ fn is_workday(serial: i64, d1904: bool) -> bool {
 
 /// NETWORKDAYS: Monday–Friday days from start to end inclusive, minus
 /// holidays; negative when end is before start.
-fn networkdays(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let s = date_arg(&args[0], ctx)?.floor() as i64;
-        let e = date_arg(&args[1], ctx)?.floor() as i64;
-        let hol = holidays(args.get(2), ctx)?;
-        let d1904 = ctx.date1904();
-        let (a, b, sign) = if s <= e { (s, e, 1.0) } else { (e, s, -1.0) };
-        let n = b - a + 1;
-        let mut count = n / 7 * 5;
-        for k in 0..n % 7 {
-            if is_workday(a + n / 7 * 7 + k, d1904) {
-                count += 1;
-            }
+fn networkdays(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let s = date_arg(&args[0], ctx)?.floor() as i64;
+    let e = date_arg(&args[1], ctx)?.floor() as i64;
+    let hol = holidays(args.get(2), ctx)?;
+    let d1904 = ctx.date1904();
+    let (a, b, sign) = if s <= e { (s, e, 1.0) } else { (e, s, -1.0) };
+    let n = b - a + 1;
+    let mut count = n / 7 * 5;
+    for k in 0..n % 7 {
+        if is_workday(a + n / 7 * 7 + k, d1904) {
+            count += 1;
         }
-        count -= hol
-            .iter()
-            .filter(|&&h| h >= a && h <= b && is_workday(h, d1904))
-            .count() as i64;
-        Ok(sign * count as f64)
-    })())
+    }
+    count -= hol
+        .iter()
+        .filter(|&&h| h >= a && h <= b && is_workday(h, d1904))
+        .count() as i64;
+    Ok(sign * count as f64)
 }
 
 /// WORKDAY: the date `days` working days (Mon–Fri, not holidays) after
 /// (or before) start.
-fn workday(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let s = date_arg(&args[0], ctx)?.floor() as i64;
-        let n = trunc_i64(num(&args[1], ctx)?)?;
-        let hol = holidays(args.get(2), ctx)?;
-        let d1904 = ctx.date1904();
-        let max = date::max_serial(d1904) as i64;
-        let step = n.signum();
-        let mut left = n.abs();
-        let mut d = s;
-        while left > 0 {
-            d += step;
-            if d < 0 || d > max {
-                return Err(ErrorKind::Num);
-            }
-            if is_workday(d, d1904) && !hol.contains(&d) {
-                left -= 1;
-            }
+fn workday(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let s = date_arg(&args[0], ctx)?.floor() as i64;
+    let n = trunc_i64(num(&args[1], ctx)?)?;
+    let hol = holidays(args.get(2), ctx)?;
+    let d1904 = ctx.date1904();
+    let max = date::max_serial(d1904) as i64;
+    let step = n.signum();
+    let mut left = n.abs();
+    let mut d = s;
+    while left > 0 {
+        d += step;
+        if d < 0 || d > max {
+            return Err(ErrorKind::Num);
         }
-        Ok(d as f64)
-    })())
+        if is_workday(d, d1904) && !hol.contains(&d) {
+            left -= 1;
+        }
+    }
+    Ok(d as f64)
 }
 
 /// DATEVALUE: text only (a number is `#VALUE!`); the time part is dropped;
 /// a date without a year is in the current year.
-fn datevalue(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(typed_datetime(&args[0], ctx).and_then(|dt| dt.date.ok_or(ErrorKind::Value)))
+fn datevalue(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    typed_datetime(&args[0], ctx).and_then(|dt| dt.date.ok_or(ErrorKind::Value))
 }
 
 /// A text argument read as a typed date and/or time (DATEVALUE, TIMEVALUE).
@@ -351,75 +328,73 @@ fn typed_datetime(arg: &Arg, ctx: &mut dyn Ctx) -> Result<date::DateTime, ErrorK
 }
 
 /// TIMEVALUE: text only; the date part is dropped (a date alone is 0).
-fn timevalue(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(typed_datetime(&args[0], ctx).map(|dt| dt.time.unwrap_or(0.0)))
+fn timevalue(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    typed_datetime(&args[0], ctx).map(|dt| dt.time.unwrap_or(0.0))
 }
 
 /// YEARFRAC(start, end, [basis]) with Excel's day-count conventions:
 /// 0 US (NASD) 30/360, 1 actual/actual, 2 actual/360, 3 actual/365,
 /// 4 European 30/360. Bases 0 and 1 follow Excel's exact (and
 /// idiosyncratic) rules as reverse-engineered by David A. Wheeler.
-fn yearfrac(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let mut s = date_arg(&args[0], ctx)?.floor();
-        let mut e = date_arg(&args[1], ctx)?.floor();
-        let basis = opt_int(args.get(2), ctx, 0)?;
-        if !(0..=4).contains(&basis) {
-            return Err(ErrorKind::Num);
+fn yearfrac(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let mut s = date_arg(&args[0], ctx)?.floor();
+    let mut e = date_arg(&args[1], ctx)?.floor();
+    let basis = opt_int(args.get(2), ctx, 0)?;
+    if !(0..=4).contains(&basis) {
+        return Err(ErrorKind::Num);
+    }
+    if s > e {
+        std::mem::swap(&mut s, &mut e);
+    }
+    let d1904 = ctx.date1904();
+    let (y1, m1, d1) = date::serial_to_ymd(s, d1904).ok_or(ErrorKind::Num)?;
+    let (y2, m2, d2) = date::serial_to_ymd(e, d1904).ok_or(ErrorKind::Num)?;
+    let diff = e - s;
+    Ok(match basis {
+        0 => {
+            let last_feb = |y: i64, m: u32, d: u32| m == 2 && d == days_in_month(y, 2);
+            let (mut dd1, mut dd2) = (d1 as i64, d2 as i64);
+            if dd1 == 31 && dd2 == 31 {
+                dd1 = 30;
+                dd2 = 30;
+            } else if dd1 == 31 {
+                dd1 = 30;
+            } else if dd1 == 30 && dd2 == 31 {
+                dd2 = 30;
+            } else if last_feb(y1, m1, d1) && last_feb(y2, m2, d2) {
+                dd1 = 30;
+                dd2 = 30;
+            } else if last_feb(y1, m1, d1) {
+                dd1 = 30;
+            }
+            days360(y1, m1, dd1, y2, m2, dd2) / 360.0
         }
-        if s > e {
-            std::mem::swap(&mut s, &mut e);
+        1 => {
+            let le_year = y1 == y2 || (y2 == y1 + 1 && (m1 > m2 || (m1 == m2 && d1 >= d2)));
+            if le_year {
+                let feb29_between =
+                    (is_leap(y1) && (m1, d1) < (3, 1)) || (is_leap(y2) && (m2, d2) >= (3, 1));
+                let year_len =
+                    if (y1 == y2 && is_leap(y1)) || feb29_between || (m2 == 2 && d2 == 29) {
+                        366.0
+                    } else {
+                        365.0
+                    };
+                diff / year_len
+            } else {
+                let years = (y2 - y1 + 1) as f64;
+                let span = (days_from_civil(y2 + 1, 1, 1) - days_from_civil(y1, 1, 1)) as f64;
+                diff / (span / years)
+            }
         }
-        let d1904 = ctx.date1904();
-        let (y1, m1, d1) = date::serial_to_ymd(s, d1904).ok_or(ErrorKind::Num)?;
-        let (y2, m2, d2) = date::serial_to_ymd(e, d1904).ok_or(ErrorKind::Num)?;
-        let diff = e - s;
-        Ok(match basis {
-            0 => {
-                let last_feb = |y: i64, m: u32, d: u32| m == 2 && d == days_in_month(y, 2);
-                let (mut dd1, mut dd2) = (d1 as i64, d2 as i64);
-                if dd1 == 31 && dd2 == 31 {
-                    dd1 = 30;
-                    dd2 = 30;
-                } else if dd1 == 31 {
-                    dd1 = 30;
-                } else if dd1 == 30 && dd2 == 31 {
-                    dd2 = 30;
-                } else if last_feb(y1, m1, d1) && last_feb(y2, m2, d2) {
-                    dd1 = 30;
-                    dd2 = 30;
-                } else if last_feb(y1, m1, d1) {
-                    dd1 = 30;
-                }
-                days360(y1, m1, dd1, y2, m2, dd2) / 360.0
-            }
-            1 => {
-                let le_year = y1 == y2 || (y2 == y1 + 1 && (m1 > m2 || (m1 == m2 && d1 >= d2)));
-                if le_year {
-                    let feb29_between =
-                        (is_leap(y1) && (m1, d1) < (3, 1)) || (is_leap(y2) && (m2, d2) >= (3, 1));
-                    let year_len =
-                        if (y1 == y2 && is_leap(y1)) || feb29_between || (m2 == 2 && d2 == 29) {
-                            366.0
-                        } else {
-                            365.0
-                        };
-                    diff / year_len
-                } else {
-                    let years = (y2 - y1 + 1) as f64;
-                    let span = (days_from_civil(y2 + 1, 1, 1) - days_from_civil(y1, 1, 1)) as f64;
-                    diff / (span / years)
-                }
-            }
-            2 => diff / 360.0,
-            3 => diff / 365.0,
-            _ => {
-                let dd1 = (d1 as i64).min(30);
-                let dd2 = (d2 as i64).min(30);
-                days360(y1, m1, dd1, y2, m2, dd2) / 360.0
-            }
-        })
-    })())
+        2 => diff / 360.0,
+        3 => diff / 365.0,
+        _ => {
+            let dd1 = (d1 as i64).min(30);
+            let dd2 = (d2 as i64).min(30);
+            days360(y1, m1, dd1, y2, m2, dd2) / 360.0
+        }
+    })
 }
 
 fn days360(y1: i64, m1: u32, d1: i64, y2: i64, m2: u32, d2: i64) -> f64 {

@@ -4,50 +4,39 @@
 use std::sync::Arc;
 
 use super::args::{MANY, arg_values, def, opt_bool, opt_int, to_serial, trunc_i64};
-use super::{Arg, Ctx, FuncDef, num, ok, scalar, text};
+use super::{Arg, Ctx, FuncDef, MAX_TEXT_LEN, num, scalar, text};
 use crate::formula::criteria::Pattern;
 use crate::formula::decimal::{Dec, Mode};
 use crate::formula::textfmt;
 use crate::formula::value::{ErrorKind, Value, parse_number};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("LEN", 1, 1, len),
-    def("LEFT", 1, 2, left),
-    def("RIGHT", 1, 2, right),
-    def("MID", 3, 3, mid),
-    def("UPPER", 1, 1, upper),
-    def("LOWER", 1, 1, lower),
-    def("PROPER", 1, 1, proper),
-    def("TRIM", 1, 1, trim),
-    def("CONCAT", 1, MANY, concat),
-    def("CONCATENATE", 1, MANY, concatenate),
-    def("TEXTJOIN", 3, MANY, textjoin),
-    def("SUBSTITUTE", 3, 4, substitute),
-    def("REPLACE", 4, 4, replace),
-    def("FIND", 2, 3, find),
-    def("SEARCH", 2, 3, search),
-    def("VALUE", 1, 1, value),
-    def("TEXT", 2, 2, text_fn),
-    def("REPT", 2, 2, rept),
-    def("EXACT", 2, 2, exact),
-    def("CHAR", 1, 1, char_fn),
-    def("CODE", 1, 1, code),
-    def("CLEAN", 1, 1, clean),
-    def("NUMBERVALUE", 1, 3, numbervalue),
-    def("FIXED", 1, 3, fixed),
-    def("DOLLAR", 1, 2, dollar),
+    def!("LEN", 1, 1, len),
+    def!("LEFT", 1, 2, left),
+    def!("RIGHT", 1, 2, right),
+    def!("MID", 3, 3, mid),
+    def!("UPPER", 1, 1, upper),
+    def!("LOWER", 1, 1, lower),
+    def!("PROPER", 1, 1, proper),
+    def!("TRIM", 1, 1, trim),
+    def!("CONCAT", 1, MANY, concat),
+    def!("CONCATENATE", 1, MANY, concatenate),
+    def!("TEXTJOIN", 3, MANY, textjoin),
+    def!("SUBSTITUTE", 3, 4, substitute),
+    def!("REPLACE", 4, 4, replace),
+    def!("FIND", 2, 3, find),
+    def!("SEARCH", 2, 3, search),
+    def!("VALUE", 1, 1, value),
+    def!("TEXT", 2, 2, text_fn),
+    def!("REPT", 2, 2, rept),
+    def!("EXACT", 2, 2, exact),
+    def!("CHAR", 1, 1, char_fn),
+    def!("CODE", 1, 1, code),
+    def!("CLEAN", 1, 1, clean),
+    def!("NUMBERVALUE", 1, 3, numbervalue),
+    def!("FIXED", 1, 3, fixed),
+    def!("DOLLAR", 1, 2, dollar),
 ];
-
-/// Excel's cell text limit; longer results are `#VALUE!`.
-const MAX_LEN: usize = 32_767;
-
-fn txt(r: Result<String, ErrorKind>) -> Value {
-    match r {
-        Ok(s) if s.chars().count() > MAX_LEN => Value::Error(ErrorKind::Value),
-        Ok(s) => Value::Text(Arc::from(s)),
-        Err(e) => Value::Error(e),
-    }
-}
 
 /// A count argument: truncated, negative is `#VALUE!`.
 fn count_arg(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: i64) -> Result<usize, ErrorKind> {
@@ -59,57 +48,48 @@ fn count_arg(arg: Option<&Arg>, ctx: &mut dyn Ctx, default: i64) -> Result<usize
     }
 }
 
-fn len(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match text(&args[0], ctx) {
-        Ok(s) => Value::Number(s.chars().count() as f64),
-        Err(e) => Value::Error(e),
+fn len(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    Ok(text(&args[0], ctx)?.chars().count() as f64)
+}
+
+fn left(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let s = text(&args[0], ctx)?;
+    let n = count_arg(args.get(1), ctx, 1)?;
+    Ok(s.chars().take(n).collect())
+}
+
+fn right(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let s = text(&args[0], ctx)?;
+    let n = count_arg(args.get(1), ctx, 1)?;
+    let total = s.chars().count();
+    Ok(s.chars().skip(total.saturating_sub(n)).collect())
+}
+
+fn mid(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let s = text(&args[0], ctx)?;
+    let start = trunc_i64(num(&args[1], ctx)?)?;
+    let n = count_arg(args.get(2), ctx, 0)?;
+    if start < 1 {
+        return Err(ErrorKind::Value);
     }
+    Ok(s.chars().skip(start as usize - 1).take(n).collect())
 }
 
-fn left(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let s = text(&args[0], ctx)?;
-        let n = count_arg(args.get(1), ctx, 1)?;
-        Ok(s.chars().take(n).collect())
-    })())
+fn map_text(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&str) -> String) -> Result<String, ErrorKind> {
+    text(&args[0], ctx).map(|s| f(&s))
 }
 
-fn right(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let s = text(&args[0], ctx)?;
-        let n = count_arg(args.get(1), ctx, 1)?;
-        let total = s.chars().count();
-        Ok(s.chars().skip(total.saturating_sub(n)).collect())
-    })())
-}
-
-fn mid(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let s = text(&args[0], ctx)?;
-        let start = trunc_i64(num(&args[1], ctx)?)?;
-        let n = count_arg(args.get(2), ctx, 0)?;
-        if start < 1 {
-            return Err(ErrorKind::Value);
-        }
-        Ok(s.chars().skip(start as usize - 1).take(n).collect())
-    })())
-}
-
-fn map_text(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&str) -> String) -> Value {
-    txt(text(&args[0], ctx).map(|s| f(&s)))
-}
-
-fn upper(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn upper(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     map_text(args, ctx, str::to_uppercase)
 }
 
-fn lower(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn lower(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     map_text(args, ctx, str::to_lowercase)
 }
 
 /// Capitalise each letter that follows a non-letter, lower-case the rest
 /// (`"2-way street"` → `"2-Way Street"`, `"it's"` → `"It'S"`, as Excel).
-fn proper(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn proper(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     map_text(args, ctx, |s| {
         let mut out = String::with_capacity(s.len());
         let mut prev_letter = false;
@@ -132,7 +112,7 @@ fn proper(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
 
 /// Excel's TRIM: ASCII spaces only — drop leading/trailing ones and
 /// collapse inner runs to one (non-breaking spaces are kept).
-fn trim(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn trim(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     map_text(args, ctx, |s| {
         s.split(' ')
             .filter(|w| !w.is_empty())
@@ -142,112 +122,102 @@ fn trim(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
 }
 
 /// CONCAT: every value of every argument, ranges flattened row by row.
-fn concat(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let mut out = String::new();
-        for a in args {
-            for v in arg_values(a, &*ctx)? {
-                out.push_str(&v.to_text()?);
-                if out.len() > MAX_LEN * 4 {
-                    return Err(ErrorKind::Value);
-                }
+fn concat(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let mut out = String::new();
+    for a in args {
+        for v in arg_values(a, &*ctx)? {
+            out.push_str(&v.to_text()?);
+            if out.len() > MAX_TEXT_LEN * 4 {
+                return Err(ErrorKind::Value);
             }
         }
-        Ok(out)
-    })())
+    }
+    Ok(out)
 }
 
 /// CONCATENATE: one value per argument (a multi-cell range is `#VALUE!`).
-fn concatenate(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let mut out = String::new();
-        for a in args {
-            out.push_str(&text(a, ctx)?);
-        }
-        Ok(out)
-    })())
+fn concatenate(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let mut out = String::new();
+    for a in args {
+        out.push_str(&text(a, ctx)?);
+    }
+    Ok(out)
 }
 
 /// TEXTJOIN(delimiter, ignore_empty, text…): a range or array of
 /// delimiters is used in turn.
-fn textjoin(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let delims: Vec<Arc<str>> = arg_values(&args[0], &*ctx)?
-            .iter()
-            .map(Value::to_text)
-            .collect::<Result<_, _>>()?;
-        let ignore_empty = opt_bool(args.get(1), ctx, true)?;
-        let mut parts: Vec<Arc<str>> = Vec::new();
-        for a in &args[2..] {
-            for v in arg_values(a, &*ctx)? {
-                let t = v.to_text()?;
-                if ignore_empty && t.is_empty() {
-                    continue;
-                }
-                parts.push(t);
+fn textjoin(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let delims: Vec<Arc<str>> = arg_values(&args[0], &*ctx)?
+        .iter()
+        .map(Value::to_text)
+        .collect::<Result<_, _>>()?;
+    let ignore_empty = opt_bool(args.get(1), ctx, true)?;
+    let mut parts: Vec<Arc<str>> = Vec::new();
+    for a in &args[2..] {
+        for v in arg_values(a, &*ctx)? {
+            let t = v.to_text()?;
+            if ignore_empty && t.is_empty() {
+                continue;
             }
+            parts.push(t);
         }
-        let mut out = String::new();
-        for (i, p) in parts.iter().enumerate() {
-            if i > 0 && !delims.is_empty() {
-                out.push_str(&delims[(i - 1) % delims.len()]);
-            }
-            out.push_str(p);
-            if out.len() > MAX_LEN * 4 {
-                return Err(ErrorKind::Value);
-            }
+    }
+    let mut out = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 && !delims.is_empty() {
+            out.push_str(&delims[(i - 1) % delims.len()]);
         }
-        Ok(out)
-    })())
+        out.push_str(p);
+        if out.len() > MAX_TEXT_LEN * 4 {
+            return Err(ErrorKind::Value);
+        }
+    }
+    Ok(out)
 }
 
 /// SUBSTITUTE(text, old, new, [instance]): case-sensitive; every
 /// occurrence, or only the `instance`-th.
-fn substitute(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let s = text(&args[0], ctx)?;
-        let old = text(&args[1], ctx)?;
-        let new = text(&args[2], ctx)?;
-        let instance = match args.get(3) {
-            None | Some(Arg::Omitted) => None,
-            Some(a) => {
-                let n = trunc_i64(num(a, ctx)?)?;
-                if n < 1 {
-                    return Err(ErrorKind::Value);
-                }
-                Some(n as usize)
+fn substitute(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let s = text(&args[0], ctx)?;
+    let old = text(&args[1], ctx)?;
+    let new = text(&args[2], ctx)?;
+    let instance = match args.get(3) {
+        None | Some(Arg::Omitted) => None,
+        Some(a) => {
+            let n = trunc_i64(num(a, ctx)?)?;
+            if n < 1 {
+                return Err(ErrorKind::Value);
             }
-        };
-        if old.is_empty() {
-            return Ok(s.to_string());
+            Some(n as usize)
         }
-        Ok(match instance {
-            None => s.replace(&*old, &new),
-            Some(k) => match s.match_indices(&*old).nth(k - 1) {
-                Some((at, _)) => format!("{}{}{}", &s[..at], new, &s[at + old.len()..]),
-                None => s.to_string(),
-            },
-        })
-    })())
+    };
+    if old.is_empty() {
+        return Ok(s.to_string());
+    }
+    Ok(match instance {
+        None => s.replace(&*old, &new),
+        Some(k) => match s.match_indices(&*old).nth(k - 1) {
+            Some((at, _)) => format!("{}{}{}", &s[..at], new, &s[at + old.len()..]),
+            None => s.to_string(),
+        },
+    })
 }
 
 /// REPLACE(old, start, count, new) by character position.
-fn replace(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let s: Vec<char> = text(&args[0], ctx)?.chars().collect();
-        let start = trunc_i64(num(&args[1], ctx)?)?;
-        let n = count_arg(args.get(2), ctx, 0)?;
-        let new = text(&args[3], ctx)?;
-        if start < 1 {
-            return Err(ErrorKind::Value);
-        }
-        let a = (start as usize - 1).min(s.len());
-        let b = a.saturating_add(n).min(s.len());
-        let mut out: String = s[..a].iter().collect();
-        out.push_str(&new);
-        out.extend(&s[b..]);
-        Ok(out)
-    })())
+fn replace(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let s: Vec<char> = text(&args[0], ctx)?.chars().collect();
+    let start = trunc_i64(num(&args[1], ctx)?)?;
+    let n = count_arg(args.get(2), ctx, 0)?;
+    let new = text(&args[3], ctx)?;
+    if start < 1 {
+        return Err(ErrorKind::Value);
+    }
+    let a = (start as usize - 1).min(s.len());
+    let b = a.saturating_add(n).min(s.len());
+    let mut out: String = s[..a].iter().collect();
+    out.push_str(&new);
+    out.extend(&s[b..]);
+    Ok(out)
 }
 
 /// The shared argument handling of FIND and SEARCH: `(needle, haystack,
@@ -266,75 +236,57 @@ fn find_args(args: &[Arg], ctx: &mut dyn Ctx) -> Result<(Arc<str>, Arc<str>, usi
 }
 
 /// FIND: case-sensitive, no wildcards.
-fn find(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let r = find_args(args, ctx).and_then(|(needle, hay, start)| {
-        let h: Vec<char> = hay.chars().collect();
-        let n: Vec<char> = needle.chars().collect();
-        if n.is_empty() {
-            return Ok(start + 1);
-        }
-        (start..h.len())
-            .find(|&i| h[i..].starts_with(&n))
-            .map(|i| i + 1)
-            .ok_or(ErrorKind::Value)
-    });
-    match r {
-        Ok(i) => Value::Number(i as f64),
-        Err(e) => Value::Error(e),
+fn find(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let (needle, hay, start) = find_args(args, ctx)?;
+    let h: Vec<char> = hay.chars().collect();
+    let n: Vec<char> = needle.chars().collect();
+    if n.is_empty() {
+        return Ok((start + 1) as f64);
     }
+    (start..h.len())
+        .find(|&i| h[i..].starts_with(&n))
+        .map(|i| (i + 1) as f64)
+        .ok_or(ErrorKind::Value)
 }
 
 /// SEARCH: case-insensitive, with `*`/`?`/`~` wildcards.
-fn search(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let r = find_args(args, ctx).and_then(|(needle, hay, start)| {
-        Pattern::new(&needle)
-            .find(&hay, start)
-            .map(|i| i + 1)
-            .ok_or(ErrorKind::Value)
-    });
-    match r {
-        Ok(i) => Value::Number(i as f64),
-        Err(e) => Value::Error(e),
-    }
+fn search(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let (needle, hay, start) = find_args(args, ctx)?;
+    Pattern::new(&needle)
+        .find(&hay, start)
+        .map(|i| (i + 1) as f64)
+        .ok_or(ErrorKind::Value)
 }
 
 /// VALUE: text as typing it into a cell would read it (numbers with
 /// grouping, currency or percent, dates, times); a boolean is `#VALUE!`.
-fn value(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn value(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     match scalar(&args[0], ctx) {
-        Value::Bool(_) => Value::Error(ErrorKind::Value),
-        v => ok(to_serial(&v, ctx)),
+        Value::Bool(_) => Err(ErrorKind::Value),
+        v => to_serial(&v, ctx),
     }
 }
 
-fn text_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let v = scalar(&args[0], ctx);
-        if let Value::Error(e) = v {
-            return Err(e);
-        }
-        let code = text(&args[1], ctx)?;
-        textfmt::format_value(&v, &code, ctx.date1904())
-    })())
-}
-
-fn rept(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let s = text(&args[0], ctx)?;
-        let n = count_arg(args.get(1), ctx, 0)?;
-        if s.chars().count().saturating_mul(n) > MAX_LEN {
-            return Err(ErrorKind::Value);
-        }
-        Ok(s.repeat(n))
-    })())
-}
-
-fn exact(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let r = (|| Ok::<_, ErrorKind>(text(&args[0], ctx)? == text(&args[1], ctx)?))();
-    match r {
-        Ok(b) => Value::Bool(b),
-        Err(e) => Value::Error(e),
+fn text_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let v = scalar(&args[0], ctx);
+    if let Value::Error(e) = v {
+        return Err(e);
     }
+    let code = text(&args[1], ctx)?;
+    textfmt::format_value(&v, &code, ctx.date1904())
+}
+
+fn rept(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let s = text(&args[0], ctx)?;
+    let n = count_arg(args.get(1), ctx, 0)?;
+    if s.chars().count().saturating_mul(n) > MAX_TEXT_LEN {
+        return Err(ErrorKind::Value);
+    }
+    Ok(s.repeat(n))
+}
+
+fn exact(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
+    Ok(text(&args[0], ctx)? == text(&args[1], ctx)?)
 }
 
 /// Windows-1252's characters for bytes 0x80–0x9F (Excel on Windows maps
@@ -345,42 +297,36 @@ const CP1252_HIGH: [char; 32] = [
     '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
 ];
 
-fn char_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let n = trunc_i64(num(&args[0], ctx)?)?;
-        let c = match n {
-            1..=127 | 160..=255 => char::from_u32(n as u32).ok_or(ErrorKind::Value)?,
-            128..=159 => CP1252_HIGH[n as usize - 128],
-            _ => return Err(ErrorKind::Value),
-        };
-        Ok(c.to_string())
-    })())
+fn char_fn(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let n = trunc_i64(num(&args[0], ctx)?)?;
+    let c = match n {
+        1..=127 | 160..=255 => char::from_u32(n as u32).ok_or(ErrorKind::Value)?,
+        128..=159 => CP1252_HIGH[n as usize - 128],
+        _ => return Err(ErrorKind::Value),
+    };
+    Ok(c.to_string())
 }
 
 /// CODE: the Windows-1252 code of the first character; characters outside
 /// that code page give 63 (`?`), as Excel's conversion does.
-fn code(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match text(&args[0], ctx) {
-        Err(e) => Value::Error(e),
-        Ok(s) => match s.chars().next() {
-            None => Value::Error(ErrorKind::Value),
-            Some(c) => {
-                let u = c as u32;
-                let code = if u < 128 || (160..=255).contains(&u) {
-                    u
-                } else if let Some(i) = CP1252_HIGH.iter().position(|&x| x == c) {
-                    128 + i as u32
-                } else {
-                    63
-                };
-                Value::Number(code as f64)
-            }
-        },
-    }
+fn code(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let c = text(&args[0], ctx)?
+        .chars()
+        .next()
+        .ok_or(ErrorKind::Value)?;
+    let u = c as u32;
+    let code = if u < 128 || (160..=255).contains(&u) {
+        u
+    } else if let Some(i) = CP1252_HIGH.iter().position(|&x| x == c) {
+        128 + i as u32
+    } else {
+        63
+    };
+    Ok(code as f64)
 }
 
 /// CLEAN: drop the non-printing ASCII control characters (0–31).
-fn clean(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn clean(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     map_text(args, ctx, |s| {
         s.chars().filter(|c| (*c as u32) >= 32).collect()
     })
@@ -390,50 +336,47 @@ fn clean(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
 /// parsing. Spaces anywhere are ignored, group separators before the
 /// decimal separator are dropped (after it they're `#VALUE!`), trailing
 /// `%` signs divide by 100 each, empty text is 0.
-fn numbervalue(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let r = (|| {
-        let s = text(&args[0], ctx)?;
-        let sep = |a: Option<&Arg>, ctx: &mut dyn Ctx, d: char| -> Result<char, ErrorKind> {
-            match a {
-                None | Some(Arg::Omitted) => Ok(d),
-                Some(a) => text(a, ctx)?.chars().next().ok_or(ErrorKind::Value),
+fn numbervalue(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let s = text(&args[0], ctx)?;
+    let sep = |a: Option<&Arg>, ctx: &mut dyn Ctx, d: char| -> Result<char, ErrorKind> {
+        match a {
+            None | Some(Arg::Omitted) => Ok(d),
+            Some(a) => text(a, ctx)?.chars().next().ok_or(ErrorKind::Value),
+        }
+    };
+    let dec = sep(args.get(1), ctx, '.')?;
+    let group = sep(args.get(2), ctx, ',')?;
+    if dec == group {
+        return Err(ErrorKind::Value);
+    }
+    let mut body: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if body.is_empty() {
+        return Ok(0.0);
+    }
+    let mut pct = 0;
+    while let Some(b) = body.strip_suffix('%') {
+        body = b.to_string();
+        pct += 1;
+    }
+    let mut out = String::new();
+    let mut seen_dec = false;
+    for c in body.chars() {
+        if c == dec {
+            if seen_dec {
+                return Err(ErrorKind::Value);
             }
-        };
-        let dec = sep(args.get(1), ctx, '.')?;
-        let group = sep(args.get(2), ctx, ',')?;
-        if dec == group {
-            return Err(ErrorKind::Value);
-        }
-        let mut body: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        if body.is_empty() {
-            return Ok(0.0);
-        }
-        let mut pct = 0;
-        while let Some(b) = body.strip_suffix('%') {
-            body = b.to_string();
-            pct += 1;
-        }
-        let mut out = String::new();
-        let mut seen_dec = false;
-        for c in body.chars() {
-            if c == dec {
-                if seen_dec {
-                    return Err(ErrorKind::Value);
-                }
-                seen_dec = true;
-                out.push('.');
-            } else if c == group {
-                if seen_dec {
-                    return Err(ErrorKind::Value);
-                }
-            } else {
-                out.push(c);
+            seen_dec = true;
+            out.push('.');
+        } else if c == group {
+            if seen_dec {
+                return Err(ErrorKind::Value);
             }
+        } else {
+            out.push(c);
         }
-        let n = parse_number(&out).ok_or(ErrorKind::Value)?;
-        Ok(n / 100f64.powi(pct))
-    })();
-    super::ok(r)
+    }
+    let n = parse_number(&out).ok_or(ErrorKind::Value)?;
+    Ok(n / 100f64.powi(pct))
 }
 
 /// `number` rounded to `decimals` places as text: `1,234.57`. Negative
@@ -466,29 +409,25 @@ fn fixed_text(x: f64, decimals: i64, commas: bool) -> Result<String, ErrorKind> 
     Ok(out)
 }
 
-fn fixed(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let x = num(&args[0], ctx)?;
-        let d = opt_int(args.get(1), ctx, 2)?;
-        let no_commas = opt_bool(args.get(2), ctx, false)?;
-        fixed_text(x, d, !no_commas)
-    })())
+fn fixed(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let x = num(&args[0], ctx)?;
+    let d = opt_int(args.get(1), ctx, 2)?;
+    let no_commas = opt_bool(args.get(2), ctx, false)?;
+    fixed_text(x, d, !no_commas)
 }
 
 /// DOLLAR: currency text, negatives in parentheses (`($1,234.57)`), as
 /// Excel's en-US currency format.
-fn dollar(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    txt((|| {
-        let x = num(&args[0], ctx)?;
-        let d = opt_int(args.get(1), ctx, 2)?;
-        let body = fixed_text(x.abs(), d, true)?;
-        let zero = body.chars().all(|c| matches!(c, '0' | '.' | ','));
-        Ok(if x < 0.0 && !zero {
-            format!("(${body})")
-        } else {
-            format!("${body}")
-        })
-    })())
+fn dollar(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
+    let x = num(&args[0], ctx)?;
+    let d = opt_int(args.get(1), ctx, 2)?;
+    let body = fixed_text(x.abs(), d, true)?;
+    let zero = body.chars().all(|c| matches!(c, '0' | '.' | ','));
+    Ok(if x < 0.0 && !zero {
+        format!("(${body})")
+    } else {
+        format!("${body}")
+    })
 }
 
 #[cfg(test)]

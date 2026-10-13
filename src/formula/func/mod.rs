@@ -1,6 +1,7 @@
 //! The built-in function library and the interface every function uses.
 //!
-//! A function is a plain `fn(&[Arg], &mut dyn Ctx) -> Value`. Arguments
+//! A function is a plain `fn(&[Arg], &mut dyn Ctx) -> R`, where `R` is
+//! anything [`IntoValue`] (typically `Result<f64, ErrorKind>`). Arguments
 //! arrive evaluated, except for the handful of short-circuiting forms (`IF`,
 //! `IFS`, `IFERROR`, `IFNA`, `CHOOSE`, `SWITCH`) that the evaluator runs
 //! itself. Ranges arrive unevaluated as [`RangeRef`]s and are read through
@@ -152,6 +153,8 @@ pub struct FuncDef {
     pub min_args: usize,
     /// `usize::MAX` for variadic functions.
     pub max_args: usize,
+    /// The body, its result already converted to a cell value (see
+    /// [`args::def`]).
     pub f: fn(&[Arg], &mut dyn Ctx) -> Value,
     /// Re-run on every recalculation (`NOW`, `RAND`).
     pub volatile: bool,
@@ -287,11 +290,67 @@ pub fn text(arg: &Arg, ctx: &mut dyn Ctx) -> Result<Arc<str>, ErrorKind> {
     scalar(arg, ctx).to_text()
 }
 
-/// Turn a `Result` into a cell value.
-pub fn ok(r: Result<f64, ErrorKind>) -> Value {
-    match r {
-        Ok(n) if n.is_finite() => Value::Number(n),
-        Ok(_) => Value::Error(ErrorKind::Num),
-        Err(e) => Value::Error(e),
+/// Excel's cell text limit; longer text results are `#VALUE!`.
+pub const MAX_TEXT_LEN: usize = 32_767;
+
+/// What a function body can return: anything that becomes one cell value.
+/// The [`FuncDef`] tables wrap each body with [`IntoValue::into_value`], so
+/// a body returns `Result<f64, ErrorKind>` (or `String`, `bool`, `Value`, …)
+/// and uses `?` freely.
+pub trait IntoValue {
+    fn into_value(self) -> Value;
+}
+
+impl IntoValue for Value {
+    fn into_value(self) -> Value {
+        self
+    }
+}
+
+/// A number; `#NUM!` when not finite.
+impl IntoValue for f64 {
+    fn into_value(self) -> Value {
+        if self.is_finite() {
+            Value::Number(self)
+        } else {
+            Value::Error(ErrorKind::Num)
+        }
+    }
+}
+
+impl IntoValue for bool {
+    fn into_value(self) -> Value {
+        Value::Bool(self)
+    }
+}
+
+/// Text; `#VALUE!` past [`MAX_TEXT_LEN`] characters.
+impl IntoValue for String {
+    fn into_value(self) -> Value {
+        if self.chars().count() > MAX_TEXT_LEN {
+            Value::Error(ErrorKind::Value)
+        } else {
+            Value::Text(Arc::from(self))
+        }
+    }
+}
+
+/// Text; `#VALUE!` past [`MAX_TEXT_LEN`] characters.
+impl IntoValue for Arc<str> {
+    fn into_value(self) -> Value {
+        if self.chars().count() > MAX_TEXT_LEN {
+            Value::Error(ErrorKind::Value)
+        } else {
+            Value::Text(self)
+        }
+    }
+}
+
+impl<T: IntoValue> IntoValue for Result<T, ErrorKind> {
+    fn into_value(self) -> Value {
+        match self {
+            Ok(v) => v.into_value(),
+            Err(e) => Value::Error(e),
+        }
     }
 }

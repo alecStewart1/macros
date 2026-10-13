@@ -4,48 +4,48 @@
 use std::collections::HashMap;
 
 use super::args::{Area, MANY, area, def, opt_num};
-use super::{Arg, Ctx, FuncDef, num, numbers, ok, scalar};
+use super::{Arg, Ctx, FuncDef, num, numbers, scalar};
 use crate::formula::criteria::Criterion;
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("AVERAGE", 1, MANY, average),
-    def("AVERAGEA", 1, MANY, averagea),
-    def("COUNT", 1, MANY, count),
-    def("COUNTA", 1, MANY, counta),
-    def("COUNTBLANK", 1, 1, countblank),
-    def("MIN", 1, MANY, min),
-    def("MAX", 1, MANY, max),
-    def("MINA", 1, MANY, mina),
-    def("MAXA", 1, MANY, maxa),
-    def("MEDIAN", 1, MANY, median),
-    def("MODE", 1, MANY, mode),
-    def("MODE.SNGL", 1, MANY, mode),
-    def("STDEV", 1, MANY, stdev_s),
-    def("STDEV.S", 1, MANY, stdev_s),
-    def("STDEV.P", 1, MANY, stdev_p),
-    def("STDEVP", 1, MANY, stdev_p),
-    def("VAR", 1, MANY, var_s),
-    def("VAR.S", 1, MANY, var_s),
-    def("VAR.P", 1, MANY, var_p),
-    def("VARP", 1, MANY, var_p),
-    def("LARGE", 2, 2, large),
-    def("SMALL", 2, 2, small),
-    def("RANK", 2, 3, rank),
-    def("RANK.EQ", 2, 3, rank),
-    def("RANK.AVG", 2, 3, rank_avg),
-    def("PERCENTILE", 2, 2, percentile),
-    def("PERCENTILE.INC", 2, 2, percentile),
-    def("QUARTILE", 2, 2, quartile),
-    def("QUARTILE.INC", 2, 2, quartile),
-    def("SUMIF", 2, 3, sumif),
-    def("SUMIFS", 3, MANY, sumifs),
-    def("COUNTIF", 2, 2, countif),
-    def("COUNTIFS", 2, MANY, countifs),
-    def("AVERAGEIF", 2, 3, averageif),
-    def("AVERAGEIFS", 3, MANY, averageifs),
-    def("MAXIFS", 3, MANY, maxifs),
-    def("MINIFS", 3, MANY, minifs),
+    def!("AVERAGE", 1, MANY, average),
+    def!("AVERAGEA", 1, MANY, averagea),
+    def!("COUNT", 1, MANY, count),
+    def!("COUNTA", 1, MANY, counta),
+    def!("COUNTBLANK", 1, 1, countblank),
+    def!("MIN", 1, MANY, min),
+    def!("MAX", 1, MANY, max),
+    def!("MINA", 1, MANY, mina),
+    def!("MAXA", 1, MANY, maxa),
+    def!("MEDIAN", 1, MANY, median),
+    def!("MODE", 1, MANY, mode),
+    def!("MODE.SNGL", 1, MANY, mode),
+    def!("STDEV", 1, MANY, stdev_s),
+    def!("STDEV.S", 1, MANY, stdev_s),
+    def!("STDEV.P", 1, MANY, stdev_p),
+    def!("STDEVP", 1, MANY, stdev_p),
+    def!("VAR", 1, MANY, var_s),
+    def!("VAR.S", 1, MANY, var_s),
+    def!("VAR.P", 1, MANY, var_p),
+    def!("VARP", 1, MANY, var_p),
+    def!("LARGE", 2, 2, large),
+    def!("SMALL", 2, 2, small),
+    def!("RANK", 2, 3, rank),
+    def!("RANK.EQ", 2, 3, rank),
+    def!("RANK.AVG", 2, 3, rank_avg),
+    def!("PERCENTILE", 2, 2, percentile),
+    def!("PERCENTILE.INC", 2, 2, percentile),
+    def!("QUARTILE", 2, 2, quartile),
+    def!("QUARTILE.INC", 2, 2, quartile),
+    def!("SUMIF", 2, 3, sumif),
+    def!("SUMIFS", 3, MANY, sumifs),
+    def!("COUNTIF", 2, 2, countif),
+    def!("COUNTIFS", 2, MANY, countifs),
+    def!("AVERAGEIF", 2, 3, averageif),
+    def!("AVERAGEIFS", 3, MANY, averageifs),
+    def!("MAXIFS", 3, MANY, maxifs),
+    def!("MINIFS", 3, MANY, minifs),
 ];
 
 /// The `…A` functions' view: like [`numbers`], but inside ranges and arrays
@@ -82,12 +82,12 @@ fn mean(ns: &[f64]) -> Result<f64, ErrorKind> {
     Ok(ns.iter().sum::<f64>() / ns.len() as f64)
 }
 
-fn average(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| mean(&ns)))
+fn average(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| mean(&ns))
 }
 
-fn averagea(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers_a(args, ctx).and_then(|ns| mean(&ns)))
+fn averagea(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers_a(args, ctx).and_then(|ns| mean(&ns))
 }
 
 /// COUNT never fails: errors and non-numeric text are simply not counted.
@@ -168,20 +168,20 @@ fn fold_or_zero(ns: Vec<f64>, f: fn(f64, f64) -> f64) -> f64 {
     ns.into_iter().reduce(f).unwrap_or(0.0)
 }
 
-fn min(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::min)))
+fn min(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::min))
 }
 
-fn max(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::max)))
+fn max(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::max))
 }
 
-fn mina(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::min)))
+fn mina(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::min))
 }
 
-fn maxa(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::max)))
+fn maxa(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::max))
 }
 
 fn sorted(mut ns: Vec<f64>) -> Vec<f64> {
@@ -189,8 +189,8 @@ fn sorted(mut ns: Vec<f64>) -> Vec<f64> {
     ns
 }
 
-fn median(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| {
+fn median(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| {
         if ns.is_empty() {
             return Err(ErrorKind::Num);
         }
@@ -201,13 +201,13 @@ fn median(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
         } else {
             (s[m - 1] + s[m]) / 2.0
         })
-    }))
+    })
 }
 
 /// The most frequent number; ties go to the one that appears first. No
 /// repeats at all is `#N/A`.
-fn mode(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| {
+fn mode(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| {
         let mut counts: HashMap<u64, (usize, usize)> = HashMap::new();
         for (i, n) in ns.iter().enumerate() {
             let key = if *n == 0.0 { 0 } else { n.to_bits() };
@@ -218,7 +218,7 @@ fn mode(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
             .filter(|(c, _)| *c > 1)
             .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
         best.map(|&(_, i)| ns[i]).ok_or(ErrorKind::NA)
-    }))
+    })
 }
 
 fn variance(ns: &[f64], sample: bool) -> Result<f64, ErrorKind> {
@@ -231,45 +231,43 @@ fn variance(ns: &[f64], sample: bool) -> Result<f64, ErrorKind> {
     Ok(ss / if sample { (n - 1) as f64 } else { n as f64 })
 }
 
-fn var_s(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| variance(&ns, true)))
+fn var_s(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| variance(&ns, true))
 }
 
-fn var_p(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| variance(&ns, false)))
+fn var_p(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| variance(&ns, false))
 }
 
-fn stdev_s(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx)
+fn stdev_s(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx)
         .and_then(|ns| variance(&ns, true))
-        .map(f64::sqrt))
+        .map(f64::sqrt)
 }
 
-fn stdev_p(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx)
+fn stdev_p(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx)
         .and_then(|ns| variance(&ns, false))
-        .map(f64::sqrt))
+        .map(f64::sqrt)
 }
 
 /// The k-th largest (or smallest). A fractional k rounds up, as in Excel.
-fn kth(args: &[Arg], ctx: &mut dyn Ctx, largest: bool) -> Value {
-    ok((|| {
-        let ns = numbers(&args[..1], ctx)?;
-        let k = num(&args[1], ctx)?.ceil();
-        if k < 1.0 || k > ns.len() as f64 {
-            return Err(ErrorKind::Num);
-        }
-        let s = sorted(ns);
-        let i = k as usize - 1;
-        Ok(if largest { s[s.len() - 1 - i] } else { s[i] })
-    })())
+fn kth(args: &[Arg], ctx: &mut dyn Ctx, largest: bool) -> Result<f64, ErrorKind> {
+    let ns = numbers(&args[..1], ctx)?;
+    let k = num(&args[1], ctx)?.ceil();
+    if k < 1.0 || k > ns.len() as f64 {
+        return Err(ErrorKind::Num);
+    }
+    let s = sorted(ns);
+    let i = k as usize - 1;
+    Ok(if largest { s[s.len() - 1 - i] } else { s[i] })
 }
 
-fn large(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn large(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     kth(args, ctx, true)
 }
 
-fn small(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn small(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     kth(args, ctx, false)
 }
 
@@ -289,12 +287,12 @@ fn rank_counts(args: &[Arg], ctx: &mut dyn Ctx) -> Result<(usize, usize), ErrorK
     Ok((better, equal))
 }
 
-fn rank(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(rank_counts(args, ctx).map(|(b, _)| (b + 1) as f64))
+fn rank(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    rank_counts(args, ctx).map(|(b, _)| (b + 1) as f64)
 }
 
-fn rank_avg(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(rank_counts(args, ctx).map(|(b, e)| b as f64 + (e as f64 + 1.0) / 2.0))
+fn rank_avg(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    rank_counts(args, ctx).map(|(b, e)| b as f64 + (e as f64 + 1.0) / 2.0)
 }
 
 fn percentile_of(ns: Vec<f64>, k: f64) -> Result<f64, ErrorKind> {
@@ -312,22 +310,18 @@ fn percentile_of(ns: Vec<f64>, k: f64) -> Result<f64, ErrorKind> {
     })
 }
 
-fn percentile(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let ns = numbers(&args[..1], ctx)?;
-        percentile_of(ns, num(&args[1], ctx)?)
-    })())
+fn percentile(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let ns = numbers(&args[..1], ctx)?;
+    percentile_of(ns, num(&args[1], ctx)?)
 }
 
-fn quartile(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let ns = numbers(&args[..1], ctx)?;
-        let q = num(&args[1], ctx)?.trunc();
-        if !(0.0..=4.0).contains(&q) {
-            return Err(ErrorKind::Num);
-        }
-        percentile_of(ns, q / 4.0)
-    })())
+fn quartile(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let ns = numbers(&args[..1], ctx)?;
+    let q = num(&args[1], ctx)?.trunc();
+    if !(0.0..=4.0).contains(&q) {
+        return Err(ErrorKind::Num);
+    }
+    percentile_of(ns, q / 4.0)
 }
 
 // ---- conditional aggregates --------------------------------------------------
@@ -452,40 +446,38 @@ fn criteria_pairs<'a>(
     Ok(pairs)
 }
 
-fn sumif(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(single_if(args, ctx).map(|ns| ns.iter().sum()))
+fn sumif(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    single_if(args, ctx).map(|ns| ns.iter().sum())
 }
 
-fn averageif(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(single_if(args, ctx).and_then(|ns| mean(&ns)))
+fn averageif(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    single_if(args, ctx).and_then(|ns| mean(&ns))
 }
 
-fn sumifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).map(|ns| ns.iter().sum()))
+fn sumifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).map(|ns| ns.iter().sum())
 }
 
-fn averageifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).and_then(|ns| mean(&ns)))
+fn averageifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).and_then(|ns| mean(&ns))
 }
 
-fn maxifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::max)))
+fn maxifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::max))
 }
 
-fn minifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::min)))
+fn minifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::min))
 }
 
-fn countif(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn countif(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     countifs(args, ctx)
 }
 
-fn countifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let pairs = criteria_pairs(args, ctx)?;
-        let m = match_cells(&pairs, None, ctx)?;
-        Ok((m.positions.len() + m.outside) as f64)
-    })())
+fn countifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let pairs = criteria_pairs(args, ctx)?;
+    let m = match_cells(&pairs, None, ctx)?;
+    Ok((m.positions.len() + m.outside) as f64)
 }
 
 #[cfg(test)]

@@ -158,34 +158,31 @@ impl Area<'_> {
 /// `max_args` for variadic functions.
 pub const MANY: usize = usize::MAX;
 
-type Impl = fn(&[Arg], &mut dyn Ctx) -> Value;
-
-/// A non-volatile function definition.
-pub const fn def(name: &'static str, min_args: usize, max_args: usize, f: Impl) -> super::FuncDef {
-    super::FuncDef {
-        name,
-        min_args,
-        max_args,
-        f,
-        volatile: false,
-    }
+/// A function definition for a category's `FUNCS` table:
+/// `def!("NAME", min_args, max_args, body)`, or `def!(volatile "NOW", …)`
+/// for one re-run on every recalculation. `body` is any
+/// `fn(&[Arg], &mut dyn Ctx) -> R` where `R:` [`IntoValue`](super::IntoValue);
+/// the result is converted to a cell value here, once.
+macro_rules! def {
+    (volatile $name:literal, $min:expr, $max:expr, $f:path) => {
+        $crate::formula::func::args::def!(@ $name, $min, $max, $f, true)
+    };
+    ($name:literal, $min:expr, $max:expr, $f:path) => {
+        $crate::formula::func::args::def!(@ $name, $min, $max, $f, false)
+    };
+    (@ $name:literal, $min:expr, $max:expr, $f:path, $volatile:expr) => {
+        $crate::formula::func::FuncDef {
+            name: $name,
+            min_args: $min,
+            max_args: $max,
+            f: |args: &[$crate::formula::func::Arg], ctx: &mut dyn $crate::formula::func::Ctx| {
+                $crate::formula::func::IntoValue::into_value($f(args, ctx))
+            },
+            volatile: $volatile,
+        }
+    };
 }
-
-/// A volatile function definition (`NOW`, `RAND`).
-pub const fn volatile(
-    name: &'static str,
-    min_args: usize,
-    max_args: usize,
-    f: Impl,
-) -> super::FuncDef {
-    super::FuncDef {
-        name,
-        min_args,
-        max_args,
-        f,
-        volatile: true,
-    }
-}
+pub(crate) use def;
 
 /// Every value of an argument, row-major (a lone value as itself; omitted
 /// as nothing). A missing sheet is `#REF!`.

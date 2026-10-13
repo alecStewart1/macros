@@ -6,12 +6,12 @@ use super::{Arg, Ctx, FuncDef, scalar};
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("AND", 1, MANY, and),
-    def("OR", 1, MANY, or),
-    def("XOR", 1, MANY, xor),
-    def("NOT", 1, 1, not),
-    def("TRUE", 0, 0, true_),
-    def("FALSE", 0, 0, false_),
+    def!("AND", 1, MANY, and),
+    def!("OR", 1, MANY, or),
+    def!("XOR", 1, MANY, xor),
+    def!("NOT", 1, 1, not),
+    def!("TRUE", 0, 0, true_),
+    def!("FALSE", 0, 0, false_),
 ];
 
 /// The logical values of the arguments, as Excel's `AND`/`OR`/`XOR` read
@@ -45,38 +45,32 @@ fn logicals(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<bool>, ErrorKind> {
     Ok(out)
 }
 
-fn logical(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&[bool]) -> bool) -> Value {
-    match logicals(args, ctx) {
-        Ok(bs) => Value::Bool(f(&bs)),
-        Err(e) => Value::Error(e),
-    }
+fn logical(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&[bool]) -> bool) -> Result<bool, ErrorKind> {
+    Ok(f(&logicals(args, ctx)?))
 }
 
-fn and(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn and(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     logical(args, ctx, |bs| bs.iter().all(|b| *b))
 }
 
-fn or(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn or(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     logical(args, ctx, |bs| bs.iter().any(|b| *b))
 }
 
-fn xor(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn xor(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     logical(args, ctx, |bs| bs.iter().filter(|b| **b).count() % 2 == 1)
 }
 
-fn not(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    match scalar(&args[0], ctx).to_bool() {
-        Ok(b) => Value::Bool(!b),
-        Err(e) => Value::Error(e),
-    }
+fn not(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
+    Ok(!scalar(&args[0], ctx).to_bool()?)
 }
 
-fn true_(_: &[Arg], _: &mut dyn Ctx) -> Value {
-    Value::Bool(true)
+fn true_(_: &[Arg], _: &mut dyn Ctx) -> bool {
+    true
 }
 
-fn false_(_: &[Arg], _: &mut dyn Ctx) -> Value {
-    Value::Bool(false)
+fn false_(_: &[Arg], _: &mut dyn Ctx) -> bool {
+    false
 }
 
 #[cfg(test)]

@@ -79,6 +79,12 @@ pub enum Value {
     Empty,
 }
 
+impl From<ErrorKind> for Value {
+    fn from(e: ErrorKind) -> Value {
+        Value::Error(e)
+    }
+}
+
 impl Value {
     pub fn text(s: &str) -> Value {
         Value::Text(Arc::from(s))
