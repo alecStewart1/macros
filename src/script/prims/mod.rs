@@ -8,3 +8,4 @@ pub(super) mod editing;
 pub(super) mod grid;
 pub(super) mod help;
 pub(super) mod keymaps;
+pub(super) mod prompts;
