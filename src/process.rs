@@ -320,6 +320,30 @@ impl Drop for ProcessGroup {
     }
 }
 
+/// The lines of `reader`, like [`BufRead::lines`] (a trailing `\n` or `\r\n`
+/// stripped) but decoding each line lossily: a process or HTTP stream that
+/// emits one non-UTF-8 line (a Latin-1 filename, a binary blob) keeps flowing
+/// instead of `lines()` erroring and the reader dropping the pipe. Ends at EOF
+/// or on a real I/O error.
+pub fn lossy_lines<R: std::io::BufRead>(mut reader: R) -> impl Iterator<Item = String> {
+    let mut buf = Vec::new();
+    std::iter::from_fn(move || {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
+                }
+                Some(String::from_utf8_lossy(&buf).into_owned())
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +419,17 @@ mod tests {
         assert_eq!(r[1], "a=b c|unset");
         assert!(std::env::var("MACROS_PT").is_err());
         assert!(std::env::var("HOME").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod lossy_lines_tests {
+    use super::lossy_lines;
+
+    #[test]
+    fn non_utf8_line_does_not_end_the_stream() {
+        let input: &[u8] = b"one\r\nbad \xff\xfe byte\nthree";
+        let lines: Vec<String> = lossy_lines(input).collect();
+        assert_eq!(lines, vec!["one", "bad \u{fffd}\u{fffd} byte", "three"]);
     }
 }

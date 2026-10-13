@@ -31,6 +31,7 @@ use crate::theme::Theme;
 mod buffers;
 mod commands;
 mod completion;
+mod dap;
 #[cfg(test)]
 mod e2e_tests;
 mod editing_extras;
@@ -56,8 +57,10 @@ mod lsp_methods;
 mod mcp;
 mod minibuffer;
 mod modeline;
+mod net;
 mod overlays;
 mod panes;
+mod process;
 mod registers;
 mod session;
 mod terminal;
@@ -71,7 +74,8 @@ use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
 use panes::{WindowLayout, layout_leaves, node_at, set_ratio_at, union_bounds};
-use terminal::{ProcessHandle, keystroke_to_bytes};
+use process::ProcessHandle;
+use terminal::keystroke_to_bytes;
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
 // rather than through the Scheme keymap, then delegated to the same commands.
@@ -796,7 +800,7 @@ pub struct Editor {
     /// Command senders for live async sockets (`socket-connect-async`) and
     /// WebSockets (`ws-connect`), by id. Each worker thread owns its stream and
     /// drains this channel for outbound sends and a close request.
-    async_sockets: HashMap<u64, std::sync::mpsc::Sender<crate::editor::terminal::SockCmd>>,
+    async_sockets: HashMap<u64, std::sync::mpsc::Sender<crate::net::SockCmd>>,
     /// Live embedded terminals, by id. A `term-mode` buffer's name maps to one
     /// of these via [`Terminal::buffer_name`].
     terminals: HashMap<u64, Terminal>,

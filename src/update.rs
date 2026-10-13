@@ -236,22 +236,14 @@ pub fn relocate() -> Result<(), String> {
 
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 
-/// A blocking HTTP agent with sane timeouts and a descriptive User-Agent.
-///
-/// ureq 3 has no per-read timeout: `recv_response` bounds the wait for the
-/// response head, and the body is left unbounded (`recv_body` caps the *whole*
-/// body, which would cut off a large artifact on a slow link).
+/// A blocking HTTP agent with sane timeouts and a descriptive User-Agent
+/// (see [`crate::net::download_agent`]).
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_response(Some(Duration::from_secs(60)))
-        .user_agent(format!(
-            "Macros/{} ({})",
-            current_version(),
-            std::env::consts::OS
-        ))
-        .build()
-        .new_agent()
+    crate::net::download_agent(&format!(
+        "Macros/{} ({})",
+        current_version(),
+        std::env::consts::OS
+    ))
 }
 
 /// GET `url` and return the body as a string (for the small JSON manifest /

@@ -23,6 +23,7 @@ mod jsonrpc;
 mod lsp;
 mod mcp;
 mod mode;
+mod net;
 mod process;
 mod runtime;
 mod save;
