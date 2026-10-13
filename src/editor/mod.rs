@@ -71,6 +71,7 @@ use isearch::IsearchState;
 use lisp_indent::{is_lisp_language, lisp_indent_for};
 use minibuffer::MinibufferHistory;
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
+use overlays::Overlays;
 use panes::{Child, SplitAxis, WindowLayout, union_bounds};
 use terminal::{ProcessHandle, keystroke_to_bytes};
 
@@ -977,103 +978,6 @@ enum MacroEvent {
     Text(String),
     /// A key token typed by `:normal` (`x`, `<Esc>`, `<CR>`, …).
     Key(String),
-}
-
-/// Overlays / text properties on a buffer (the Emacs overlay + text-property
-/// model). Sub-line face ranges layer over tree-sitter highlighting; folded line
-/// ranges are hidden from display; text properties carry arbitrary metadata
-/// Scheme can read back. All are byte/line-range based and reset only when the
-/// buffer itself is replaced.
-#[derive(Default)]
-struct Overlays {
-    /// `(byte_range, face)` — overrides syntax highlighting in that range.
-    faces: Vec<(Range<usize>, SharedString)>,
-    /// Byte ranges hidden from display, without changing the buffer text.
-    hidden: Vec<Range<usize>>,
-    /// Folded line ranges (`start..end`, end-exclusive) — hidden from display.
-    folds: Vec<Range<usize>>,
-    /// `(byte_range, key, value)` text properties (Emacs `put-text-property`).
-    props: Vec<(Range<usize>, String, String)>,
-    /// `line -> (suffix_text, face)` virtual text appended after a line (inlay
-    /// hints, blame, inline diagnostics).
-    suffixes: HashMap<usize, (SharedString, SharedString)>,
-    /// `line -> columns` of virtual left indentation (display-only), the Org
-    /// `org-indent-mode` look. The buffer text is untouched.
-    indents: HashMap<usize, usize>,
-    /// `line -> font-size multiplier` for whole-line scaling (markdown/org
-    /// headings render larger). A scaled line reserves extra display rows the
-    /// same way an inline image does, so cursor/scroll math stays correct.
-    scales: HashMap<usize, f32>,
-    /// `line -> is_open` fold chevrons painted in the gutter. Scheme declares a
-    /// marker on each foldable header line (`set-fold-marker`); the value is the
-    /// glyph state (open = expanded). A click on the chevron is hit-tested and
-    /// routed to Scheme's `fold-toggle-at-line`, which mutates `folds` to match.
-    fold_markers: HashMap<usize, bool>,
-}
-
-/// Re-key a line-indexed overlay map after `line_delta` lines were inserted
-/// (positive) or removed (negative) starting just after `start_line`. Entries on
-/// or before `start_line` keep their line; later ones shift; any that would land
-/// at/before `start_line` (deleted out) are dropped.
-fn shift_line_map<V>(
-    map: &mut HashMap<usize, V>,
-    start_line: usize,
-    line_delta: isize,
-    carry_start_line: bool,
-) {
-    if line_delta == 0 {
-        return;
-    }
-    // Lines inserted at column 0 of `start_line`: its entry moves with its text.
-    // No entry can sit in the freshly inserted lines, so this can't collide.
-    let carried = if carry_start_line && line_delta > 0 {
-        map.remove(&start_line)
-    } else {
-        None
-    };
-    // Re-key only the entries past the edit, in place. Process in an order that
-    // never overwrites an entry we haven't moved yet: highest-first when shifting
-    // up, lowest-first when shifting down. Entries shifted to at/before
-    // `start_line` (deleted out) are dropped.
-    let mut movers: Vec<usize> = map.keys().copied().filter(|&l| l > start_line).collect();
-    if line_delta > 0 {
-        movers.sort_unstable_by(|a, b| b.cmp(a));
-    } else {
-        movers.sort_unstable();
-    }
-    for line in movers {
-        let Some(v) = map.remove(&line) else { continue };
-        let shifted = line as isize + line_delta;
-        if shifted > start_line as isize {
-            map.insert(shifted as usize, v);
-        }
-    }
-    if let Some(v) = carried {
-        map.insert(start_line + line_delta as usize, v);
-    }
-}
-
-/// Shift folded line ranges to track an edit that added/removed `line_delta`
-/// lines beginning on `start_line`. A line at/before `start_line` is fixed; a
-/// later line moves by `line_delta` (clamped to `start_line`) — the line-space
-/// twin of `adjust_overlays`'s byte shift. Ranges that collapse to empty are
-/// dropped. Without this, editing above a folded subtree (e.g. RET to push an
-/// Org heading down) leaves the fold hiding stale line numbers.
-fn shift_fold_ranges(folds: &mut Vec<Range<usize>>, start_line: usize, line_delta: isize) {
-    if line_delta == 0 {
-        return;
-    }
-    let shift = |l: usize| -> usize {
-        if l <= start_line {
-            l
-        } else {
-            (l as isize + line_delta).max(start_line as isize) as usize
-        }
-    };
-    folds.retain_mut(|r| {
-        *r = shift(r.start)..shift(r.end);
-        r.end > r.start
-    });
 }
 
 /// Merge runs of consecutive [`EditorCommand::Insert`] into a single insert.
@@ -2197,12 +2101,9 @@ impl Editor {
 
     // --- Editing primitives (all edits funnel through `edit` for undo) -----
 
-    /// Shift overlays to track an edit that replaced `[start, old_end)` with
-    /// `new_len` bytes (`line_delta` net newlines, the edit beginning on
-    /// `start_line`). Byte-range overlays (faces, hidden, props) move with the
-    /// text; whole-line overlays (indents, suffixes) shift by the line delta when
-    /// lines were added/removed. Without this they'd point at stale positions
-    /// until the debounced re-fontify, making content below an edit flicker.
+    /// Shift the active buffer's [`Overlays`] to track an edit that replaced
+    /// `[start, old_end)` with `new_len` bytes (`line_delta` net newlines, the
+    /// edit beginning on `start_line`) — see [`Overlays::adjust_for_edit`].
     fn adjust_overlays(
         &mut self,
         start: usize,
@@ -2211,61 +2112,15 @@ impl Editor {
         line_delta: isize,
         start_line: usize,
     ) {
-        let delta = new_len as isize - (old_end - start) as isize;
-        let insertion = old_end == start;
-        // A byte offset, mapped past the edit: before it is fixed, inside it
-        // collapses to its start, after it shifts by the size delta.
-        let shift = |pos: usize| -> usize {
-            if pos <= start {
-                pos
-            } else if pos >= old_end {
-                (pos as isize + delta).max(start as isize) as usize
-            } else {
-                start
-            }
-        };
-        if delta != 0 {
-            self.active.overlays.faces.retain_mut(|(r, _)| {
-                *r = shift(r.start)..shift(r.end);
-                r.end > r.start
-            });
-            // A pure insertion exactly at a hide's start lands BEFORE it: the
-            // hide is concealment of the text that was there (a heading's `## `),
-            // not of whatever is typed in front of it. Anchoring the start would
-            // stretch the hide over the new text — typing at column 0 of a
-            // heading, or pressing Enter there, made the whole line vanish.
-            self.active.overlays.hidden.retain_mut(|r| {
-                let s = if insertion && r.start == start {
-                    start + new_len
-                } else {
-                    shift(r.start)
-                };
-                *r = s..shift(r.end);
-                r.end > r.start
-            });
-            self.active.overlays.props.retain_mut(|(r, _, _)| {
-                *r = shift(r.start)..shift(r.end);
-                r.end > r.start
-            });
-        }
-        if line_delta != 0 {
-            // Newlines inserted at column 0 push `start_line`'s own text down, so
-            // its line overlays go with it — else Enter at the start of a heading
-            // leaves the heading's scale/chevron on the now-empty line above.
-            let carry = insertion && self.active.buffer.line_range(start_line).start == start;
-            let o = &mut self.active.overlays;
-            shift_line_map(&mut o.indents, start_line, line_delta, carry);
-            shift_line_map(&mut o.scales, start_line, line_delta, carry);
-            shift_line_map(&mut o.suffixes, start_line, line_delta, carry);
-            shift_line_map(&mut o.fold_markers, start_line, line_delta, carry);
-            // Folded line ranges shift too, else editing above a folded subtree
-            // (e.g. pressing RET to push an Org heading down) leaves the fold
-            // hiding stale line numbers — the content lands on lines the fold no
-            // longer covers while old lines stay hidden. Nothing reapplies folds
-            // on edit, so without this the mis-hidden content persists until the
-            // next fold cycle.
-            shift_fold_ranges(&mut self.active.overlays.folds, start_line, line_delta);
-        }
+        // Newlines inserted at column 0 push `start_line`'s own text down, so
+        // its line overlays go with it — else Enter at the start of a heading
+        // leaves the heading's scale/chevron on the now-empty line above.
+        let carry = line_delta != 0
+            && old_end == start
+            && self.active.buffer.line_range(start_line).start == start;
+        self.active
+            .overlays
+            .adjust_for_edit(start, old_end, new_len, line_delta, start_line, carry);
     }
 
     /// Whether replacing bytes `[a, b)` would touch a `read-only` text property
@@ -5669,7 +5524,7 @@ mod tests {
     use super::{
         Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
         file_completions, language_for_path, last_sexp, line_span, prefix_arg_value, push_capped,
-        scheme_symbol_token, shift_fold_ranges, shift_line_map, symbol_at, top_level_form_at,
+        scheme_symbol_token, symbol_at, top_level_form_at,
     };
 
     #[test]
@@ -5709,7 +5564,6 @@ mod tests {
         assert_eq!(char_col_byte(s, 2), 3); // start of 'b'
         assert_eq!(char_col_byte(s, 3), 4); // end
     }
-    use std::collections::HashMap;
 
     #[test]
     fn universal_argument_value() {
@@ -5755,67 +5609,6 @@ mod tests {
         assert_eq!(scheme_symbol_token("("), (1, ""));
         // A string literal opens a fresh delimiter boundary.
         assert_eq!(scheme_symbol_token("(load-theme \"mac"), (13, "mac"));
-    }
-
-    #[test]
-    fn shift_line_map_tracks_inserted_and_deleted_lines() {
-        let base: HashMap<usize, usize> = [(0, 10), (3, 20), (5, 30)].into_iter().collect();
-        // Insert 2 lines after line 3: keys <=3 stay, keys >3 shift by +2.
-        let mut ins = base.clone();
-        shift_line_map(&mut ins, 3, 2, false);
-        assert_eq!(ins.get(&0), Some(&10));
-        assert_eq!(ins.get(&3), Some(&20));
-        assert_eq!(ins.get(&7), Some(&30)); // 5 -> 7
-        assert_eq!(ins.get(&5), None);
-        // Delete 2 lines after line 0: key 3 -> 1, key 5 -> 3.
-        let mut del = base.clone();
-        shift_line_map(&mut del, 0, -2, false);
-        assert_eq!(del.get(&0), Some(&10));
-        assert_eq!(del.get(&1), Some(&20));
-        assert_eq!(del.get(&3), Some(&30));
-        // A key that would collapse into the deleted region is dropped.
-        let mut collapse = base.clone();
-        shift_line_map(&mut collapse, 0, -4, false);
-        assert_eq!(collapse.get(&0), Some(&10)); // 0 stays
-        assert!(!collapse.values().any(|&v| v == 20)); // 3 -> -1 -> dropped
-    }
-
-    #[test]
-    // These fixtures really are one-element vectors OF ranges (fold spans),
-    // which the lint would reject as a probable typo for `(a..b).collect()`.
-    #[allow(clippy::single_range_in_vec_init)]
-    fn shift_fold_ranges_tracks_edits_above_and_within_a_fold() {
-        use std::ops::Range;
-        // A folded Org subtree hiding body lines 1..4 (heading on line 0).
-        let base: Vec<Range<usize>> = vec![1..4];
-        // Press RET above the heading: +1 line at line 0 pushes the fold down.
-        // This is the reported bug — content must stay hidden at its NEW lines.
-        let mut ins = base.clone();
-        shift_fold_ranges(&mut ins, 0, 1);
-        assert_eq!(ins, vec![2..5]);
-        // Edit on the heading line (== fold start - 1) still counts as "before"
-        // the hidden range, so the whole range shifts by the delta.
-        let mut on_heading = base.clone();
-        shift_fold_ranges(&mut on_heading, 0, 2);
-        assert_eq!(on_heading, vec![3..6]);
-        // Delete a line above: the fold moves up to keep covering the body.
-        let mut del = vec![3..6];
-        shift_fold_ranges(&mut del, 0, -1);
-        assert_eq!(del, vec![2..5]);
-        // An edit inside the folded region grows only the end (start is fixed).
-        let mut within = vec![1..4];
-        shift_fold_ranges(&mut within, 2, 1);
-        assert_eq!(within, vec![1..5]);
-        // Deleting through the whole folded body collapses the range (both ends
-        // clamp back to the edit line) so it is dropped rather than left hiding
-        // the wrong lines.
-        let mut collapse = vec![1..4];
-        shift_fold_ranges(&mut collapse, 0, -4);
-        assert!(collapse.is_empty());
-        // A fold entirely below the edit still shifts; delta 0 is a no-op.
-        let mut noop = vec![1..4];
-        shift_fold_ranges(&mut noop, 0, 0);
-        assert_eq!(noop, vec![1..4]);
     }
 
     #[test]
