@@ -270,61 +270,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::crypto::register(&mut reg, shared);
     prims::sockets::register(&mut reg, shared);
     prims::sqlite::register(&mut reg, shared);
-    // --- ANVIL REPL (a second, independent Steel interpreter) -------------
-    reg.section(Section::Anvil);
-    {
-        // `(anvil-eval source on-result)` evaluates `source` in the separate
-        // REPL image; the printed result is delivered to the Scheme function
-        // named `on-result` (in this engine) as a single string argument.
-        register_binary(&mut reg, queue, "anvil-eval", |source, on_result| {
-            EditorCommand::AnvilEval { source, on_result }
-        });
-    }
-    {
-        // `(anvil-interrupt)` cancels the REPL's current evaluation;
-        // `(anvil-reset)` rebuilds the REPL image from scratch.
-        register_nullary(
-            &mut reg,
-            queue,
-            "anvil-interrupt",
-            EditorCommand::AnvilInterrupt,
-        );
-        register_nullary(&mut reg, queue, "anvil-reset", EditorCommand::AnvilReset);
-        // SLIME-style interaction commands. The editor computes the buffer
-        // context (the form at point, the symbol at point, the file path) since
-        // that needs the live buffer; the result streams back to the REPL.
-        register_nullary(
-            &mut reg,
-            queue,
-            "anvil-eval-defun",
-            EditorCommand::AnvilEvalDefun,
-        );
-        register_nullary(
-            &mut reg,
-            queue,
-            "anvil-load-file",
-            EditorCommand::AnvilLoadFile,
-        );
-        register_nullary(&mut reg, queue, "anvil-doc", EditorCommand::AnvilDoc);
-        register_nullary(
-            &mut reg,
-            queue,
-            "anvil-macroexpand",
-            EditorCommand::AnvilMacroexpand,
-        );
-        register_unary(
-            &mut reg,
-            queue,
-            "anvil-apropos",
-            EditorCommand::AnvilApropos,
-        );
-        register_nullary(
-            &mut reg,
-            queue,
-            "anvil-signature",
-            EditorCommand::AnvilSignature,
-        );
-    }
+    prims::anvil::register(&mut reg, shared);
     reg.section(Section::BufferReads);
     // Read bridges over the editor's published snapshot (see `set_snapshot`).
     register_snapshot_read(&mut reg, snapshot, "buffer-line", |s| s.line);

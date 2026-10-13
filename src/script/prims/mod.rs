@@ -4,6 +4,7 @@
 
 use super::*;
 
+pub(super) mod anvil;
 pub(super) mod buffers;
 pub(super) mod crypto;
 pub(super) mod dap;
