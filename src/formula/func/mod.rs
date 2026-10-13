@@ -11,7 +11,8 @@
 //! Each category lives in its own file and exposes a `FUNCS` table; the
 //! registry here concatenates them.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use super::value::{ErrorKind, Value};
 
@@ -162,11 +163,20 @@ pub struct FuncDef {
 
 /// The function named `name` (case-insensitive).
 pub fn lookup(name: &str) -> Option<&'static FuncDef> {
-    let upper = name.to_ascii_uppercase();
-    TABLES
-        .iter()
-        .flat_map(|t| t.iter())
-        .find(|f| f.name == upper)
+    static BY_NAME: OnceLock<HashMap<&str, &FuncDef>> = OnceLock::new();
+    let by_name = BY_NAME.get_or_init(|| {
+        let mut map = HashMap::new();
+        for f in all() {
+            map.entry(f.name).or_insert(f);
+        }
+        map
+    });
+    // Names in a parsed formula are already upper case (`Expr::Call`).
+    if name.bytes().any(|b| b.is_ascii_lowercase()) {
+        by_name.get(name.to_ascii_uppercase().as_str()).copied()
+    } else {
+        by_name.get(name).copied()
+    }
 }
 
 /// Every built-in function, for completion and docs.
