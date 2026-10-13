@@ -257,10 +257,6 @@ impl ScriptEngine {
         self.snapshot.store(Arc::new(snapshot));
     }
 
-    /// If `expr` is a bare `(name)` naming a nullary builtin, return its command
-    /// so the editor can apply it synchronously (instant motion, etc.) without a
-    /// thread round-trip. Returns `None` for user functions / argument calls,
-    /// which go to the engine thread.
     /// Recognise one or more bare `(builtin)` forms — `(forward-char)` or a
     /// sequence like `(set-mark) (move-end-of-line)` — and return their commands
     /// in order, so a motion/edit keybinding applies synchronously instead of

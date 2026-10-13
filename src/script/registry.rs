@@ -3841,11 +3841,6 @@ pub(crate) fn register_transient(
     });
 }
 
-/// Register a nullary Steel *read* bridge: `name` returns a value derived from
-/// the editor's published snapshot. Collapses the repeated
-/// `{ let shared = snapshot.clone(); engine.register_fn(name, move || …) }`
-/// boilerplate for the many single-snapshot readers. `get` runs under the
-/// snapshot lock and must produce an owned value (clone out anything borrowed).
 /// The grid customization API (see `scheme/grid.scm` for the overview):
 /// reads from the published [`GridSnapshot`], and queued
 /// [`GridOp`](crate::grid::cmd::GridOp)s for edits, structure, view, and
@@ -4391,8 +4386,6 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     });
 }
 
-/// A rule/filter value from Scheme as text: numbers print plainly, strings
-/// and symbols as themselves.
 /// A value Scheme writes into a cell, as the cell's text: a string as is,
 /// a number in its shortest form, a boolean as `TRUE`/`FALSE`; anything
 /// else can't go in a cell.
@@ -4406,6 +4399,8 @@ fn steel_cell_text(v: &SteelVal) -> Option<String> {
     }
 }
 
+/// A rule/filter value from Scheme as text: numbers print plainly, strings
+/// and symbols as themselves.
 fn steel_value_text(v: &SteelVal) -> String {
     match v {
         SteelVal::IntV(i) => i.to_string(),
@@ -4431,7 +4426,6 @@ fn steel_col(v: &SteelVal) -> Option<usize> {
     }
 }
 
-/// A face, operator, or function name given as a string or a symbol.
 /// A palette color argument: `#f`, `""` or `none` is no color; an unknown
 /// name comes back as the second value, to be reported.
 fn steel_palette_color(v: &SteelVal) -> (Option<u8>, Option<String>) {
@@ -4448,6 +4442,7 @@ fn steel_palette_color(v: &SteelVal) -> (Option<u8>, Option<String>) {
     }
 }
 
+/// A face, operator, or function name given as a string or a symbol.
 fn steel_name(v: &SteelVal) -> String {
     match v {
         SteelVal::StringV(s) | SteelVal::SymbolV(s) => s.to_string(),
@@ -4455,6 +4450,11 @@ fn steel_name(v: &SteelVal) -> String {
     }
 }
 
+/// Register a nullary Steel *read* bridge: `name` returns a value derived from
+/// the editor's published snapshot. Collapses the repeated
+/// `{ let shared = snapshot.clone(); engine.register_fn(name, move || …) }`
+/// boilerplate for the many single-snapshot readers. `get` runs under the
+/// snapshot lock and must produce an owned value (clone out anything borrowed).
 pub(crate) fn register_snapshot_read<T: IntoSteelVal + 'static>(
     reg: &mut Registrar,
     snapshot: &SharedSnapshot,
@@ -4465,10 +4465,6 @@ pub(crate) fn register_snapshot_read<T: IntoSteelVal + 'static>(
     reg.register_fn(name, move || get(&shared.load()));
 }
 
-/// Snap a byte index down to the nearest UTF-8 char boundary in `rope`, clamped
-/// to its length. Slicing a `Rope` panics on a non-boundary index, so the
-/// text-slicing bridges route caller-supplied offsets through this first — the
-/// boundary safety the old `String`-slicing bridges did by hand.
 /// Matches of `re` inside bytes `[start, end)` of `rope` — the worker behind
 /// `buffer-search-all`. Searches the enclosing whole lines so `^`/`$`/`\b`
 /// see real context, then keeps only matches fully inside the window.
@@ -4505,6 +4501,10 @@ pub(crate) fn buffer_search_all(rope: &Rope, re: &Regex, start: usize, end: usiz
     SteelVal::ListV(out.into())
 }
 
+/// Snap a byte index down to the nearest UTF-8 char boundary in `rope`, clamped
+/// to its length. Slicing a `Rope` panics on a non-boundary index, so the
+/// text-slicing bridges route caller-supplied offsets through this first — the
+/// boundary safety the old `String`-slicing bridges did by hand.
 pub(crate) fn snap_byte(rope: &Rope, byte: usize) -> usize {
     let byte = byte.min(rope.len_bytes());
     rope.char_to_byte(rope.byte_to_char(byte))
