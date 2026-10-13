@@ -561,6 +561,17 @@ impl Default for GridView {
     }
 }
 
+/// One column or row on screen: where it starts (screen px from the cells
+/// area's left or top edge) and how wide or tall it draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisibleLine {
+    pub idx: usize,
+    pub pos: f32,
+    pub size: f32,
+    /// A frozen row (drawn over the scrolled ones).
+    pub frozen: bool,
+}
+
 /// An inclusive cell rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellRange {
@@ -758,6 +769,65 @@ impl GridView {
             }
         }
         self.clamp_scroll();
+    }
+
+    /// The columns on screen across `width` screen px of cells area, left
+    /// to right (hidden ones skipped).
+    pub fn visible_cols(&self, width: f32) -> Vec<VisibleLine> {
+        let mut out = Vec::new();
+        let mut c = self.col_at(0.0);
+        loop {
+            let x = self.col_x(c) as f32;
+            if x >= width || c >= MAX_INDEX {
+                break;
+            }
+            let w = self.col_px(c) as f32;
+            if w > 0.0 {
+                out.push(VisibleLine {
+                    idx: c,
+                    pos: x,
+                    size: w,
+                    frozen: false,
+                });
+            }
+            c = self.cols.next_visible(c + 1);
+        }
+        out
+    }
+
+    /// The rows on screen down `height` screen px of cells area: the
+    /// frozen ones first, then the scrolled ones (hidden ones skipped).
+    pub fn visible_rows(&self, height: f32) -> Vec<VisibleLine> {
+        let mut out = Vec::new();
+        let mut push = |r: usize, y: f32, frozen: bool| {
+            let h = self.row_px(r) as f32;
+            if h > 0.0 {
+                out.push(VisibleLine {
+                    idx: r,
+                    pos: y,
+                    size: h,
+                    frozen,
+                });
+            }
+        };
+        for r in 0..self.frozen_rows {
+            let y = self.row_y(r) as f32;
+            if y >= height {
+                break; // the rest of the frozen band is off screen
+            }
+            push(r, y, true);
+        }
+        let mut r = self.top_row();
+        loop {
+            let y = self.row_y(r) as f32;
+            if y >= height || r >= MAX_INDEX {
+                break;
+            }
+            push(r, y, false);
+            // Skips a filter's hidden rows in one jump, however many.
+            r = self.rows.next_visible(r + 1);
+        }
+        out
     }
 
     /// Step the zoom one preset up (`dir > 0`) or down.
@@ -1150,6 +1220,43 @@ mod tests {
             parse_clipboard_block("a,b\tc", b','),
             vec![vec!["a,b", "c"]]
         );
+    }
+
+    #[test]
+    fn visible_lines_skip_hidden_and_put_frozen_rows_first() {
+        let mut v = GridView {
+            frozen_rows: 1,
+            scroll_y: 40.0,
+            ..GridView::default()
+        };
+        v.cols.set_hidden(1, true);
+        let line = |idx, pos, size, frozen| VisibleLine {
+            idx,
+            pos,
+            size,
+            frozen,
+        };
+        assert_eq!(
+            v.visible_cols(200.0),
+            [
+                line(0, 0.0, 64.0, false),
+                line(2, 64.0, 64.0, false),
+                line(3, 128.0, 64.0, false),
+                line(4, 192.0, 64.0, false),
+            ]
+        );
+        // Row 0 frozen at the top; the scroll starts the rest at row 3.
+        assert_eq!(
+            v.visible_rows(70.0),
+            [
+                line(0, 0.0, 20.0, true),
+                line(3, 20.0, 20.0, false),
+                line(4, 40.0, 20.0, false),
+                line(5, 60.0, 20.0, false),
+            ]
+        );
+        v.zoom = 2.0;
+        assert_eq!(v.visible_rows(30.0), [line(0, 0.0, 40.0, true)]);
     }
 
     #[test]
