@@ -255,10 +255,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::search::register(&mut reg, shared);
     prims::git::register(&mut reg, shared);
     prims::process::register(&mut reg, shared);
-    // --- Async (subprocess streaming, timers) -----------------------------
-    // Processes, terminals, DAP sessions, HTTP streams and async sockets draw
-    // their ids from `shared.ids`. Each lives in its own editor-side map keyed
-    // by id, so it needn't share the marker counter.
     prims::dap::register(&mut reg, shared);
     prims::http::register(&mut reg, shared);
     prims::crypto::register(&mut reg, shared);

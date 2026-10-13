@@ -251,6 +251,8 @@ pub(crate) struct EngineShared {
     pub(crate) options: Options,
     pub(crate) session: SharedSession,
     /// The id source shared by `make-process`, `make-terminal`, `dap-*`,
-    /// `make-http-stream` and the async sockets (see [`IdGen`]).
+    /// `make-http-stream` and the async sockets (see [`IdGen`]). Each lives in
+    /// its own editor-side map keyed by id, so it needn't share the marker
+    /// counter.
     pub(crate) ids: IdGen,
 }
