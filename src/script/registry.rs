@@ -260,22 +260,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::special_buffers::register(&mut reg, shared);
     prims::ui::register(&mut reg, shared);
     prims::overlays::register(&mut reg, shared);
-    // --- Identity + time (org-roam node IDs, timestamps) ------------------
-    reg.section(Section::TimeIds);
-    // `(org-id-new)` → a fresh v4 UUID string (org-roam node IDs).
-    reg.register_fn("org-id-new", || -> String {
-        uuid::Uuid::new_v4().to_string()
-    });
-    // `(current-time fmt)` → local time formatted with a `strftime`-style string
-    // (Emacs `format-time-string`), e.g. `(current-time "%Y%m%d%H%M%S")` for a
-    // node filename, `(current-time "%Y-%m-%d")` for an agenda date. An invalid
-    // format yields "" rather than panicking (write! returns Err, never unwinds).
-    reg.register_fn("current-time", |fmt: String| -> String {
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        let _ = write!(out, "{}", chrono::Local::now().format(&fmt));
-        out
-    });
+    prims::time::register(&mut reg, shared);
     // --- Fast search (ripgrep as a library, Scheme-configurable) ----------
     reg.section(Section::Search);
     // The config lives entirely on this (engine) thread; the register_fns share

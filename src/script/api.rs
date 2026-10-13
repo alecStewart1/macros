@@ -243,6 +243,7 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ),
     ("script/prims/spell.rs", include_str!("prims/spell.rs")),
     ("script/prims/text.rs", include_str!("prims/text.rs")),
+    ("script/prims/time.rs", include_str!("prims/time.rs")),
     (
         "script/prims/tree_sitter.rs",
         include_str!("prims/tree_sitter.rs"),
