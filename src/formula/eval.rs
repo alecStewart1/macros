@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use super::ast::{BinOp, Expr, UnOp};
-use super::func::{self, Arg, Array, Ctx, RangeRef};
+use super::func::{self, Arg, Array, Ctx, IntoValue, RangeRef};
 use super::value::{ErrorKind, Value, compare};
 
 /// An intermediate result.
@@ -129,7 +129,7 @@ fn binary(op: BinOp, a: Value, b: Value, date1904: bool) -> Value {
                 num(x / y)
             }
         }),
-        BinOp::Pow => arith(|x, y| func::ok(func::math::excel_power(x, y))),
+        BinOp::Pow => arith(|x, y| func::math::excel_power(x, y).into_value()),
         BinOp::Concat => match (a.to_text(), b.to_text()) {
             (Ok(x), Ok(y)) => Value::Text(Arc::from(format!("{x}{y}"))),
             (Err(e), _) | (_, Err(e)) => Value::Error(e),
@@ -145,7 +145,7 @@ fn binary(op: BinOp, a: Value, b: Value, date1904: bool) -> Value {
 
 /// A computed number as a cell value (`#NUM!` when not finite).
 fn num(n: f64) -> Value {
-    func::ok(Ok(n))
+    n.into_value()
 }
 
 /// An intermediate result as one value (see the module docs).

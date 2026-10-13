@@ -339,136 +339,171 @@ fn parse_workbook(xml: &[u8], notes: &mut Notes) -> Result<Workbook, XmlError> {
 /// alignment, a theme color, a named cell style, …) — a cell using one is
 /// what gets reported as "cell styles".
 fn parse_styles(xml: &[u8]) -> Result<Vec<Option<XStyle>>, XmlError> {
-    #[derive(Default)]
-    struct Font {
-        bold: bool,
-        color: Option<u32>,
-        size: Option<String>,
-        name: Option<String>,
-        /// Anything else: italics, underline, a theme color, ….
-        other: bool,
+    let tables = StyleTables::collect(xml)?;
+    let mut out: Vec<Option<XStyle>> = tables.xfs.iter().map(|x| tables.resolve(x)).collect();
+    if out.is_empty() {
+        out.push(Some(XStyle::default()));
     }
-    #[derive(Default)]
-    struct Fill {
-        solid: bool,
-        color: Option<u32>,
-        /// A pattern or gradient, or a color given other than as RGB.
-        other: bool,
-    }
-    #[derive(Default)]
-    struct Xf {
-        num: u32,
-        font: usize,
-        fill: usize,
-        border: usize,
-        other: bool,
-    }
-    let mut r = Reader::new(xml)?;
-    let mut stack: Vec<&str> = Vec::new();
-    let mut codes: std::collections::HashMap<u32, String> = Default::default();
-    let mut fonts: Vec<Font> = Vec::new();
-    let mut fills: Vec<Fill> = Vec::new();
-    // Per border: whether it draws nothing.
-    let mut borders: Vec<bool> = Vec::new();
-    let mut xfs: Vec<Xf> = Vec::new();
-    let flag = |t: &Tag| t.attr("val").is_none_or(|v| is_true(&v));
-    while let Some(ev) = r.next()? {
-        let t = match ev {
-            Event::Start(t) => t,
-            Event::End(_) => {
-                stack.pop();
-                continue;
-            }
-            Event::Text(_) => continue,
-        };
-        let parent = stack.last().copied();
-        let grand = stack.len().checked_sub(2).map(|i| stack[i]);
-        match (grand, parent, t.name) {
-            (_, Some("numFmts"), "numFmt") => {
-                if let (Some(id), Some(code)) = (t.attr("numFmtId"), t.attr("formatCode"))
-                    && let Ok(id) = id.trim().parse()
-                {
-                    codes.insert(id, code.into_owned());
+    Ok(out)
+}
+
+/// A `<font>` of the stylesheet, as far as [`XStyle`] cares.
+#[derive(Default)]
+struct Font {
+    bold: bool,
+    color: Option<u32>,
+    size: Option<String>,
+    name: Option<String>,
+    /// Anything else: italics, underline, a theme color, ….
+    other: bool,
+}
+
+/// A `<fill>`.
+#[derive(Default)]
+struct Fill {
+    solid: bool,
+    color: Option<u32>,
+    /// A pattern or gradient, or a color given other than as RGB.
+    other: bool,
+}
+
+/// A cell format (`<xf>` of `cellXfs`): indexes into the other tables.
+#[derive(Default)]
+struct Xf {
+    num: u32,
+    font: usize,
+    fill: usize,
+    border: usize,
+    /// Alignment, protection, a named style, a quote prefix.
+    other: bool,
+}
+
+/// The stylesheet's tables, as read.
+#[derive(Default)]
+struct StyleTables {
+    /// Custom number formats by id.
+    codes: std::collections::HashMap<u32, String>,
+    fonts: Vec<Font>,
+    fills: Vec<Fill>,
+    /// Per border: whether it draws nothing.
+    borders: Vec<bool>,
+    xfs: Vec<Xf>,
+}
+
+impl StyleTables {
+    fn collect(xml: &[u8]) -> Result<StyleTables, XmlError> {
+        let mut r = Reader::new(xml)?;
+        let mut stack: Vec<&str> = Vec::new();
+        let mut tables = StyleTables::default();
+        let StyleTables {
+            codes,
+            fonts,
+            fills,
+            borders,
+            xfs,
+        } = &mut tables;
+        let flag = |t: &Tag| t.attr("val").is_none_or(|v| is_true(&v));
+        while let Some(ev) = r.next()? {
+            let t = match ev {
+                Event::Start(t) => t,
+                Event::End(_) => {
+                    stack.pop();
+                    continue;
                 }
-            }
-            (_, Some("fonts"), "font") => fonts.push(Font::default()),
-            (Some("fonts"), Some("font"), name) => {
-                let Some(f) = fonts.last_mut() else { continue };
-                match name {
-                    "b" => f.bold = flag(&t),
-                    "sz" => f.size = t.attr("val").map(|v| v.into_owned()),
-                    "name" => f.name = t.attr("val").map(|v| v.into_owned()),
-                    "color" => match font_color(&t) {
-                        Some(c) => f.color = c,
-                        None => f.other = true,
-                    },
-                    "family" | "charset" | "scheme" => {}
-                    _ => f.other |= flag(&t),
-                }
-            }
-            (_, Some("fills"), "fill") => fills.push(Fill::default()),
-            (Some("fills"), Some("fill"), kind) => {
-                if let Some(f) = fills.last_mut() {
-                    match (kind, t.attr("patternType").as_deref()) {
-                        ("patternFill", None | Some("none")) => {}
-                        ("patternFill", Some("solid")) => f.solid = true,
-                        _ => f.other = true,
+                Event::Text(_) => continue,
+            };
+            let parent = stack.last().copied();
+            let grand = stack.len().checked_sub(2).map(|i| stack[i]);
+            match (grand, parent, t.name) {
+                (_, Some("numFmts"), "numFmt") => {
+                    if let (Some(id), Some(code)) = (t.attr("numFmtId"), t.attr("formatCode"))
+                        && let Ok(id) = id.trim().parse()
+                    {
+                        codes.insert(id, code.into_owned());
                     }
                 }
-            }
-            (Some("fill"), Some("patternFill"), "fgColor") => {
-                if let Some(f) = fills.last_mut() {
-                    match t.attr("rgb").and_then(|v| argb(&v)) {
-                        Some(c) => f.color = Some(c),
-                        None => f.other = true,
+                (_, Some("fonts"), "font") => fonts.push(Font::default()),
+                (Some("fonts"), Some("font"), name) => {
+                    let Some(f) = fonts.last_mut() else { continue };
+                    match name {
+                        "b" => f.bold = flag(&t),
+                        "sz" => f.size = t.attr("val").map(|v| v.into_owned()),
+                        "name" => f.name = t.attr("val").map(|v| v.into_owned()),
+                        "color" => match font_color(&t) {
+                            Some(c) => f.color = c,
+                            None => f.other = true,
+                        },
+                        "family" | "charset" | "scheme" => {}
+                        _ => f.other |= flag(&t),
                     }
                 }
-            }
-            (_, Some("borders"), "border") => borders.push(true),
-            (Some("borders"), Some("border"), _) => {
-                if t.attr("style").is_some_and(|s| s != "none")
-                    && let Some(b) = borders.last_mut()
-                {
-                    *b = false;
-                }
-            }
-            (_, Some("cellXfs"), "xf") => {
-                let id = |name: &str| t.attr(name).and_then(|v| v.trim().parse::<usize>().ok());
-                let other = id("xfId").is_some_and(|i| i != 0)
-                    || t.attr("quotePrefix").is_some_and(|v| is_true(&v));
-                xfs.push(Xf {
-                    num: id("numFmtId").unwrap_or(0) as u32,
-                    font: id("fontId").unwrap_or(0),
-                    fill: id("fillId").unwrap_or(0),
-                    border: id("borderId").unwrap_or(0),
-                    other,
-                });
-            }
-            (Some("cellXfs"), Some("xf"), name) => {
-                // Alignment, or protection other than Excel's default
-                // (locked, not hidden).
-                let changes = match name {
-                    "protection" => {
-                        t.attr("locked").is_some_and(|v| !is_true(&v))
-                            || t.attr("hidden").is_some_and(|v| is_true(&v))
+                (_, Some("fills"), "fill") => fills.push(Fill::default()),
+                (Some("fills"), Some("fill"), kind) => {
+                    if let Some(f) = fills.last_mut() {
+                        match (kind, t.attr("patternType").as_deref()) {
+                            ("patternFill", None | Some("none")) => {}
+                            ("patternFill", Some("solid")) => f.solid = true,
+                            _ => f.other = true,
+                        }
                     }
-                    _ => t.attrs().next().is_some(),
-                };
-                if changes && let Some(x) = xfs.last_mut() {
-                    x.other = true;
                 }
+                (Some("fill"), Some("patternFill"), "fgColor") => {
+                    if let Some(f) = fills.last_mut() {
+                        match t.attr("rgb").and_then(|v| argb(&v)) {
+                            Some(c) => f.color = Some(c),
+                            None => f.other = true,
+                        }
+                    }
+                }
+                (_, Some("borders"), "border") => borders.push(true),
+                (Some("borders"), Some("border"), _) => {
+                    if t.attr("style").is_some_and(|s| s != "none")
+                        && let Some(b) = borders.last_mut()
+                    {
+                        *b = false;
+                    }
+                }
+                (_, Some("cellXfs"), "xf") => {
+                    let id = |name: &str| t.attr(name).and_then(|v| v.trim().parse::<usize>().ok());
+                    let other = id("xfId").is_some_and(|i| i != 0)
+                        || t.attr("quotePrefix").is_some_and(|v| is_true(&v));
+                    xfs.push(Xf {
+                        num: id("numFmtId").unwrap_or(0) as u32,
+                        font: id("fontId").unwrap_or(0),
+                        fill: id("fillId").unwrap_or(0),
+                        border: id("borderId").unwrap_or(0),
+                        other,
+                    });
+                }
+                (Some("cellXfs"), Some("xf"), name) => {
+                    // Alignment, or protection other than Excel's default
+                    // (locked, not hidden).
+                    let changes = match name {
+                        "protection" => {
+                            t.attr("locked").is_some_and(|v| !is_true(&v))
+                                || t.attr("hidden").is_some_and(|v| is_true(&v))
+                        }
+                        _ => t.attrs().next().is_some(),
+                    };
+                    if changes && let Some(x) = xfs.last_mut() {
+                        x.other = true;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+            // An empty element gets its End event too.
+            stack.push(t.name);
         }
-        // An empty element gets its End event too.
-        stack.push(t.name);
+        Ok(tables)
     }
-    let base = fonts.first();
-    let style = |x: &Xf| -> Option<XStyle> {
-        if x.other || !borders.get(x.border).copied().unwrap_or(x.border == 0) {
+
+    /// One cell format as an [`XStyle`], or `None` if it holds more.
+    fn resolve(&self, x: &Xf) -> Option<XStyle> {
+        let base = self.fonts.first();
+        if x.other || !self.borders.get(x.border).copied().unwrap_or(x.border == 0) {
             return None;
         }
-        let (bold, color) = match fonts.get(x.font) {
+        let (bold, color) = match self.fonts.get(x.font) {
             Some(f) => {
                 let same_face = base.is_none_or(|b| b.size == f.size && b.name == f.name);
                 if f.other || !same_face {
@@ -479,7 +514,7 @@ fn parse_styles(xml: &[u8]) -> Result<Vec<Option<XStyle>>, XmlError> {
             None if x.font == 0 => (false, None),
             None => return None,
         };
-        let fill = match fills.get(x.fill) {
+        let fill = match self.fills.get(x.fill) {
             Some(f) if f.other || (f.solid && f.color.is_none()) => return None,
             Some(f) => f.color.filter(|_| f.solid),
             None if x.fill == 0 => None,
@@ -488,7 +523,7 @@ fn parse_styles(xml: &[u8]) -> Result<Vec<Option<XStyle>>, XmlError> {
         let num_fmt = match x.num {
             0 => None,
             id => Some(
-                codes
+                self.codes
                     .get(&id)
                     .cloned()
                     .or_else(|| builtin_format(id).map(String::from))?,
@@ -500,13 +535,9 @@ fn parse_styles(xml: &[u8]) -> Result<Vec<Option<XStyle>>, XmlError> {
             fill,
             num_fmt: num_fmt.filter(|c| !c.eq_ignore_ascii_case("general")),
         })
-    };
-    let mut out: Vec<Option<XStyle>> = xfs.iter().map(style).collect();
-    if out.is_empty() {
-        out.push(Some(XStyle::default()));
     }
-    Ok(out)
 }
+
 /// A font's `<color>`: `Some(None)` for the default text color (automatic,
 /// black, or the theme's text color untinted), `Some(Some(argb))` for an RGB
 /// color, `None` for any other theme or indexed color.
@@ -583,22 +614,23 @@ fn builtin_format(id: u32) -> Option<&'static str> {
 /// annotations, not text, and are skipped.
 fn rich_text(r: &mut Reader, notes: &mut Notes) -> Result<String, XmlError> {
     let mut out = String::new();
+    // Elements open inside it (a run, `<r>`, is read through), counted
+    // rather than recursed into so deep nesting can't overflow the stack.
     let mut depth = 1;
     while depth > 0 {
-        match r.next()? {
-            Some(Event::Start(t)) => match t.name {
-                "t" => out.push_str(&t_text(r, &t)?),
-                "rPh" | "phoneticPr" => r.skip()?,
-                // A run's font: the text is kept, its formatting isn't.
-                "rPr" => {
-                    notes.add("rich text formatting");
-                    r.skip()?
-                }
-                _ => depth += 1,
-            },
-            Some(Event::End(_)) => depth -= 1,
-            Some(Event::Text(_)) => {}
-            None => return Err(r.err("unexpected end of document")),
+        let Some(t) = r.next_child()? else {
+            depth -= 1;
+            continue;
+        };
+        match t.name {
+            "t" => out.push_str(&t_text(r, &t)?),
+            "rPh" | "phoneticPr" => r.skip()?,
+            // A run's font: the text is kept, its formatting isn't.
+            "rPr" => {
+                notes.add("rich text formatting");
+                r.skip()?
+            }
+            _ => depth += 1,
         }
     }
     Ok(out)
@@ -692,30 +724,31 @@ fn parse_sheet(
         }
         match t.name {
             "sheetData" => sheet_data(&mut r, shared, styles, notes, &mut cells)?,
-            "sheetPr" | "sheetViews" => {
-                // Mostly view state, except a tab color and frozen panes.
-                let mut d = 1;
-                while d > 0 {
-                    match r.next()? {
-                        Some(Event::Start(c)) => {
-                            match c.name {
-                                "tabColor" => notes.add("tab color"),
-                                "pane" => notes.add("frozen panes"),
-                                _ => {}
-                            }
-                            d += 1;
-                        }
-                        Some(Event::End(_)) => d -= 1,
-                        Some(Event::Text(_)) => {}
-                        None => return Err(r.err("unexpected end of document")),
-                    }
-                }
-            }
+            "sheetPr" | "sheetViews" => view_state(&mut r, notes)?,
             _ => r.skip()?,
         }
     }
     cells.sort_by_key(|c| (c.row, c.col));
     Ok(cells)
+}
+
+/// The rest of a `<sheetPr>` or `<sheetViews>`: mostly view state, except a
+/// tab color and frozen panes (at any depth).
+fn view_state(r: &mut Reader, notes: &mut Notes) -> Result<(), XmlError> {
+    let mut depth = 1;
+    while depth > 0 {
+        let Some(c) = r.next_child()? else {
+            depth -= 1;
+            continue;
+        };
+        match c.name {
+            "tabColor" => notes.add("tab color"),
+            "pane" => notes.add("frozen panes"),
+            _ => {}
+        }
+        depth += 1;
+    }
+    Ok(())
 }
 
 fn sheet_data(
@@ -727,13 +760,7 @@ fn sheet_data(
 ) -> Result<(), XmlError> {
     // Rows and cells may omit `r`; each then follows the previous one.
     let mut next_row = 0usize;
-    loop {
-        let t = match r.next()? {
-            Some(Event::Start(t)) => t,
-            Some(Event::End(_)) => return Ok(()),
-            Some(Event::Text(_)) => continue,
-            None => return Err(r.err("unexpected end of document")),
-        };
+    while let Some(t) = r.next_child()? {
         if t.name != "row" {
             r.skip()?;
             continue;
@@ -762,13 +789,7 @@ fn sheet_data(
             notes.add("cell styles");
         }
         let mut next_col = 0usize;
-        loop {
-            let c = match r.next()? {
-                Some(Event::Start(c)) => c,
-                Some(Event::End(_)) => break,
-                Some(Event::Text(_)) => continue,
-                None => return Err(r.err("unexpected end of document")),
-            };
+        while let Some(c) = r.next_child()? {
             if c.name != "c" {
                 r.skip()?;
                 continue;
@@ -786,6 +807,7 @@ fn sheet_data(
             }
         }
     }
+    Ok(())
 }
 
 /// One `<c>` whose start tag was just read. Cells with no value, formula
@@ -815,18 +837,12 @@ fn cell(
     let mut v: Option<String> = None;
     let mut inline: Option<String> = None;
     let mut formula = None;
-    let mut depth = 1;
-    while depth > 0 {
-        match r.next()? {
-            Some(Event::Start(t)) => match t.name {
-                "v" => v = Some(r.text()?),
-                "is" => inline = Some(rich_text(r, notes)?),
-                "f" => formula = formula_of(r, &t, row, col, notes)?,
-                _ => r.skip()?,
-            },
-            Some(Event::End(_)) => depth -= 1,
-            Some(Event::Text(_)) => {}
-            None => return Err(r.err("unexpected end of document")),
+    while let Some(t) = r.next_child()? {
+        match t.name {
+            "v" => v = Some(r.text()?),
+            "is" => inline = Some(rich_text(r, notes)?),
+            "f" => formula = formula_of(r, &t, row, col, notes)?,
+            _ => r.skip()?,
         }
     }
     let value = match typ.as_deref().unwrap_or("n") {

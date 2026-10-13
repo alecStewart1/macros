@@ -3,76 +3,110 @@
 
 use std::collections::HashMap;
 
-use super::args::{Area, MANY, area, def, opt_num};
-use super::{Arg, Ctx, FuncDef, num, numbers, ok, scalar};
+use super::args::{Area, MANY, area, def, fold_args, given, opt_num};
+use super::lookup::Key;
+use super::{Arg, Ctx, FuncDef, num, numbers, scalar};
 use crate::formula::criteria::Criterion;
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("AVERAGE", 1, MANY, average),
-    def("AVERAGEA", 1, MANY, averagea),
-    def("COUNT", 1, MANY, count),
-    def("COUNTA", 1, MANY, counta),
-    def("COUNTBLANK", 1, 1, countblank),
-    def("MIN", 1, MANY, min),
-    def("MAX", 1, MANY, max),
-    def("MINA", 1, MANY, mina),
-    def("MAXA", 1, MANY, maxa),
-    def("MEDIAN", 1, MANY, median),
-    def("MODE", 1, MANY, mode),
-    def("MODE.SNGL", 1, MANY, mode),
-    def("STDEV", 1, MANY, stdev_s),
-    def("STDEV.S", 1, MANY, stdev_s),
-    def("STDEV.P", 1, MANY, stdev_p),
-    def("STDEVP", 1, MANY, stdev_p),
-    def("VAR", 1, MANY, var_s),
-    def("VAR.S", 1, MANY, var_s),
-    def("VAR.P", 1, MANY, var_p),
-    def("VARP", 1, MANY, var_p),
-    def("LARGE", 2, 2, large),
-    def("SMALL", 2, 2, small),
-    def("RANK", 2, 3, rank),
-    def("RANK.EQ", 2, 3, rank),
-    def("RANK.AVG", 2, 3, rank_avg),
-    def("PERCENTILE", 2, 2, percentile),
-    def("PERCENTILE.INC", 2, 2, percentile),
-    def("QUARTILE", 2, 2, quartile),
-    def("QUARTILE.INC", 2, 2, quartile),
-    def("SUMIF", 2, 3, sumif),
-    def("SUMIFS", 3, MANY, sumifs),
-    def("COUNTIF", 2, 2, countif),
-    def("COUNTIFS", 2, MANY, countifs),
-    def("AVERAGEIF", 2, 3, averageif),
-    def("AVERAGEIFS", 3, MANY, averageifs),
-    def("MAXIFS", 3, MANY, maxifs),
-    def("MINIFS", 3, MANY, minifs),
+    def!("AVERAGE", 1, MANY, average, "number1, [number2], …"),
+    def!("AVERAGEA", 1, MANY, averagea, "value1, [value2], …"),
+    def!("COUNT", 1, MANY, count, "value1, [value2], …"),
+    def!("COUNTA", 1, MANY, counta, "value1, [value2], …"),
+    def!("COUNTBLANK", 1, 1, countblank, "range"),
+    def!("MIN", 1, MANY, min, "number1, [number2], …"),
+    def!("MAX", 1, MANY, max, "number1, [number2], …"),
+    def!("MINA", 1, MANY, mina, "value1, [value2], …"),
+    def!("MAXA", 1, MANY, maxa, "value1, [value2], …"),
+    def!("MEDIAN", 1, MANY, median, "number1, [number2], …"),
+    def!("MODE", 1, MANY, mode, "number1, [number2], …"),
+    def!("MODE.SNGL", 1, MANY, mode, "number1, [number2], …"),
+    def!("STDEV", 1, MANY, stdev_s, "number1, [number2], …"),
+    def!("STDEV.S", 1, MANY, stdev_s, "number1, [number2], …"),
+    def!("STDEV.P", 1, MANY, stdev_p, "number1, [number2], …"),
+    def!("STDEVP", 1, MANY, stdev_p, "number1, [number2], …"),
+    def!("VAR", 1, MANY, var_s, "number1, [number2], …"),
+    def!("VAR.S", 1, MANY, var_s, "number1, [number2], …"),
+    def!("VAR.P", 1, MANY, var_p, "number1, [number2], …"),
+    def!("VARP", 1, MANY, var_p, "number1, [number2], …"),
+    def!("LARGE", 2, 2, large, "array, k"),
+    def!("SMALL", 2, 2, small, "array, k"),
+    def!("RANK", 2, 3, rank, "number, ref, [order]"),
+    def!("RANK.EQ", 2, 3, rank, "number, ref, [order]"),
+    def!("RANK.AVG", 2, 3, rank_avg, "number, ref, [order]"),
+    def!("PERCENTILE", 2, 2, percentile, "array, k"),
+    def!("PERCENTILE.INC", 2, 2, percentile, "array, k"),
+    def!("QUARTILE", 2, 2, quartile, "array, quart"),
+    def!("QUARTILE.INC", 2, 2, quartile, "array, quart"),
+    def!("SUMIF", 2, 3, sumif, "range, criteria, [sum_range]"),
+    def!(
+        "SUMIFS",
+        3,
+        MANY,
+        sumifs,
+        "sum_range, criteria_range1, criteria1, [criteria_range2, criteria2], …"
+    ),
+    def!("COUNTIF", 2, 2, countif, "range, criteria"),
+    def!(
+        "COUNTIFS",
+        2,
+        MANY,
+        countifs,
+        "criteria_range1, criteria1, [criteria_range2, criteria2], …"
+    ),
+    def!(
+        "AVERAGEIF",
+        2,
+        3,
+        averageif,
+        "range, criteria, [average_range]"
+    ),
+    def!(
+        "AVERAGEIFS",
+        3,
+        MANY,
+        averageifs,
+        "average_range, criteria_range1, criteria1, [criteria_range2, criteria2], …"
+    ),
+    def!(
+        "MAXIFS",
+        3,
+        MANY,
+        maxifs,
+        "max_range, criteria_range1, criteria1, [criteria_range2, criteria2], …"
+    ),
+    def!(
+        "MINIFS",
+        3,
+        MANY,
+        minifs,
+        "min_range, criteria_range1, criteria1, [criteria_range2, criteria2], …"
+    ),
 ];
 
 /// The `…A` functions' view: like [`numbers`], but inside ranges and arrays
 /// text counts as 0 and booleans as 1/0 (empty cells are still skipped).
 fn numbers_a(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<f64>, ErrorKind> {
-    let mut out = Vec::new();
-    for arg in args {
-        match arg {
-            Arg::Omitted => {}
-            Arg::Value(Value::Empty) => {}
-            Arg::Value(v) => out.push(v.to_number()?),
-            _ => {
-                let ar = area(arg, ctx)?;
-                let (r, c) = ar.data_dims(ctx);
-                for v in ar.window(ctx, r, c) {
-                    match v {
-                        Value::Number(n) => out.push(n),
-                        Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
-                        Value::Text(_) => out.push(0.0),
-                        Value::Error(e) => return Err(e),
-                        Value::Empty => {}
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
+    fold_args(
+        args,
+        ctx,
+        Vec::new(),
+        |out, v| {
+            out.push(v.to_number()?);
+            Ok(())
+        },
+        |out, v| {
+            out.push(match v {
+                Value::Number(n) => *n,
+                Value::Bool(b) => f64::from(u8::from(*b)),
+                Value::Text(_) => 0.0,
+                Value::Error(e) => return Err(*e),
+                Value::Empty => return Ok(()),
+            });
+            Ok(())
+        },
+    )
 }
 
 fn mean(ns: &[f64]) -> Result<f64, ErrorKind> {
@@ -82,63 +116,46 @@ fn mean(ns: &[f64]) -> Result<f64, ErrorKind> {
     Ok(ns.iter().sum::<f64>() / ns.len() as f64)
 }
 
-fn average(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| mean(&ns)))
+fn average(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| mean(&ns))
 }
 
-fn averagea(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers_a(args, ctx).and_then(|ns| mean(&ns)))
+fn averagea(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers_a(args, ctx).and_then(|ns| mean(&ns))
 }
 
 /// COUNT never fails: errors and non-numeric text are simply not counted.
 /// Values typed directly count when they are numbers, booleans or numeric
 /// text; inside ranges and arrays only numbers count.
-fn count(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let mut n = 0usize;
-    for arg in args {
-        match arg {
-            Arg::Omitted => {}
-            Arg::Value(v) => {
-                if !matches!(v, Value::Empty | Value::Error(_)) && v.to_number().is_ok() {
-                    n += 1;
-                }
+fn count(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let n = fold_args(
+        args,
+        ctx,
+        0usize,
+        |n, v| {
+            if !v.is_error() && v.to_number().is_ok() {
+                *n += 1;
             }
-            _ => {
-                let Ok(ar) = area(arg, ctx) else { continue };
-                let (r, c) = ar.data_dims(ctx);
-                n += ar
-                    .window(ctx, r, c)
-                    .iter()
-                    .filter(|v| matches!(v, Value::Number(_)))
-                    .count();
+            Ok(())
+        },
+        |n, v| {
+            if matches!(v, Value::Number(_)) {
+                *n += 1;
             }
-        }
-    }
-    Value::Number(n as f64)
+            Ok(())
+        },
+    )?;
+    Ok(n as f64)
 }
 
-/// Every non-empty value counts, errors and empty text included.
-fn counta(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    let mut n = 0usize;
-    for arg in args {
-        match arg {
-            Arg::Omitted | Arg::Value(Value::Empty) => {}
-            Arg::Value(_) => n += 1,
-            _ => {
-                let ar = match area(arg, ctx) {
-                    Ok(a) => a,
-                    Err(e) => return Value::Error(e),
-                };
-                let (r, c) = ar.data_dims(ctx);
-                n += ar
-                    .window(ctx, r, c)
-                    .iter()
-                    .filter(|v| **v != Value::Empty)
-                    .count();
-            }
-        }
-    }
-    Value::Number(n as f64)
+/// Every non-empty value counts, errors and empty text included (a
+/// reference to a missing sheet is one `#REF!`).
+fn counta(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let tally = |n: &mut usize, _: &Value| {
+        *n += 1;
+        Ok(())
+    };
+    Ok(fold_args(args, ctx, 0usize, tally, tally)? as f64)
 }
 
 /// Empty cells and empty text in the range, counting the cells outside the
@@ -168,20 +185,20 @@ fn fold_or_zero(ns: Vec<f64>, f: fn(f64, f64) -> f64) -> f64 {
     ns.into_iter().reduce(f).unwrap_or(0.0)
 }
 
-fn min(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::min)))
+fn min(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::min))
 }
 
-fn max(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::max)))
+fn max(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).map(|ns| fold_or_zero(ns, f64::max))
 }
 
-fn mina(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::min)))
+fn mina(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::min))
 }
 
-fn maxa(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::max)))
+fn maxa(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers_a(args, ctx).map(|ns| fold_or_zero(ns, f64::max))
 }
 
 fn sorted(mut ns: Vec<f64>) -> Vec<f64> {
@@ -189,8 +206,8 @@ fn sorted(mut ns: Vec<f64>) -> Vec<f64> {
     ns
 }
 
-fn median(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| {
+fn median(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| {
         if ns.is_empty() {
             return Err(ErrorKind::Num);
         }
@@ -201,24 +218,23 @@ fn median(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
         } else {
             (s[m - 1] + s[m]) / 2.0
         })
-    }))
+    })
 }
 
 /// The most frequent number; ties go to the one that appears first. No
 /// repeats at all is `#N/A`.
-fn mode(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| {
-        let mut counts: HashMap<u64, (usize, usize)> = HashMap::new();
+fn mode(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| {
+        let mut counts: HashMap<Key, (usize, usize)> = HashMap::new();
         for (i, n) in ns.iter().enumerate() {
-            let key = if *n == 0.0 { 0 } else { n.to_bits() };
-            counts.entry(key).or_insert((0, i)).0 += 1;
+            counts.entry(Key::num(*n)).or_insert((0, i)).0 += 1;
         }
         let best = counts
             .values()
             .filter(|(c, _)| *c > 1)
             .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
         best.map(|&(_, i)| ns[i]).ok_or(ErrorKind::NA)
-    }))
+    })
 }
 
 fn variance(ns: &[f64], sample: bool) -> Result<f64, ErrorKind> {
@@ -231,45 +247,43 @@ fn variance(ns: &[f64], sample: bool) -> Result<f64, ErrorKind> {
     Ok(ss / if sample { (n - 1) as f64 } else { n as f64 })
 }
 
-fn var_s(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| variance(&ns, true)))
+fn var_s(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| variance(&ns, true))
 }
 
-fn var_p(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx).and_then(|ns| variance(&ns, false)))
+fn var_p(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx).and_then(|ns| variance(&ns, false))
 }
 
-fn stdev_s(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx)
+fn stdev_s(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx)
         .and_then(|ns| variance(&ns, true))
-        .map(f64::sqrt))
+        .map(f64::sqrt)
 }
 
-fn stdev_p(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(numbers(args, ctx)
+fn stdev_p(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    numbers(args, ctx)
         .and_then(|ns| variance(&ns, false))
-        .map(f64::sqrt))
+        .map(f64::sqrt)
 }
 
 /// The k-th largest (or smallest). A fractional k rounds up, as in Excel.
-fn kth(args: &[Arg], ctx: &mut dyn Ctx, largest: bool) -> Value {
-    ok((|| {
-        let ns = numbers(&args[..1], ctx)?;
-        let k = num(&args[1], ctx)?.ceil();
-        if k < 1.0 || k > ns.len() as f64 {
-            return Err(ErrorKind::Num);
-        }
-        let s = sorted(ns);
-        let i = k as usize - 1;
-        Ok(if largest { s[s.len() - 1 - i] } else { s[i] })
-    })())
+fn kth(args: &[Arg], ctx: &mut dyn Ctx, largest: bool) -> Result<f64, ErrorKind> {
+    let ns = numbers(&args[..1], ctx)?;
+    let k = num(&args[1], ctx)?.ceil();
+    if k < 1.0 || k > ns.len() as f64 {
+        return Err(ErrorKind::Num);
+    }
+    let s = sorted(ns);
+    let i = k as usize - 1;
+    Ok(if largest { s[s.len() - 1 - i] } else { s[i] })
 }
 
-fn large(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn large(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     kth(args, ctx, true)
 }
 
-fn small(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn small(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     kth(args, ctx, false)
 }
 
@@ -289,12 +303,12 @@ fn rank_counts(args: &[Arg], ctx: &mut dyn Ctx) -> Result<(usize, usize), ErrorK
     Ok((better, equal))
 }
 
-fn rank(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(rank_counts(args, ctx).map(|(b, _)| (b + 1) as f64))
+fn rank(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    rank_counts(args, ctx).map(|(b, _)| (b + 1) as f64)
 }
 
-fn rank_avg(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(rank_counts(args, ctx).map(|(b, e)| b as f64 + (e as f64 + 1.0) / 2.0))
+fn rank_avg(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    rank_counts(args, ctx).map(|(b, e)| b as f64 + (e as f64 + 1.0) / 2.0)
 }
 
 fn percentile_of(ns: Vec<f64>, k: f64) -> Result<f64, ErrorKind> {
@@ -312,22 +326,18 @@ fn percentile_of(ns: Vec<f64>, k: f64) -> Result<f64, ErrorKind> {
     })
 }
 
-fn percentile(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let ns = numbers(&args[..1], ctx)?;
-        percentile_of(ns, num(&args[1], ctx)?)
-    })())
+fn percentile(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let ns = numbers(&args[..1], ctx)?;
+    percentile_of(ns, num(&args[1], ctx)?)
 }
 
-fn quartile(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let ns = numbers(&args[..1], ctx)?;
-        let q = num(&args[1], ctx)?.trunc();
-        if !(0.0..=4.0).contains(&q) {
-            return Err(ErrorKind::Num);
-        }
-        percentile_of(ns, q / 4.0)
-    })())
+fn quartile(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let ns = numbers(&args[..1], ctx)?;
+    let q = num(&args[1], ctx)?.trunc();
+    if !(0.0..=4.0).contains(&q) {
+        return Err(ErrorKind::Num);
+    }
+    percentile_of(ns, q / 4.0)
 }
 
 // ---- conditional aggregates --------------------------------------------------
@@ -413,8 +423,8 @@ fn matched_numbers(m: &Matches, target: &Area, ctx: &dyn Ctx) -> Result<Vec<f64>
 fn single_if(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<f64>, ErrorKind> {
     let range = area(&args[0], ctx)?;
     let crit = criterion(&args[1], ctx)?;
-    let target = match args.get(2) {
-        None | Some(Arg::Omitted) => range.clone(),
+    let target = match given(args.get(2)) {
+        None => range.clone(),
         Some(a) => area(a, ctx)?.sub(0, 0, range.rows(), range.cols()),
     };
     let pairs = [(range, crit)];
@@ -452,40 +462,38 @@ fn criteria_pairs<'a>(
     Ok(pairs)
 }
 
-fn sumif(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(single_if(args, ctx).map(|ns| ns.iter().sum()))
+fn sumif(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    single_if(args, ctx).map(|ns| ns.iter().sum())
 }
 
-fn averageif(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(single_if(args, ctx).and_then(|ns| mean(&ns)))
+fn averageif(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    single_if(args, ctx).and_then(|ns| mean(&ns))
 }
 
-fn sumifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).map(|ns| ns.iter().sum()))
+fn sumifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).map(|ns| ns.iter().sum())
 }
 
-fn averageifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).and_then(|ns| mean(&ns)))
+fn averageifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).and_then(|ns| mean(&ns))
 }
 
-fn maxifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::max)))
+fn maxifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::max))
 }
 
-fn minifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok(multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::min)))
+fn minifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    multi_if(args, ctx).map(|ns| fold_or_zero(ns, f64::min))
 }
 
-fn countif(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn countif(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
     countifs(args, ctx)
 }
 
-fn countifs(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
-    ok((|| {
-        let pairs = criteria_pairs(args, ctx)?;
-        let m = match_cells(&pairs, None, ctx)?;
-        Ok((m.positions.len() + m.outside) as f64)
-    })())
+fn countifs(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let pairs = criteria_pairs(args, ctx)?;
+    let m = match_cells(&pairs, None, ctx)?;
+    Ok((m.positions.len() + m.outside) as f64)
 }
 
 #[cfg(test)]
@@ -531,6 +539,10 @@ mod tests {
                 ("COUNTA(1, \"\", #N/A)", "3"),
                 ("COUNTA(D1:D9)", "0"),
                 ("COUNTA(A1, B3)", "1"),
+                // A missing sheet reads as one #REF!, as the evaluator passes it.
+                ("COUNT(Nope!A1, 1)", "1"),
+                ("COUNTA(Nope!A1, 1)", "2"),
+                ("AVERAGEA(Nope!A1)", "#REF!"),
                 ("COUNTBLANK(B1:B5)", "1"),
                 ("COUNTBLANK(A1:D10)", "26"),
                 ("COUNTBLANK(D1:D3)", "3"),

@@ -27,6 +27,7 @@
 //! 16,384 limit is the caller's job.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use super::xml::{escape_attr, escape_xstring};
 use super::zip;
@@ -180,9 +181,10 @@ impl Styles {
                     codes.len() - 1
                 })
             });
-            xfs.push_str(&format!(
+            let _ = write!(
+                xfs,
                 "<xf numFmtId=\"{num_id}\" fontId=\"{font_id}\" fillId=\"{fill_id}\" borderId=\"0\" xfId=\"0\""
-            ));
+            );
             if num_id != 0 {
                 xfs.push_str(" applyNumberFormat=\"1\"");
             }
@@ -195,17 +197,17 @@ impl Styles {
             xfs.push_str("/>");
         }
         let mut s = String::from(DECL);
-        s.push_str(&format!("<styleSheet xmlns=\"{NS_MAIN}\">"));
+        let _ = write!(s, "<styleSheet xmlns=\"{NS_MAIN}\">");
         if !codes.is_empty() {
-            s.push_str(&format!("<numFmts count=\"{}\">", codes.len()));
+            let _ = write!(s, "<numFmts count=\"{}\">", codes.len());
             for (i, code) in codes.iter().enumerate() {
-                s.push_str(&format!("<numFmt numFmtId=\"{}\" formatCode=\"", 164 + i));
+                let _ = write!(s, "<numFmt numFmtId=\"{}\" formatCode=\"", 164 + i);
                 escape_attr(&mut s, code);
                 s.push_str("\"/>");
             }
             s.push_str("</numFmts>");
         }
-        s.push_str(&format!("<fonts count=\"{}\">", fonts.len()));
+        let _ = write!(s, "<fonts count=\"{}\">", fonts.len());
         for (bold, color) in &fonts {
             s.push_str("<font>");
             if *bold {
@@ -213,28 +215,31 @@ impl Styles {
             }
             s.push_str("<sz val=\"11\"/>");
             if let Some(argb) = color {
-                s.push_str(&format!("<color rgb=\"{argb:08X}\"/>"));
+                let _ = write!(s, "<color rgb=\"{argb:08X}\"/>");
             }
             s.push_str(FONT_FACE);
             s.push_str("</font>");
         }
         s.push_str("</fonts>");
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             "<fills count=\"{}\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill>",
             2 + fills.len()
-        ));
+        );
         for argb in &fills {
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"{argb:08X}\"/><bgColor indexed=\"64\"/></patternFill></fill>"
-            ));
+            );
         }
         s.push_str("</fills>");
         s.push_str("<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>");
         s.push_str("<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>");
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             "<cellXfs count=\"{}\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>{xfs}</cellXfs>",
             1 + self.xfs.len()
-        ));
+        );
         s.push_str("<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>");
         s.push_str("</styleSheet>");
         s
@@ -243,9 +248,7 @@ impl Styles {
 
 fn workbook_xml(sheet_name: &str, date1904: bool) -> String {
     let mut s = String::from(DECL);
-    s.push_str(&format!(
-        "<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">"
-    ));
+    let _ = write!(s, "<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
     s.push_str(if date1904 {
         "<workbookPr date1904=\"1\"/>"
     } else {
@@ -331,9 +334,7 @@ fn sheet_xml<'a>(cells: impl IntoIterator<Item = WriteCell<'a>>, styles: &mut St
 
     let mut s = String::with_capacity(64 + cells.len() * 32);
     s.push_str(DECL);
-    s.push_str(&format!(
-        "<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">"
-    ));
+    let _ = write!(s, "<worksheet xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
     let dim = match (cells.first(), cells.last()) {
         (Some(first), Some(last)) => {
             let min_col = cells.iter().map(|c| c.col).min().unwrap_or(0);
@@ -348,7 +349,7 @@ fn sheet_xml<'a>(cells: impl IntoIterator<Item = WriteCell<'a>>, styles: &mut St
         }
         _ => "A1".into(),
     };
-    s.push_str(&format!("<dimension ref=\"{dim}\"/>"));
+    let _ = write!(s, "<dimension ref=\"{dim}\"/>");
     if cells.is_empty() {
         s.push_str("<sheetData/></worksheet>");
         return s;
@@ -360,7 +361,7 @@ fn sheet_xml<'a>(cells: impl IntoIterator<Item = WriteCell<'a>>, styles: &mut St
             if row.is_some() {
                 s.push_str("</row>");
             }
-            s.push_str(&format!("<row r=\"{}\">", c.row + 1));
+            let _ = write!(s, "<row r=\"{}\">", c.row + 1);
             row = Some(c.row);
         }
         push_cell(&mut s, c, styles.id(c.style));
@@ -379,16 +380,20 @@ fn push_cell(s: &mut String, c: &WriteCell, style: usize) {
     let Some(f) = c.formula else {
         match c.value {
             XValue::Number(n) if n.is_finite() => {
-                s.push_str(&format!("<c {r}><v>{}</v></c>", number_text(*n)));
+                let _ = write!(s, "<c {r}><v>{}</v></c>", number_text(*n));
             }
-            XValue::Number(_) => s.push_str(&format!("<c {r} t=\"e\"><v>#NUM!</v></c>")),
-            XValue::Bool(b) => s.push_str(&format!("<c {r} t=\"b\"><v>{}</v></c>", *b as u8)),
+            XValue::Number(_) => {
+                let _ = write!(s, "<c {r} t=\"e\"><v>#NUM!</v></c>");
+            }
+            XValue::Bool(b) => {
+                let _ = write!(s, "<c {r} t=\"b\"><v>{}</v></c>", *b as u8);
+            }
             XValue::Error(e) if excel_error(e) => {
-                s.push_str(&format!("<c {r} t=\"e\"><v>{e}</v></c>"));
+                let _ = write!(s, "<c {r} t=\"e\"><v>{e}</v></c>");
             }
             // An error Excel can't read is kept as its text.
             XValue::Text(t) | XValue::Error(t) => {
-                s.push_str(&format!("<c {r} t=\"inlineStr\"><is><t"));
+                let _ = write!(s, "<c {r} t=\"inlineStr\"><is><t");
                 if needs_preserve(t) {
                     s.push_str(" xml:space=\"preserve\"");
                 }
@@ -396,7 +401,9 @@ fn push_cell(s: &mut String, c: &WriteCell, style: usize) {
                 escape_xstring(s, t);
                 s.push_str("</t></is></c>");
             }
-            XValue::Empty if style != 0 => s.push_str(&format!("<c {r}/>")),
+            XValue::Empty if style != 0 => {
+                let _ = write!(s, "<c {r}/>");
+            }
             XValue::Empty => {}
         }
         return;
@@ -414,11 +421,11 @@ fn push_cell(s: &mut String, c: &WriteCell, style: usize) {
         XValue::Error(_) => ("", Some("0".into())),
         XValue::Empty => ("", None),
     };
-    s.push_str(&format!("<c {r}{typ}><f>"));
+    let _ = write!(s, "<c {r}{typ}><f>");
     escape_xstring(s, f);
     s.push_str("</f>");
     if let Some(v) = cached {
-        s.push_str(&format!("<v>{v}</v>"));
+        let _ = write!(s, "<v>{v}</v>");
     }
     s.push_str("</c>");
 }

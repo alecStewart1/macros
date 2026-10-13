@@ -218,38 +218,25 @@ pub fn hms(serial: f64) -> (u32, u32, u32) {
 
 // ---- parsing ---------------------------------------------------------------
 
+/// Full English month names, January first.
 const MONTHS: [&str; 12] = [
-    "january",
-    "february",
-    "march",
-    "april",
-    "may",
-    "june",
-    "july",
-    "august",
-    "september",
-    "october",
-    "november",
-    "december",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 
-/// Full English month names, January first.
+/// The full English name of month `m` (1–12).
 pub fn month_name(m: u32) -> &'static str {
-    const NAMES: [&str; 12] = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
-    NAMES[(m as usize).clamp(1, 12) - 1]
+    MONTHS[(m as usize).clamp(1, 12) - 1]
 }
 
 /// Full English weekday names, Sunday first.
@@ -274,7 +261,10 @@ fn parse_month(s: &str) -> Option<u32> {
     }
     MONTHS
         .iter()
-        .position(|name| name.starts_with(&l))
+        .position(|name| {
+            name.get(..l.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(&l))
+        })
         .map(|i| i as u32 + 1)
 }
 

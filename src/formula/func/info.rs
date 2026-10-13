@@ -5,53 +5,53 @@ use super::{Arg, Ctx, FuncDef, scalar};
 use crate::formula::value::{ErrorKind, Value};
 
 pub(super) const FUNCS: &[FuncDef] = &[
-    def("ISBLANK", 1, 1, isblank),
-    def("ISNUMBER", 1, 1, isnumber),
-    def("ISTEXT", 1, 1, istext),
-    def("ISNONTEXT", 1, 1, isnontext),
-    def("ISLOGICAL", 1, 1, islogical),
-    def("ISERROR", 1, 1, iserror),
-    def("ISERR", 1, 1, iserr),
-    def("ISNA", 1, 1, isna),
-    def("ISEVEN", 1, 1, iseven),
-    def("ISODD", 1, 1, isodd),
-    def("NA", 0, 0, na),
-    def("ERROR.TYPE", 1, 1, error_type),
-    def("TYPE", 1, 1, type_),
-    def("N", 1, 1, n),
-    def("T", 1, 1, t),
+    def!("ISBLANK", 1, 1, isblank, "value"),
+    def!("ISNUMBER", 1, 1, isnumber, "value"),
+    def!("ISTEXT", 1, 1, istext, "value"),
+    def!("ISNONTEXT", 1, 1, isnontext, "value"),
+    def!("ISLOGICAL", 1, 1, islogical, "value"),
+    def!("ISERROR", 1, 1, iserror, "value"),
+    def!("ISERR", 1, 1, iserr, "value"),
+    def!("ISNA", 1, 1, isna, "value"),
+    def!("ISEVEN", 1, 1, iseven, "number"),
+    def!("ISODD", 1, 1, isodd, "number"),
+    def!("NA", 0, 0, na, ""),
+    def!("ERROR.TYPE", 1, 1, error_type, "error_val"),
+    def!("TYPE", 1, 1, type_, "value"),
+    def!("N", 1, 1, n, "value"),
+    def!("T", 1, 1, t, "value"),
 ];
 
-fn is(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&Value) -> bool) -> Value {
-    Value::Bool(f(&scalar(&args[0], ctx)))
+fn is(args: &[Arg], ctx: &mut dyn Ctx, f: fn(&Value) -> bool) -> bool {
+    f(&scalar(&args[0], ctx))
 }
 
 /// Only a truly empty cell is blank; a formula's `""` is text.
-fn isblank(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn isblank(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(args, ctx, |v| matches!(v, Value::Empty))
 }
 
-fn isnumber(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn isnumber(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(args, ctx, |v| matches!(v, Value::Number(_)))
 }
 
-fn istext(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn istext(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(args, ctx, |v| matches!(v, Value::Text(_)))
 }
 
-fn isnontext(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn isnontext(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(args, ctx, |v| !matches!(v, Value::Text(_)))
 }
 
-fn islogical(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn islogical(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(args, ctx, |v| matches!(v, Value::Bool(_)))
 }
 
-fn iserror(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn iserror(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(args, ctx, |v| matches!(v, Value::Error(_)))
 }
 
-fn iserr(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn iserr(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(
         args,
         ctx,
@@ -59,30 +59,26 @@ fn iserr(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     )
 }
 
-fn isna(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn isna(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
     is(args, ctx, |v| matches!(v, Value::Error(ErrorKind::NA)))
 }
 
 /// ISEVEN/ISODD: the number is truncated; booleans and non-numeric text are
 /// `#VALUE!` (as in Excel); an empty cell is 0.
-fn parity(args: &[Arg], ctx: &mut dyn Ctx, odd: bool) -> Value {
-    let v = scalar(&args[0], ctx);
-    let n = match v {
-        Value::Bool(_) => return Value::Error(ErrorKind::Value),
-        v => match v.to_number() {
-            Ok(n) => n,
-            Err(e) => return Value::Error(e),
-        },
+fn parity(args: &[Arg], ctx: &mut dyn Ctx, odd: bool) -> Result<bool, ErrorKind> {
+    let n = match scalar(&args[0], ctx) {
+        Value::Bool(_) => return Err(ErrorKind::Value),
+        v => v.to_number()?,
     };
     let is_odd = (n.trunc() % 2.0).abs() == 1.0;
-    Value::Bool(is_odd == odd)
+    Ok(is_odd == odd)
 }
 
-fn iseven(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn iseven(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     parity(args, ctx, false)
 }
 
-fn isodd(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
+fn isodd(args: &[Arg], ctx: &mut dyn Ctx) -> Result<bool, ErrorKind> {
     parity(args, ctx, true)
 }
 
@@ -90,22 +86,10 @@ fn na(_: &[Arg], _: &mut dyn Ctx) -> Value {
     Value::Error(ErrorKind::NA)
 }
 
-/// Excel's error numbers. This engine's own errors get numbers past
-/// Excel's: `#ERROR!` (parse) 101, `#CIRC!` 102; `#CALC!` is Excel's 14.
+/// The error's number ([`ErrorKind::code`]); `#N/A` for a non-error.
 fn error_type(args: &[Arg], ctx: &mut dyn Ctx) -> Value {
     match scalar(&args[0], ctx) {
-        Value::Error(e) => Value::Number(match e {
-            ErrorKind::Null => 1.0,
-            ErrorKind::Div0 => 2.0,
-            ErrorKind::Value => 3.0,
-            ErrorKind::Ref => 4.0,
-            ErrorKind::Name => 5.0,
-            ErrorKind::Num => 6.0,
-            ErrorKind::NA => 7.0,
-            ErrorKind::Calc => 14.0,
-            ErrorKind::Parse => 101.0,
-            ErrorKind::Circ => 102.0,
-        }),
+        Value::Error(e) => Value::Number(f64::from(e.code())),
         _ => Value::Error(ErrorKind::NA),
     }
 }

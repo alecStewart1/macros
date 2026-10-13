@@ -154,48 +154,69 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// Visit each direct sub-expression, in source order. Array constants
+    /// count their elements (constants only, as the parser allows, so a
+    /// walk finds nothing there — but every walk agrees).
+    pub fn for_each_child(&self, f: &mut impl FnMut(&Expr)) {
+        match self {
+            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => f(e),
+            Expr::Binary(_, a, b) => {
+                f(a);
+                f(b);
+            }
+            Expr::Call(_, args) => args.iter().for_each(f),
+            Expr::Array(rows) => rows.iter().flatten().for_each(f),
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Ref(_)
+            | Expr::Missing
+            | Expr::Name(_) => {}
+        }
+    }
+
+    /// [`Self::for_each_child`], mutably.
+    pub fn for_each_child_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
+        match self {
+            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => f(e),
+            Expr::Binary(_, a, b) => {
+                f(a);
+                f(b);
+            }
+            Expr::Call(_, args) => args.iter_mut().for_each(f),
+            Expr::Array(rows) => rows.iter_mut().flatten().for_each(f),
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Ref(_)
+            | Expr::Missing
+            | Expr::Name(_) => {}
+        }
+    }
+
     /// Every reference in the formula, in source order.
     pub fn refs(&self, out: &mut Vec<Ref>) {
         match self {
             Expr::Ref(r) => out.push(r.clone()),
-            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.refs(out),
-            Expr::Binary(_, a, b) => {
-                a.refs(out);
-                b.refs(out);
-            }
-            Expr::Call(_, args) => args.iter().for_each(|a| a.refs(out)),
-            Expr::Array(rows) => rows.iter().flatten().for_each(|a| a.refs(out)),
-            _ => {}
+            e => e.for_each_child(&mut |c| c.refs(out)),
         }
     }
 
     /// Every function name called, upper-case, in source order.
     pub fn calls(&self, out: &mut Vec<Arc<str>>) {
-        match self {
-            Expr::Call(name, args) => {
-                out.push(name.clone());
-                args.iter().for_each(|a| a.calls(out));
-            }
-            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.calls(out),
-            Expr::Binary(_, a, b) => {
-                a.calls(out);
-                b.calls(out);
-            }
-            _ => {}
+        if let Expr::Call(name, _) = self {
+            out.push(name.clone());
         }
+        self.for_each_child(&mut |c| c.calls(out));
     }
 
     /// Apply `f` to every reference, mutably (structural edits, copying).
     pub fn for_each_ref_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
         match self {
             Expr::Ref(_) => f(self),
-            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => e.for_each_ref_mut(f),
-            Expr::Binary(_, a, b) => {
-                a.for_each_ref_mut(f);
-                b.for_each_ref_mut(f);
-            }
-            Expr::Call(_, args) => args.iter_mut().for_each(|a| a.for_each_ref_mut(f)),
-            _ => {}
+            e => e.for_each_child_mut(&mut |c| c.for_each_ref_mut(f)),
         }
     }
 }

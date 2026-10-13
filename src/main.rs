@@ -5,6 +5,7 @@
 // console of their own.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod a1;
 mod analyze;
 mod anvil;
 mod assets;

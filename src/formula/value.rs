@@ -44,21 +44,65 @@ impl ErrorKind {
         }
     }
 
+    /// Every error kind.
+    pub const ALL: [ErrorKind; 10] = [
+        ErrorKind::Null,
+        ErrorKind::Div0,
+        ErrorKind::Value,
+        ErrorKind::Ref,
+        ErrorKind::Name,
+        ErrorKind::Num,
+        ErrorKind::NA,
+        ErrorKind::Parse,
+        ErrorKind::Circ,
+        ErrorKind::Calc,
+    ];
+
     /// Parse an error literal (case-insensitive, as Excel accepts `#n/a`).
     pub fn parse(s: &str) -> Option<ErrorKind> {
-        let all = [
-            ErrorKind::Null,
-            ErrorKind::Div0,
-            ErrorKind::Value,
-            ErrorKind::Ref,
-            ErrorKind::Name,
-            ErrorKind::Num,
-            ErrorKind::NA,
-            ErrorKind::Parse,
-            ErrorKind::Circ,
-            ErrorKind::Calc,
-        ];
-        all.into_iter().find(|e| e.as_str().eq_ignore_ascii_case(s))
+        s.parse().ok()
+    }
+
+    /// Excel's error number (`ERROR.TYPE`). This engine's own errors get
+    /// numbers past Excel's: `#ERROR!` (parse) 101, `#CIRC!` 102; `#CALC!`
+    /// is Excel's 14.
+    pub fn code(self) -> u8 {
+        match self {
+            ErrorKind::Null => 1,
+            ErrorKind::Div0 => 2,
+            ErrorKind::Value => 3,
+            ErrorKind::Ref => 4,
+            ErrorKind::Name => 5,
+            ErrorKind::Num => 6,
+            ErrorKind::NA => 7,
+            ErrorKind::Calc => 14,
+            ErrorKind::Parse => 101,
+            ErrorKind::Circ => 102,
+        }
+    }
+}
+
+/// Text that isn't an error literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownError;
+
+impl fmt::Display for UnknownError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("not an error value")
+    }
+}
+
+impl std::error::Error for UnknownError {}
+
+impl std::str::FromStr for ErrorKind {
+    type Err = UnknownError;
+
+    /// An error literal, case-insensitively (`#n/a` is `#N/A`).
+    fn from_str(s: &str) -> Result<ErrorKind, UnknownError> {
+        ErrorKind::ALL
+            .into_iter()
+            .find(|e| e.as_str().eq_ignore_ascii_case(s))
+            .ok_or(UnknownError)
     }
 }
 
@@ -77,6 +121,12 @@ pub enum Value {
     Error(ErrorKind),
     /// An empty cell (or an omitted argument).
     Empty,
+}
+
+impl From<ErrorKind> for Value {
+    fn from(e: ErrorKind) -> Value {
+        Value::Error(e)
+    }
 }
 
 impl Value {
@@ -161,15 +211,17 @@ impl Value {
             Value::Error(e) => Err(*e),
         }
     }
+}
 
-    /// How the value is shown in a cell.
-    pub fn display(&self) -> String {
+/// How the value is shown in a cell.
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Number(n) => general_format(*n),
-            Value::Text(s) => s.to_string(),
-            Value::Bool(b) => (if *b { "TRUE" } else { "FALSE" }).to_string(),
-            Value::Error(e) => e.as_str().to_string(),
-            Value::Empty => String::new(),
+            Value::Number(n) => f.write_str(&general_format(*n)),
+            Value::Text(s) => f.write_str(s),
+            Value::Bool(b) => f.write_str(if *b { "TRUE" } else { "FALSE" }),
+            Value::Error(e) => f.write_str(e.as_str()),
+            Value::Empty => Ok(()),
         }
     }
 }

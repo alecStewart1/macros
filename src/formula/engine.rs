@@ -24,8 +24,9 @@
 //! on the reader is a cycle: it becomes `#CIRC!`, which then propagates.
 //! A time budget lets a large recalculation continue across frames.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::ast::Expr;
@@ -171,7 +172,8 @@ enum State {
 
 struct Slot {
     pos: (usize, usize),
-    expr: Result<Expr, ParseError>,
+    /// Shared, so evaluating doesn't copy the tree.
+    expr: Result<Arc<Expr>, ParseError>,
     result: Value,
     /// `result` as shown in the cell (kept so reads can borrow a `&str`).
     shown: String,
@@ -187,7 +189,7 @@ struct Slot {
 impl Slot {
     /// Done: `value` is the result.
     fn settle(&mut self, value: Value) {
-        self.shown = value.display();
+        self.shown = value.to_string();
         self.result = value;
         self.state = State::Clean;
     }
@@ -237,7 +239,7 @@ pub struct Engine {
     waiting_on_calls: HashSet<Fid>,
     /// Exact-match lookup indexes by range, dropped whenever any cell
     /// changes (so `VLOOKUP` down a column builds each index once).
-    lookups: HashMap<RangeRef, std::sync::Arc<super::func::lookup::LookupIndex>>,
+    lookups: HashMap<RangeRef, Arc<super::func::lookup::LookupIndex>>,
     /// The sheet this engine computes (references naming it are local).
     own_sheet: String,
     /// Formula results computed so far (a change counter for results).
@@ -277,7 +279,7 @@ impl Engine {
     /// The parsed formula at `(row, col)`, if it parsed.
     pub fn expr(&self, row: usize, col: usize) -> Option<&Expr> {
         let fid = *self.by_pos.get(&(row, col))?;
-        self.slot(fid)?.expr.as_ref().ok()
+        self.slot(fid)?.expr.as_deref().ok()
     }
 
     /// Positions of every formula (unordered).
@@ -346,7 +348,7 @@ impl Engine {
     }
 
     fn register(&mut self, row: usize, col: usize, stored: &str) {
-        let expr = parse(display_text(stored));
+        let expr = parse(display_text(stored)).map(Arc::new);
         let mut precedents = Vec::new();
         let mut sheets: Vec<String> = Vec::new();
         let mut volatile = false;
@@ -600,7 +602,12 @@ impl Engine {
             if state == State::Clean {
                 continue;
             }
-            let (value, pending, circular, called) = self.evaluate(src, fid);
+            let Evaluation {
+                value,
+                pending,
+                circular,
+                called,
+            } = self.evaluate(src, fid);
             let pending: Vec<Fid> = pending
                 .into_iter()
                 .filter(|&p| p != fid && self.slot(p).is_some_and(|s| s.state != State::Clean))
@@ -649,19 +656,18 @@ impl Engine {
         true
     }
 
-    /// Evaluate one formula: `(value, dirty inputs it read, read itself?,
-    /// called a Scheme function that isn't done)`.
-    fn evaluate(&mut self, src: &dyn Source, fid: Fid) -> (Value, Vec<Fid>, bool, bool) {
+    /// Evaluate one formula.
+    fn evaluate(&mut self, src: &dyn Source, fid: Fid) -> Evaluation {
         let Some(slot) = self.slot_mut(fid) else {
-            return (Value::Empty, Vec::new(), false, false);
+            return Evaluation::of(Value::Empty);
         };
         slot.state = State::Evaluating;
         let pos = slot.pos;
         let expr = match &slot.expr {
-            Ok(e) => e.clone(),
+            Ok(e) => Arc::clone(e),
             Err(_) => {
                 slot.state = State::Dirty;
-                return (Value::Error(ErrorKind::Parse), Vec::new(), false, false);
+                return Evaluation::of(Value::Error(ErrorKind::Parse));
             }
         };
         let mut ctx = EngineCtx {
@@ -669,13 +675,13 @@ impl Engine {
             src,
             here: pos,
             pending: RefCell::new(Vec::new()),
-            circular: RefCell::new(false),
+            circular: Cell::new(false),
             called: false,
             now: src.now(),
         };
         let value = eval::eval_cell(&expr, &mut ctx);
         let pending = ctx.pending.into_inner();
-        let circular = ctx.circular.into_inner();
+        let circular = ctx.circular.get();
         let called = ctx.called;
         if let Some(s) = self.slot_mut(fid) {
             s.state = State::Dirty;
@@ -685,7 +691,12 @@ impl Engine {
         } else {
             value
         };
-        (value, pending, circular, called)
+        Evaluation {
+            value,
+            pending,
+            circular,
+            called,
+        }
     }
 
     fn next_random(&mut self) -> f64 {
@@ -772,13 +783,36 @@ impl Engine {
     }
 }
 
+/// What evaluating one formula found.
+struct Evaluation {
+    value: Value,
+    /// Inputs it read that were still dirty.
+    pending: Vec<Fid>,
+    /// It read itself (the value is then `#CIRC!`).
+    circular: bool,
+    /// It called a Scheme function that isn't done.
+    called: bool,
+}
+
+impl Evaluation {
+    /// A value found without reading anything.
+    fn of(value: Value) -> Evaluation {
+        Evaluation {
+            value,
+            pending: Vec::new(),
+            circular: false,
+            called: false,
+        }
+    }
+}
+
 /// The [`Ctx`] a formula evaluates in.
 struct EngineCtx<'a> {
     engine: &'a mut Engine,
     src: &'a dyn Source,
     here: (usize, usize),
     pending: RefCell<Vec<Fid>>,
-    circular: RefCell<bool>,
+    circular: Cell<bool>,
     called: bool,
     now: f64,
 }
@@ -802,7 +836,7 @@ impl EngineCtx<'_> {
         match slot.state {
             State::Clean => slot.result.clone(),
             State::Evaluating => {
-                *self.circular.borrow_mut() = true;
+                self.circular.set(true);
                 Value::Error(ErrorKind::Circ)
             }
             State::Dirty | State::Waiting => {
@@ -900,15 +934,12 @@ impl Ctx for EngineCtx<'_> {
         self.engine.next_random()
     }
 
-    fn lookup_index(
-        &mut self,
-        range: &RangeRef,
-    ) -> Option<std::sync::Arc<super::func::lookup::LookupIndex>> {
+    fn lookup_index(&mut self, range: &RangeRef) -> Option<Arc<super::func::lookup::LookupIndex>> {
         if let Some(ix) = self.engine.lookups.get(range) {
             return Some(ix.clone());
         }
         let before = self.pending.borrow().len();
-        let ix = std::sync::Arc::new(super::func::lookup::LookupIndex::build(&*self, range));
+        let ix = Arc::new(super::func::lookup::LookupIndex::build(&*self, range));
         // Built over results still being computed: use it now, don't keep it.
         if self.pending.borrow().len() == before {
             self.engine.lookups.insert(range.clone(), ix.clone());
