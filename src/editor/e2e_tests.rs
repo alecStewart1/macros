@@ -648,7 +648,7 @@ fn insert_at_hidden_range_start_stays_visible(cx: &mut TestAppContext) {
 fn undo_groups_nest_and_respect_buffer_switches(cx: &mut TestAppContext) {
     let ed = setup(cx, "\n");
     ed.update(cx, |e, _| {
-        let before = e.active.undo_tree.len();
+        let before = e.active.undo.len();
         e.begin_undo_group();
         e.edit(0..0, "a");
         e.begin_undo_group(); // e.g. a `C-u 3` repeat inside a Scheme batch
@@ -656,8 +656,8 @@ fn undo_groups_nest_and_respect_buffer_switches(cx: &mut TestAppContext) {
         e.end_undo_group();
         e.edit(2..2, "c"); // still inside the outer group
         e.end_undo_group();
-        assert_eq!(e.active.undo_tree.len(), before + 1, "one undo node");
-        assert_eq!(e.active.undo_tree[e.active.undo_current].edit.len(), 3);
+        assert_eq!(e.active.undo.len(), before + 1, "one undo node");
+        assert_eq!(e.active.undo.nodes[e.active.undo.current].edit.len(), 3);
 
         // Group open in buffer A, then the batch switches to B and edits.
         e.begin_undo_group();
@@ -668,9 +668,9 @@ fn undo_groups_nest_and_respect_buffer_switches(cx: &mut TestAppContext) {
         e.edit(0..0, "y");
         e.end_undo_group();
         // B's edit is its own node off B's root — not appended to the root.
-        assert_eq!(e.active.undo_tree.len(), 2);
-        assert_eq!(e.active.undo_current, 1);
-        assert!(e.active.undo_tree[0].edit.is_empty());
+        assert_eq!(e.active.undo.len(), 2);
+        assert_eq!(e.active.undo.current, 1);
+        assert!(e.active.undo.nodes[0].edit.is_empty());
     });
 }
 

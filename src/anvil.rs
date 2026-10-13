@@ -38,11 +38,10 @@ pub enum AnvilOutcome {
     Result {
         /// The callback that should render this result into the REPL buffer.
         callback: String,
-        /// The printed value, or `None` for void/no value.
-        value: Option<String>,
-        /// Error text if the eval failed — including `"Interrupted by user"`
-        /// when the evaluation was cancelled.
-        error: Option<String>,
+        /// The printed value (`None` for void/no value), or the error text if
+        /// the eval failed — including `"Interrupted by user"` when the
+        /// evaluation was cancelled.
+        result: Result<Option<String>, String>,
         /// Anything the form wrote to `(current-output-port)` — `(display …)`
         /// and friends — captured so it lands in the REPL buffer instead of the
         /// process stdout. `None` for queries and for evals that printed nothing.
@@ -191,10 +190,10 @@ fn anvil_thread(
                 // its own top-level form *before* the user's source so the user's
                 // `define`s stay top-level (wrapping them in a `let` wouldn't).
                 let _ = engine.run("(current-output-port (open-output-string))");
-                let (value, error) = match engine.run(source) {
-                    Ok(values) => (values.last().and_then(format_value), None),
-                    Err(e) => (None, Some(steel_error_string(&e))),
-                };
+                let result = engine
+                    .run(source)
+                    .map(|values| values.last().and_then(format_value))
+                    .map_err(|e| steel_error_string(&e));
                 // The run may have ended via interrupt, which leaves the VM in
                 // the Interrupted state — reset it so the next eval isn't
                 // immediately poisoned.
@@ -202,18 +201,16 @@ fn anvil_thread(
                 let output = drain_output(&mut engine);
                 let _ = outcomes.unbounded_send(AnvilOutcome::Result {
                     callback,
-                    value,
-                    error,
+                    result,
                     output,
                 });
             }
             AnvilJob::Query { kind, callback } => {
                 controller.lock().unwrap().resume();
-                let value = Some(run_query(&mut engine, kind));
+                let value = run_query(&mut engine, kind);
                 let _ = outcomes.unbounded_send(AnvilOutcome::Result {
                     callback,
-                    value,
-                    error: None,
+                    result: Ok(Some(value)),
                     output: None,
                 });
             }
@@ -242,34 +239,32 @@ fn drain_output(engine: &mut Engine) -> Option<String> {
     }
 }
 
-/// The live image's global bindings whose name starts with `prefix`, sorted and
-/// de-duplicated — the candidate set for SLIME-style symbol completion. Shares
-/// `readable_globals` with apropos, so it sees everything the user has defined
-/// this session, immediately.
-fn complete_globals(engine: &Engine, prefix: &str) -> Vec<String> {
+/// The live image's global bindings whose name passes `keep`, sorted and
+/// de-duplicated. Reads `readable_globals`, so it sees everything the user has
+/// defined this session, immediately.
+fn matching_globals(engine: &Engine, keep: impl Fn(&str) -> bool) -> Vec<String> {
     let mut names: Vec<String> = engine
         .readable_globals(0)
         .iter()
         .map(|sym| sym.resolve().to_string())
-        .filter(|name| name.starts_with(prefix))
+        .filter(|name| keep(name))
         .collect();
     names.sort();
     names.dedup();
     names
 }
 
+/// The live globals starting with `prefix` — the candidate set for
+/// SLIME-style symbol completion.
+fn complete_globals(engine: &Engine, prefix: &str) -> Vec<String> {
+    matching_globals(engine, |name| name.starts_with(prefix))
+}
+
 /// Answer an [`AnvilQuery`] against the live image, rendered as display text.
 fn run_query(engine: &mut Engine, kind: AnvilQuery) -> String {
     match kind {
         AnvilQuery::Apropos(pattern) => {
-            let mut names: Vec<String> = engine
-                .readable_globals(0)
-                .iter()
-                .map(|sym| sym.resolve().to_string())
-                .filter(|name| name.contains(&pattern))
-                .collect();
-            names.sort();
-            names.dedup();
+            let names = matching_globals(engine, |name| name.contains(&pattern));
             if names.is_empty() {
                 format!(";; no live binding matches {pattern:?}")
             } else {
@@ -323,13 +318,17 @@ impl AnvilOutcome {
     }
     fn value(&self) -> Option<&str> {
         match self {
-            AnvilOutcome::Result { value, .. } => value.as_deref(),
+            AnvilOutcome::Result {
+                result: Ok(value), ..
+            } => value.as_deref(),
             _ => None,
         }
     }
     fn error(&self) -> Option<&str> {
         match self {
-            AnvilOutcome::Result { error, .. } => error.as_deref(),
+            AnvilOutcome::Result {
+                result: Err(error), ..
+            } => Some(error),
             _ => None,
         }
     }

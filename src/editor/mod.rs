@@ -75,6 +75,7 @@ use overlays::{Overlays, shift_line_map};
 use panes::{Child, SplitAxis, WindowLayout, union_bounds};
 use session::BoundedRing;
 use terminal::{ProcessHandle, keystroke_to_bytes};
+use undo::{UndoGrouping, UndoRecord, UndoTree};
 
 // Keys that the OS treats specially are captured as GPUI actions (in `main`)
 // rather than through the Scheme keymap, then delegated to the same commands.
@@ -96,38 +97,6 @@ actions!(
         SelectAll,
     ]
 );
-
-/// A reversible edit at byte `at`: it replaced `removed` with `inserted`.
-/// Undo restores `removed` over the inserted span; redo re-applies `inserted`
-/// over the removed span. Storing both texts makes undo and redo symmetric,
-/// which is what the undo *tree* (branching history) needs.
-#[derive(Clone)]
-struct UndoRecord {
-    at: usize,
-    removed: String,
-    inserted: String,
-}
-
-/// One state in the undo tree. The root (index 0) is the buffer as loaded;
-/// every other node carries the edit group that transforms its parent into it.
-/// Branches are preserved: undoing then typing adds a *sibling* child rather
-/// than discarding the redo branch (the whole point of an undo tree / vundo).
-#[derive(Clone)]
-struct UndoNode {
-    parent: Option<usize>,
-    children: Vec<usize>,
-    /// Edits (in application order) that take `parent`'s state to this node's.
-    edit: Vec<UndoRecord>,
-}
-
-/// A fresh undo tree: a single root node with no edits.
-fn new_undo_tree() -> Vec<UndoNode> {
-    vec![UndoNode {
-        parent: None,
-        children: Vec::new(),
-        edit: Vec::new(),
-    }]
-}
 
 /// An action deferred until the user confirms it in a yes/no minibuffer.
 /// The kill variants carry the buffer's name: the prompt is asynchronous, so
@@ -239,8 +208,7 @@ struct Document {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     mark_active: bool,
-    undo_tree: Vec<UndoNode>,
-    undo_current: usize,
+    undo: UndoTree,
     scroll_offset: Pixels,
     modes: ModeStack,
     highlighter: Option<Highlighter>,
@@ -552,20 +520,9 @@ pub struct Editor {
     kill_index: usize,
     last_yank: Option<Range<usize>>,
     last_was_yank: bool,
-    /// Nesting depth of open undo groups. While > 0, edits append to the current
-    /// undo group (so a multi-edit Scheme command undoes as one unit); otherwise
-    /// each edit is its own group. Counted, so a nested begin/end (a `C-u N`
-    /// repeat or `:s` inside a Scheme batch) merges into the outer group.
-    undo_group_depth: usize,
-    /// Bumped each time an outermost undo group opens, so grid edits can tell
-    /// which Scheme command batch they belong to (one batch = one undo step).
-    undo_batch_seq: u64,
-    /// Whether the current group has received an edit yet (lazily created).
-    undo_group_started: bool,
-    /// The buffer the open group's node lives in. An edit in another buffer
-    /// (the batch switched buffers) starts its own node there instead of
-    /// appending to whatever that buffer's current node happens to be.
-    undo_group_buffer: String,
+    /// Open undo groups (see [`UndoGrouping`]): while one is open, edits
+    /// append to one undo node.
+    undo_grouping: UndoGrouping,
 
     /// Keys accumulated in an in-progress prefix sequence (e.g. after `C-x`).
     pending_keys: Vec<String>,
@@ -1405,10 +1362,7 @@ impl Editor {
             kill_index: 0,
             last_yank: None,
             last_was_yank: false,
-            undo_group_depth: 0,
-            undo_batch_seq: 0,
-            undo_group_started: false,
-            undo_group_buffer: String::new(),
+            undo_grouping: UndoGrouping::default(),
             pending_keys: Vec::new(),
             minibuffer: None,
             completing_candidates: Vec::new(),
@@ -1721,8 +1675,7 @@ impl Editor {
         match outcome {
             AnvilOutcome::Result {
                 callback,
-                value,
-                error,
+                result,
                 output,
             } => {
                 // Captured `(display …)` output prints first, then the value (or
@@ -1732,9 +1685,9 @@ impl Editor {
                     payload.push_str(out.trim_end_matches('\n'));
                     payload.push('\n');
                 }
-                match error {
-                    Some(error) => payload.push_str(&format!("error: {error}")),
-                    None => payload.push_str(&value.unwrap_or_default()),
+                match result {
+                    Err(error) => payload.push_str(&format!("error: {error}")),
+                    Ok(value) => payload.push_str(&value.unwrap_or_default()),
                 }
                 self.script.dispatch_action(&callback, Some(&payload));
             }
@@ -2175,37 +2128,12 @@ impl Editor {
         // InputEdit, LSP sync, and overlay shifts all agree with what the rope
         // actually does (it repairs bad ranges itself — see `Buffer::replace`).
         let range = self.active.buffer.clamp_range(range);
-        let (range_start, range_end) = (range.start, range.end);
-        let removed = self.active.buffer.slice_to_string(range.clone());
-        let removed_newlines = removed.matches('\n').count();
-        let record = UndoRecord {
+        let range_start = range.start;
+        self.record_undo(UndoRecord {
             at: range.start,
-            removed,
+            removed: self.active.buffer.slice_to_string(range.clone()),
             inserted: new_text.to_string(),
-        };
-        // Append to the open group when grouping (one Scheme command = one undo);
-        // otherwise start a NEW node branching off the current one — undoing then
-        // editing keeps the old branch as a sibling (undo tree, not a stack).
-        let grouping = self.undo_group_depth > 0;
-        if grouping && self.undo_group_started && self.undo_group_buffer == self.active.name {
-            self.active.undo_tree[self.active.undo_current]
-                .edit
-                .push(record);
-        } else {
-            let new_idx = self.active.undo_tree.len();
-            let parent = self.active.undo_current;
-            self.active.undo_tree.push(UndoNode {
-                parent: Some(parent),
-                children: Vec::new(),
-                edit: vec![record],
-            });
-            self.active.undo_tree[parent].children.push(new_idx);
-            self.active.undo_current = new_idx;
-            self.undo_group_started = grouping;
-            if grouping && self.undo_group_buffer != self.active.name {
-                self.undo_group_buffer.clone_from(&self.active.name);
-            }
-        }
+        });
 
         // Capture pre-edit byte/point positions while the old text still exists.
         let positions = self.active.highlighter.is_some().then(|| {
@@ -2217,10 +2145,7 @@ impl Editor {
             )
         });
 
-        // Capture pre-edit LSP positions for incremental sync (before the change).
-        let lsp_change = self.lsp_change_positions(range.start, range.end);
-
-        let cursor = self.active.buffer.replace(range, new_text);
+        let cursor = self.apply_tracked_replace(range, new_text);
         self.active.modified = true;
 
         if let Some((start_byte, old_end_byte, start_point, old_end_point)) = positions {
@@ -2237,36 +2162,51 @@ impl Editor {
             });
             highlighter.reparse(self.active.buffer.rope());
         }
-        if let Some((language, start, end)) = lsp_change {
-            self.lsp_did_change(&language, start, end, new_text);
-        }
-        // Move any markers tracking positions in this buffer.
-        self.script
-            .adjust_markers(range_start, range_end, new_text.len());
-        // …and the Vim marks / jump list, then the change marks `[ ] .`.
-        self.shift_vim_positions(range_start, range_end, new_text.len());
+        // The change marks `[ ] .`.
         self.set_auto_mark('[', range_start);
         // `]` sits ON the last inserted char — its start byte, never mid-codepoint
         // (`len - 1` would land inside a multibyte char like `é`).
         let last_char = new_text.char_indices().next_back().map_or(0, |(i, _)| i);
         self.set_auto_mark(']', range_start + last_char);
         self.set_auto_mark('.', range_start);
-        // Shift byte-range overlays the same way so they stay aligned until the
-        // debounced re-fontify runs — otherwise hidden ranges / faces below the
-        // edit point at stale bytes for a frame and visibly flicker (e.g. an Org
-        // heading's hidden stars momentarily reappear and its indent jumps).
-        let line_delta = new_text.matches('\n').count() as isize - removed_newlines as isize;
-        let start_line = self.active.buffer.byte_to_position(range_start).0;
-        self.adjust_overlays(
-            range_start,
-            range_end,
-            new_text.len(),
-            line_delta,
-            start_line,
-        );
         // Emacs `after-change-functions`. Guarded, so it costs nothing unless a
         // hook is registered (then it opts into a dispatch per edit).
         self.run_hook("after-change-functions");
+        cursor
+    }
+
+    /// Replace the (already normalized) byte `range` with `new_text` and keep
+    /// everything that tracks buffer positions in step — LSP incremental sync,
+    /// Scheme markers, Vim marks / jump list, and byte-range overlays — but
+    /// record nothing for undo. Shared by [`Self::edit`] and undo/redo replay
+    /// (an undo is an ordinary document change as far as all of these are
+    /// concerned). Returns the byte offset just past the inserted text.
+    fn apply_tracked_replace(&mut self, range: Range<usize>, new_text: &str) -> usize {
+        let (start, old_end) = (range.start, range.end);
+        // Capture pre-change LSP positions BEFORE mutating the rope: skipping
+        // this leaves an incremental-sync server (rust-analyzer, gopls, …)
+        // permanently out of step with the buffer.
+        let lsp_change = self.lsp_change_positions(start, old_end);
+        // Line breaks removed (the editor's lines are `\n`-only, so this is a
+        // line-index difference — no slice needed).
+        let removed_newlines = self.active.buffer.line_index_at_byte(old_end)
+            - self.active.buffer.line_index_at_byte(start);
+        let cursor = self.active.buffer.replace(range, new_text);
+        if let Some((language, lsp_start, lsp_end)) = lsp_change {
+            self.lsp_did_change(&language, lsp_start, lsp_end, new_text);
+        }
+        // Move any markers tracking positions in this buffer, and the Vim
+        // marks / jump list.
+        self.script.adjust_markers(start, old_end, new_text.len());
+        self.shift_vim_positions(start, old_end, new_text.len());
+        // Shift byte-range overlays the same way so they stay aligned until the
+        // debounced re-fontify runs — otherwise hidden ranges / faces below the
+        // edit point at stale bytes for a frame and visibly flicker (e.g. an Org
+        // heading's hidden stars momentarily reappear and its indent jumps), and
+        // after an undo (with no after-change hook fired) nothing repaints them.
+        let line_delta = new_text.matches('\n').count() as isize - removed_newlines as isize;
+        let start_line = self.active.buffer.byte_to_position(start).0;
+        self.adjust_overlays(start, old_end, new_text.len(), line_delta, start_line);
         cursor
     }
 
@@ -2384,14 +2324,11 @@ impl Editor {
         }
         // Vim `"_d`: the black hole register swallows the text.
         let reg = self.take_kill_register();
-        if reg == Some('_') {
-            self.delete_range(range, cx);
-            return;
+        if reg != Some('_') {
+            // C-k/C-w/M-d also feed the OS clipboard.
+            let killed = self.active.buffer.slice_to_string(range.clone());
+            self.file_kill(registers::KillKind::Delete, reg, killed, false, cx);
         }
-        let killed = self.active.buffer.slice_to_string(range.clone());
-        self.set_clipboard(&killed, cx); // C-k/C-w/M-d also feed the OS clipboard
-        self.note_register_kill(registers::KillKind::Delete, reg, &killed);
-        self.push_kill(killed);
         self.delete_range(range, cx);
     }
 
@@ -4501,14 +4438,7 @@ impl Editor {
     /// it directly).
     fn run_counted(&mut self, expr: &str, n: usize, cx: &mut Context<Self>) {
         // The command name: the call's first token (`(evil-macro-play "a")`).
-        let name = expr
-            .trim()
-            .trim_start_matches('(')
-            .trim_end_matches(')')
-            .split(char::is_whitespace)
-            .next()
-            .unwrap_or("");
-        if self.count_aware.contains(name) {
+        if self.count_aware.contains(vim::expr_head(expr)) {
             self.prefix_count = n;
             self.run_script(expr, cx);
             self.prefix_count = 0;
@@ -4555,43 +4485,6 @@ impl Editor {
         let source = r.source.clone();
         self.publish_point();
         self.script.dispatch(&source, false);
-    }
-
-    fn undo_base(&self) -> UndoBase {
-        UndoBase {
-            buffer: self.active.name.clone(),
-            len: self.active.undo_tree.len(),
-            current: self.active.undo_current,
-        }
-    }
-
-    /// Fold every undo node added since `base` into the first of them, so a
-    /// multi-run command (`3dd`) undoes in one step. Only when the new nodes
-    /// form a straight chain off `base.current` in the same buffer — anything
-    /// else (an undo mid-way, a buffer switch) is left untouched.
-    fn squash_undo_since(&mut self, base: &UndoBase) {
-        if self.active.name != base.buffer {
-            return;
-        }
-        let tree = &mut self.active.undo_tree;
-        if tree.len() <= base.len + 1 {
-            return;
-        }
-        let chain = (base.len..tree.len()).all(|i| {
-            let parent = if i == base.len { base.current } else { i - 1 };
-            tree[i].parent == Some(parent)
-        });
-        if !chain || self.active.undo_current != tree.len() - 1 {
-            return;
-        }
-        let rest: Vec<UndoRecord> = tree
-            .drain(base.len + 1..)
-            .flat_map(|node| node.edit)
-            .collect();
-        let first = &mut tree[base.len];
-        first.edit.extend(rest);
-        first.children.clear();
-        self.active.undo_current = base.len;
     }
 
     /// After kills were appended (`kill_append`), push the combined kill to the
@@ -4800,8 +4693,7 @@ fn blank_document(
         selection_reversed: false,
         marked_range: None,
         mark_active: false,
-        undo_tree: new_undo_tree(),
-        undo_current: 0,
+        undo: UndoTree::default(),
         scroll_offset: px(0.),
         modes,
         highlighter: None,
@@ -5487,16 +5379,6 @@ impl EntityInputHandler for Editor {
     }
 }
 
-/// Byte offset within `line` of character column `col`, clamped to the line's
-/// end (so a column past a short line lands at its end). Used by block-wise
-/// Visual to map a rectangle's columns to per-line byte ranges.
-fn char_col_byte(line: &str, col: usize) -> usize {
-    line.char_indices()
-        .nth(col)
-        .map(|(b, _)| b)
-        .unwrap_or(line.len())
-}
-
 /// Clamp a byte range to `[0, len]` and keep it well-ordered.
 fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
     let start = range.start.min(len);
@@ -5507,9 +5389,9 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, char_col_byte,
-        file_completions, language_for_path, last_sexp, line_span, prefix_arg_value,
-        scheme_symbol_token, symbol_at, top_level_form_at,
+        Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, file_completions,
+        language_for_path, last_sexp, line_span, prefix_arg_value, scheme_symbol_token, symbol_at,
+        top_level_form_at,
     };
 
     #[test]
@@ -5532,22 +5414,6 @@ mod tests {
         assert_eq!(apply_trailing_rule(4, 2, step, "main", ia, aa), 4);
         // No rules configured (another language): structural is returned as-is.
         assert_eq!(apply_trailing_rule(4, 2, step, "->", "", ""), 4);
-    }
-
-    #[test]
-    fn char_col_byte_maps_columns_and_clamps() {
-        // ASCII: column == byte offset.
-        assert_eq!(char_col_byte("hello", 0), 0);
-        assert_eq!(char_col_byte("hello", 3), 3);
-        // Past the end clamps to the line length (a block column off a short row).
-        assert_eq!(char_col_byte("hi", 5), 2);
-        assert_eq!(char_col_byte("", 0), 0);
-        // Multi-byte chars: column 2 is the 'é' (2 bytes) + 1 ascii = byte 3.
-        let s = "aéb"; // a=1, é=2, b=1 bytes
-        assert_eq!(char_col_byte(s, 0), 0);
-        assert_eq!(char_col_byte(s, 1), 1); // start of 'é'
-        assert_eq!(char_col_byte(s, 2), 3); // start of 'b'
-        assert_eq!(char_col_byte(s, 3), 4); // end
     }
 
     #[test]

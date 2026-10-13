@@ -2176,7 +2176,7 @@ impl Editor {
         // step (the batch opened an undo group; see `apply_script_outcome`).
         // Only for this command: an edit made later some other way (typing
         // in a cell) must not join the batch's step.
-        let batch = (self.undo_group_depth > 0).then_some(self.undo_batch_seq);
+        let batch = self.undo_grouping.batch();
         if let Some(g) = self.active.grid.as_deref_mut() {
             g.batch = batch;
         }

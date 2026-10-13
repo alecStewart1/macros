@@ -1720,15 +1720,7 @@ impl Editor {
             removed: doc.buffer.full_text(),
             inserted: new.to_string(),
         };
-        let node = doc.undo_tree.len();
-        let parent = doc.undo_current;
-        doc.undo_tree.push(UndoNode {
-            parent: Some(parent),
-            children: Vec::new(),
-            edit: vec![record],
-        });
-        doc.undo_tree[parent].children.push(node);
-        doc.undo_current = node;
+        doc.undo.record(record);
         doc.buffer.replace(0..len, new);
         doc.modified = true;
         let uri = document_uri(doc);
