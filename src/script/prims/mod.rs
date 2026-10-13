@@ -23,6 +23,7 @@ pub(super) mod languages;
 pub(super) mod lsp;
 pub(super) mod markers;
 pub(super) mod modal;
+pub(super) mod motions;
 pub(super) mod options;
 pub(super) mod overlays;
 pub(super) mod plotting;
