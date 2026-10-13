@@ -247,15 +247,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::prompts::register(&mut reg, shared);
     prims::keymaps::register(&mut reg, shared);
     prims::languages::register(&mut reg, shared);
-    reg.section(Section::Faces);
-    {
-        // `(theme-names)` → every bundled theme name (the stem of each
-        // scheme/themes/*.scm). The `load-theme` wrapper in core.scm reads this to
-        // complete theme names — in the M-x prompt and the in-buffer argument CAPF.
-        reg.register_fn("theme-names", || -> Vec<String> {
-            crate::runtime::theme_names()
-        });
-    }
+    prims::faces::register(&mut reg, shared);
     prims::help::register(&mut reg, shared, &api_cell);
     reg.section(Section::Text);
     {
@@ -423,27 +415,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
                 .unwrap_or_default()
         });
     }
-    reg.section(Section::Faces);
-    register_binary(&mut reg, queue, "set-face", EditorCommand::SetFace);
-    // `(set-face-background name color)` — the background painted behind
-    // overlay text using `name` (plot heatmaps' `plot-heat-N-bg`).
-    register_binary(
-        &mut reg,
-        queue,
-        "set-face-background",
-        EditorCommand::SetFaceBackground,
-    );
-    // `(set-face-font name family)` — the font family for text under `name`
-    // (an installed or bundled family, e.g. "Macros Plot").
-    register_binary(&mut reg, queue, "set-face-font", EditorCommand::SetFaceFont);
-    register_binary(
-        &mut reg,
-        queue,
-        "set-face-underline",
-        EditorCommand::SetFaceUnderline,
-    );
-    register_binary(&mut reg, queue, "set-face-bold", EditorCommand::SetFaceBold);
-    register_binary(&mut reg, queue, "set-face-wavy", EditorCommand::SetFaceWavy);
     // --- Native spell checking (scheme/spell.scm's 'native backend) -------
     reg.section(Section::Spell);
     // `(spell-native-available?)` → #t where the OS provides a checker.
@@ -611,16 +582,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
                 .iter()
                 .find(|(c, _)| *c == m)
                 .map_or(-1, |(_, p)| *p as isize)
-        });
-    }
-    reg.section(Section::Faces);
-    {
-        // `load-theme-impl` accepts a string or a symbol — `(load-theme "x")` and
-        // `(load-theme 'x)` both reach here via the core.scm wrapper. Any other
-        // value is stringified, so a bad arg echoes "No theme named …" rather than
-        // failing to type-check. The wrapper adds the no-arg interactive prompt.
-        register_unary(&mut reg, queue, "load-theme-impl", |Name(name)| {
-            EditorCommand::LoadTheme(name)
         });
     }
     reg.section(Section::Lsp);
