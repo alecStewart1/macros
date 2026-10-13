@@ -11,6 +11,7 @@ pub(super) mod faces;
 pub(super) mod files;
 pub(super) mod grid;
 pub(super) mod help;
+pub(super) mod hooks;
 pub(super) mod keymaps;
 pub(super) mod languages;
 pub(super) mod lsp;

@@ -256,15 +256,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     prims::buffers::register(&mut reg, shared);
     prims::decorations::register(&mut reg, shared);
     prims::files::register(&mut reg, shared);
-    reg.section(Section::HooksTimers);
-    register_binary(&mut reg, queue, "add-hook", EditorCommand::AddHook);
-    register_binary(&mut reg, queue, "remove-hook", EditorCommand::RemoveHook);
-    register_unary(
-        &mut reg,
-        queue,
-        "add-completion-at-point-function",
-        EditorCommand::AddCapf,
-    );
+    prims::hooks::register(&mut reg, shared);
     // --- Special buffers / transient (the magit primitives) ---------------
     reg.section(Section::SpecialBuffers);
     // `(render-buffer name mode text faces)` — faces is a list of
@@ -1641,10 +1633,6 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
             },
         );
     }
-    reg.section(Section::HooksTimers);
-    register_binary(&mut reg, queue, "run-with-timer", |ms, callback| {
-        EditorCommand::RunWithTimer { ms, callback }
-    });
     reg.section(Section::BufferReads);
     // Read bridges over the editor's published snapshot (see `set_snapshot`).
     register_snapshot_read(&mut reg, snapshot, "buffer-line", |s| s.line);
