@@ -25,7 +25,7 @@ use super::input::Handled;
 use super::*;
 use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt, CellFormats, NumCode};
-use crate::grid::cmd::{GridCmd, GridInvocation, GridOp};
+use crate::grid::cmd::{Dir, GridCmd, GridInvocation, GridOp};
 use crate::grid::infer::ColType;
 use crate::grid::model::{CellsSnapshot, Change, Workbook};
 use crate::grid::sidecar::Sidecar;
@@ -540,6 +540,14 @@ impl GridDoc {
         let cells = Arc::new(self.wb.cells_snapshot(SHEET));
         *slot = Some((key, cells.clone()));
         Some(cells)
+    }
+
+    /// The cursor moved one shown cell `d`-ward (staying put at the edge).
+    fn stepped(&self, d: Dir) -> Pos {
+        let mut p = self.view.cursor;
+        let i = view::coord_mut(&mut p, d.axis());
+        *i = self.step(d.axis(), *i, d.forward());
+        p
     }
 
     /// One shown row (column) on from `i` — down (right) when `forward`,
@@ -1285,24 +1293,22 @@ impl GridDoc {
         let (rows, cols) = self.used();
         match cmd {
             // Across a whole-line selection, step it to take in the next line.
-            Left | Right if self.line_selected(SelKind::Cols) => {
-                self.move_to(r, self.step(Axis::Cols, c, cmd == Right), true)
+            Move(d) if self.line_selected(line_kind(d.axis())) => {
+                let (nr, nc) = self.stepped(d);
+                self.move_to(nr, nc, true);
             }
-            Up | Down if self.line_selected(SelKind::Rows) => {
-                self.move_to(self.step(Axis::Rows, r, cmd == Down), c, true)
+            Move(Dir::Left) if self.stepped(Dir::Left) == (r, c) => {
+                self.select_line_at_edge(SelKind::Rows)
             }
-            Left if self.step(Axis::Cols, c, false) == c => self.select_line_at_edge(SelKind::Rows),
-            Right if self.leave_line_at_edge(SelKind::Rows) => {}
-            Up if self.step(Axis::Rows, r, false) == r => self.select_line_at_edge(SelKind::Cols),
-            Down if self.leave_line_at_edge(SelKind::Cols) => {}
-            Left => self.move_to(r, self.step(Axis::Cols, c, false), false),
-            Right => self.move_to(r, self.step(Axis::Cols, c, true), false),
-            Up => self.move_to(self.step(Axis::Rows, r, false), c, false),
-            Down => self.move_to(self.step(Axis::Rows, r, true), c, false),
-            ExtendLeft => self.move_to(r, self.step(Axis::Cols, c, false), true),
-            ExtendRight => self.move_to(r, self.step(Axis::Cols, c, true), true),
-            ExtendUp => self.move_to(self.step(Axis::Rows, r, false), c, true),
-            ExtendDown => self.move_to(self.step(Axis::Rows, r, true), c, true),
+            Move(Dir::Right) if self.leave_line_at_edge(SelKind::Rows) => {}
+            Move(Dir::Up) if self.stepped(Dir::Up) == (r, c) => {
+                self.select_line_at_edge(SelKind::Cols)
+            }
+            Move(Dir::Down) if self.leave_line_at_edge(SelKind::Cols) => {}
+            Move(d) | Extend(d) => {
+                let (nr, nc) = self.stepped(d);
+                self.move_to(nr, nc, matches!(cmd, Extend(_)));
+            }
             NextCell => {
                 if cols > 0 && c + 1 >= cols && r + 1 < rows.max(r + 2) {
                     self.move_to(self.step(Axis::Rows, r, true), 0, false);
@@ -1318,13 +1324,8 @@ impl GridDoc {
                     self.move_to(r, self.step(Axis::Cols, c, false), false);
                 }
             }
-            EdgeLeft | EdgeRight | EdgeUp | EdgeDown => {
-                let (dr, dc) = match cmd {
-                    EdgeLeft => (0, -1),
-                    EdgeRight => (0, 1),
-                    EdgeUp => (-1, 0),
-                    _ => (1, 0),
-                };
+            Edge(d) => {
+                let (dr, dc) = d.delta();
                 let (nr, nc) = self.edge(dr, dc);
                 self.move_to(nr, nc, false);
             }
@@ -1459,13 +1460,13 @@ impl GridDoc {
             EditPopup | Cut | Yank | Paste | YankPop | Goto | SearchForward | SearchBackward
             | SearchNext | SearchPrevious | ViewAsText | ExchangeAnchor | Recenter
             | JumpToColumn | KillToRowEnd | Upcase | Downcase | Capitalize | CopyDown
-            | CompleteCell | MoveRowUp | MoveRowDown | MoveColumnLeft | MoveColumnRight
-            | HideColumn | ShowColumns | NarrowToSelection | Filter | FilterByValue | Widen
-            | CopyAsOrg | CopyAsMarkdown | CopyAsJson | ToggleBold | CycleTextColor
-            | CycleFillColor | ClearFormat | FormatGeneral | FormatNumber | FormatCurrency
-            | FormatPercent | FormatDate | FormatText | IncreaseDecimals | DecreaseDecimals
-            | TracePrecedents | TraceDependents | GridMode | ToggleView | CellPopupCommit
-            | CellPopupAbort | OrgTableToGrid | Recalculate => {}
+            | CompleteCell | MoveLine(_) | HideColumn | ShowColumns | NarrowToSelection
+            | Filter | FilterByValue | Widen | CopyAsOrg | CopyAsMarkdown | CopyAsJson
+            | ToggleBold | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral
+            | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
+            | IncreaseDecimals | DecreaseDecimals | TracePrecedents | TraceDependents
+            | GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
+            | Recalculate => {}
         }
         Ok(Outcome::default())
     }
@@ -2864,10 +2865,12 @@ impl Editor {
             }
             CopyDown => return self.grid_copy_down(flag, cx),
             CompleteCell => return self.grid_complete_cell(cx),
-            MoveRowUp => return self.grid_move_rows(false, cx),
-            MoveRowDown => return self.grid_move_rows(true, cx),
-            MoveColumnLeft => return self.grid_move_columns(false, cx),
-            MoveColumnRight => return self.grid_move_columns(true, cx),
+            MoveLine(d) => {
+                return match d.axis() {
+                    Axis::Rows => self.grid_move_rows(d.forward(), cx),
+                    Axis::Cols => self.grid_move_columns(d.forward(), cx),
+                };
+            }
             HideColumn => return self.grid_hide_columns(cx),
             ToggleBold | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral
             | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
@@ -3823,10 +3826,7 @@ impl Editor {
             .next()
             .unwrap_or("")
             .to_string();
-        let grid_cmd = crate::grid::cmd::GRID_COMMANDS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|&(_, c)| c);
+        let grid_cmd = GridCmd::from_name(&name);
         self.record_event(MacroEvent::Command(expr.to_string()));
         // An Emacs `C-u N` prefix: a flag for some commands, else a count.
         let prefix = self.uarg.pending.take();
@@ -4369,14 +4369,18 @@ enum GridKey {
     Miss,
 }
 
+/// Whole rows or whole columns: the selection kind of a line along `axis`.
+fn line_kind(axis: Axis) -> SelKind {
+    match axis {
+        Axis::Cols => SelKind::Cols,
+        Axis::Rows => SelKind::Rows,
+    }
+}
+
 /// The columns (or rows) a header-border action applies to: every selected
 /// one when `idx` is part of a whole-column (row) selection, else just `idx`.
 fn selected_or(g: &GridDoc, idx: usize, axis: Axis) -> Vec<usize> {
-    let kind = match axis {
-        Axis::Cols => SelKind::Cols,
-        Axis::Rows => SelKind::Rows,
-    };
-    if g.view.anchor.is_some() && g.view.sel_kind == kind {
+    if g.view.anchor.is_some() && g.view.sel_kind == line_kind(axis) {
         let (a, b) = g.view.selection((usize::MAX, usize::MAX)).span(axis);
         if (a..=b).contains(&idx) {
             return (a..=b).collect();

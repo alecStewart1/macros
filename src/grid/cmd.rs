@@ -3,21 +3,56 @@
 //! `nullary_commands` in `src/script/registry.rs`), so a keypress applies
 //! synchronously without a trip through the Scheme engine thread.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use crate::formula::refs::Axis;
+
+/// A direction on the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Dir {
+    /// `(rows, cols)` one step this way moves.
+    pub fn delta(self) -> (isize, isize) {
+        match self {
+            Dir::Left => (0, -1),
+            Dir::Right => (0, 1),
+            Dir::Up => (-1, 0),
+            Dir::Down => (1, 0),
+        }
+    }
+
+    /// Across columns (left/right) or rows (up/down).
+    pub fn axis(self) -> Axis {
+        match self {
+            Dir::Left | Dir::Right => Axis::Cols,
+            Dir::Up | Dir::Down => Axis::Rows,
+        }
+    }
+
+    /// Toward higher indices (right or down).
+    pub fn forward(self) -> bool {
+        matches!(self, Dir::Right | Dir::Down)
+    }
+}
+
 /// One grid command. Applied by `Editor::grid_command` against the active
 /// grid buffer; a no-op (with a message) anywhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridCmd {
     // Motion
-    Left,
-    Right,
-    Up,
-    Down,
+    /// One cell (`grid-left`, …).
+    Move(Dir),
     NextCell,
     PreviousCell,
-    EdgeLeft,
-    EdgeRight,
-    EdgeUp,
-    EdgeDown,
+    /// Excel's Ctrl+Arrow: to the end of the filled run (`grid-edge-left`, …).
+    Edge(Dir),
     RowStart,
     RowFirstNonEmpty,
     RowEnd,
@@ -31,10 +66,8 @@ pub enum GridCmd {
     HalfPageDown,
     HalfPageUp,
     // Selection
-    ExtendLeft,
-    ExtendRight,
-    ExtendUp,
-    ExtendDown,
+    /// Extend the selection one cell (`grid-extend-left`, …).
+    Extend(Dir),
     SelectCells,
     SelectRows,
     SelectColumns,
@@ -116,10 +149,9 @@ pub enum GridCmd {
     YankPop,
     /// Complete the cell's value from the column's choices or its values.
     CompleteCell,
-    MoveRowUp,
-    MoveRowDown,
-    MoveColumnLeft,
-    MoveColumnRight,
+    /// `M-arrows`: move the cursor's row (up/down) or column (left/right),
+    /// or the selected ones (`grid-move-row-up`, …).
+    MoveLine(Dir),
     HideColumn,
     ShowColumns,
     /// `C-x n n`: show only the selected rows.
@@ -182,18 +214,19 @@ impl From<GridCmd> for GridInvocation {
 
 /// Steel name → command, for builtin registration.
 pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
+    use Dir::*;
     use GridCmd::*;
     &[
-        ("grid-left", Left),
-        ("grid-right", Right),
-        ("grid-up", Up),
-        ("grid-down", Down),
+        ("grid-left", Move(Left)),
+        ("grid-right", Move(Right)),
+        ("grid-up", Move(Up)),
+        ("grid-down", Move(Down)),
         ("grid-next-cell", NextCell),
         ("grid-previous-cell", PreviousCell),
-        ("grid-edge-left", EdgeLeft),
-        ("grid-edge-right", EdgeRight),
-        ("grid-edge-up", EdgeUp),
-        ("grid-edge-down", EdgeDown),
+        ("grid-edge-left", Edge(Left)),
+        ("grid-edge-right", Edge(Right)),
+        ("grid-edge-up", Edge(Up)),
+        ("grid-edge-down", Edge(Down)),
         ("grid-row-start", RowStart),
         ("grid-row-first-nonempty", RowFirstNonEmpty),
         ("grid-row-end", RowEnd),
@@ -206,10 +239,10 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
         ("grid-page-up", PageUp),
         ("grid-half-page-down", HalfPageDown),
         ("grid-half-page-up", HalfPageUp),
-        ("grid-extend-left", ExtendLeft),
-        ("grid-extend-right", ExtendRight),
-        ("grid-extend-up", ExtendUp),
-        ("grid-extend-down", ExtendDown),
+        ("grid-extend-left", Extend(Left)),
+        ("grid-extend-right", Extend(Right)),
+        ("grid-extend-up", Extend(Up)),
+        ("grid-extend-down", Extend(Down)),
         ("grid-select-cells", SelectCells),
         ("grid-select-rows", SelectRows),
         ("grid-select-columns", SelectColumns),
@@ -271,10 +304,10 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
         ("grid-copy-down", CopyDown),
         ("grid-yank-pop", YankPop),
         ("grid-complete-cell", CompleteCell),
-        ("grid-move-row-up", MoveRowUp),
-        ("grid-move-row-down", MoveRowDown),
-        ("grid-move-column-left", MoveColumnLeft),
-        ("grid-move-column-right", MoveColumnRight),
+        ("grid-move-row-up", MoveLine(Up)),
+        ("grid-move-row-down", MoveLine(Down)),
+        ("grid-move-column-left", MoveLine(Left)),
+        ("grid-move-column-right", MoveLine(Right)),
         ("grid-hide-column", HideColumn),
         ("grid-show-columns", ShowColumns),
         ("grid-narrow-to-selection", NarrowToSelection),
@@ -301,6 +334,15 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
 };
 
 impl GridCmd {
+    /// The command a Steel name (`grid-left`) names.
+    pub fn from_name(name: &str) -> Option<GridCmd> {
+        static BY_NAME: OnceLock<HashMap<&'static str, GridCmd>> = OnceLock::new();
+        BY_NAME
+            .get_or_init(|| GRID_COMMANDS.iter().copied().collect())
+            .get(name)
+            .copied()
+    }
+
     /// Whether this command changes cell data or formatting (so `.` repeats
     /// it, and it is refused while the file is still loading).
     pub fn edits(self) -> bool {
@@ -324,10 +366,7 @@ impl GridCmd {
                 | Capitalize
                 | CopyDown
                 | YankPop
-                | MoveRowUp
-                | MoveRowDown
-                | MoveColumnLeft
-                | MoveColumnRight
+                | MoveLine(_)
                 | ToggleBold
                 | CycleTextColor
                 | CycleFillColor
@@ -490,4 +529,37 @@ pub enum GridOp {
         col: Option<usize>,
         values: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_resolve_and_are_unique() {
+        assert_eq!(
+            GridCmd::from_name("grid-left"),
+            Some(GridCmd::Move(Dir::Left))
+        );
+        assert_eq!(
+            GridCmd::from_name("grid-move-column-right"),
+            Some(GridCmd::MoveLine(Dir::Right))
+        );
+        assert_eq!(GridCmd::from_name("grid-nope"), None);
+        let mut names: Vec<&str> = GRID_COMMANDS.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), GRID_COMMANDS.len(), "a name listed twice");
+        for &(name, cmd) in GRID_COMMANDS {
+            assert_eq!(GridCmd::from_name(name), Some(cmd), "{name}");
+        }
+    }
+
+    #[test]
+    fn directions() {
+        assert_eq!(Dir::Left.delta(), (0, -1));
+        assert_eq!(Dir::Down.delta(), (1, 0));
+        assert_eq!(Dir::Up.axis(), Axis::Rows);
+        assert!(Dir::Right.forward() && !Dir::Up.forward());
+    }
 }
