@@ -202,11 +202,13 @@ fn friendly_type(ty: &str) -> String {
     }
 }
 
-/// Rust sources whose registrations carry `//` doc comments.
-const RUST_SOURCES: &[&str] = &[
-    include_str!("registry.rs"),
-    include_str!("session.rs"),
-    include_str!("../authinfo.rs"),
+/// Rust sources whose registrations carry `//` doc comments, by path
+/// (relative to `src/`). Every `script/prims/*.rs` must be listed — the
+/// `doc_sources_cover_every_prims_file` test enforces it.
+const DOC_SOURCES: &[(&str, &str)] = &[
+    ("script/registry.rs", include_str!("registry.rs")),
+    ("script/session.rs", include_str!("session.rs")),
+    ("authinfo.rs", include_str!("../authinfo.rs")),
 ];
 
 /// name → the `//` comment block immediately above its registration.
@@ -214,7 +216,7 @@ fn rust_docs() -> &'static HashMap<String, String> {
     static DOCS: OnceLock<HashMap<String, String>> = OnceLock::new();
     DOCS.get_or_init(|| {
         let mut docs = HashMap::new();
-        for src in RUST_SOURCES {
+        for (_, src) in DOC_SOURCES {
             scrape_rust_docs(src, &mut docs);
         }
         docs
@@ -550,6 +552,27 @@ mod tests {
             assert!(docs.contains_key(name), "no doc for {name}");
         }
         assert!(docs["grid-set-cell-fill-color"].contains("purple"));
+    }
+
+    /// A primitives file missing from `DOC_SOURCES` would silently lose every
+    /// doc it carries from the API reference.
+    #[test]
+    fn doc_sources_cover_every_prims_file() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/script/prims");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".rs") || name == "mod.rs" {
+                continue;
+            }
+            let path = format!("script/prims/{name}");
+            assert!(
+                DOC_SOURCES.iter().any(|(p, _)| *p == path),
+                "{path} is not in DOC_SOURCES"
+            );
+        }
     }
 
     #[test]
