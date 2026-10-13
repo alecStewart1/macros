@@ -616,6 +616,34 @@ fn electric_pair_on_read_only_text_keeps_point(cx: &mut TestAppContext) {
     });
 }
 
+/// Text inserted at the start of a hidden range (a markdown heading's `## `)
+/// lands before the hide instead of being swallowed by it, and newlines inserted
+/// at column 0 carry the line's scale down with the heading. Markdown only
+/// repaints when the heading-level sequence changes, so a hide stretched over
+/// typed text used to blank the whole line whenever point left it.
+#[gpui::test]
+fn insert_at_hidden_range_start_stays_visible(cx: &mut TestAppContext) {
+    let ed = setup(cx, "a\n## H\nb\n");
+    ed.update(cx, |e, _| {
+        e.active.overlays.hidden.push(2..5);
+        e.active.overlays.scales.insert(1, 1.4);
+        // Enter at column 0 of the heading.
+        e.edit(2..2, "\n");
+        assert_eq!(e.active.overlays.hidden, vec![3..6]);
+        assert_eq!(e.active.overlays.scales.get(&2), Some(&1.4));
+        assert_eq!(e.active.overlays.scales.get(&1), None);
+        // Typing on the opened line, right before the heading's newline… and
+        // directly at the hide's start.
+        e.edit(2..2, "xy");
+        e.edit(5..5, "z");
+        assert_eq!(e.active.buffer.full_text(), "a\nxy\nz## H\nb\n");
+        assert_eq!(e.active.overlays.hidden, vec![6..9]);
+        // Typing after the hide (the title) never grows it.
+        e.edit(9..9, "Q");
+        assert_eq!(e.active.overlays.hidden, vec![6..9]);
+    });
+}
+
 /// Nested undo groups merge into the outer one; an edit in another buffer
 /// mid-group starts its own node there.
 #[gpui::test]
