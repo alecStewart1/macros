@@ -447,12 +447,12 @@ fn grid_text(g: &super::grid::GridDoc, lines: Option<(usize, usize)>, faces: boo
             "no"
         }
     );
-    if let Some(name) = g.xlsx_sheets.get(g.xlsx_sheet) {
+    if let Some(name) = g.xlsx.sheets.get(g.xlsx.sheet) {
         out.push_str(&format!(
             "sheet: {name} ({} of {}; all: {})\n",
-            g.xlsx_sheet + 1,
-            g.xlsx_sheets.len(),
-            g.xlsx_sheets.join(", ")
+            g.xlsx.sheet + 1,
+            g.xlsx.sheets.len(),
+            g.xlsx.sheets.join(", ")
         ));
     }
     let (cr, cc) = g.view.cursor;

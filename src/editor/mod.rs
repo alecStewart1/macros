@@ -278,10 +278,10 @@ impl Document {
                 self.name,
                 g.csv_would_lose().unwrap_or("formulas")
             ))),
-            Some(g) if !g.xlsx_lossy.is_empty() => Err(std::io::Error::other(format!(
+            Some(g) if !g.xlsx.lossy.is_empty() => Err(std::io::Error::other(format!(
                 "{} has {}, which saving over it would lose — save a copy with :w",
                 self.name,
-                g.xlsx_lossy.join(", ")
+                g.xlsx.lossy.join(", ")
             ))),
             Some(g) => match g.encoding_error() {
                 Some(e) => Err(std::io::Error::other(e)),

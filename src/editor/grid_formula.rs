@@ -391,7 +391,7 @@ impl GridDoc {
             self.formats.remap(rows, cols);
             self.view.rows.remap(rows);
             self.view.cols.remap(cols);
-            self.xlsx_text = std::mem::take(&mut self.xlsx_text)
+            self.xlsx.text = std::mem::take(&mut self.xlsx.text)
                 .into_iter()
                 .filter_map(|((r, c), t)| Some(((rows(r)?, cols(c)?), t)))
                 .collect();
@@ -406,7 +406,7 @@ impl GridDoc {
             let structural = changes.iter().any(|c| !matches!(c, Change::Cells(_)));
             let src = WbSource {
                 wb: &self.wb,
-                others: &self.other_sheets,
+                others: &self.xlsx.other_sheets,
             };
             if structural {
                 // Positions shifted: re-index from the cells (only once a
@@ -434,7 +434,7 @@ impl GridDoc {
         self.wb.take_changes();
         let src = WbSource {
             wb: &self.wb,
-            others: &self.other_sheets,
+            others: &self.xlsx.other_sheets,
         };
         self.formulas = Engine::new();
         self.formulas.rebuild(&src);
@@ -449,7 +449,7 @@ impl GridDoc {
         }
         let src = WbSource {
             wb: &self.wb,
-            others: &self.other_sheets,
+            others: &self.xlsx.other_sheets,
         };
         !self.formulas.recalc(&src, Some(Instant::now() + SLICE))
     }

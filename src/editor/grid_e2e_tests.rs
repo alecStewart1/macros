@@ -1702,7 +1702,7 @@ fn same_named_workbooks_get_their_own_sheet_buffers(cx: &mut TestAppContext) {
         scheme(&ed, cx, "(grid-open-sheet \"Second\")");
     }
     let src = ed.read_with(cx, |e, _| {
-        e.active.grid.as_ref().unwrap().xlsx_source.clone()
+        e.active.grid.as_ref().unwrap().xlsx.source.clone()
     });
     assert_eq!(
         src.as_deref(),
@@ -1820,7 +1820,7 @@ fn regression_sheet_buffer_write_over_its_workbook(cx: &mut TestAppContext) {
     settle(&ed, cx);
     scheme(&ed, cx, "(grid-open-sheet \"Second\")");
     let lossy = ed.read_with(cx, |e, _| {
-        e.active.grid.as_ref().unwrap().xlsx_lossy.clone()
+        e.active.grid.as_ref().unwrap().xlsx.lossy.clone()
     });
     eprintln!("lossy: {lossy:?}");
     let target = book.to_string_lossy().to_string();

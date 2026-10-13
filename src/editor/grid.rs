@@ -206,6 +206,134 @@ enum Hist {
     Group(Vec<Hist>),
 }
 
+/// A grid's undo history. Data edits are delegated to the workbook's own
+/// undo stack (see [`Hist::Model`]); this orders them with the grid-only
+/// steps and groups the edits of one command into one step.
+#[derive(Debug)]
+struct History {
+    undo: Vec<Hist>,
+    redo: Vec<Hist>,
+    /// The Scheme command batch now applying, if any: model edits made under
+    /// the same batch merge into one undo step.
+    batch: Option<u64>,
+    /// The batch the last history entry belongs to.
+    last_batch: Option<u64>,
+    /// Source of local undo batches (grouping several model edits made by
+    /// one native command, e.g. deleting the visible rows of a filter).
+    local_batch: u64,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            batch: None,
+            last_batch: None,
+            // Far from the Scheme batches' sequence numbers.
+            local_batch: u64::MAX / 2,
+        }
+    }
+}
+
+impl History {
+    /// Push an entry; within one batch (a Scheme command, or a
+    /// [`GridDoc::grouped`] native one) it joins the batch's single step.
+    fn record(&mut self, entry: Hist) {
+        match (self.batch, self.undo.last_mut()) {
+            (Some(b), Some(last)) if self.last_batch == Some(b) => match last {
+                Hist::Group(entries) => entries.push(entry),
+                _ => {
+                    let prev = std::mem::replace(last, Hist::Group(Vec::new()));
+                    *last = Hist::Group(vec![prev, entry]);
+                }
+            },
+            _ => self.undo.push(entry),
+        }
+        self.last_batch = self.batch;
+        self.redo.clear();
+    }
+
+    /// The entry an undo (`undo`) or redo replays next, taken off its stack.
+    fn take(&mut self, undo: bool) -> Option<Hist> {
+        if undo {
+            self.undo.pop()
+        } else {
+            self.redo.pop()
+        }
+    }
+
+    /// File `entry`, just replayed, on the other stack. The next edit starts
+    /// a step of its own.
+    fn replayed(&mut self, entry: Hist, undo: bool) {
+        self.last_batch = None;
+        if undo {
+            self.redo.push(entry);
+        } else {
+            self.undo.push(entry);
+        }
+    }
+
+    /// Open a local batch; returns the batch to restore when it ends.
+    fn begin_local(&mut self) -> Option<u64> {
+        self.local_batch += 1;
+        self.batch.replace(self.local_batch)
+    }
+
+    /// How many steps undo can take.
+    fn len(&self) -> usize {
+        self.undo.len()
+    }
+
+    fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+}
+
+/// What an `.xlsx` grid carries besides its cells (all empty for CSV).
+#[derive(Debug, Default)]
+pub(super) struct XlsxState {
+    /// What the file holds that a rewrite would drop (charts, styles, more
+    /// sheets, …), and so saving over the file is refused.
+    pub lossy: Vec<String>,
+    /// The sheet names, in workbook order.
+    pub sheets: Vec<String>,
+    /// Which of them this buffer shows.
+    pub sheet: usize,
+    /// The workbook a sheet buffer (`report.xlsx<Costs>`) was opened from;
+    /// such a buffer visits no file itself.
+    pub source: Option<PathBuf>,
+    /// The workbook's other sheets' values, by lower-case name, for
+    /// `Costs!B2` references: from the file, then live from open sheet
+    /// buffers ([`Editor::grid_sync_sheets_of`]).
+    pub other_sheets: HashMap<String, crate::formula::engine::SheetValues>,
+    /// Cells the file stored as text that would otherwise be saved as
+    /// another type (`"12"` as a number), with that text: saved as text while
+    /// they still hold it (an edit, then undo, included).
+    pub text: HashMap<(usize, usize), String>,
+    /// `(data generation, formula evaluations)` when this sheet's values
+    /// were last handed to the other open sheets.
+    pub sheet_published: Option<(u64, u64)>,
+}
+
+/// A grid's state against the file on disk.
+#[derive(Debug, Default)]
+struct SaveState {
+    /// Hash of the bytes last read from / written to disk, so auto-revert can
+    /// tell our own save apart from an outside change.
+    disk_hash: u64,
+    /// The last save failed: stay modified even if undo returns to the
+    /// workbook's saved point.
+    failed: bool,
+    /// `formats` as last saved (or loaded): formatting differing from it
+    /// makes the buffer modified, since an `.xlsx` saves it.
+    formats: CellFormats,
+    /// String-pool size after the last load/compaction: edits leave orphaned
+    /// strings in the append-only pool, reclaimed on save once they pile up.
+    pool_baseline: usize,
+}
+
 /// What of a grid follows its cells through structural edits: formatting
 /// set by hand, and the columns' and rows' sizes and hidden flags.
 #[derive(Debug, Clone, PartialEq)]
@@ -245,8 +373,8 @@ pub(super) struct GridLoading {
 pub(super) struct GridDoc {
     pub wb: Workbook,
     pub view: GridView,
-    hist: Vec<Hist>,
-    redo: Vec<Hist>,
+    /// Undo and redo, and the batches edits group into.
+    history: History,
     pub loading: Option<GridLoading>,
     /// A `v`/`V`/`C-v`/`C-SPC` selection: motions extend it until Escape.
     /// (Shift-arrow selections aren't sticky — the next plain motion drops
@@ -254,32 +382,17 @@ pub(super) struct GridDoc {
     sticky_sel: bool,
     last_repeat: Option<RepeatOp>,
     search: Option<String>,
-    /// Hash of the bytes last read from / written to disk, so auto-revert can
-    /// tell our own save apart from an outside change.
-    disk_hash: u64,
-    /// The last save failed: stay modified even if undo returns to the
-    /// workbook's saved point.
-    save_failed: bool,
+    /// What was last read from or written to disk.
+    save: SaveState,
     /// Lower-cased file extension, the dialect hint for re-parses.
     pub(super) ext: Option<String>,
     /// The mode line's range summary, recomputed after each command (not
     /// per frame — a whole-column selection can span a million cells).
     pub summary: String,
-    /// String-pool size after the last load/compaction: edits leave orphaned
-    /// strings in the append-only pool, reclaimed on save once they pile up.
-    pool_baseline: usize,
     /// Declarative styling set from Scheme (faces, number formats, rules).
     pub style: crate::grid::style::GridStyle,
     /// Bold and colors set by hand (`grid-toggle-bold`, …); session only.
     pub formats: CellFormats,
-    /// `formats` as last saved (or loaded): formatting differing from it
-    /// makes the buffer modified, since an `.xlsx` saves it.
-    saved_formats: CellFormats,
-    /// The Scheme command batch now applying, if any: model edits made under
-    /// the same batch merge into one undo step.
-    batch: Option<u64>,
-    /// The batch the last `Model` history entry belongs to.
-    last_batch: Option<u64>,
     /// See [`next_epoch`].
     pub(super) epoch: u64,
     /// Values `grid-complete-cell` offers per column (`grid-column-choices`).
@@ -295,39 +408,18 @@ pub(super) struct GridDoc {
     hook_sel: Option<SelState>,
     /// The cell copy published for Scheme, keyed by `(epoch, generation)`.
     published: RefCell<PublishedCells>,
-    /// Source of local undo batches (grouping several model edits made by
-    /// one native command, e.g. deleting the visible rows of a filter).
-    local_batch: u64,
     /// The formula engine: which cells are formulas, their results, and
     /// recalculation (see `grid_formula.rs`).
     pub(super) formulas: crate::formula::engine::Engine,
     /// A formula has existed in this buffer, so structural edits must
     /// re-index (a plain CSV never pays for the scan).
     pub(super) had_formulas: bool,
-    /// For an `.xlsx` holding things a rewrite would drop (charts, styles,
-    /// more sheets, …): what, and so saving over the file is refused.
-    pub(super) xlsx_lossy: Vec<String>,
-    /// An `.xlsx`'s sheet names, in workbook order (empty for CSV).
-    pub(super) xlsx_sheets: Vec<String>,
-    /// Which of them this buffer shows.
-    pub(super) xlsx_sheet: usize,
-    /// The workbook a sheet buffer (`report.xlsx<Costs>`) was opened from;
-    /// such a buffer visits no file itself.
-    pub(super) xlsx_source: Option<PathBuf>,
-    /// The workbook's other sheets' values, by lower-case name, for
-    /// `Costs!B2` references: from the file, then live from open sheet
-    /// buffers ([`Editor::grid_sync_sheets_of`]).
-    pub(super) other_sheets: HashMap<String, crate::formula::engine::SheetValues>,
-    /// Cells an `.xlsx` stored as text that would otherwise be saved as
-    /// another type (`"12"` as a number), with that text: saved as text while
-    /// they still hold it (an edit, then undo, included).
-    pub(super) xlsx_text: HashMap<(usize, usize), String>,
+    /// What an `.xlsx` brought along: its sheets, what a rewrite would
+    /// drop, and cells stored as text.
+    pub(super) xlsx: XlsxState,
     /// A structural edit moved column widths, hidden columns or row heights
     /// (to persist with the file's layout).
     pub(super) layout_moved: bool,
-    /// `(data generation, formula evaluations)` when this sheet's values
-    /// were last handed to the other open sheets.
-    pub(super) sheet_published: Option<(u64, u64)>,
     /// Cells the user changed in the current command, for
     /// `grid-cell-changed-hook` (drained by `grid_fire_changes`).
     changed: Vec<CellChange>,
@@ -362,22 +454,20 @@ impl GridDoc {
         Self {
             wb,
             view,
-            hist: Vec::new(),
-            redo: Vec::new(),
+            history: History::default(),
             loading: None,
             sticky_sel: false,
             last_repeat: None,
             search: None,
-            disk_hash,
-            save_failed: false,
+            save: SaveState {
+                disk_hash,
+                pool_baseline,
+                ..SaveState::default()
+            },
             ext,
             summary: String::new(),
-            pool_baseline,
             style: Default::default(),
             formats: CellFormats::default(),
-            saved_formats: CellFormats::default(),
-            batch: None,
-            last_batch: None,
             epoch: next_epoch(),
             choices: HashMap::new(),
             filters: Vec::new(),
@@ -386,17 +476,10 @@ impl GridDoc {
             recenter_phase: 0,
             hook_sel: None,
             published: RefCell::new(None),
-            local_batch: u64::MAX / 2,
             formulas: crate::formula::engine::Engine::new(),
             had_formulas: false,
-            xlsx_lossy: Vec::new(),
-            xlsx_sheets: Vec::new(),
-            xlsx_sheet: 0,
-            xlsx_source: None,
-            other_sheets: HashMap::new(),
-            xlsx_text: Default::default(),
+            xlsx: XlsxState::default(),
             layout_moved: false,
-            sheet_published: None,
             changed: Vec::new(),
         }
     }
@@ -413,7 +496,7 @@ impl GridDoc {
         // Positions mean nothing in the new data: drop hand formatting and
         // positional narrowing (`C-x n n`); filters by value re-apply.
         self.formats.clear();
-        self.saved_formats.clear();
+        self.save.formats.clear();
         self.filters.retain(|f| matches!(f, RowFilter::Test { .. }));
         self.rebuild_formulas();
         self.refresh_derived();
@@ -421,11 +504,9 @@ impl GridDoc {
 
     /// Run `f`, merging the model edits it makes into one undo step.
     pub(super) fn grouped(&mut self, f: impl FnOnce(&mut Self)) {
-        let saved = self.batch;
-        self.local_batch += 1;
-        self.batch = Some(self.local_batch);
+        let saved = self.history.begin_local();
         f(self);
-        self.batch = saved;
+        self.history.batch = saved;
     }
 
     /// Whether row `r` is shown (not filtered out).
@@ -606,13 +687,13 @@ impl GridDoc {
     }
 
     pub fn modified(&self) -> bool {
-        self.wb.is_modified() || self.save_failed || self.formats != self.saved_formats
+        self.wb.is_modified() || self.save.failed || self.formats != self.save.formats
     }
 
     /// Record the data and the formatting as saved.
     pub fn mark_saved(&mut self) {
         self.wb.mark_saved();
-        self.saved_formats = self.formats.clone();
+        self.save.formats = self.formats.clone();
     }
 
     pub fn used(&self) -> (usize, usize) {
@@ -677,8 +758,8 @@ impl GridDoc {
     /// wrote [`Self::bytes`]: record the saved point.
     pub fn saved_externally(&mut self) {
         self.mark_saved();
-        self.save_failed = false;
-        self.disk_hash = bytes_hash(&self.bytes());
+        self.save.failed = false;
+        self.save.disk_hash = bytes_hash(&self.bytes());
     }
 
     /// The file's bytes as they should be written now (CSV, or `.xlsx` for
@@ -744,21 +825,9 @@ impl GridDoc {
         out
     }
 
-    /// Push a history entry; within one batch (a Scheme command, or a
-    /// [`Self::grouped`] native one) it joins the batch's single step.
+    /// Push a history entry (see [`History::record`]).
     fn record(&mut self, entry: Hist) {
-        match (self.batch, self.hist.last_mut()) {
-            (Some(b), Some(last)) if self.last_batch == Some(b) => match last {
-                Hist::Group(entries) => entries.push(entry),
-                _ => {
-                    let prev = std::mem::replace(last, Hist::Group(Vec::new()));
-                    *last = Hist::Group(vec![prev, entry]);
-                }
-            },
-            _ => self.hist.push(entry),
-        }
-        self.last_batch = self.batch;
-        self.redo.clear();
+        self.history.record(entry);
     }
 
     /// Undo (`undo`) or redo one history entry. Returns the cell to put the
@@ -826,7 +895,7 @@ impl GridDoc {
             formats: self.formats.clone(),
             cols: self.view.cols.sizing(),
             rows: self.view.rows.sizing(),
-            xlsx_text: self.xlsx_text.clone(),
+            xlsx_text: self.xlsx.text.clone(),
         }
     }
 
@@ -834,13 +903,13 @@ impl GridDoc {
         self.formats = layout.formats;
         self.view.cols.set_sizing(layout.cols);
         self.view.rows.set_sizing(layout.rows);
-        self.xlsx_text = layout.xlsx_text;
+        self.xlsx.text = layout.xlsx_text;
     }
 
     /// Whether anything would need to follow cells through an edit.
     fn has_layout(&self) -> bool {
         !self.formats.is_empty()
-            || !self.xlsx_text.is_empty()
+            || !self.xlsx.text.is_empty()
             || self.view.cols.has_sizing()
             || self.view.rows.has_sizing()
     }
@@ -871,7 +940,7 @@ impl GridDoc {
 
     /// Depth of the grid's undo history.
     pub(super) fn hist_len(&self) -> usize {
-        self.hist.len()
+        self.history.len()
     }
 
     /// Set column (or row) `idx`'s size, as an undo step.
@@ -1197,8 +1266,8 @@ impl GridDoc {
             cells: self.published_cells(),
             filter: self.view.rows.only().cloned(),
             visible_rows: self.view.rows.only().map_or(rows, |o| o.shown.len()),
-            sheets: self.xlsx_sheets.clone(),
-            sheet: self.xlsx_sheets.get(self.xlsx_sheet).cloned(),
+            sheets: self.xlsx.sheets.clone(),
+            sheet: self.xlsx.sheets.get(self.xlsx.sheet).cloned(),
         }
     }
 
@@ -1587,11 +1656,7 @@ impl GridDoc {
     /// Undo (or redo) one history entry, putting the cursor where it
     /// happened.
     fn undo_redo(&mut self, undo: bool) -> Result<Outcome, Cow<'static, str>> {
-        let entry = if undo {
-            self.hist.pop()
-        } else {
-            self.redo.pop()
-        };
+        let entry = self.history.take(undo);
         let Some(entry) = entry else {
             let what = if undo { "undo" } else { "redo" };
             return Err(format!("No further {what} information").into());
@@ -1601,12 +1666,7 @@ impl GridDoc {
             self.deselect();
             self.move_to(pr, pc, false);
         }
-        self.last_batch = None;
-        if undo {
-            self.redo.push(entry);
-        } else {
-            self.hist.push(entry);
-        }
+        self.history.replayed(entry, undo);
         Ok(Outcome {
             msg: None,
             persist_view: layout,
@@ -1877,14 +1937,14 @@ impl Editor {
             (prefix, Some(bytes))
         };
         let mut grid = GridDoc::new(wb, ext.clone(), hash, &self.grid_ui.opts);
-        grid.xlsx_lossy = xlsx_lossy;
-        grid.xlsx_sheets = xlsx_sheets;
-        grid.other_sheets = other_sheets;
-        grid.xlsx_text = xlsx_text;
+        grid.xlsx.lossy = xlsx_lossy;
+        grid.xlsx.sheets = xlsx_sheets;
+        grid.xlsx.other_sheets = other_sheets;
+        grid.xlsx.text = xlsx_text;
         for ((r, c), f) in xlsx_formats {
             grid.formats.set(r, c, f);
         }
-        grid.saved_formats = grid.formats.clone();
+        grid.save.formats = grid.formats.clone();
         if grid.is_xlsx() {
             grid.rebuild_formulas();
         }
@@ -1958,7 +2018,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let mut grid = GridDoc::new(wb, Some("csv".into()), 0, &self.grid_ui.opts);
-        grid.save_failed = true;
+        grid.save.failed = true;
         self.install_grid_doc(name, None, grid, true, cx);
         self.grid_after(cx);
         self.grid_fire_load();
@@ -2085,7 +2145,7 @@ impl Editor {
                     .and_then(|p| std::fs::read(p).ok())
                     .map_or(0, |b| bytes_hash(&b));
                 let mut grid = GridDoc::new(wb, ext, disk, &self.grid_ui.opts);
-                grid.save_failed = modified; // carry the unsaved state over
+                grid.save.failed = modified; // carry the unsaved state over
                 if let Some(path) = &self.active.path {
                     load_sidecar(path, &mut grid);
                 }
@@ -2651,11 +2711,11 @@ impl Editor {
         // in a cell) must not join the batch's step.
         let batch = (self.undo_group_depth > 0).then_some(self.undo_batch_seq);
         if let Some(g) = self.active.grid.as_deref_mut() {
-            g.batch = batch;
+            g.history.batch = batch;
         }
         let result = self.cmd_grid_inner(command, cx);
         if let Some(g) = self.active.grid.as_deref_mut() {
-            g.batch = None;
+            g.history.batch = None;
         }
         result
     }
@@ -3289,8 +3349,8 @@ impl Editor {
             self.echo("Saving after load completes…", cx);
             return;
         }
-        if !g.xlsx_lossy.is_empty() {
-            let what = g.xlsx_lossy.join(", ");
+        if !g.xlsx.lossy.is_empty() {
+            let what = g.xlsx.lossy.join(", ");
             self.echo(
                 format!("Not saving over this file: it has {what}, which would be lost — :w copy.xlsx saves a copy"),
                 cx,
@@ -3338,15 +3398,15 @@ impl Editor {
             return;
         }
         let pool = g.wb.pool().len();
-        if pool > g.pool_baseline.saturating_mul(2) + 10_000 {
+        if pool > g.save.pool_baseline.saturating_mul(2) + 10_000 {
             g.wb.compact();
-            g.pool_baseline = g.wb.pool().len();
+            g.save.pool_baseline = g.wb.pool().len();
         }
         let bytes = g.bytes();
         let rows = g.wb.used_rows(SHEET);
-        g.disk_hash = bytes_hash(&bytes);
+        g.save.disk_hash = bytes_hash(&bytes);
         g.mark_saved();
-        g.save_failed = false;
+        g.save.failed = false;
         self.active.modified = false;
         let name = self.active.name.clone();
         let ticket = crate::save::ticket(&path);
@@ -3370,7 +3430,7 @@ impl Editor {
                     if let Some(d) = editor.doc_mut(&name) {
                         d.modified = true;
                         if let Some(g) = d.grid.as_deref_mut() {
-                            g.save_failed = true;
+                            g.save.failed = true;
                         }
                     }
                     editor.echo(format!("Save of {name} failed: {err}"), cx);
@@ -3388,7 +3448,7 @@ impl Editor {
             .active
             .grid
             .as_deref()
-            .and_then(|g| g.xlsx_source.clone());
+            .and_then(|g| g.xlsx.source.clone());
         let Some(path) = self.active.path.clone().or(source) else {
             return;
         };
@@ -3430,7 +3490,7 @@ impl Editor {
         };
         let ext = g.ext.clone();
         let parsed = if ext.as_deref() == Some("xlsx") {
-            Parsed::Xlsx(Box::new(super::grid_xlsx::load(&bytes, g.xlsx_sheet)?))
+            Parsed::Xlsx(Box::new(super::grid_xlsx::load(&bytes, g.xlsx.sheet)?))
         } else if total <= SYNC_PARSE_LIMIT {
             Parsed::Csv(Box::new(
                 crate::grid::parse::parse_now(bytes.clone(), ext.as_deref())
@@ -3447,20 +3507,19 @@ impl Editor {
             return Ok(());
         };
         g.view.edit = None;
-        g.hist.clear();
-        g.redo.clear();
-        g.disk_hash = hash;
-        g.save_failed = false;
+        g.history.clear();
+        g.save.disk_hash = hash;
+        g.save.failed = false;
         let mut background = None;
         let mut formats = Vec::new();
         match parsed {
             Parsed::Xlsx(l) => {
                 g.wb = l.wb;
-                g.xlsx_lossy = l.lossy;
-                g.xlsx_sheets = l.sheets;
-                g.other_sheets = l.others;
-                g.xlsx_text = l.text_cells;
-                g.sheet_published = None;
+                g.xlsx.lossy = l.lossy;
+                g.xlsx.sheets = l.sheets;
+                g.xlsx.other_sheets = l.others;
+                g.xlsx.text = l.text_cells;
+                g.xlsx.sheet_published = None;
                 formats = l.formats;
                 if let Some(old) = g.loading.take() {
                     old.cancel.store(true, Ordering::Relaxed);
@@ -3492,7 +3551,7 @@ impl Editor {
         for ((r, c), f) in formats {
             g.formats.set(r, c, f);
         }
-        g.saved_formats = g.formats.clone();
+        g.save.formats = g.formats.clone();
         g.apply_filters();
         doc.modified = false;
         if let Some((cancel, progress)) = background {
@@ -3511,7 +3570,7 @@ impl Editor {
             d.grid.as_deref().is_some_and(|g| {
                 d.path
                     .as_deref()
-                    .or(g.xlsx_source.as_deref())
+                    .or(g.xlsx.source.as_deref())
                     .is_some_and(|p| p == path || super::buffers::file_identity(p) == id)
             })
         };
@@ -3544,7 +3603,7 @@ impl Editor {
             let name = doc.name.clone();
             // A sheet buffer has no disk hash of its own: it reloads
             // whenever the workbook really changed.
-            if g.disk_hash == hash {
+            if g.save.disk_hash == hash {
                 continue; // our own save, or no real change
             }
             if g.modified() || g.view.edit.is_some() {
