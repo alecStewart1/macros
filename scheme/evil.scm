@@ -755,90 +755,120 @@
 
 ;; The motion table. Every motion computes from the snapshot (point, buffer)
 ;; and the motion count; #f means "fails" (Vim beeps; the operator is dropped).
+;; Built-ins live in their own hash, name → (lambda (p n raw) …) with p = point,
+;; n = the motion count (at least 1) and raw = the typed count (0 when none).
+;; They are consulted BEFORE `evil-define-motion` entries, so a user motion can
+;; add a name but not shadow a built-in one.
+(define *evil-builtin-motions* (hash))
+(define (evil-builtin-motion name proc)
+  (set! *evil-builtin-motions* (hash-insert *evil-builtin-motions* name proc)))
 (define (evil-motion name)
-  (let* ((p (point)) (n (evil-mcount)) (raw *evil-motion-count*))
-    (cond
-      ((equal? name "line")                    ; dd / cc / yy / >> …
-       (let ((ln (min (evil-last-line) (+ (line-of-pos p) (- n 1)))))
-         (list "line" p (pos-at-char-column ln 0))))
-      ((equal? name "h")
-       (let ((ls (line-start-pos p)))
-         (and (> p ls)
-              (evil-mres "exclusive"
-                         (evil-repeat-pos (lambda (q) (if (> q ls) (grapheme-backward q) q)) p n)))))
-      ((equal? name "l")
-       (let ((le (line-end-pos p)))
-         (and (< p le)
-              (evil-mres "exclusive"
-                         (evil-repeat-pos (lambda (q) (if (< q le) (grapheme-forward q) q)) p n)))))
-      ((equal? name "j")
-       (let ((ln (line-of-pos p)))
-         (and (< ln (evil-last-line)) (list "line" p (evil-vertical-target (+ ln n))))))
-      ((equal? name "k")
-       (let ((ln (line-of-pos p)))
-         (and (> ln 0) (list "line" p (evil-vertical-target (- ln n))))))
-      ((equal? name "+")
-       (let ((ln (line-of-pos p)))
-         (and (< ln (evil-last-line))
-              (list "line" p (evil-first-nonblank-pos (evil-vertical-target (+ ln n)))))))
-      ((equal? name "-")
-       (let ((ln (line-of-pos p)))
-         (and (> ln 0) (list "line" p (evil-first-nonblank-pos (evil-vertical-target (- ln n)))))))
-      ((equal? name "_")
-       (list "line" p (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0)))
-      ((equal? name "w")
-       (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
-           (evil-mres "exclusive!" (evil-change-word-target p n #f))
-           (evil-mres "exclusive" (evil-word-op-target p n word-forward-start))))
-      ((equal? name "W")
-       (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
-           (evil-mres "exclusive!" (evil-change-word-target p n #t))
-           (evil-mres "exclusive" (evil-word-op-target p n bigword-forward-start))))
-      ((equal? name "b")  (evil-mres "exclusive" (evil-repeat-pos word-backward-start p n)))
-      ((equal? name "B")  (evil-mres "exclusive" (evil-repeat-pos bigword-backward-start p n)))
-      ((equal? name "e")  (evil-mres "inclusive" (evil-repeat-pos word-forward-end p n)))
-      ((equal? name "E")  (evil-mres "inclusive" (evil-repeat-pos bigword-forward-end p n)))
-      ((equal? name "ge") (evil-mres "inclusive" (evil-repeat-pos word-backward-end p n)))
-      ((equal? name "gE") (evil-mres "inclusive" (evil-repeat-pos bigword-backward-end p n)))
-      ((equal? name "0")  (evil-mres "exclusive" (line-start-pos p)))
-      ((equal? name "^")  (evil-mres "exclusive" (evil-first-nonblank-pos p)))
-      ((equal? name "$")
-       (evil-mres "exclusive!"
-                  (line-end-pos (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))))
-      ((equal? name "g_")
-       (let* ((ls (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))
-              (le (line-end-pos ls))
-              (last (let loop ((i le))
-                      (if (and (> i ls) (evil-blank-pos? (- i 1))) (loop (- i 1)) i))))
-         (evil-mres "exclusive!" last)))
-      ((equal? name "|")
-       (evil-mres "exclusive" (evil-line-col-pos (line-of-pos p) (- n 1))))
-      ((equal? name "gg")
-       (list "line" p (evil-first-nonblank-pos
-                       (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) 0) 0))))
-      ((equal? name "G")
-       (list "line" p (evil-first-nonblank-pos
-                       (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) (evil-last-line)) 0))))
-      ((equal? name "}")  (evil-mres "exclusive" (evil-repeat-pos paragraph-forward-pos p n)))
-      ((equal? name "{")  (evil-mres "exclusive" (evil-repeat-pos paragraph-backward-pos p n)))
-      ((equal? name ")")  (evil-mres "exclusive" (evil-repeat-pos evil-sentence-forward-pos p n)))
-      ((equal? name "(")  (evil-mres "exclusive" (evil-repeat-pos evil-sentence-backward-pos p n)))
-      ((equal? name "%")
-       (if (> raw 0)
-           (let ((ln (min (evil-last-line) (quotient (+ (* raw (line-count)) 99) 100))))
-             (list "line" p (pos-at-char-column (max 0 (- ln 1)) 0)))
-           (let ((tg (evil-matchit-target))) (and tg (evil-mres "inclusive" tg)))))
-      ((or (equal? name "H") (equal? name "M") (equal? name "L"))
-       (list "line" p (evil-first-nonblank-pos (pos-at-char-column (evil-screen-line name n) 0))))
-      ((equal? name ";") (evil-find-motion *evil-find-forward* n))
-      ((equal? name ",") (evil-find-motion (not *evil-find-forward*) n))
-      ((equal? name "n") (evil-search-motion (search-query) (search-forward?) n))
-      ((equal? name "N") (evil-search-motion (search-query) (not (search-forward?)) n))
-      ((equal? name "*") (evil-search-word-motion #t n))
-      ((equal? name "#") (evil-search-word-motion #f n))
-      (else
-       (let ((user (hash-try-get *evil-user-motions* name)))
-         (and user (user)))))))
+  (let ((builtin (hash-try-get *evil-builtin-motions* name)))
+    (if builtin
+        (builtin (point) (evil-mcount) *evil-motion-count*)
+        (let ((user (hash-try-get *evil-user-motions* name)))
+          (and user (user))))))
+
+;; The n-th line below point (clamped to the last line), at column 0.
+(define (evil-motion-nth-line-start p n)
+  (pos-at-char-column (min (evil-last-line) (+ (line-of-pos p) (- n 1))) 0))
+
+;; Motions that just step a position function `n` times: (name type step).
+(for-each
+ (lambda (row)
+   (let ((type (cadr row)) (step (caddr row)))
+     (evil-builtin-motion (car row)
+                          (lambda (p n raw) (evil-mres type (evil-repeat-pos step p n))))))
+ (list (list "b"  "exclusive" word-backward-start)
+       (list "B"  "exclusive" bigword-backward-start)
+       (list "e"  "inclusive" word-forward-end)
+       (list "E"  "inclusive" bigword-forward-end)
+       (list "ge" "inclusive" word-backward-end)
+       (list "gE" "inclusive" bigword-backward-end)
+       (list "}"  "exclusive" paragraph-forward-pos)
+       (list "{"  "exclusive" paragraph-backward-pos)
+       (list ")"  "exclusive" evil-sentence-forward-pos)
+       (list "("  "exclusive" evil-sentence-backward-pos)))
+
+(evil-builtin-motion "line"                    ; dd / cc / yy / >> …
+  (lambda (p n raw) (list "line" p (evil-motion-nth-line-start p n))))
+(evil-builtin-motion "_"
+  (lambda (p n raw) (list "line" p (evil-motion-nth-line-start p n))))
+(evil-builtin-motion "h"
+  (lambda (p n raw)
+    (let ((ls (line-start-pos p)))
+      (and (> p ls)
+           (evil-mres "exclusive"
+                      (evil-repeat-pos (lambda (q) (if (> q ls) (grapheme-backward q) q)) p n))))))
+(evil-builtin-motion "l"
+  (lambda (p n raw)
+    (let ((le (line-end-pos p)))
+      (and (< p le)
+           (evil-mres "exclusive"
+                      (evil-repeat-pos (lambda (q) (if (< q le) (grapheme-forward q) q)) p n))))))
+(evil-builtin-motion "j"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (< ln (evil-last-line)) (list "line" p (evil-vertical-target (+ ln n)))))))
+(evil-builtin-motion "k"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (> ln 0) (list "line" p (evil-vertical-target (- ln n)))))))
+(evil-builtin-motion "+"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (< ln (evil-last-line))
+           (list "line" p (evil-first-nonblank-pos (evil-vertical-target (+ ln n))))))))
+(evil-builtin-motion "-"
+  (lambda (p n raw)
+    (let ((ln (line-of-pos p)))
+      (and (> ln 0) (list "line" p (evil-first-nonblank-pos (evil-vertical-target (- ln n))))))))
+;; w / W: under `c` on a non-blank, Vim's cw acts like ce.
+(define (evil-word-motion p n bigword)
+  (if (and (equal? *evil-op-name* "change") (not (evil-blank-pos? p)) (< p (line-end-pos p)))
+      (evil-mres "exclusive!" (evil-change-word-target p n bigword))
+      (evil-mres "exclusive" (evil-word-op-target p n (if bigword bigword-forward-start word-forward-start)))))
+(evil-builtin-motion "w" (lambda (p n raw) (evil-word-motion p n #f)))
+(evil-builtin-motion "W" (lambda (p n raw) (evil-word-motion p n #t)))
+(evil-builtin-motion "0" (lambda (p n raw) (evil-mres "exclusive" (line-start-pos p))))
+(evil-builtin-motion "^" (lambda (p n raw) (evil-mres "exclusive" (evil-first-nonblank-pos p))))
+(evil-builtin-motion "$"
+  (lambda (p n raw) (evil-mres "exclusive!" (line-end-pos (evil-motion-nth-line-start p n)))))
+(evil-builtin-motion "g_"
+  (lambda (p n raw)
+    (let* ((ls (evil-motion-nth-line-start p n))
+           (le (line-end-pos ls))
+           (last (let loop ((i le))
+                   (if (and (> i ls) (evil-blank-pos? (- i 1))) (loop (- i 1)) i))))
+      (evil-mres "exclusive!" last))))
+(evil-builtin-motion "|"
+  (lambda (p n raw) (evil-mres "exclusive" (evil-line-col-pos (line-of-pos p) (- n 1)))))
+(evil-builtin-motion "gg"
+  (lambda (p n raw)
+    (list "line" p (evil-first-nonblank-pos
+                    (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) 0) 0)))))
+(evil-builtin-motion "G"
+  (lambda (p n raw)
+    (list "line" p (evil-first-nonblank-pos
+                    (pos-at-char-column (if (> raw 0) (min (evil-last-line) (- raw 1)) (evil-last-line)) 0)))))
+(evil-builtin-motion "%"
+  (lambda (p n raw)
+    (if (> raw 0)
+        (let ((ln (min (evil-last-line) (quotient (+ (* raw (line-count)) 99) 100))))
+          (list "line" p (pos-at-char-column (max 0 (- ln 1)) 0)))
+        (let ((tg (evil-matchit-target))) (and tg (evil-mres "inclusive" tg))))))
+(for-each
+ (lambda (which)
+   (evil-builtin-motion which
+     (lambda (p n raw)
+       (list "line" p (evil-first-nonblank-pos (pos-at-char-column (evil-screen-line which n) 0))))))
+ (list "H" "M" "L"))
+(evil-builtin-motion ";" (lambda (p n raw) (evil-find-motion *evil-find-forward* n)))
+(evil-builtin-motion "," (lambda (p n raw) (evil-find-motion (not *evil-find-forward*) n)))
+(evil-builtin-motion "n" (lambda (p n raw) (evil-search-motion (search-query) (search-forward?) n)))
+(evil-builtin-motion "N" (lambda (p n raw) (evil-search-motion (search-query) (not (search-forward?)) n)))
+(evil-builtin-motion "*" (lambda (p n raw) (evil-search-word-motion #t n)))
+(evil-builtin-motion "#" (lambda (p n raw) (evil-search-word-motion #f n)))
 
 ;; f/F/t/T as operator motions: `(evil-motion-find "f" "x")` (the editor fills
 ;; in the char). f/t are inclusive, F/T exclusive — as in Vim.
@@ -976,45 +1006,62 @@
 (define (evil-define-operator name proc)
   (set! *evil-user-operators* (hash-insert *evil-user-operators* name proc)))
 
+;; Built-in operators: name → (lambda (line? s e p) …), where line? is whether
+;; the range is linewise and p is point before the operator ran. Consulted
+;; before `evil-define-operator` entries, like the built-in motions.
+(define *evil-builtin-operators* (hash))
+(define (evil-builtin-operator name proc)
+  (set! *evil-builtin-operators* (hash-insert *evil-builtin-operators* name proc)))
+
 ;; Apply operator `op` to [s, e) of kind "char"/"line".
 (define (evil-apply-operator op kind s e)
-  (let ((line (equal? kind "line")) (p (point)))
-    (cond
-      ((equal? op "delete")
-       (if line
-           (evil-delete-lines s e)
-           (when (< s e) (kill-region-between s e) (evil-set-charwise))))
-      ((equal? op "change")
-       (if line
-           (let* ((eof (and (= e (point-max))
-                            (or (= e s) (not (equal? (buffer-substring (- e 1) e) "\n")))))
-                  (e2 (if eof e (- e 1))))
-             (when (< s e2) (kill-region-between s e2) (evil-set-linewise))
-             (goto-char s))
-           (when (< s e) (kill-region-between s e) (evil-set-charwise)))
-       (evil-insert-state))
-      ((equal? op "yank")
-       (when (< s e)
-         (set-region s e) (kill-ring-save)
-         (if line (evil-set-linewise) (evil-set-charwise))
-         (goto-char (if (and line (= (line-of-pos p) (line-of-pos s))) p s))))
-      ((equal? op "indent")  (evil-shift-lines s e 1))
-      ((equal? op "outdent") (evil-shift-lines s e -1))
-      ((equal? op "reindent") (evil-reindent-lines s e))
-      ((equal? op "downcase") (evil-fold-range s e string-downcase (if line p s)))
-      ((equal? op "upcase")   (evil-fold-range s e string-upcase (if line p s)))
-      ((equal? op "togglecase") (evil-fold-range s e string-toggle-case (if line p s)))
-      ((equal? op "rot13")    (evil-fold-range s e evil-rot13 (if line p s)))
-      ((equal? op "fill")
-       (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #f))
-      ((equal? op "fill-keep")
-       (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #t))
-      ((equal? op "comment") (evil-comment-lines s e))
-      (else
-       (let ((user (hash-try-get *evil-user-operators* op)))
-         (if user
-             (user kind s e)
-             (message (string-append "Unknown operator: " op))))))))
+  (let ((builtin (hash-try-get *evil-builtin-operators* op)))
+    (if builtin
+        (builtin (equal? kind "line") s e (point))
+        (let ((user (hash-try-get *evil-user-operators* op)))
+          (if user
+              (user kind s e)
+              (message (string-append "Unknown operator: " op)))))))
+
+(evil-builtin-operator "delete"
+  (lambda (line s e p)
+    (if line
+        (evil-delete-lines s e)
+        (when (< s e) (kill-region-between s e) (evil-set-charwise)))))
+(evil-builtin-operator "change"
+  (lambda (line s e p)
+    (if line
+        (let* ((eof (and (= e (point-max))
+                         (or (= e s) (not (equal? (buffer-substring (- e 1) e) "\n")))))
+               (e2 (if eof e (- e 1))))
+          (when (< s e2) (kill-region-between s e2) (evil-set-linewise))
+          (goto-char s))
+        (when (< s e) (kill-region-between s e) (evil-set-charwise)))
+    (evil-insert-state)))
+(evil-builtin-operator "yank"
+  (lambda (line s e p)
+    (when (< s e)
+      (set-region s e) (kill-ring-save)
+      (if line (evil-set-linewise) (evil-set-charwise))
+      (goto-char (if (and line (= (line-of-pos p) (line-of-pos s))) p s)))))
+(evil-builtin-operator "indent"   (lambda (line s e p) (evil-shift-lines s e 1)))
+(evil-builtin-operator "outdent"  (lambda (line s e p) (evil-shift-lines s e -1)))
+(evil-builtin-operator "reindent" (lambda (line s e p) (evil-reindent-lines s e)))
+;; Case / rot13 folds: (name folder). Point stays put on a linewise range.
+(for-each
+ (lambda (row)
+   (let ((folder (cadr row)))
+     (evil-builtin-operator (car row)
+                            (lambda (line s e p) (evil-fold-range s e folder (if line p s))))))
+ (list (list "downcase" string-downcase)
+       (list "upcase" string-upcase)
+       (list "togglecase" string-toggle-case)
+       (list "rot13" evil-rot13)))
+(evil-builtin-operator "fill"
+  (lambda (line s e p) (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #f)))
+(evil-builtin-operator "fill-keep"
+  (lambda (line s e p) (evil-fill-range (line-start-pos s) (line-end-pos (max s (- e 1))) #t)))
+(evil-builtin-operator "comment" (lambda (line s e p) (evil-comment-lines s e)))
 
 ;; The entry point the editor dispatches for `{count}{op}{count}{motion}`.
 (define (evil-operate op count force thunk)
