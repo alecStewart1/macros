@@ -4671,14 +4671,7 @@ impl Editor {
     /// it directly).
     fn run_counted(&mut self, expr: &str, n: usize, cx: &mut Context<Self>) {
         // The command name: the call's first token (`(evil-macro-play "a")`).
-        let name = expr
-            .trim()
-            .trim_start_matches('(')
-            .trim_end_matches(')')
-            .split(char::is_whitespace)
-            .next()
-            .unwrap_or("");
-        if self.count_aware.contains(name) {
+        if self.count_aware.contains(vim::expr_head(expr)) {
             self.prefix_count = n;
             self.run_script(expr, cx);
             self.prefix_count = 0;

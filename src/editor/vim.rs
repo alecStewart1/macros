@@ -272,16 +272,25 @@ pub(super) struct Replay {
     pub undo_base: Option<UndoBase>,
 }
 
-/// Commands that never count as "the last change", even though they edit.
-fn is_repeat_neutral(expr: &str) -> bool {
-    let name = expr
-        .trim()
+/// The command name a key-bound expression calls: the head symbol of
+/// `(name arg …)` (or a bare `name`).
+pub(super) fn expr_head(expr: &str) -> &str {
+    expr.trim()
         .trim_start_matches('(')
         .split(|c: char| c.is_whitespace() || c == ')')
         .next()
-        .unwrap_or("");
+        .unwrap_or("")
+}
+
+/// Whether `expr` is a `"x` register prefix rather than a command proper.
+fn is_register_prefix(expr: &str) -> bool {
+    expr_head(expr) == "evil-use-register"
+}
+
+/// Commands that never count as "the last change", even though they edit.
+fn is_repeat_neutral(expr: &str) -> bool {
     matches!(
-        name,
+        expr_head(expr),
         "undo"
             | "redo"
             | "undo-tree-undo"
@@ -296,26 +305,32 @@ fn is_repeat_neutral(expr: &str) -> bool {
     )
 }
 
+/// `(evil-operate "op" COUNT …)` (as [`compose_operate`] builds it) with
+/// COUNT replaced by `n`. `None` when `expr` isn't such a call.
+fn with_operate_count(expr: &str, n: usize) -> Option<String> {
+    const HEAD: &str = "(evil-operate ";
+    let args = expr.strip_prefix(HEAD)?;
+    // Past the operator name's closing quote.
+    let open = args.find('"')?;
+    let close = args[open + 1..].find('"')?;
+    let name_end = HEAD.len() + open + 1 + close + 1;
+    let rest = expr[name_end..].trim_start();
+    let tail = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    Some(format!("{} {n}{tail}", &expr[..name_end]))
+}
+
 /// `3.`: give the repeated command the new count. The operator call carries
 /// its count inline; anything else becomes a counted command.
 pub(super) fn override_count(events: &mut [MacroEvent], n: usize) {
     for ev in events.iter_mut() {
         match ev {
             // `"a` before the change: the register prefix, not the change.
-            MacroEvent::Command(expr) if expr.trim_start().starts_with("(evil-use-register ") => {}
+            MacroEvent::Command(expr) if is_register_prefix(expr) => {}
             MacroEvent::Command(expr) | MacroEvent::Counted(expr, _)
                 if expr.starts_with("(evil-operate ") =>
             {
-                // (evil-operate "op" COUNT …): swap the first integer.
-                let head_end = expr["(evil-operate ".len()..].find('"').and_then(|q| {
-                    let after = "(evil-operate ".len() + q + 1;
-                    expr[after..].find('"').map(|q2| after + q2 + 1)
-                });
-                if let Some(i) = head_end {
-                    let rest = expr[i..].trim_start();
-                    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-                    let tail = &rest[digits..];
-                    *ev = MacroEvent::Command(format!("{} {n}{tail}", &expr[..i]));
+                if let Some(recounted) = with_operate_count(expr, n) {
+                    *ev = MacroEvent::Command(recounted);
                 }
                 return;
             }
@@ -468,7 +483,7 @@ impl Editor {
     /// A Normal-state command boundary: a register prefix lives for exactly
     /// the one command after it.
     pub(super) fn register_boundary(&mut self, expr: &str) {
-        if expr.trim_start().starts_with("(evil-use-register") {
+        if is_register_prefix(expr) {
             return;
         }
         if expr.trim() == "(keyboard-quit)" {
@@ -962,13 +977,7 @@ impl Editor {
 
     /// Whether `expr` runs a registered jump command.
     pub(super) fn is_jump_expr(&self, expr: &str) -> bool {
-        let name = expr
-            .trim()
-            .trim_start_matches('(')
-            .split(|c: char| c.is_whitespace() || c == ')')
-            .next()
-            .unwrap_or("");
-        self.vim.jump_commands.contains(name)
+        self.vim.jump_commands.contains(expr_head(expr))
     }
 
     /// C-o (`forward` false) / C-i, Tab (`forward` true): walk the jump list.
@@ -1259,7 +1268,7 @@ impl Editor {
         if self.vim.replay.is_some() {
             return;
         }
-        let register_prefix = expr.trim_start().starts_with("(evil-use-register");
+        let register_prefix = is_register_prefix(expr);
         if let Some(rec) = self.vim.dot.as_mut()
             && rec.prefix_only
         {
@@ -1362,14 +1371,8 @@ impl Editor {
                 MacroEvent::Key(tok) => self.replay_key(&tok, cx),
                 MacroEvent::Command(expr) => self.run_script(&expr, cx),
                 MacroEvent::Counted(expr, n) => {
-                    let name = expr
-                        .trim()
-                        .trim_start_matches('(')
-                        .trim_end_matches(')')
-                        .split(char::is_whitespace)
-                        .next()
-                        .unwrap_or("");
-                    if self.count_aware.contains(name) || self.script.builtins_for(&expr).is_some()
+                    if self.count_aware.contains(expr_head(&expr))
+                        || self.script.builtins_for(&expr).is_some()
                     {
                         self.run_counted(&expr, n, cx);
                     } else {
@@ -1709,6 +1712,17 @@ mod tests {
         let mut ev = vec![MacroEvent::Counted("(evil-join-line)".into(), 2)];
         override_count(&mut ev, 5);
         assert!(matches!(&ev[0], MacroEvent::Counted(_, 5)));
+        // The register prefix keeps its place; the operator after it is recounted.
+        let mut ev = vec![
+            MacroEvent::Command(r#"(evil-use-register "a")"#.into()),
+            MacroEvent::Counted(r#"(evil-operate "yank" 12 "V" (lambda () 1))"#.into(), 1),
+        ];
+        override_count(&mut ev, 7);
+        assert!(matches!(&ev[1], MacroEvent::Command(e)
+            if e == r#"(evil-operate "yank" 7 "V" (lambda () 1))"#));
+        assert_eq!(expr_head(r#"(evil-goto-mark "a")"#), "evil-goto-mark");
+        assert_eq!(expr_head("(undo)"), "undo");
+        assert_eq!(expr_head(" redo "), "redo");
         assert!(is_repeat_neutral("(undo)"));
         assert!(is_repeat_neutral("(evil-repeat)"));
         assert!(!is_repeat_neutral("(evil-delete-char)"));
