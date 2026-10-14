@@ -1,12 +1,9 @@
 name: Release
 
 on:
+  # The release version always comes from Cargo.toml [package].version, so a
+  # manual run needs no inputs. Bump it locally with `cargo set-version X.Y.Z`.
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version (e.g. 1.2.3). Embedded into every artifact filename."
-        required: true
-        type: string
   push:
     tags:
       - "v*"
@@ -21,18 +18,33 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - name: Resolve version
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ACCESS_TOKEN }}
+      - name: Resolve version from Cargo.toml
         id: resolve
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            v="${{ inputs.version }}"
-          else
-            tag="${GITHUB_REF#refs/tags/}"
-            v="${tag#v}"
-          fi
+          set -euo pipefail
+          v=$(awk '
+            /^\[/ { sect = ($0 ~ /^\[package\]/) ? "pkg" : ""; next }
+            sect == "pkg" && /^version *= *"/ {
+              gsub(/^[^"]*"|"[^"]*$/, ""); print; exit
+            }
+          ' Cargo.toml)
           if [ -z "$v" ]; then
-            echo "::error::Could not resolve a version from inputs or tag" >&2
+            echo "::error::Could not read [package].version from Cargo.toml" >&2
             exit 1
+          fi
+          # On a tag push, the tag must agree with Cargo.toml so a release can
+          # never be published under a version the binary doesn't report.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] || [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            if [ "${tag#v}" != "$v" ]; then
+              echo "::error::Tag is '$tag' but Cargo.toml [package].version is '$v'"
+              echo "Fix locally with: cargo set-version ${tag#v}"
+              exit 1
+            fi
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $v"
@@ -66,20 +78,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ACCESS_TOKEN }}
-      - name: Verify Cargo.toml version matches tag
-        run: |
-          actual=$(awk '
-            /^\[/ { sect = ($0 ~ /^\[package\]/) ? "pkg" : ""; next }
-            sect == "pkg" && /^version *= *"/ {
-              gsub(/^[^"]*"|"[^"]*$/, ""); print; exit
-            }
-          ' Cargo.toml)
-          if [ "$actual" != "$VERSION" ]; then
-            echo "::error::Cargo.toml [package].version is '$actual' but release says '$VERSION'"
-            echo "Fix locally with: cargo set-version $VERSION"
-            exit 1
-          fi
-          echo "Cargo.toml version matches: $VERSION"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
@@ -191,19 +189,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ACCESS_TOKEN }}
-      - name: Verify Cargo.toml version matches tag
-        run: |
-          actual=$(awk '
-            /^\[/ { sect = ($0 ~ /^\[package\]/) ? "pkg" : ""; next }
-            sect == "pkg" && /^version *= *"/ {
-              gsub(/^[^"]*"|"[^"]*$/, ""); print; exit
-            }
-          ' Cargo.toml)
-          if [ "$actual" != "$VERSION" ]; then
-            echo "::error::Cargo.toml [package].version is '$actual' but release says '$VERSION'"
-            exit 1
-          fi
-          echo "Cargo.toml version matches: $VERSION"
       - name: Install system dependencies
         # Only on the fresh container leg; the self-hosted x86 runner already has
         # these (see the matrix note). Guarded by passwordless-sudo so it never
@@ -284,20 +269,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ACCESS_TOKEN }}
-      - name: Verify Cargo.toml version matches tag
-        shell: pwsh
-        run: |
-          $inPkg = $false
-          $actual = $null
-          foreach ($line in Get-Content Cargo.toml) {
-            if ($line -match '^\[') { $inPkg = ($line -match '^\[package\]'); continue }
-            if ($inPkg -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $actual = $Matches[1]; break }
-          }
-          if ($actual -ne $env:VERSION) {
-            Write-Error "Cargo.toml [package].version is '$actual' but release says '$env:VERSION'. Fix locally with: cargo set-version $env:VERSION"
-            exit 1
-          }
-          Write-Host "Cargo.toml version matches: $env:VERSION"
       # Rust/cargo are preinstalled on this self-hosted Windows runner, and its
       # native target is already x86_64-pc-windows-msvc, so no toolchain-install
       # step is needed.
@@ -392,6 +363,63 @@ jobs:
           name: Macros-windows-x86_64-${{ needs.version.outputs.version }}
           path: ${{ steps.msi.outputs.path }}
           if-no-files-found: error
+      # The signed standalone exe, uploaded only so the virustotal job can scan
+      # it. publish-release.mjs ignores filenames it doesn't recognise, so this
+      # never reaches R2.
+      - name: Upload .exe artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Macros-windows-x86_64-${{ needs.version.outputs.version }}-exe
+          path: target/release/macros.exe
+          if-no-files-found: error
+
+  virustotal:
+    name: Submit to VirusTotal
+    runs-on: ubuntu-latest
+    # Runs alongside publish rather than gating it: a VirusTotal outage or rate
+    # limit shouldn't block a release. Check the logged links for verdicts.
+    needs: [version, macos, linux, windows]
+    env:
+      VT_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dist
+      - name: Upload each artifact to VirusTotal
+        run: |
+          set -euo pipefail
+          if [ -z "${VT_API_KEY:-}" ]; then
+            echo "::error::VIRUSTOTAL_API_KEY secret is not set"
+            exit 1
+          fi
+          # The public API allows 4 requests/minute, so space every request out.
+          # curl --retry also backs off on 429s if we still trip the limit.
+          vt() {
+            sleep 16
+            curl -fsS --retry 5 --retry-delay 30 \
+              -H "x-apikey: $VT_API_KEY" -H "accept: application/json" "$@"
+          }
+          # The plain /files endpoint caps uploads at 32 MB; larger files need a
+          # one-off upload URL from /files/upload_url.
+          limit=$((32 * 1024 * 1024))
+          find dist -type f \( -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
+            | sort | while read -r f; do
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            size=$(stat -c %s "$f")
+            if [ "$size" -gt "$limit" ]; then
+              url=$(vt https://www.virustotal.com/api/v3/files/upload_url \
+                | sed -n 's/.*"data": *"\([^"]*\)".*/\1/p')
+              if [ -z "$url" ]; then
+                echo "::error::Could not get a VirusTotal upload URL for $f"
+                exit 1
+              fi
+            else
+              url=https://www.virustotal.com/api/v3/files
+            fi
+            vt -X POST -F "file=@$f" "$url" > /dev/null
+            echo "$(basename "$f"): https://www.virustotal.com/gui/file/$sha"
+          done
 
   publish:
     name: Publish to Cloudflare R2
