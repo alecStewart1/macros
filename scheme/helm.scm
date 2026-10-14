@@ -72,14 +72,14 @@
   (list-directory
     (directory-of
       (expand-file-name
-        (if (equal? pattern "") (string-append (buffer-directory) "/") pattern)))))
+        (if (equal? pattern "") (path-join (buffer-directory) "") pattern)))))
 
 ;; C-x C-f: the file navigator, pre-filled with the current directory (so fuzzy
 ;; matching works immediately and there are folders to descend). Type to fuzzy-
 ;; match entries; TAB completes to the selection — a folder ends with "/" so TAB
 ;; (or RET) descends into it; RET on a file opens it.
 (define (helm-find-files)
-  (helm-from (string-append (buffer-directory) "/")
+  (helm-from (path-join (buffer-directory) "")
              (list (list "Files" "find-file-candidates" "open-file"))))
 (define-key "fundamental" "ctrl-x ctrl-f" 'helm-find-files)
 
