@@ -275,7 +275,7 @@ pub fn import_shell_env() {
 pub fn import_shell_env() {}
 
 /// The user's home directory, from `$HOME` (Unix) or `%USERPROFILE%` (Windows).
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|h| !h.is_empty())

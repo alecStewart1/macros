@@ -1363,9 +1363,10 @@ impl Editor {
             line_height: px(0.),
             viewport_height: px(0.),
             pending_grammar_installs: VecDeque::new(),
-            process_cwd: std::env::current_dir()
-                .map(|d| d.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            process_cwd: startup_directory(
+                std::env::current_dir().ok(),
+                crate::runtime::home_dir(),
+            ),
             pending_opens: HashSet::new(),
             inactive: Vec::new(),
             lsp_commands: HashMap::new(),
@@ -4868,6 +4869,18 @@ fn last_sexp(text: &str) -> Option<Range<usize>> {
     }
 }
 
+/// The startup `default-directory` for fileless buffers: the process cwd, except
+/// that a cwd of `/` (what macOS gives apps launched from the Dock or Finder) or
+/// an unreadable one falls back to the home directory — as Emacs.app does.
+fn startup_directory(cwd: Option<PathBuf>, home: Option<PathBuf>) -> String {
+    let dir = match cwd {
+        Some(d) if d.parent().is_some() => Some(d),
+        cwd => home.or(cwd),
+    };
+    dir.map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// The top-level parenthesized form containing `point` — the unit
 /// `anvil-eval-defun` sends. Falls back to the last complete top-level form that
 /// ends at or before `point`. Counts parens only (like [`last_sexp`]); good
@@ -5537,6 +5550,24 @@ mod tests {
             top_level_form_at(src, gap).map(|r| &src[r]),
             Some("(define (f x)\n  (+ x 1))")
         );
+    }
+
+    #[test]
+    fn startup_directory_falls_back_to_home_for_root_cwd() {
+        use super::startup_directory;
+        use std::path::PathBuf;
+        let home = || Some(PathBuf::from("/Users/me"));
+        // Dock / Finder launch: cwd is `/`.
+        assert_eq!(startup_directory(Some("/".into()), home()), "/Users/me");
+        // Unreadable cwd.
+        assert_eq!(startup_directory(None, home()), "/Users/me");
+        // Terminal launch keeps the shell's cwd.
+        assert_eq!(
+            startup_directory(Some("/Users/me/proj".into()), home()),
+            "/Users/me/proj"
+        );
+        // No home either: keep `/` rather than nothing.
+        assert_eq!(startup_directory(Some("/".into()), None), "/");
     }
 
     #[test]
