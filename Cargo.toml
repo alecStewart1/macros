@@ -244,3 +244,8 @@ gpui = { version = "0.2.2", features = ["test-support"] }
 # zero-copy Span cells and byte-exact saves), which csv-core's copy-into-an-
 # output-buffer API doesn't expose, and csv-core silently skips blank lines.
 csv-core = "0.1"
+
+# gpui 0.2.2, vendored with two macOS text-rendering fixes that make glyphs
+# crisp on 1x (non-Retina) displays — see vendor/gpui/PATCHES.md.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
