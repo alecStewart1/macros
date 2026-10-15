@@ -58,10 +58,6 @@ const LILEX_REGULAR: &[u8] = include_bytes!("../assets/fonts/Lilex-Regular.ttf")
 /// the plot faces select it with `set-face-font`.
 const MACROS_PLOT_REGULAR: &[u8] = include_bytes!("../assets/fonts/MacrosPlot-Regular.ttf");
 
-use editor::{
-    Backspace, Delete, Down, End, Home, Left, Newline, Right, SelectAll, SelectLeft, SelectRight,
-    Tab, Up,
-};
 use workspace::Workspace;
 
 // App-level actions, driven by the native menu bar / dock menu (and their
@@ -349,20 +345,8 @@ fn main() {
         // OS-special keys are captured as GPUI actions and delegated to the
         // same commands. The `Ctrl-`/`Alt-`/prefix keymap lives in Scheme
         // (FUNDAMENTAL_KEYMAP) and is dispatched inside the editor.
+        cx.bind_keys(editor::key_bindings());
         cx.bind_keys([
-            KeyBinding::new("backspace", Backspace, Some("Editor")),
-            KeyBinding::new("delete", Delete, Some("Editor")),
-            KeyBinding::new("left", Left, Some("Editor")),
-            KeyBinding::new("right", Right, Some("Editor")),
-            KeyBinding::new("up", Up, Some("Editor")),
-            KeyBinding::new("down", Down, Some("Editor")),
-            KeyBinding::new("home", Home, Some("Editor")),
-            KeyBinding::new("end", End, Some("Editor")),
-            KeyBinding::new("enter", Newline, Some("Editor")),
-            KeyBinding::new("tab", Tab, Some("Editor")),
-            KeyBinding::new("shift-left", SelectLeft, Some("Editor")),
-            KeyBinding::new("shift-right", SelectRight, Some("Editor")),
-            KeyBinding::new("cmd-a", SelectAll, Some("Editor")),
             // App-level shortcuts (no context → dispatched regardless of
             // focus). These also become the key equivalents the menu bar
             // displays next to `New Window` / `Quit Macros`.

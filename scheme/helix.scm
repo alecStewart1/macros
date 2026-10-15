@@ -150,7 +150,25 @@
 (define (helix-goto-line-end)   (helix-move helix-line-last-char #f))
 
 ;; --- word motions (these select) -------------------------------------------
-(define (helix-word-next) (helix-move word-forward-start #t)) ; w
+;; w / W select up to the next word start, but like Helix they stop at a line
+;; ending: on a line's last word the selection ends before the newline (so
+;; `w c` doesn't join lines). Starting on a line break, they first step past
+;; it (and any blank lines), so the next `w` selects the next line's word.
+(define (helix-skip-line-breaks p)
+  (let ((end (point-max)))
+    (let loop ((p p))
+      (if (and (< p end) (= p (line-end-pos p))) (loop (grapheme-forward p)) p))))
+(define (helix-word-start-move next-start)
+  (helix-set!
+    (map (lambda (s)
+           (let* ((a (car s)) (h (cdr s))
+                  (from (helix-skip-line-breaks h))
+                  (le (line-end-pos from))
+                  (nx (next-start from))
+                  (tg (if (and (< from le) (> nx le)) le nx)))
+             (if *helix-extend* (cons a tg) (cons from tg))))
+         (helix-selections))))
+(define (helix-word-next) (helix-word-start-move word-forward-start)) ; w
 ;; `e` / `b` use the CLASS-AWARE primitives (the mirrors of `w`), not Emacs's
 ;; `word-forward` / `word-backward` — those treat punctuation as a separator, so
 ;; `e` sailed past a `);` run and `b` disagreed with `w` about where a word starts.
@@ -158,7 +176,7 @@
 (define (helix-word-prev) (helix-move-backward word-backward-start)) ; b
 
 ;; W / E / B — whitespace-delimited WORDs (`foo.bar` is one WORD).
-(define (helix-bigword-next) (helix-move bigword-forward-start  #t))
+(define (helix-bigword-next) (helix-word-start-move bigword-forward-start))
 (define (helix-bigword-end)  (helix-move-inclusive bigword-forward-end))
 (define (helix-bigword-prev) (helix-move-backward bigword-backward-start))
 

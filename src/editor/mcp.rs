@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use gpui::{Context, Task};
+use gpui::{AsyncApp, Context, Keystroke, Task, WeakEntity};
 
 use super::*;
 use crate::mcp::{Backend, EvalReport, McpServer};
@@ -28,8 +28,60 @@ pub(crate) enum McpRequest {
     },
     ListBuffers(Sender<Result<String, String>>),
     Messages(usize, Sender<Result<String, String>>),
+    /// Dispatch one keystroke through the editor's window.
+    PressKey(Keystroke, Sender<Result<(), String>>),
+    /// What `press_keys` reports, read after its keys settle.
+    KeyState(Sender<KeyState>),
     Log(String),
 }
+
+/// The editor's state as `press_keys` reports it. Also its settle check: keys
+/// are done once two reads in a row (with the engine drained between) agree.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct KeyState {
+    buffer: String,
+    modes: String,
+    /// `emacs`, or the evil/helix state (`evil normal`, `helix insert`, …).
+    state: String,
+    point: usize,
+    line: usize,
+    column: usize,
+    current_line: String,
+    /// A hash of the buffer text, to say whether the keys changed it.
+    text_hash: u64,
+    /// The keys of an unfinished prefix sequence (`C-x` …).
+    pending: String,
+    minibuffer: Option<String>,
+    helm: Option<String>,
+    echo_area: String,
+    echo_count: usize,
+}
+
+#[cfg(test)]
+impl KeyState {
+    pub(super) fn state(&self) -> &str {
+        &self.state
+    }
+    /// `(point, line, column)`.
+    pub(super) fn position(&self) -> (usize, usize, usize) {
+        (self.point, self.line, self.column)
+    }
+    pub(super) fn current_line(&self) -> &str {
+        &self.current_line
+    }
+    pub(super) fn pending(&self) -> &str {
+        &self.pending
+    }
+    /// The open minibuffer's or Helm's prompt and input.
+    pub(super) fn prompt(&self) -> Option<&str> {
+        self.minibuffer.as_deref().or(self.helm.as_deref())
+    }
+}
+
+/// Longest wait for one keystroke's effects to settle, in engine round trips.
+const SETTLE_ROUNDS: usize = 20;
+/// Most messages a `press_keys` report lists.
+const KEY_MESSAGES_CAP: usize = 50;
 
 /// A running server plus the foreground task draining its requests.
 pub(crate) struct McpState {
@@ -112,9 +164,313 @@ impl Backend for EditorBackend {
             .unwrap_or_else(|| Err(EDITOR_GONE.into()))
     }
 
+    fn press_keys(&self, keys: &str) -> Result<String, String> {
+        let strokes = parse_keys(keys)?;
+        if strokes.is_empty() {
+            return Err("no keys given".into());
+        }
+        let before = self.settle()?;
+        let mut after = before.clone();
+        for ks in strokes.iter().cloned() {
+            self.ask(|tx| McpRequest::PressKey(ks, tx))
+                .unwrap_or_else(|| Err(EDITOR_GONE.into()))?;
+            after = self.settle()?;
+        }
+        let new = after.echo_count.saturating_sub(before.echo_count);
+        let messages = if new == 0 {
+            String::new()
+        } else {
+            self.messages(new.min(KEY_MESSAGES_CAP))?
+        };
+        Ok(key_report(&strokes, &before, &after, &messages))
+    }
+
     fn log(&self, line: String) {
         let _ = self.tx.unbounded_send(McpRequest::Log(line));
     }
+}
+
+impl EditorBackend {
+    /// Wait for the editor to go quiet: drain the engine (a blocking eval
+    /// queues behind every command already dispatched), let the foreground
+    /// apply what it produced, and repeat until nothing changes (replays and
+    /// hooks chain several rounds).
+    fn settle(&self) -> Result<KeyState, String> {
+        let mut last: Option<KeyState> = None;
+        for _ in 0..SETTLE_ROUNDS {
+            let _ = self.engine.eval_sync("0");
+            let state = self.ask(McpRequest::KeyState).ok_or(EDITOR_GONE)?;
+            if last.as_ref() == Some(&state) {
+                break;
+            }
+            last = Some(state);
+        }
+        last.ok_or_else(|| EDITOR_GONE.into())
+    }
+}
+
+/// Parse `press_keys` notation: whitespace-separated keys, Emacs-style
+/// (`C-x`, `M-f`, `s-v`, `RET`, `<left>`) or gpui-style (`ctrl-x`, `enter`),
+/// plus double-quoted strings that type each character.
+pub(super) fn parse_keys(seq: &str) -> Result<Vec<Keystroke>, String> {
+    let mut out = Vec::new();
+    let mut chars = seq.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+        } else if c == '"' {
+            chars.next();
+            let mut closed = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => {
+                        closed = true;
+                        break;
+                    }
+                    '\\' => match chars.next() {
+                        Some('n') => out.push(named_key("enter")),
+                        Some('t') => out.push(named_key("tab")),
+                        Some(c) => out.push(char_key(c)),
+                        None => break,
+                    },
+                    '\n' => out.push(named_key("enter")),
+                    '\t' => out.push(named_key("tab")),
+                    c => out.push(char_key(c)),
+                }
+            }
+            if !closed {
+                return Err("unterminated string in keys".into());
+            }
+        } else {
+            let mut token = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                token.push(c);
+                chars.next();
+            }
+            out.push(parse_key(&token)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Keys with names, as gpui spells them.
+const NAMED_KEYS: &[&str] = &[
+    "enter",
+    "escape",
+    "space",
+    "backspace",
+    "tab",
+    "delete",
+    "insert",
+    "left",
+    "right",
+    "up",
+    "down",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+];
+
+fn named_key(key: &str) -> Keystroke {
+    Keystroke {
+        modifiers: gpui::Modifiers::default(),
+        key: key.into(),
+        key_char: None,
+    }
+}
+
+/// A typed character: an uppercase letter is shift + the letter, as the
+/// platform reports it; the window's simulated IME fills in the text.
+fn char_key(c: char) -> Keystroke {
+    let mut modifiers = gpui::Modifiers::default();
+    let key = match c {
+        ' ' => "space".to_string(),
+        c if c.is_uppercase() => {
+            modifiers.shift = true;
+            c.to_lowercase().collect()
+        }
+        c => c.to_string(),
+    };
+    Keystroke {
+        modifiers,
+        key,
+        key_char: Some(c.to_string()),
+    }
+}
+
+/// One key token, Emacs- or gpui-style.
+fn parse_key(token: &str) -> Result<Keystroke, String> {
+    let unknown = || format!("unknown key: {token}");
+    let mut modifiers = gpui::Modifiers::default();
+    let mut rest = token;
+    // Emacs modifier prefixes. `C--` is C- then the `-` key.
+    loop {
+        let flag = match rest.get(..2) {
+            Some("C-") => &mut modifiers.control,
+            Some("M-") => &mut modifiers.alt,
+            Some("S-") => &mut modifiers.shift,
+            Some("s-") => &mut modifiers.platform,
+            _ => break,
+        };
+        if rest.len() == 2 {
+            break;
+        }
+        *flag = true;
+        rest = &rest[2..];
+    }
+    let emacs_name = match rest {
+        "RET" => Some("enter"),
+        "SPC" => Some("space"),
+        "TAB" => Some("tab"),
+        "ESC" => Some("escape"),
+        "DEL" => Some("backspace"),
+        _ => None,
+    };
+    let key = if let Some(name) = emacs_name {
+        name.to_string()
+    } else if let Some(inner) = rest.strip_prefix('<').and_then(|r| r.strip_suffix('>')) {
+        let inner = inner.to_ascii_lowercase();
+        match inner.as_str() {
+            "return" => "enter".into(),
+            "esc" => "escape".into(),
+            "del" => "delete".into(),
+            "prior" => "pageup".into(),
+            "next" => "pagedown".into(),
+            k if NAMED_KEYS.contains(&k) || is_function_key(k) => inner.clone(),
+            _ => return Err(unknown()),
+        }
+    } else if rest.chars().count() == 1 {
+        let c = rest.chars().next().ok_or_else(unknown)?;
+        let mut ks = char_key(c);
+        ks.modifiers.control |= modifiers.control;
+        ks.modifiers.alt |= modifiers.alt;
+        ks.modifiers.platform |= modifiers.platform;
+        ks.modifiers.shift |= modifiers.shift;
+        // A chord's text is the platform's business; a plain key types itself.
+        if ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform {
+            ks.key_char = None;
+        }
+        return Ok(ks);
+    } else if NAMED_KEYS.contains(&rest) || is_function_key(rest) {
+        rest.to_string()
+    } else if rest.contains('-') && rest.len() > 1 && modifiers == gpui::Modifiers::default() {
+        // gpui-style: `ctrl-x`, `alt-shift-f`, `cmd-v`.
+        let ks = Keystroke::parse(rest).map_err(|_| unknown())?;
+        let named = NAMED_KEYS.contains(&ks.key.as_str()) || is_function_key(&ks.key);
+        if ks.key.chars().count() != 1 && !named {
+            return Err(unknown());
+        }
+        return Ok(ks);
+    } else {
+        return Err(unknown());
+    };
+    Ok(Keystroke {
+        modifiers,
+        key,
+        key_char: None,
+    })
+}
+
+fn is_function_key(k: &str) -> bool {
+    k.strip_prefix('f')
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=24).contains(&n))
+}
+
+/// A keystroke in Emacs notation, for the report.
+fn key_name(ks: &Keystroke) -> String {
+    let mut out = String::new();
+    let m = &ks.modifiers;
+    for (on, prefix) in [(m.control, "C-"), (m.alt, "M-"), (m.platform, "s-")] {
+        if on {
+            out.push_str(prefix);
+        }
+    }
+    // A shifted character shows as itself (`A`); a shifted named key as `S-`.
+    let shifted_char = m.shift && ks.key.chars().count() == 1;
+    if m.shift && !shifted_char {
+        out.push_str("S-");
+    }
+    let key = match ks.key.as_str() {
+        "enter" => "RET".to_string(),
+        "space" => "SPC".to_string(),
+        "tab" => "TAB".to_string(),
+        "escape" => "ESC".to_string(),
+        "backspace" => "DEL".to_string(),
+        k if k.chars().count() == 1 && shifted_char => k.to_uppercase(),
+        k if k.chars().count() == 1 => k.to_string(),
+        k => format!("<{k}>"),
+    };
+    out.push_str(&key);
+    out
+}
+
+/// What `press_keys` returns: the keys, then the state they left.
+fn key_report(keys: &[Keystroke], before: &KeyState, after: &KeyState, messages: &str) -> String {
+    let names: Vec<String> = keys.iter().map(key_name).collect();
+    let mut out = format!("pressed: {} ({} key(s))\n", names.join(" "), keys.len());
+    if after.buffer != before.buffer {
+        out.push_str(&format!("buffer: {} (was {})", after.buffer, before.buffer));
+    } else {
+        out.push_str(&format!("buffer: {}", after.buffer));
+    }
+    out.push_str(&format!("  [{}]\n", after.modes));
+    out.push_str(&format!("state: {}\n", after.state));
+    out.push_str(&format!(
+        "point: byte {} (line {}, column {}, 0-based)\n",
+        after.point, after.line, after.column
+    ));
+    out.push_str(&format!("line: {:?}\n", after.current_line));
+    let changed = after.buffer == before.buffer && after.text_hash != before.text_hash;
+    out.push_str(&format!(
+        "text changed: {}\n",
+        if after.buffer != before.buffer {
+            "(different buffer)"
+        } else if changed {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    if !after.pending.is_empty() {
+        out.push_str(&format!("pending prefix: {}\n", after.pending));
+    }
+    if let Some(mb) = &after.minibuffer {
+        out.push_str(&format!("minibuffer: {mb}\n"));
+    }
+    if let Some(helm) = &after.helm {
+        out.push_str(&format!("helm: {helm}\n"));
+    }
+    if !after.echo_area.is_empty() {
+        out.push_str(&format!("echo area: {}\n", after.echo_area));
+    }
+    if !messages.is_empty() {
+        out.push_str("messages:\n");
+        for line in messages.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+/// Dispatch one keystroke through the editor's window — gpui's own path for a
+/// real key press: the window's action keymap (RET, DEL, arrows, …), then the
+/// focused element's key-down listeners (the editor's modal layers), then,
+/// if no one stopped it, the text-input handler.
+fn press_key(this: &WeakEntity<Editor>, ks: Keystroke, cx: &mut AsyncApp) -> Result<(), String> {
+    let window = this
+        .read_with(cx, |e, _| e.window_handle)
+        .map_err(|_| EDITOR_GONE.to_string())?
+        .ok_or("the editor has not been drawn in a window yet")?;
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_keystroke(ks, cx);
+    })
+    .map_err(|_| "the editor's window is closed".to_string())
 }
 
 /// Cap on the `*mcp-server*` request log.
@@ -214,6 +570,15 @@ impl Editor {
             Ok(server) => {
                 let drain = cx.spawn(async move |this, cx| {
                     while let Some(request) = rx.next().await {
+                        // A keystroke goes through the window, which updates
+                        // the editor itself — so not from inside an update.
+                        let request = match request {
+                            McpRequest::PressKey(ks, reply) => {
+                                let _ = reply.send(press_key(&this, ks, cx));
+                                continue;
+                            }
+                            other => other,
+                        };
                         if this
                             .update(cx, |editor, cx| editor.on_mcp_request(request, cx))
                             .is_err()
@@ -301,7 +666,64 @@ impl Editor {
                     text
                 }));
             }
+            McpRequest::KeyState(reply) => {
+                let _ = reply.send(self.key_state());
+            }
+            // The drain loop dispatches these itself, outside any update.
+            McpRequest::PressKey(_, reply) => {
+                let _ = reply.send(Err("internal: keystroke not sent to the window".into()));
+            }
             McpRequest::Log(line) => self.mcp_log_line(line),
+        }
+    }
+
+    /// The state `press_keys` reports (see [`KeyState`]).
+    pub(super) fn key_state(&self) -> KeyState {
+        use std::hash::{Hash, Hasher};
+        let buffer = &self.active.buffer;
+        let point = self.point();
+        let (line, column) = buffer.byte_to_position(point);
+        let text = buffer.full_text();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let current_line = text
+            .get(buffer.line_range(line.min(buffer.line_count().saturating_sub(1))))
+            .unwrap_or("")
+            .trim_end_matches('\n')
+            .to_string();
+        let state = match self.evil {
+            EvilState::Disabled => "emacs",
+            EvilState::Normal => "normal",
+            EvilState::Insert => "insert",
+            EvilState::Visual => "visual",
+            EvilState::VisualLine => "visual-line",
+            EvilState::VisualBlock => "visual-block",
+        };
+        let state = match (self.evil, self.modal_helix) {
+            (EvilState::Disabled, _) => state.to_string(),
+            (_, true) => format!("helix {state}"),
+            (_, false) => format!("evil {state}"),
+        };
+        KeyState {
+            buffer: self.active.name.to_string(),
+            modes: self.active.modes.names().join(" "),
+            state,
+            point,
+            line,
+            column,
+            current_line,
+            text_hash: hasher.finish(),
+            pending: self.pending_keys.join(" "),
+            minibuffer: self.minibuffer.as_ref().map(|m| {
+                if m.secret.is_some() {
+                    format!("{}(secret input hidden)", m.prompt)
+                } else {
+                    format!("{}{}", m.prompt, m.input)
+                }
+            }),
+            helm: self.helm.as_ref().map(|h| h.prompt_and_pattern()),
+            echo_area: self.status.to_string(),
+            echo_count: self.echo_count,
         }
     }
 

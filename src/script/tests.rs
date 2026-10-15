@@ -3157,6 +3157,15 @@ mod magit_tests {
         set(vec![(0, 0)]);
         assert_eq!(sels("(helix-word-next)"), vec![(0, 6)]);
 
+        // On a line's last word it stops before the newline, as Helix does...
+        set(vec![(6, 6)]);
+        assert_eq!(sels("(helix-word-next)"), vec![(6, 11)]);
+        // ...and from there the next `w` skips the break to the next word.
+        set(vec![(6, 11)]);
+        assert_eq!(sels("(helix-word-next)"), vec![(12, 19)]);
+        set(vec![(6, 6)]);
+        assert_eq!(sels("(helix-bigword-next)"), vec![(6, 11)]);
+
         // Two selections move independently — the whole point of multi-selection.
         set(vec![(0, 0), (12, 12)]);
         assert_eq!(sels("(helix-char-right)"), vec![(1, 1), (13, 13)]);

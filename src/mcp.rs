@@ -63,6 +63,9 @@ pub trait Backend: Send + Sync + 'static {
     fn list_buffers(&self) -> Result<String, String>;
     /// The last `count` echo-area messages.
     fn messages(&self, count: usize) -> Result<String, String>;
+    /// Press `keys` (see the `press_keys` tool) in the editor's window, as if
+    /// typed, and report the editor's state afterwards.
+    fn press_keys(&self, keys: &str) -> Result<String, String>;
     /// Record one line in the editor's `*mcp-server*` buffer.
     fn log(&self, line: String);
 }
@@ -475,7 +478,8 @@ pub fn handle_message(message: &Value, backend: &dyn Backend) -> Option<Value> {
 const INSTRUCTIONS: &str = "This server is a live Macros editor (an Emacs-style editor \
 scripted in Steel Scheme). Use `eval` to run Steel in the running editor — define or \
 redefine functions, call commands like (plot-demo), inspect state — then `buffer_text`, \
-`list_buffers`, and `messages` to see the effect. Before writing package code, call `api` \
+`list_buffers`, and `messages` to see the effect. `press_keys` types keys into the window \
+the way a user would, to check what a binding really does. Before writing package code, call `api` \
 for the categorized reference of every primitive (signatures, types, docs) and the bundled \
 Scheme library; `describe` and `apropos` look up single names. Buffer and overlay positions \
 are BYTE offsets.";
@@ -545,6 +549,28 @@ const TOOLS: &[Tool] = &[
             })
         },
         run: messages_tool,
+    },
+    Tool {
+        name: "press_keys",
+        description: "Press keys in the editor's window exactly as if typed: each keystroke \
+        goes through the window's key dispatch (OS-key actions like RET/DEL/arrows, then \
+        the editor's modal layers and keymaps, then text input), and the editor settles \
+        (Scheme commands finish) before the next one. Returns the modal state, point, the \
+        current line, any pending prefix, an open minibuffer or Helm prompt, and the \
+        messages the keys echoed. Notation: space-separated keys, Emacs-style (`C-x C-f`, \
+        `M-x`, `C-M-a`, `s-v` for Cmd, `RET`, `SPC`, `TAB`, `ESC`, `DEL`, `<left>`, `<f1>`) \
+        or gpui-style (`ctrl-x`, `alt-f`, `cmd-v`, `shift-tab`, `enter`, `escape`). A \
+        single character is that key (`A` is shift-a). A double-quoted string types each \
+        of its characters (`\"hello world\"`). Keys go wherever the window's focus is, \
+        as a user's would.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {"keys": {"type": "string", "description": "Keys to press, e.g. \"C-x b\" or \"i \\\"hi\\\" ESC d d\"."}},
+                "required": ["keys"]
+            })
+        },
+        run: press_keys_tool,
     },
     Tool {
         name: "describe",
@@ -694,6 +720,20 @@ fn messages_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
         .count
         .map_or(50, |n| n as usize);
     reply(backend.messages(count.clamp(1, 10_000)))
+}
+
+#[derive(Deserialize, Default)]
+struct PressKeysArgs {
+    #[serde(default, deserialize_with = "lenient")]
+    keys: Option<String>,
+}
+
+fn press_keys_tool(args: &Value, backend: &dyn Backend) -> (String, bool) {
+    let Some(keys) = parse_args::<PressKeysArgs>(args).keys else {
+        return missing("keys");
+    };
+    backend.log(format!("press_keys: {}", one_line(&keys, 120)));
+    reply(backend.press_keys(&keys))
 }
 
 #[derive(Deserialize, Default)]
@@ -897,6 +937,12 @@ mod tests {
         fn messages(&self, count: usize) -> Result<String, String> {
             Ok(format!("{count} messages"))
         }
+        fn press_keys(&self, keys: &str) -> Result<String, String> {
+            if keys == "bogus" {
+                return Err("unknown key: bogus".into());
+            }
+            Ok(format!("pressed {keys}"))
+        }
         fn log(&self, line: String) {
             self.logs.lock().unwrap().push(line);
         }
@@ -946,6 +992,7 @@ mod tests {
                 "buffer_text",
                 "list_buffers",
                 "messages",
+                "press_keys",
                 "describe",
                 "api",
                 "apropos"
@@ -1005,6 +1052,30 @@ mod tests {
             json!({"name": "buffer_text", "arguments": {"buffer": "a", "end_line": 5, "faces": true}}),
         );
         assert_eq!(text(&r), "Some(\"a\") Some((0, 5)) true");
+
+        let r = call(
+            &fake,
+            "tools/call",
+            json!({"name": "press_keys", "arguments": {"keys": "C-x b"}}),
+        );
+        assert_eq!(text(&r), "pressed C-x b");
+        assert!(
+            fake.logs
+                .lock()
+                .unwrap()
+                .contains(&"press_keys: C-x b".to_string())
+        );
+        let r = call(
+            &fake,
+            "tools/call",
+            json!({"name": "press_keys", "arguments": {"keys": "bogus"}}),
+        );
+        assert_eq!(
+            (text(&r).as_str(), &r["result"]["isError"]),
+            ("unknown key: bogus", &json!(true))
+        );
+        let r = call(&fake, "tools/call", json!({"name": "press_keys"}));
+        assert_eq!(r["result"]["isError"], true);
 
         let r = call(
             &fake,

@@ -239,6 +239,11 @@ impl AsRef<str> for Indexed<'_> {
 }
 
 impl HelmSession {
+    /// The prompt followed by what's been typed (for the MCP `press_keys` report).
+    pub(super) fn prompt_and_pattern(&self) -> String {
+        format!("{}{}", self.prompt, self.pattern)
+    }
+
     pub(super) fn new(
         prompt: String,
         pattern: String,
