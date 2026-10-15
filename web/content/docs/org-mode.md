@@ -13,7 +13,7 @@ It's built in five independently useful layers:
 2. **Structure editing** — TODO/tag/priority cycling, promote/demote, move subtree, insert heading, toggle checkbox.
 3. **An Org AST parser** (`org-parse`) that both export and the agenda consume.
 4. **Agenda + capture** across a set of `.org` files.
-5. **Tables** (alignment) and **babel** (executing source blocks).
+5. **Tables** (alignment, text charts) and **babel** (executing source blocks).
 
 ## Visibility & headings
 
@@ -61,8 +61,44 @@ Tables are interactive, like Emacs. Inside a table:
 | <kbd>M-S-→</kbd> / <kbd>M-S-←</kbd> | Insert / delete a column |
 | <kbd>M-S-↓</kbd> / <kbd>M-S-↑</kbd> | Insert / delete a row |
 | <kbd>C-c C-c</kbd> | Re-align the table |
+| <kbd>C-c " g</kbd> | Chart the table (`org-plot/text`) |
 
-Outside a table these keys keep their heading meanings (fold, promote/demote, move subtree). `C-c C-c` also executes the source block at point. The Org AST parser drives tables, babel, and export, so they all see the same structure.
+Outside a table these keys keep their heading meanings (fold, promote/demote, move subtree). `C-c C-c` also executes the source block at point and writes its output to a `#+RESULTS:` block below it. Blocks can be `sh`/`bash`, `python`, `ruby`, `js`, or `scheme`. The Org AST parser drives tables, babel, and export, so they all see the same structure.
+
+### Scheme blocks
+
+A `scheme` (or `steel`) block runs inside the editor, like an `emacs-lisp` block in Emacs. Its defines stay defined, and it can call any editor function. The value of the last form is the result. A string is written as-is, and other values are printed. If the value is a [text chart](/docs/plotting), the chart is written, colors included:
+
+```org
+#+begin_src scheme
+(plot-function sin -6.3 6.3 'width 40 'height 6 'shade (list 0 3.14))
+#+end_src
+```
+
+Output a block prints with `display` isn't captured; only the value is.
+
+### Charting a table
+
+<kbd>C-c " g</kbd> (`org-plot/text`) charts the table at point as a [text chart](/docs/plotting) in a `#+RESULTS:` block below it, and running it again redraws the chart. Settings come from a `#+PLOT:` line above the table, in Emacs org-plot's syntax:
+
+```org
+#+PLOT: title:"Requests" ind:1 deps:(2 3) type:bars
+| day | req | err |
+|-----+-----+-----|
+| mon |  10 |   1 |
+| tue |  25 |   3 |
+```
+
+| Option | Meaning |
+| --- | --- |
+| `ind` | The x column, counting from 1 (default 1). If it holds numbers, they're the x values. Otherwise they label the bars, and line charts use the row number. |
+| `deps` | The columns to plot (default: every other column that has a number) |
+| `type` | `lines` (the default), `bars`, or `scatter`. Emacs's `with:points` also means scatter, and `with:boxes` / `with:histograms` mean bars. |
+| `title`, `width`, `height` | Passed to the chart |
+
+Column names come from the header row above the first `|---|` line. Bars draw one chart per column, and lines and scatter draw one series per column, with a legend.
+
+Org repaints its colors on every edit, so it keeps the colors of charts written this session itself. After the file is reopened a chart shows uncolored until you run its block or `C-c " g` again.
 
 ## Export & previews
 
