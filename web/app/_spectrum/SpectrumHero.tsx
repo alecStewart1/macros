@@ -315,6 +315,9 @@ export function SpectrumHero() {
           <Link href="/docs/plotting" className={`${s.topLink} ${s.hideSm}`}>
             Text charts
           </Link>
+          <Link href="/blog" className={s.topLink}>
+            Blog
+          </Link>
           <a href={REPO} className={`${s.topLink} ${s.hideSm}`} target="_blank" rel="noreferrer">
             GitHub
           </a>
