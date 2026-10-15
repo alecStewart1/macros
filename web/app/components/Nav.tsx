@@ -32,6 +32,9 @@ export function Nav() {
           <Link className="nav-link nav-hide-sm" href="/docs/getting-started">
             Get started
           </Link>
+          <Link className="nav-link" href="/blog">
+            Blog
+          </Link>
           <a className="nav-link nav-hide-sm" href={REPO} target="_blank" rel="noreferrer">
             GitHub
           </a>
