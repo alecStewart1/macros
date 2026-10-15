@@ -12068,17 +12068,32 @@ mod org_plot_tests {
         assert_eq!(val(&e, r#"(org--run-src "scheme" "(+ 1 2)")"#), r#""3""#);
         // A string is written as-is, a define (void) as nothing, and defines persist.
         assert_eq!(val(&e, r#"(org--run-src "scheme" "\"hi\"")"#), r#""hi""#);
-        assert_eq!(val(&e, r#"(org--run-src "scheme" "(define zz-org 41)")"#), r#""""#);
-        assert_eq!(val(&e, r#"(org--run-src "steel" "(+ zz-org 1)")"#), r#""42""#);
-        assert_eq!(val(&e, r#"(org--run-src "scheme" "(list 1 \"a\")")"#), r#""(1 \"a\")""#);
+        assert_eq!(
+            val(&e, r#"(org--run-src "scheme" "(define zz-org 41)")"#),
+            r#""""#
+        );
+        assert_eq!(
+            val(&e, r#"(org--run-src "steel" "(+ zz-org 1)")"#),
+            r#""42""#
+        );
+        assert_eq!(
+            val(&e, r#"(org--run-src "scheme" "(list 1 \"a\")")"#),
+            r#""(1 \"a\")""#
+        );
         // Errors are caught and reported as the result.
         assert_eq!(
-            val(&e, r#"(starts-with? (org--run-src "scheme" "(car '())") "Error: ")"#),
+            val(
+                &e,
+                r#"(starts-with? (org--run-src "scheme" "(car '())") "Error: ")"#
+            ),
             "#true"
         );
         // A plot comes back as its rows.
         assert_eq!(
-            val(&e, r#"(org--styled-rows? (org--run-src "scheme" "(plot-bars (list (list \"a\" 1) (list \"b\" 2)))"))"#),
+            val(
+                &e,
+                r#"(org--styled-rows? (org--run-src "scheme" "(plot-bars (list (list \"a\" 1) (list \"b\" 2)))"))"#
+            ),
             "#true"
         );
     }
@@ -12097,9 +12112,11 @@ mod org_plot_tests {
     fn chart_results_keep_their_colors() {
         // A written chart's rows are remembered, so the fontifier paints them.
         let e = engine_with("", 0);
-        e.eval(r#"(define zz-p (plot-bars (list (list "a" 1) (list "b" 2))))
-                  (org--remember-chart-rows zz-p)"#)
-            .unwrap();
+        e.eval(
+            r#"(define zz-p (plot-bars (list (list "a" 1) (list "b" 2))))
+                  (org--remember-chart-rows zz-p)"#,
+        )
+        .unwrap();
         let text = format!(
             "#+RESULTS:\n: {}\n",
             val(&e, "(plot-row-text (car zz-p))").trim_matches('"')
@@ -12126,7 +12143,10 @@ mod org_plot_tests {
     fn plot_options_parse() {
         let e = engine_with("", 0);
         assert_eq!(
-            val(&e, r##"(org-plot--parse-options "#+PLOT: title:\"Two words\" ind:1 deps:(2 3) type:bars")"##),
+            val(
+                &e,
+                r##"(org-plot--parse-options "#+PLOT: title:\"Two words\" ind:1 deps:(2 3) type:bars")"##
+            ),
             r#"(("title" "Two words") ("ind" "1") ("deps" "2 3") ("type" "bars"))"#
         );
         assert_eq!(val(&e, r#"(org-plot--parse-deps "2 3")"#), "(1 2)");
@@ -12138,7 +12158,10 @@ mod org_plot_tests {
     fn plot_table_as_bars() {
         let e = engine_with(TABLE, 40);
         let out = replaced(&e, "(org-plot/text)");
-        assert!(out.starts_with(&TABLE[..TABLE.find("\n\nafter").unwrap()]), "{out}");
+        assert!(
+            out.starts_with(&TABLE[..TABLE.find("\n\nafter").unwrap()]),
+            "{out}"
+        );
         assert!(out.contains("|\n#+RESULTS:\n: Load\n"), "{out}");
         // Two deps → a titled chart per column, with each row's label.
         for want in [": req\n", ": err\n", ": mon ", ": tue "] {
@@ -12152,17 +12175,25 @@ mod org_plot_tests {
         let text = "#+PLOT: deps:(2) width:30 height:5\n| x | y |\n|---+---|\n| 1 | 2 |\n| 2 | 4 |\n| 3 | 1 |\n";
         let e = engine_with(text, 40);
         let out = replaced(&e, "(org-plot/text)");
-        let results: Vec<&str> = out.lines().skip_while(|l| *l != "#+RESULTS:").skip(1).collect();
+        let results: Vec<&str> = out
+            .lines()
+            .skip_while(|l| *l != "#+RESULTS:")
+            .skip(1)
+            .collect();
         assert!(results.len() >= 5, "{out}");
-        assert!(results.iter().all(|l| l.starts_with(": ") || l.is_empty()), "{out}");
+        assert!(
+            results.iter().all(|l| l.starts_with(": ") || l.is_empty()),
+            "{out}"
+        );
         // Not in a table → no rewrite.
         let e = engine_with("plain\n", 0);
-        assert!(e
-            .eval("(org-plot/text)")
-            .unwrap()
-            .commands
-            .iter()
-            .all(|c| !matches!(c, EditorCommand::ReplaceRegion { .. })));
+        assert!(
+            e.eval("(org-plot/text)")
+                .unwrap()
+                .commands
+                .iter()
+                .all(|c| !matches!(c, EditorCommand::ReplaceRegion { .. }))
+        );
     }
 
     #[test]
