@@ -415,7 +415,11 @@
                     ((org--table-line? line)
                      (org--span off lend "org-table") #f)
                     (else
-                     (org--fontify-plain off line) #f))))))
+                     (let ((cl (org--chart-line line)))
+                       (if cl
+                           (org--fontify-chart-line off lend cl)
+                           (org--fontify-plain off line)))
+                     #f))))))
       (org--flush-spans)
       (org--apply-indent all-lines))))
 
@@ -1580,11 +1584,64 @@
                    ((equal? lang "ruby") (list "ruby"))
                    ((or (equal? lang "js") (equal? lang "javascript") (equal? lang "node")) (list "node"))
                    (else #f))))
-    (if (not cmd)
-        (string-append "Unsupported src language: " lang)
-        (let* ((res (call-process-full (car cmd) (cdr cmd) (string-append body "\n")))
-               (out (trim-end (nth res 1))) (err (trim-end (nth res 2))))
-          (if (equal? out "") err out)))))
+    (cond ((or (equal? lang "scheme") (equal? lang "steel")) (org--run-scheme body))
+          ((not cmd) (string-append "Unsupported src language: " lang))
+          (else
+           (let* ((res (call-process-full (car cmd) (cdr cmd) (string-append body "\n")))
+                  (out (trim-end (nth res 1))) (err (trim-end (nth res 2))))
+             (if (equal? out "") err out))))))
+
+;; --- scheme blocks ----------------------------------------------------------
+;; A `scheme` block runs in the editor's own Steel engine, like an elisp block
+;; in Emacs: its defines persist and it can call any editor function. The value
+;; of the last form is the result. A string is written as-is; a chart (a plot
+;; from plot.scm — rows of (text spans)) is written as its text and keeps its
+;; colors; anything else is printed.
+(define (org--styled-rows? v)
+  (and (list? v) (not (null? v))
+       (all? (lambda (r) (and (list? r) (= (length r) 2)
+                              (string? (car r)) (list? (cadr r))))
+             v)))
+
+(define (org--run-scheme body)
+  (with-handler
+    (lambda (err)
+      (string-append "Error: " (if (error-object? err) (error-object-message err) (to-string err))))
+    (let ((v (eval-string (string-append "(begin\n" body "\n)"))))
+      (cond ((string? v) v)
+            ((void? v) "")
+            ((org--styled-rows? v) v)
+            (else (to-string v))))))
+
+;; Chart colors. Org repaints every face on each edit (`org--fontify` clears
+;; them all), so a chart's colors can't just be overlaid once. Instead each
+;; written chart row's text maps to its (start end face) spans here, and the
+;; fontifier paints any `: ` results line whose text it knows. Keyed by text
+;; with trailing blanks trimmed, so a save that strips trailing whitespace
+;; keeps the colors. Lives for the session: reopening the file shows the chart
+;; uncolored until its block is run again.
+(define *org--chart-rows* (hash))
+(define (org--remember-chart-rows rows)
+  (for-each (lambda (r)
+              (set! *org--chart-rows*
+                    (hash-insert *org--chart-rows* (trim-end (car r)) (cadr r))))
+            rows))
+
+;; (prefix-bytes spans) when `line` is a results line holding a known chart
+;; row, else #f.
+(define (org--chart-line line)
+  (let ((c (regexp-captures "^([ \t]*: )" line)))
+    (and (not (null? c))
+         (let* ((pre (utf8-length (nth c 1)))
+                (spans (hash-try-get *org--chart-rows* (trim-end (byte-drop line pre)))))
+           (and spans (list pre spans))))))
+
+(define (org--fontify-chart-line lstart lend cl)
+  (let ((pre (car cl)))
+    (for-each (lambda (sp)
+                (let ((s (+ lstart pre (car sp))) (e (min lend (+ lstart pre (cadr sp)))))
+                  (when (< s e) (org--span s e (nth sp 2)))))
+              (cadr cl))))
 
 ;; Existing #+RESULTS block right after `start` (skipping blanks): (s e) or #f.
 (define (org--existing-results lines start n)
@@ -1600,6 +1657,29 @@
                    (else (list i (- j 1))))))
           (else #f))))
 
+;; Write `out` as a #+RESULTS: block after line `el`, replacing the one
+;; already there. `out` is a string or chart rows (see org--styled-rows?); each
+;; result line is prefixed `: ` so Org keeps it verbatim.
+(define (org--write-results el out)
+  (let* ((lines (org--lines)) (n (length lines))
+         (texts (if (string? out) (split-many out "\n") (map car out)))
+         (res-lines (cons "#+RESULTS:" (map (lambda (l) (string-append ": " l)) texts)))
+         (ex (org--existing-results lines (+ el 1) n))
+         (rest-start (if ex (+ (nth ex 1) 1) (+ el 1)))
+         (before (org--slice lines 0 el))
+         (rest (org--slice lines rest-start (- n 1))))
+    (unless (string? out) (org--remember-chart-rows out))
+    ;; One blank line separates the results from what follows — but only
+    ;; add it when `rest` doesn't already start with one, or every re-run
+    ;; would stack another blank line (the old one survives in `rest`).
+    (org--replace-all
+     (join-lines (append before res-lines
+                         (if (and (not (null? rest))
+                                  (equal? (string-trim (car rest)) ""))
+                             '()
+                             (list ""))
+                         rest)))))
+
 ;; C-c C-c inside a src block — run it, write a #+RESULTS block after it.
 (define-command (org-babel-execute)
   (let ((L0 (buffer-line))
@@ -1607,25 +1687,11 @@
     (if (not b)
         (message "Not in a src block")
         (let* ((el (nth b 1)) (lang (nth b 2))
-               (lines (org--lines)) (n (length lines))
-               (body (org--expand-noweb (join-lines (org--slice lines (+ (nth b 0) 1) (- el 1)))))
-               (out (org--run-src lang body))
-               (res-lines (cons "#+RESULTS:" (map (lambda (l) (string-append ": " l)) (split-many out "\n"))))
-               (ex (org--existing-results lines (+ el 1) n))
-               (rest-start (if ex (+ (nth ex 1) 1) (+ el 1)))
-               (before (org--slice lines 0 el))
-               (rest (org--slice lines rest-start (- n 1))))
-          ;; One blank line separates the results from what follows — but only
-          ;; add it when `rest` doesn't already start with one, or every re-run
-          ;; would stack another blank line (the old one survives in `rest`).
-          (org--replace-all
-           (join-lines (append before res-lines
-                               (if (and (not (null? rest))
-                                        (equal? (string-trim (car rest)) ""))
-                                   '()
-                                   (list ""))
-                               rest)))
+               (lines (org--lines))
+               (body (org--expand-noweb (join-lines (org--slice lines (+ (nth b 0) 1) (- el 1))))))
+          (org--write-results el (org--run-src lang body))
           (goto-line L0)
+          (org--fontify-schedule)
           (message "Block executed")))))
 
 ;; ===========================================================================
@@ -2912,7 +2978,9 @@
          (m (string-match "src_([A-Za-z0-9]+)(\\[[^]]*\\])?\\{([^}]*)\\}" line)))
     (if (< m 0) (message "No inline src at point")
         (let* ((c (regexp-captures "src_([A-Za-z0-9]+)(\\[[^]]*\\])?\\{([^}]*)\\}" line))
-               (whole (car c)) (out (trim-end (org--run-src (nth c 1) (nth c 3))))
+               (whole (car c))
+               (res (org--run-src (nth c 1) (nth c 3)))
+               (out (trim-end (if (string? res) res (join-lines (map car res)))))
                (pos (+ (org--line-start L) m (utf8-length whole))))
           (insert-at pos (string-append " {{{results(" out ")}}}"))
           (message "Inline src executed")))))

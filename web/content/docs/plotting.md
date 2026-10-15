@@ -5,7 +5,7 @@ description: Sparklines, bar charts, line and scatter plots, function and normal
 
 # Text charts
 
-`scheme/plot.scm` draws charts out of characters — braille dots, block elements, and box-drawing lines — colored with faces. Because a chart is just text, it works anywhere text does: inline in a dashboard row, in an Org or Markdown file, in a REPL, or in a buffer of its own. Run <kbd>M-x</kbd> `plot-demo` to see every chart type.
+`scheme/plot.scm` draws charts out of characters — braille dots, block elements, and box-drawing lines — colored with faces. Because a chart is just text, it works anywhere text does: inline in a dashboard row, in an Org or Markdown file, in a REPL, or in a buffer of its own. In Org, a `scheme` source block that returns a chart writes it as the block's result, and <kbd>C-c " g</kbd> charts a table. See [Org mode](/docs/org-mode#charting-a-table). Run <kbd>M-x</kbd> `plot-demo` to see every chart type.
 
 ```
 12 ┤      ⢀⡠⠊⠉⠢⡀

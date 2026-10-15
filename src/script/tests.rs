@@ -12024,3 +12024,184 @@ mod secret_options {
         );
     }
 }
+
+/// Org ↔ plot: scheme babel blocks (org.scm) and org-plot/text (plotting-org.scm).
+#[cfg(test)]
+mod org_plot_tests {
+    use super::*;
+
+    fn engine_with(text: &str, point: usize) -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine.set_snapshot(EditorSnapshot {
+            name: "notes.org".into(),
+            text: Rope::from_str(text),
+            point,
+            line: text[..point].matches('\n').count(),
+            ..Default::default()
+        });
+        engine
+    }
+
+    fn val(e: &ScriptEngine, q: &str) -> String {
+        e.eval(q).unwrap().value.unwrap_or_default()
+    }
+
+    /// The text of the command's ReplaceRegion, i.e. the rewritten buffer.
+    fn replaced(e: &ScriptEngine, q: &str) -> String {
+        e.eval(q)
+            .unwrap()
+            .commands
+            .into_iter()
+            .find_map(|c| match c {
+                EditorCommand::ReplaceRegion { text, .. } => Some(text),
+                _ => None,
+            })
+            .expect("a ReplaceRegion")
+    }
+
+    #[test]
+    fn scheme_block_values() {
+        let e = engine_with("", 0);
+        assert_eq!(val(&e, r#"(org--run-src "scheme" "(+ 1 2)")"#), r#""3""#);
+        // A string is written as-is, a define (void) as nothing, and defines persist.
+        assert_eq!(val(&e, r#"(org--run-src "scheme" "\"hi\"")"#), r#""hi""#);
+        assert_eq!(
+            val(&e, r#"(org--run-src "scheme" "(define zz-org 41)")"#),
+            r#""""#
+        );
+        assert_eq!(
+            val(&e, r#"(org--run-src "steel" "(+ zz-org 1)")"#),
+            r#""42""#
+        );
+        assert_eq!(
+            val(&e, r#"(org--run-src "scheme" "(list 1 \"a\")")"#),
+            r#""(1 \"a\")""#
+        );
+        // Errors are caught and reported as the result.
+        assert_eq!(
+            val(
+                &e,
+                r#"(starts-with? (org--run-src "scheme" "(car '())") "Error: ")"#
+            ),
+            "#true"
+        );
+        // A plot comes back as its rows.
+        assert_eq!(
+            val(
+                &e,
+                r#"(org--styled-rows? (org--run-src "scheme" "(plot-bars (list (list \"a\" 1) (list \"b\" 2)))"))"#
+            ),
+            "#true"
+        );
+    }
+
+    #[test]
+    fn scheme_block_writes_results() {
+        let text = "#+begin_src scheme\n(* 6 7)\n#+end_src\n\nafter\n";
+        let e = engine_with(text, 20);
+        assert_eq!(
+            replaced(&e, "(org-babel-execute)"),
+            "#+begin_src scheme\n(* 6 7)\n#+end_src\n#+RESULTS:\n: 42\n\nafter\n"
+        );
+    }
+
+    #[test]
+    fn chart_results_keep_their_colors() {
+        // A written chart's rows are remembered, so the fontifier paints them.
+        let e = engine_with("", 0);
+        e.eval(
+            r#"(define zz-p (plot-bars (list (list "a" 1) (list "b" 2))))
+                  (org--remember-chart-rows zz-p)"#,
+        )
+        .unwrap();
+        let text = format!(
+            "#+RESULTS:\n: {}\n",
+            val(&e, "(plot-row-text (car zz-p))").trim_matches('"')
+        );
+        e.set_snapshot(EditorSnapshot {
+            name: "notes.org".into(),
+            text: Rope::from_str(&text),
+            ..Default::default()
+        });
+        let commands = e.eval("(org--fontify)").unwrap().commands;
+        assert!(
+            commands.iter().any(|c| matches!(
+                c,
+                EditorCommand::OverlayFace { start, face, .. }
+                    if face.starts_with("plot-") && *start >= "#+RESULTS:\n: ".len()
+            )),
+            "no chart face painted: {commands:?}"
+        );
+        // An unknown results line is still plain.
+        assert_eq!(val(&e, r#"(org--chart-line ": hello")"#), "#false");
+    }
+
+    #[test]
+    fn plot_options_parse() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            val(
+                &e,
+                r##"(org-plot--parse-options "#+PLOT: title:\"Two words\" ind:1 deps:(2 3) type:bars")"##
+            ),
+            r#"(("title" "Two words") ("ind" "1") ("deps" "2 3") ("type" "bars"))"#
+        );
+        assert_eq!(val(&e, r#"(org-plot--parse-deps "2 3")"#), "(1 2)");
+    }
+
+    const TABLE: &str = "#+PLOT: title:\"Load\" type:bars\n| day | req | err |\n|-----+-----+-----|\n| mon | 10  | 1   |\n| tue | 25  | 3   |\n\nafter\n";
+
+    #[test]
+    fn plot_table_as_bars() {
+        let e = engine_with(TABLE, 40);
+        let out = replaced(&e, "(org-plot/text)");
+        assert!(
+            out.starts_with(&TABLE[..TABLE.find("\n\nafter").unwrap()]),
+            "{out}"
+        );
+        assert!(out.contains("|\n#+RESULTS:\n: Load\n"), "{out}");
+        // Two deps → a titled chart per column, with each row's label.
+        for want in [": req\n", ": err\n", ": mon ", ": tue "] {
+            assert!(out.contains(want), "missing {want:?}: {out}");
+        }
+        assert!(out.ends_with("\n\nafter\n"), "{out}");
+    }
+
+    #[test]
+    fn plot_table_as_lines() {
+        let text = "#+PLOT: deps:(2) width:30 height:5\n| x | y |\n|---+---|\n| 1 | 2 |\n| 2 | 4 |\n| 3 | 1 |\n";
+        let e = engine_with(text, 40);
+        let out = replaced(&e, "(org-plot/text)");
+        let results: Vec<&str> = out
+            .lines()
+            .skip_while(|l| *l != "#+RESULTS:")
+            .skip(1)
+            .collect();
+        assert!(results.len() >= 5, "{out}");
+        assert!(
+            results.iter().all(|l| l.starts_with(": ") || l.is_empty()),
+            "{out}"
+        );
+        // Not in a table → no rewrite.
+        let e = engine_with("plain\n", 0);
+        assert!(
+            e.eval("(org-plot/text)")
+                .unwrap()
+                .commands
+                .iter()
+                .all(|c| !matches!(c, EditorCommand::ReplaceRegion { .. }))
+        );
+    }
+
+    #[test]
+    fn plot_key_is_bound() {
+        let e = engine_with("", 0);
+        assert_eq!(
+            val(&e, r#"(key-binding "org-mode" "ctrl-c \" g")"#),
+            r#""org-plot/text""#
+        );
+    }
+}
