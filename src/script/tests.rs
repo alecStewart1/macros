@@ -12140,6 +12140,33 @@ mod org_plot_tests {
     }
 
     #[test]
+    fn src_block_body_is_painted_as_a_block() {
+        // The body is literal code: org-block, never parsed for emphasis (the
+        // `/repos/` in a path must not turn italic).
+        let text = "#+BEGIN_SRC scheme\n(load \"~/repos/x.scm\")\n#+END_SRC\n";
+        let e = engine_with("", 0);
+        e.set_snapshot(EditorSnapshot {
+            name: "notes.org".into(),
+            text: Rope::from_str(text),
+            ..Default::default()
+        });
+        let commands = e.eval("(org--fontify)").unwrap().commands;
+        let body = "#+BEGIN_SRC scheme\n".len();
+        let faces: Vec<_> = commands
+            .iter()
+            .filter_map(|c| match c {
+                EditorCommand::OverlayFace { start, face, .. } => Some((*start, face.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert!(faces.contains(&(body, "org-block")), "{faces:?}");
+        assert!(
+            !faces.iter().any(|(_, f)| *f == "org-italic"),
+            "src body parsed for emphasis: {faces:?}"
+        );
+    }
+
+    #[test]
     fn plot_options_parse() {
         let e = engine_with("", 0);
         assert_eq!(

@@ -403,7 +403,7 @@
                      (org--span off lend "org-block") #t)
                     ((org--block-begin? line)
                      (org--span off lend "org-meta")
-                     (>= (string-match "_[sS][rR][cC]\\|_[eE][xX]" line) 0))
+                     (>= (string-match "_[sS][rR][cC]|_[eE][xX]" line) 0))
                     ((org--block-end? line)
                      (org--span off lend "org-meta") #f)
                     (lvl
