@@ -51,6 +51,8 @@ mod helm;
 mod input;
 mod isearch;
 mod json_print;
+#[cfg(test)]
+mod key_tests;
 mod kill_ring;
 mod lisp_indent;
 mod lsp_methods;
@@ -81,8 +83,8 @@ use session::BoundedRing;
 use terminal::keystroke_to_bytes;
 use undo::{UndoGrouping, UndoRecord, UndoTree};
 
-// Keys that the OS treats specially are captured as GPUI actions (in `main`)
-// rather than through the Scheme keymap, then delegated to the same commands.
+// Keys that the OS treats specially are captured as GPUI actions (bound by
+// [`key_bindings`]) rather than through the Scheme keymap, then delegated to the same commands.
 actions!(
     editor,
     [
@@ -101,6 +103,26 @@ actions!(
         SelectAll,
     ]
 );
+
+/// The OS-special keys bound to the actions above, in the editor's key context.
+pub fn key_bindings() -> Vec<gpui::KeyBinding> {
+    use gpui::KeyBinding;
+    vec![
+        KeyBinding::new("backspace", Backspace, Some("Editor")),
+        KeyBinding::new("delete", Delete, Some("Editor")),
+        KeyBinding::new("left", Left, Some("Editor")),
+        KeyBinding::new("right", Right, Some("Editor")),
+        KeyBinding::new("up", Up, Some("Editor")),
+        KeyBinding::new("down", Down, Some("Editor")),
+        KeyBinding::new("home", Home, Some("Editor")),
+        KeyBinding::new("end", End, Some("Editor")),
+        KeyBinding::new("enter", Newline, Some("Editor")),
+        KeyBinding::new("tab", Tab, Some("Editor")),
+        KeyBinding::new("shift-left", SelectLeft, Some("Editor")),
+        KeyBinding::new("shift-right", SelectRight, Some("Editor")),
+        KeyBinding::new("cmd-a", SelectAll, Some("Editor")),
+    ]
+}
 
 /// An action deferred until the user confirms it in a yes/no minibuffer.
 /// The kill variants carry the buffer's name: the prompt is asynchronous, so
@@ -484,8 +506,14 @@ pub struct Editor {
     /// Scrollback of echo-area messages (Emacs `*Messages*`), capped. Every
     /// `echo` appends here so transient status can be reviewed later.
     messages: BoundedRing,
+    /// Messages echoed since startup (the ring above drops old ones), so the
+    /// MCP `press_keys` tool can tell which messages its keys produced.
+    echo_count: usize,
     /// The MCP server (src/mcp.rs), when the `mcp-server` option is on.
     mcp: Option<mcp::McpState>,
+    /// The window this editor renders in, recorded on first render: the MCP
+    /// `press_keys` tool dispatches keystrokes through it.
+    window_handle: Option<gpui::AnyWindowHandle>,
     /// Its request log, shown by `M-x mcp-server-info` (capped).
     mcp_log: BoundedRing,
     /// Captured stderr from external language servers (Emacs-style `*lsp-log*`),
@@ -1323,7 +1351,9 @@ impl Editor {
             status: "Macros ready".into(),
             is_selecting: false,
             messages: BoundedRing::new(MESSAGES_CAP),
+            echo_count: 0,
             mcp: None,
+            window_handle: None,
             mcp_log: BoundedRing::new(mcp::MCP_LOG_CAP),
             lsp_log: BoundedRing::new(lsp_methods::LSP_LOG_CAP),
             hover_message: None,
@@ -3238,6 +3268,7 @@ impl Editor {
         self.status = message.into();
         let line = self.status.to_string();
         self.messages.push(line.clone());
+        self.echo_count += 1;
         // Append live to `*Messages*` if it's open (active or any pane/inactive),
         // so the buffer accumulates like Emacs's `*Messages*`.
         self.append_to_log_buffer("*Messages*", &line);
@@ -5036,6 +5067,7 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_handle = Some(window.window_handle());
         // Observe window focus once, so the cursor only blinks while the window
         // is active. Seed the current state here; the observer handles later
         // activate/deactivate changes.
