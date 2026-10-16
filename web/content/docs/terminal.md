@@ -41,7 +41,13 @@ Two more ways out of the shell:
 
 ## When the shell exits
 
-A terminal whose program has exited releases the keyboard, so normal editor keys work in the leftover buffer. `terminal-exit-hook` runs with the terminal's buffer name, so you can clean up automatically:
+By default, exiting the shell (`exit`, <kbd>C-d</kbd>) kills the terminal's buffer. To keep the dead terminal's scrollback around instead, remove the default hook:
+
+```scheme
+(remove-hook "terminal-exit-hook" "term-kill-on-exit")
+```
+
+A terminal whose program has exited releases the keyboard, so normal editor keys work in the leftover buffer. `terminal-exit-hook` runs with the terminal's buffer name, so you can customize the cleanup — for example, also closing the terminal's window:
 
 ```scheme
 (define (my-close-dead-terminal name)
@@ -50,6 +56,7 @@ A terminal whose program has exited releases the keyboard, so normal editor keys
       (select-window w)
       (delete-window))
     (kill-buffer-named name)))
+(remove-hook "terminal-exit-hook" "term-kill-on-exit")
 (add-hook "terminal-exit-hook" 'my-close-dead-terminal)
 ```
 

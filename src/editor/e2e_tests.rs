@@ -1361,3 +1361,36 @@ fn action_keys_share_one_precedence_order(cx: &mut TestAppContext) {
         assert!(!e.route_action_key(&KEY_LEFT, cx));
     });
 }
+
+/// When a terminal's shell exits, the bundled `terminal-exit-hook` kills its
+/// buffer (and the terminal backing it).
+#[gpui::test]
+fn terminal_exit_kills_its_buffer(cx: &mut TestAppContext) {
+    let ed = setup(cx, "");
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(make-terminal "*terminal*" "/bin/sh" (list "-c" "sleep 30") "/tmp")"#,
+            cx,
+        );
+    });
+    settle(&ed, cx);
+    let id = ed.read_with(cx, |e, _| {
+        assert!(e.has_buffer("*terminal*"));
+        e.terminals
+            .values()
+            .find(|t| t.buffer_name == "*terminal*")
+            .map(|t| t.id)
+            .expect("terminal spawned")
+    });
+
+    ed.update(cx, |e, cx| e.on_terminal_event(id, TermEvent::Exit, cx));
+    settle(&ed, cx);
+    ed.read_with(cx, |e, _| {
+        assert!(
+            !e.has_buffer("*terminal*"),
+            "buffers: {:?}",
+            e.buffer_names()
+        );
+        assert!(e.terminals.is_empty());
+    });
+}

@@ -9,10 +9,10 @@
 //! `element.rs`, which reads a plain-data [`TermSnapshot`] produced here — so no
 //! alacritty types leak past this module and the editor's terminal methods.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, Notify, OnResize, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
+use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 /// Which half of a cell a selection endpoint sits on.
 pub use alacritty_terminal::index::Side;
@@ -70,6 +70,10 @@ pub enum TermEvent {
 struct EventProxy {
     id: u64,
     tx: UnboundedSender<(u64, TermEvent)>,
+    /// Back-channel to the PTY for replies the terminal generates itself
+    /// (device-attribute / cursor-position reports). Set once the event loop
+    /// exists — the proxy has to be built before it.
+    pty: Arc<OnceLock<EventLoopSender>>,
 }
 
 impl EventListener for EventProxy {
@@ -79,8 +83,16 @@ impl EventListener for EventProxy {
             AlacEvent::Title(t) => TermEvent::Title(t),
             AlacEvent::ResetTitle => TermEvent::Title(String::new()),
             AlacEvent::Exit | AlacEvent::ChildExit(_) => TermEvent::Exit,
-            // Bell, clipboard, color requests, cursor-shape, PTY-write callbacks:
-            // nothing the basic embedded terminal needs to act on.
+            // Answers to queries like DA1 (`\e[c`) — programs such as fish 4
+            // block at startup until they arrive, so write them straight back.
+            AlacEvent::PtyWrite(text) => {
+                if let Some(pty) = self.pty.get() {
+                    let _ = pty.send(Msg::Input(text.into_bytes().into()));
+                }
+                return;
+            }
+            // Bell, clipboard, color requests, cursor-shape: nothing the basic
+            // embedded terminal needs to act on.
             _ => return,
         };
         let _ = self.tx.unbounded_send((self.id, mapped));
@@ -151,7 +163,11 @@ impl Terminal {
 
         let pty = tty::new(&options, window_size, id)?;
 
-        let proxy = EventProxy { id, tx };
+        let proxy = EventProxy {
+            id,
+            tx,
+            pty: Arc::new(OnceLock::new()),
+        };
         let config = Config {
             scrolling_history: SCROLLING_HISTORY,
             ..Config::default()
@@ -165,7 +181,8 @@ impl Terminal {
 
         // `drain_on_exit` kept `false` so a finished child stops promptly
         // rather than blocking to flush.
-        let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)?;
+        let event_loop = EventLoop::new(term.clone(), proxy.clone(), pty, false, false)?;
+        let _ = proxy.pty.set(event_loop.channel());
         let notifier = Notifier(event_loop.channel());
         // The join handle is intentionally dropped: the loop runs until it gets a
         // `Shutdown` (sent on `Drop`) or the child exits.
@@ -576,6 +593,46 @@ mod tests {
             found.contains("ZXCV"),
             "expected shell output in grid, got {found:?}"
         );
+    }
+
+    /// A DA1 query (`\e[c`) gets answered over the PTY — fish 4 stalls 10s at
+    /// startup without the reply. Same headless-CI caveat as above.
+    #[test]
+    #[ignore = "real-PTY integration test; unreliable in headless CI"]
+    fn device_attribute_query_is_answered() {
+        let (tx, _rx) = futures::channel::mpsc::unbounded();
+        let term = Terminal::new(
+            3,
+            "*t*".to_string(),
+            40,
+            10,
+            8,
+            16,
+            Some((
+                "/bin/bash".to_string(),
+                vec![
+                    "-c".to_string(),
+                    "stty -echo -icanon; printf '\\e[c'; IFS= read -rs -d c -t 3 r && printf DA1OK"
+                        .to_string(),
+                ],
+            )),
+            None,
+            &Default::default(),
+            tx,
+        )
+        .expect("spawn pty");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut found = String::new();
+        while std::time::Instant::now() < deadline {
+            let snap = term.snapshot(0xffffff, 0x000000);
+            found = snap.cells.iter().map(|c| c.ch).collect();
+            if found.contains("DA1OK") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(found.contains("DA1OK"), "no DA1 reply; grid was {found:?}");
     }
 
     /// A grid selection extracts the selected text — drives `selection_*`.
