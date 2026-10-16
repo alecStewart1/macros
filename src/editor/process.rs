@@ -24,6 +24,9 @@ enum ChildMsg {
 
 /// How long a terminated process group gets to exit on SIGTERM before SIGKILL.
 const TERM_GRACE: Duration = Duration::from_millis(500);
+/// How long quitting waits, in total, for language servers to exit after
+/// `shutdown` + `exit` before SIGKILLing their groups.
+const LSP_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// A live `make-process` child kept so Scheme can write to its stdin or kill
 /// it. The child's [`ProcessGroup`] is shared with the worker thread that reaps it (so the UI
@@ -121,6 +124,23 @@ impl Editor {
         drop(handles);
         self.terminals.clear();
         self.terminal_geom.clear();
+        self.shutdown_lsp_servers();
+    }
+
+    /// App quit: send every language server `shutdown` + `exit` together,
+    /// then share one grace period across them before SIGKILLing stragglers'
+    /// groups. Without this they'd only get `LspClient`'s drop-time SIGKILL,
+    /// and only if the editor is dropped before the process exits.
+    fn shutdown_lsp_servers(&mut self) {
+        let groups: Vec<_> = self
+            .servers
+            .values_mut()
+            .filter_map(|server| server.client.begin_shutdown())
+            .collect();
+        let deadline = Instant::now() + LSP_SHUTDOWN_GRACE;
+        for mut group in groups {
+            group.reap_with_grace(deadline.saturating_duration_since(Instant::now()));
+        }
     }
 
     /// Spawn `program` asynchronously (Emacs `make-process`): a worker thread
