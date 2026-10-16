@@ -384,6 +384,8 @@ sys.exit(5)
         struct KillGroup(i32);
         impl Drop for KillGroup {
             fn drop(&mut self) {
+                // SAFETY: `kill` takes no pointers; signalling a process group
+                // that has already exited just returns ESRCH.
                 unsafe {
                     libc::kill(-self.0, libc::SIGKILL);
                 }

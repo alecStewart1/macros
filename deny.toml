@@ -1,8 +1,13 @@
-# cargo-deny configuration — license compliance gate.
+# cargo-deny configuration — dependency gate.
 #
-# Macros is MIT-licensed (see LICENSE). This file enforces that every crate we
-# link is available under a license compatible with redistributing Macros under
-# the MIT License. CI runs `cargo deny check licenses`.
+# CI runs `cargo deny check`, which covers four things:
+#   [advisories]  RustSec security advisories, yanked and unmaintained crates
+#   [licenses]    every crate is MIT-compatible (Macros is MIT, see LICENSE)
+#   [bans]        duplicate crate versions (warn only) and wildcard deps
+#   [sources]     crates come only from crates.io
+#
+# Licenses: this enforces that every crate we link is available under a
+# license compatible with redistributing Macros under the MIT License.
 #
 # How the check works: each crate's SPDX expression is evaluated against the
 # `allow` list below. For an OR expression (e.g. "Apache-2.0 OR GPL-2.0-only"),
@@ -50,3 +55,32 @@ allow = [
 # Per-crate license exceptions go here, e.g.:
 #   { crate = "some-crate", allow = ["LicenseRef-Foo"] }
 exceptions = []
+
+[advisories]
+# Fail on any RustSec vulnerability or a yanked crate in Cargo.lock. Every
+# entry in `ignore` must say why it does not affect Macros and what would lift
+# it, so the list stays auditable.
+yanked = "deny"
+# Unmaintained notices fail only for crates we depend on directly. The
+# transitive ones (async-std, bincode, im-rc, paste, rustybuzz, ttf-parser, …)
+# arrive via gpui, steel and ureq and can only be dropped upstream; flagging
+# them would make every run red with nothing for us to act on.
+unmaintained = "workspace"
+ignore = []
+
+[bans]
+# gpui, steel, gix and the tree-sitter grammars each pin their own versions of
+# common crates, so duplicates are expected and mostly outside our control.
+# Warn so they stay visible without blocking CI.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies (the vendored gpui patch) carry no version; don't count
+# them as wildcards.
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io. A git dependency must be added here deliberately.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
