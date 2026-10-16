@@ -1,3 +1,5 @@
+;; requires: core helm
+
 ;; persistence — remember things across sessions:
 ;;   * saveplace  : restore point to where you left it in each file (Emacs
 ;;                  `save-place-mode`).
@@ -10,8 +12,21 @@
 
 ;; ~/.config/macros, resolved in Rust (a per-engine temp dir under `cargo test`).
 (define (persistence-dir) (persistence-directory))
-(define (saveplace-file)  (string-append (persistence-dir) "/saveplace"))
-(define (recentf-file)    (string-append (persistence-dir) "/recentf"))
+
+;; The state file `name` under the persistence dir.
+(define (persistence-file name) (string-append (persistence-dir) "/" name))
+
+;; The non-empty lines of state file `name`, or '() when it doesn't exist yet.
+(define (persistence-read-lines name)
+  (let ((f (persistence-file name)))
+    (if (file-exists? f) (non-empty-lines (read-file f)) '())))
+
+;; Write `lines` (a list of strings) to state file `name`, one per line.
+(define (persistence-write-lines name lines)
+  (write-file (persistence-file name) (join-lines lines)))
+
+(define (saveplace-file)  (persistence-file "saveplace"))
+(define (recentf-file)    (persistence-file "recentf"))
 
 ;; --- saveplace --------------------------------------------------------------
 ;; path -> byte position of point
@@ -70,7 +85,7 @@
 (add-hook "find-file-hook" "saveplace-restore")
 (add-hook "after-save-hook" "persistence-save")
 
-;; Load persisted state at startup (these files load after helm.scm, so
-;; *recentf* / *recentf-max* / take already exist).
+;; Load persisted state at startup (helm.scm, required above, defines
+;; *recentf* / *recentf-max*).
 (saveplace-load)
 (recentf-load)

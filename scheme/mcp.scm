@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; mcp.scm — commands for the MCP server (src/mcp.rs, src/editor/mcp.rs).
 ;;
 ;; The server lets an AI assistant evaluate Steel in this editor and read its

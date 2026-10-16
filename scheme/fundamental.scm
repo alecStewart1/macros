@@ -1,3 +1,5 @@
+;; requires:
+
 ;; fundamental-mode keymap — the global map: motion, editing, region,
 ;; kill/yank, undo, files, and buffers. Every binding here is overridable:
 ;; call (define-key "fundamental" "<chord>" "<command>") to rebind.

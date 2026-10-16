@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; diagnostics.scm — surface LSP diagnostics beyond the hover echo: a
 ;; flycheck/flymake-style *diagnostics* list (RET jumps to the source) and
 ;; next-error / previous-error navigation. Built on the `(diagnostics)` primitive
@@ -12,7 +14,7 @@
 
 ;; Which buffer `next-error` / `previous-error` walk. Emacs unifies these across
 ;; compilation, grep, and diagnostics: whichever was used most recently wins.
-;; Defined here (loads before shell.scm) so compile's dispatcher can `set!` it.
+;; Defined here (shell.scm requires this file) so compile's dispatcher can `set!` it.
 ;; "diagnostics" = LSP list (below); "compile" = the *compilation* error list
 ;; (shell.scm). list-diagnostics / compile-run each claim the source.
 (define *next-error-source* "diagnostics")

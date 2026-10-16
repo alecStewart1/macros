@@ -1,3 +1,5 @@
+;; requires:
+
 ;;; indent.scm — per-language indentation width defaults.
 ;;;
 ;;; Each structural indent level is `tab-width` columns (global default 4). A

@@ -1,3 +1,5 @@
+;; requires: core fundamental
+
 ;; Helm — a generic selection framework (the behaviour is in Rust; sources,
 ;; actions, and applications are written in Scheme). These keys are active only
 ;; during a Helm session; arrows / RET / C-g are handled as well.

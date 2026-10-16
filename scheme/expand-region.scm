@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; expand-region — grow the selection outward along tree-sitter node boundaries
 ;; (word → expression → statement → block → …), the Macros port of
 ;; expand-region.el. Unlike the LSP-backed `lsp-expand-selection`, this works in

@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; multiple-cursors — edit at many places at once, the Macros port of mc.el /
 ;; VS Code multi-cursor. Add secondary cursors, then typed text, Enter, and
 ;; Backspace are replicated at every cursor. C-g (or M-x mc-clear) collapses

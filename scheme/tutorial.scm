@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; tutorial.scm — interactive, hands-on tutorials (help-with-tutorial, C-h t).
 ;;
 ;; Two tutorials, one per editing style: an Emacs-keys tutorial and a Vim/evil

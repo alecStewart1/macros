@@ -1,3 +1,5 @@
+;; requires: core magit persistence
+
 ;; Perspectives — one workspace context per project, switched from the title
 ;; bar. Visiting a file inside a project (find-file-hook) creates that
 ;; project's perspective on first touch and records the file as its resume
@@ -6,9 +8,9 @@
 ;; The list survives restarts via ~/.config/macros/perspectives.
 ;;
 ;; All the logic lives here — Rust only draws the dropdown and hands the
-;; clicked label back to `perspective-select`. This file loads BEFORE
-;; projectile.scm (sorted order) and Steel resolves free identifiers at
-;; definition time, so it must not call projectile functions; the root
+;; clicked label back to `perspective-select`. This file doesn't
+;; require projectile.scm and Steel resolves free identifiers at definition
+;; time, so it must not call projectile functions; the root
 ;; resolver (`project-root`) lives in core.scm, which is fine.
 
 (define *perspectives* '())        ;; alist: project root -> last visited file, creation order
@@ -175,11 +177,11 @@
 ;; Magit follows the title bar: scope it to the current perspective's git work
 ;; tree so `C-x g` opens the project shown in the dropdown, not whatever buffer
 ;; is current (a *magit* buffer, terminal, sidebar, …). Installed here because
-;; perspectives.scm loads AFTER magit.scm, so magit needn't reference perspective
+;; perspectives.scm requires magit.scm (not the reverse), so magit needn't reference perspective
 ;; state at definition time. Returns #f when no perspective is active or its root
 ;; isn't a git repo, letting magit fall back to the current buffer's work-tree.
 ;; MUST go through the owners' setters, not a raw `set!` — a top-level set! from
-;; this later-loaded file would mutate a binding the owners' functions never read.
+;; this dependent file would mutate a binding the owners' functions never read.
 (set-magit-scope-hook!
   (lambda ()
     (and *perspective-current*

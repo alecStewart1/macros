@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; hooks.scm — friendlier `add-hook` / `remove-hook`.
 ;;
 ;; The raw builtins take a string (the editor calls hooks by name across the

@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; Completion-popup keymap (corfu-style). These bindings are consulted only
 ;; while the in-buffer completion popup is open; otherwise the keys behave
 ;; normally. Rebind freely — the popup is driven entirely from here.
@@ -49,15 +51,6 @@
       ((capf-word-char? (char->integer (car chars)))
        (loop (cdr chars) (cons (car chars) cur) acc))
       (else (loop (cdr chars) '() (flush acc))))))
-
-;; Distinct elements of `lst`, preserving first-seen order. (Same as core.scm's
-;; `dedup`, but this file sorts before core.scm and Steel rejects references to
-;; not-yet-defined globals, even inside function bodies.)
-(define (capf-dedup lst)
-  (let loop ((lst lst) (seen '()) (acc '()))
-    (cond ((null? lst) (reverse acc))
-          ((member (car lst) seen) (loop (cdr lst) seen acc))
-          (else (loop (cdr lst) (cons (car lst) seen) (cons (car lst) acc))))))
 
 ;; --- argument-aware completion ----------------------------------------------
 ;; A general CAPF that completes the *argument* of a known call by its position.
@@ -188,7 +181,7 @@
 (define (dabbrev-capf prefix)
   (if (or (lsp-server-ready?) (< (string-length prefix) 1))
       '()
-      (capf-dedup
+      (dedup
         (filter (lambda (w) (and (starts-with? w prefix) (not (equal? w prefix))))
                 (capf-buffer-words (buffer-string))))))
 

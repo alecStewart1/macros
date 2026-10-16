@@ -1,3 +1,5 @@
+;; requires: core folding
+
 ;; org.scm — Org mode, implemented entirely in Scheme on the editor primitives.
 ;;
 ;; Five layers, each independently useful:

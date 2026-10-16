@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; grammar.scm — install user tree-sitter grammars at runtime.
 ;;
 ;; `install-language` downloads a grammar repo, compiles its committed parser
@@ -38,8 +40,8 @@
 ;; under the OS cache dir keyed by id+rev, so a later launch reuses the compiled
 ;; library instead of recompiling.
 ;;
-;; Self-contained on purpose: scheme/ files eval in sorted order, and this loads
-;; before language-modes.scm, so it can't lean on that file's helpers.
+;; Self-contained on purpose: this file doesn't require language-modes.scm, so
+;; it can't lean on that file's helpers.
 
 ;; Define `<id>-mode` as a nullary interactive command, so once the grammar has
 ;; loaded you can `M-x <id>-mode` on any buffer to colorize it (set-major-mode is

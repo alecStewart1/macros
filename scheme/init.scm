@@ -1,3 +1,5 @@
+;; requires: core fundamental
+
 ;; Startup. Loaded after the keymaps; a good place for user customization
 ;; (set-face, load-theme, define-key, …).
 ;;

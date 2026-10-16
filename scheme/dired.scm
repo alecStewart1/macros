@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; dired.scm — a directory editor (file manager), on list-directory + the
 ;; special-buffer model + call-process for fs operations. C-x d opens it.
 

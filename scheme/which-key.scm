@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; which-key — discover the key bindings available under a prefix (Emacs
 ;; which-key). `M-x which-key` (or the keys below) pops a read-only list of every
 ;; binding whose chord starts with the prefix you type.

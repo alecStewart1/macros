@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; replace.scm — Emacs's replace commands:
 ;;
 ;;   query-replace          (M-%)     ask at each match of a literal string

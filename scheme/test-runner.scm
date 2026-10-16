@@ -1,3 +1,5 @@
+;; requires: core shell
+
 ;; test-runner.scm — run tests from the buffer, on top of compile-mode (shell.scm).
 ;;
 ;;   M-x test-at-point    C-c x t   the test enclosing point

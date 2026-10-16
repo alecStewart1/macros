@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; rainbow-delimiters: color nested brackets by their nesting depth, using the
 ;; live tree-sitter parse tree (the `tree-sitter-query` bridge). Because we ask
 ;; the grammar for bracket *nodes* — not raw characters — brackets that sit

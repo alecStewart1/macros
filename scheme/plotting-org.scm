@@ -1,3 +1,5 @@
+;; requires: core org plot
+
 ;; plotting-org.scm — Org table → text chart (org-plot, drawn with plot.scm).
 ;;
 ;; `org-plot/text` (C-c " g) charts the table at point and writes the chart as
@@ -14,8 +16,8 @@
 ;;           with:points means scatter and with:boxes / with:histograms bars.
 ;;   title, width, height   passed to the chart.
 ;;
-;; Loads after org.scm and plot.scm (bundled files load alphabetically), since
-;; Steel resolves a name when the code using it is defined.
+;; Requires org.scm and plot.scm, since Steel resolves a name when the code
+;; using it is defined.
 
 ;; --- #+PLOT: options --------------------------------------------------------
 

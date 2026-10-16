@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; lib-async — named, cancellable subprocess "lanes" (the "lib-" prefix keeps
 ;; this file sorting before its consumers: magit.scm, shell.scm, and any
 ;; installed package).

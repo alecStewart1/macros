@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; folding.scm — generic code folding (Emacs hideshow). A gutter chevron on each
 ;; foldable header line toggles the visibility of its indented body. Rust renders
 ;; the chevron and hit-tests the click (calling `fold-toggle-at-line`); this file
@@ -21,7 +23,7 @@
 ;; doesn't). So each recorded line also remembers its TEXT — an anchor — and a
 ;; resync relocates it: still at the same line ⇒ unchanged; moved ⇒ the nearest
 ;; line with identical text; gone ⇒ dropped. Shared by folding/markdown/org
-;; (this file loads before both).
+;; (both require this file).
 
 ;; `lines`' entry `i`, or "" out of range.
 (define (fold--line-text lines i)

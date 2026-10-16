@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; tabulated-list — a columnar, sortable list UI, the Macros port of Emacs
 ;; `tabulated-list-mode` (the engine behind `list-packages`, `proced`, the buffer
 ;; menu, …). It renders rows of aligned columns into a read-only buffer with a

@@ -1,3 +1,5 @@
+;; requires:
+
 ;; Mode line — the Emacs `mode-line-format` analogue. The bar's *content* lives
 ;; here in Scheme: an ordered list of segments handed to `set-mode-line-format`.
 ;; Rust owns only a small vocabulary of live FIELDS (resolved from editor state

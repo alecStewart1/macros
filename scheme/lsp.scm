@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; lsp.scm — LSP navigation, documentation, refactoring, and formatting on top
 ;; of the Rust protocol layer. The heavy lifting (sending requests, routing
 ;; responses, jumping to locations, applying edits) is in Rust; this file wires

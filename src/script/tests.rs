@@ -19,6 +19,46 @@ fn fresh_persistence_dir() -> String {
     dir.to_str().unwrap().to_string()
 }
 
+/// Load bundled `scheme/<name>.scm` into `engine` after everything its
+/// `;; requires:` header pulls in (transitively, in startup order), so a test
+/// needn't hand-list the dependency graph. Returns the module's own result
+/// (its emitted commands), like evaluating the file directly.
+fn load_with_deps(engine: &ScriptEngine, name: &str) -> EvalResult {
+    let mut last = None;
+    for src in crate::runtime::script_with_deps(name) {
+        last = Some(
+            engine
+                .eval(src)
+                .unwrap_or_else(|e| panic!("loading {name} and its deps: {e}")),
+        );
+    }
+    last.expect("script_with_deps always ends with the script itself")
+}
+
+/// Each bundled script loads with ONLY its declared dependencies — a fresh
+/// engine per file, so a missing `;; requires:` entry fails here even when the
+/// real startup order happens to load the dependency first.
+#[test]
+fn each_startup_script_loads_with_only_declared_deps() {
+    for script in crate::runtime::bundled_scripts() {
+        assert!(
+            crate::runtime::parse_requires(script.source).is_some(),
+            "scheme/{}.scm has no `;; requires:` header (use `;; requires:` for none)",
+            script.name
+        );
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::script_with_deps(script.name) {
+            if let Err(e) = engine.eval(src) {
+                panic!(
+                    "scheme/{}.scm failed to load with only its declared deps \
+                     (missing a `;; requires:` entry?): {e}",
+                    script.name
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod engine_tests {
     use super::*;
@@ -5042,17 +5082,7 @@ mod magit_tests {
     #[test]
     fn magit_rename_pathspecs() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
         // Rename: both sides, NEW is the on-disk path.
         assert_eq!(
@@ -5076,17 +5106,7 @@ mod magit_tests {
     #[test]
     fn magit_keyboard_quit_cancels_async_git() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
 
         // Idle — no live git subprocess: the ordinary quit.
         assert!(matches!(
@@ -5214,20 +5234,7 @@ mod magit_tests {
     #[test]
     fn magit_evil_overlay_motions() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        let cmds = engine
-            .eval(include_str!("../../scheme/magit.scm"))
-            .unwrap()
-            .commands;
+        let cmds = load_with_deps(&engine, "magit").commands;
         let bound = |mode: &str, key: &str, cmd: &str| {
             cmds.iter().any(|c| {
                 matches!(c, EditorCommand::DefineKey(m, s, x)
@@ -5267,17 +5274,7 @@ mod magit_tests {
     #[test]
     fn magit_branch_line_parse() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
         let pipe = |line: &str| format!(r#"(string-join (magit-parse-branch-line "{line}") "|")"#);
         // No upstream.
@@ -5310,17 +5307,7 @@ mod magit_tests {
     #[test]
     fn magit_transients_build() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         // Build transients as if invoked from inside a magit buffer, so the
         // repo-association guard (which refuses fileless buffers like *scratch*)
         // short-circuits and we exercise the transient structure itself.
@@ -5360,17 +5347,7 @@ mod magit_tests {
     #[test]
     fn magit_diff_rendering() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
 
         // Face classification.
         for (line, face) in [
@@ -5439,17 +5416,7 @@ mod magit_tests {
     #[test]
     fn magit_blame_porcelain() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
 
         // Two commits over three lines (lines 1-2 share a commit; line 3 differs),
@@ -6426,17 +6393,7 @@ mod magit_e2e {
         git(&["add", "b.txt"]); // staged add
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
 
         // Bodies are lazy: an all-collapsed render parses no hunks at all.
@@ -6509,17 +6466,7 @@ mod magit_hunk_e2e {
         std::fs::write(dir.join("f.txt"), "a\nCHANGED\nc\nd\n").unwrap(); // one unstaged hunk
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
         // Bodies are lazy — expand f.txt so its hunks are parsed + recorded.
         engine
@@ -6606,17 +6553,7 @@ mod magit_hunk_e2e {
         std::fs::write(dir.join("u2.txt"), "2\n").unwrap(); // untracked
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
         engine.eval("(magit-render)").unwrap();
 
@@ -6948,17 +6885,7 @@ mod magit_quiet_refresh {
         git(&["commit", "-qm", "init"]);
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
 
         // Interactive: focus-switching render-buffer.
@@ -7093,15 +7020,7 @@ mod gix_stash {
         // magit's stash picker gets the bare `stash@{N}` names from gix-stash-list,
         // matching `git stash list --format=%gd`.
         let (engine, _rx) = ScriptEngine::new();
-        for src in [
-            include_str!("../../scheme/core.scm"),
-            include_str!("../../scheme/lib-section.scm"),
-            include_str!("../../scheme/lib-transient.scm"),
-            include_str!("../../scheme/lib-async.scm"),
-            include_str!("../../scheme/magit.scm"),
-        ] {
-            engine.eval(src).unwrap();
-        }
+        load_with_deps(&engine, "magit");
         engine.eval(&format!("(set! *magit-dir* {d:?})")).unwrap();
         assert_eq!(
             engine.eval("(magit-stash-refs)").unwrap().value.as_deref(),
@@ -7574,17 +7493,7 @@ mod magit_blame_gix {
         git(&["commit", "-qm", "init"]);
 
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-section.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-transient.scm"))
-            .unwrap();
-        engine
-            .eval(include_str!("../../scheme/lib-async.scm"))
-            .unwrap();
-        engine.eval(include_str!("../../scheme/magit.scm")).unwrap();
+        load_with_deps(&engine, "magit");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
         // Clean file → gix path: one record per line, attributed to a real commit.
@@ -8641,7 +8550,7 @@ mod capf_lib {
         );
         // Dedup preserves first-seen order.
         assert_eq!(
-            v(r#"(capf-dedup (list "a" "b" "a" "c" "b"))"#),
+            v(r#"(dedup (list "a" "b" "a" "c" "b"))"#),
             "(\"a\" \"b\" \"c\")"
         );
         // An empty prefix is declined; a single character is enough to offer.

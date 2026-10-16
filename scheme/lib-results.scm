@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; lib-results.scm — editable result buffers (occur-edit-mode / wgrep), shared
 ;; by `occur` (occur.scm) and projectile's `*grep*`. A "results buffer" is a
 ;; read-only special buffer of
@@ -30,7 +32,7 @@
 ;; built from byte lengths (`utf8-length`) or Rust-reported byte spans; text is
 ;; only ever sliced with char-based `substring` on char counts.
 ;;
-;; Loads before occur.scm and projectile.scm (sorted load order), which build on it.
+;; occur.scm and projectile.scm require this file and build on it.
 
 (set-face "occur-header" "#66d9ef")
 (set-face "occur-prefix" "#75715e")

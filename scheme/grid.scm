@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; grid.scm — key bindings for grid buffers: CSV/TSV files shown as a
 ;; spreadsheet. The grid itself (storage, rendering, cell editing) is Rust;
 ;; every *binding* lives here, so all of it is overridable with `define-key`.

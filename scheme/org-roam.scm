@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; org-roam.scm — a Zettelkasten over your .org files, in the org-roam style,
 ;; built entirely in Scheme on the editor primitives. No SQLite: the node index
 ;; is scanned from disk (ripgrep-fast `walk-files`) and cached in memory; a
@@ -478,7 +480,7 @@
 (define (org-roam--dailies-dir) (path-join (org-roam-directory) *org-roam-dailies-directory*))
 (define (org-roam--daily-file date) (path-join (org-roam--dailies-dir) (string-append date ".org")))
 ;; Gregorian day arithmetic comes from core.scm (ymd->days / days->ymd / pad2),
-;; which loads before this file; org-roam stays independent of org.scm.
+;; which this file requires; org-roam stays independent of org.scm.
 (define (org-roam--date-str->days s) (or (iso-date->days s) 0))
 (define (org-roam--date-str days) (days->iso-date days))
 (define (org-roam--ensure-daily date)

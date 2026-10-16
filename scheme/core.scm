@@ -1,3 +1,5 @@
+;; requires:
+
 ;; Core Lisp-style helpers built on the new read primitives (point, goto-char,
 ;; buffer-string, …). Loaded early so later libs (magit, projectile) can use them.
 

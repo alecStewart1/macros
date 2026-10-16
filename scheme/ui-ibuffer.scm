@@ -1,3 +1,5 @@
+;; requires: core fundamental tabulated
+
 ;; ibuffer — a tabulated buffer manager, the Macros port of Emacs `ibuffer`.
 ;; Lists every open buffer with its type; RET switches to it, d/x kills it, g
 ;; refreshes. Built entirely on tabulated-list (scheme/tabulated.scm) — no new

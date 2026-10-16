@@ -1,3 +1,5 @@
+;; requires: core diagnostics lib-async
+
 ;; shell.scm — process integration: an Emacs-style `compile` (run a command into
 ;; a read-only *compilation* buffer, parse errors, walk them with next-error /
 ;; previous-error and jump to the source), grep navigation, and a basic shell.
