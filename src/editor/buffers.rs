@@ -12,6 +12,11 @@ use crate::buffer::Buffer;
 
 use super::*;
 
+/// The longest the UI thread waits on a Scheme call it must block on
+/// (`before-save-hook`, Org fontify) before interrupting it. Generous enough
+/// for a formatter shelling out; short of the editor looking hung for good.
+const SYNC_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Returns `true` when `name` looks like a special buffer (`*scratch*`,
 /// `*Messages*`, etc.) — i.e. it starts and ends with `*`.
 fn is_special_buffer_name(name: &str) -> bool {
@@ -957,8 +962,12 @@ impl Editor {
         };
         for function in functions {
             self.publish_point();
-            for command in self.script.call_action(&function, None) {
+            let (commands, error) = self.script.call_action_within(&function, SYNC_HOOK_TIMEOUT);
+            for command in commands {
                 self.apply_command(command, cx);
+            }
+            if let Some(error) = error {
+                self.echo(format!("{hook}: {function}: {error}"), cx);
             }
         }
     }
@@ -1460,9 +1469,7 @@ impl Editor {
     pub(super) fn fontify_org_buffer(&mut self, name: String, cx: &mut Context<Self>) {
         if self.active.name == name {
             self.publish_point();
-            for command in self.script.call_action("org--fontify", None) {
-                self.apply_command(command, cx);
-            }
+            self.run_org_fontify(cx);
             return;
         }
         let Some(idx) = self.inactive_index(&name) else {
@@ -1471,12 +1478,25 @@ impl Editor {
         };
         self.publish_inactive_snapshot(idx);
         self.render_redirect = Some(name);
-        for command in self.script.call_action("org--fontify", None) {
-            self.apply_command(command, cx);
-        }
+        self.run_org_fontify(cx);
         self.render_redirect = None;
         // Restore the active-buffer snapshot for the next read bridge.
         self.publish_point();
+    }
+
+    /// Run `org--fontify` against the published snapshot and apply its
+    /// overlays, reporting (rather than hanging on) a fontifier that errors
+    /// or runs past [`SYNC_HOOK_TIMEOUT`].
+    fn run_org_fontify(&mut self, cx: &mut Context<Self>) {
+        let (commands, error) = self
+            .script
+            .call_action_within("org--fontify", SYNC_HOOK_TIMEOUT);
+        for command in commands {
+            self.apply_command(command, cx);
+        }
+        if let Some(error) = error {
+            self.echo(format!("org--fontify: {error}"), cx);
+        }
     }
 
     /// The [`Document`] named `name` — the active buffer or an inactive

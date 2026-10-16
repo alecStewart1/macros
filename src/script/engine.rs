@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use steel::rvals::{IntoSteelVal, SteelVal};
+use steel::steel_vm::ThreadStateController;
 
 use super::*;
 
@@ -78,10 +81,66 @@ pub(crate) enum Task {
 }
 
 pub(crate) struct Job {
+    /// Watchdog id (see [`Watchdog`]); 0 for jobs nobody will interrupt.
+    id: u64,
     task: Task,
     interactive: bool,
     reply: Reply,
 }
+
+/// Lets a blocking caller with a deadline interrupt *its own* job and no
+/// other. The engine thread records the running job's id and resets the VM's
+/// interrupt flag under the lock when each job starts, so an interrupt either
+/// lands on the job it was aimed at or is cleared before the next one runs.
+#[derive(Clone, Default)]
+pub(crate) struct Watchdog {
+    next_id: Arc<AtomicU64>,
+    state: Arc<Mutex<WatchState>>,
+}
+
+#[derive(Default)]
+struct WatchState {
+    running: u64,
+    controller: Option<ThreadStateController>,
+}
+
+impl Watchdog {
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Engine thread: install the VM's controller once it is built.
+    fn install(&self, controller: ThreadStateController) {
+        if let Ok(mut s) = self.state.lock() {
+            s.controller = Some(controller);
+        }
+    }
+
+    /// Engine thread: job `id` is starting — clear any stale interrupt.
+    fn begin(&self, id: u64) {
+        if let Ok(mut s) = self.state.lock() {
+            s.running = id;
+            if let Some(c) = &s.controller {
+                c.resume();
+            }
+        }
+    }
+
+    /// Caller: interrupt job `id` if (and only if) it is the one running.
+    fn interrupt(&self, id: u64) {
+        if let Ok(s) = self.state.lock()
+            && s.running == id
+            && let Some(c) = &s.controller
+        {
+            c.interrupt();
+        }
+    }
+}
+
+/// How long [`ScriptEngine::call_action_within`] waits for an interrupted job
+/// to unwind. Steel checks the flag every opcode, so this only runs out when
+/// the job is stuck inside a native primitive (e.g. a hung `call-process`).
+const INTERRUPT_GRACE: Duration = Duration::from_secs(1);
 
 /// A handle to the Steel interpreter, which runs on its OWN thread so a slow or
 /// runaway script can never freeze the UI (the editor's command loop solves
@@ -123,11 +182,18 @@ impl ScriptEngine {
         let (names_tx, names_rx) = channel::<Vec<String>>();
 
         let thread_shared = shared.clone();
-        std::thread::spawn(move || engine_thread(jobs_rx, outcomes, names_tx, thread_shared));
+        let watchdog = Watchdog::default();
+        let thread_watchdog = watchdog.clone();
+        std::thread::spawn(move || {
+            engine_thread(jobs_rx, outcomes, names_tx, thread_shared, thread_watchdog)
+        });
 
         (
             Self {
-                handle: ActionHandle { jobs },
+                handle: ActionHandle {
+                    jobs,
+                    watchdog: watchdog.clone(),
+                },
                 command_names,
                 global_names: std::sync::OnceLock::new(),
                 global_names_rx: Mutex::new(Some(names_rx)),
@@ -282,13 +348,34 @@ impl ScriptEngine {
         }
     }
 
-    /// Blocking action call — used by tests; the editor uses `dispatch_action`.
+    /// Blocking action call — tests only; the editor uses `dispatch_action`,
+    /// or [`Self::call_action_within`] when it must wait (it runs on the UI
+    /// thread, so it needs the deadline).
     #[allow(dead_code)]
     pub fn call_action(&self, name: &str, candidate: Option<&str>) -> Vec<EditorCommand> {
         self.handle
             .run_sync(Task::Call(name.to_string(), candidate.map(str::to_string)))
             .map(|raw| raw.commands)
             .unwrap_or_default()
+    }
+
+    /// Call the nullary function `name` and wait at most `timeout` for it —
+    /// for the few calls the UI thread must block on (`before-save-hook`,
+    /// Org fontify). Past the deadline the job is interrupted, so a hook stuck
+    /// in a loop can't freeze the editor. Returns the commands queued (even
+    /// those before an error) and the error, if any.
+    pub fn call_action_within(
+        &self,
+        name: &str,
+        timeout: Duration,
+    ) -> (Vec<EditorCommand>, Option<String>) {
+        match self
+            .handle
+            .run_sync_within(Task::Call(name.to_string(), None), timeout)
+        {
+            Ok(raw) => (raw.commands, raw.error),
+            Err(error) => (Vec::new(), Some(error)),
+        }
     }
 
     /// Async eval — runs on the engine thread; the outcome is delivered to the
@@ -355,6 +442,7 @@ impl ScriptEngine {
 #[derive(Clone)]
 pub struct ActionHandle {
     jobs: Sender<Job>,
+    watchdog: Watchdog,
 }
 
 impl ActionHandle {
@@ -362,6 +450,7 @@ impl ActionHandle {
     /// stopped engine drops it silently.
     fn send_async(&self, task: Task, interactive: bool) {
         let _ = self.jobs.send(Job {
+            id: 0,
             task,
             interactive,
             reply: Reply::Async,
@@ -378,12 +467,48 @@ impl ActionHandle {
         let (tx, rx) = channel();
         self.jobs
             .send(Job {
+                id: 0,
                 task,
                 interactive: false,
                 reply: Reply::Sync(tx),
             })
             .map_err(|_| "script engine stopped".to_string())?;
         rx.recv().map_err(|_| "script engine stopped".to_string())
+    }
+
+    /// [`Self::run_sync`] with a deadline: past `timeout` the job is
+    /// interrupted and, after [`INTERRUPT_GRACE`], abandoned (its result, if
+    /// it ever finishes, is dropped).
+    fn run_sync_within(&self, task: Task, timeout: Duration) -> Result<RawResult, String> {
+        use std::sync::mpsc::RecvTimeoutError;
+        let id = self.watchdog.next_id();
+        let (tx, rx) = channel();
+        self.jobs
+            .send(Job {
+                id,
+                task,
+                interactive: false,
+                reply: Reply::Sync(tx),
+            })
+            .map_err(|_| "script engine stopped".to_string())?;
+        match rx.recv_timeout(timeout) {
+            Ok(raw) => return Ok(raw),
+            Err(RecvTimeoutError::Disconnected) => return Err("script engine stopped".into()),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        self.watchdog.interrupt(id);
+        let secs = timeout.as_secs_f32();
+        match rx.recv_timeout(INTERRUPT_GRACE) {
+            // The interrupted job unwound: keep what it queued, but report the
+            // timeout rather than Steel's generic interrupt error.
+            Ok(raw) => Ok(RawResult {
+                error: Some(format!("timed out after {secs}s; interrupted")),
+                ..raw
+            }),
+            Err(_) => Err(format!(
+                "timed out after {secs}s (still running in a native call; abandoned)"
+            )),
+        }
     }
 
     /// Blocking eval from any thread (the MCP server's): returns the editor
@@ -413,17 +538,21 @@ pub(crate) fn engine_thread(
     outcomes: UnboundedSender<ScriptOutcome>,
     names_tx: Sender<Vec<String>>,
     shared: EngineShared,
+    watchdog: Watchdog,
 ) {
     let queue = shared.queue.clone();
     let (mut engine, names) = build_engine(&shared);
+    watchdog.install(engine.get_thread_state_controller());
     let _ = names_tx.send(names);
 
     while let Ok(Job {
+        id,
         task,
         interactive,
         reply,
     }) = jobs.recv()
     {
+        watchdog.begin(id);
         // `with-process-env` extents never span jobs (one an error escaped
         // without popping would otherwise leak into every later spawn).
         crate::process::reset_dynamic();
