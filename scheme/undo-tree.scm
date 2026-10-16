@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; undo-tree / vundo — branching undo, the Macros port of undo-tree.el + vundo.
 ;; The buffer model now keeps undo history as a TREE, not a linear stack: undoing
 ;; and then editing branches rather than discarding the redone edits, so no work

@@ -1,3 +1,5 @@
+;; requires: core evil
+
 ;; helix.scm — Helix-style selection-first modal editing, built on Macros'
 ;; keymaps and the multiple-selection core. Like evil.scm, the Rust side only
 ;; decides *when* plain keys are commands (Normal) vs. text (Insert); every

@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; evil-mode — Vim-style modal editing, built on Macros' keymaps. The Rust side
 ;; only decides *when* plain keys are commands (Normal/Visual) vs. text (Insert);
 ;; every binding below is Scheme and fully overridable. Emacs keybindings are
@@ -217,8 +219,8 @@
           (replace-region p (+ p 1) (if (equal? c up) dn up)))))))
 
 ;; J — join the next line onto this one, collapsing its leading indentation to a
-;; single space (Vim `J`). Kept self-contained here (evil.scm must not depend on
-;; editing.scm: load order isn't guaranteed and the tests load evil.scm alone).
+;; single space (Vim `J`). Kept self-contained here (evil.scm doesn't require
+;; editing.scm).
 ;; With a count, `3J` joins 3 lines (2 joins). Like Vim, no space is added when
 ;; the next line is empty (after its indent), starts with `)`, or the line
 ;; already ends in a blank. Edits run bottom-up so earlier offsets stay valid.
@@ -2072,7 +2074,7 @@
 ;; `g` is `refresh` in several of these modes, so a `g g` top-motion would
 ;; shadow it — left out deliberately. `n`/`p` keep working from the base keymap.
 ;; Parameterized over the overlay prefix so the helix collection (helix.scm,
-;; which loads after this file) shares the exact same binding set.
+;; which requires this file) shares the exact same binding set.
 (define (modal-collection-bind-mode prefix mode)
   (let ((km (string-append prefix mode)))
     (define-key km "j" 'next-line)

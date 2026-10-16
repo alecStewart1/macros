@@ -1,10 +1,11 @@
+;; requires: core dap lib-section lib-transient modeline
+
 ;; ui-dap.scm — the debugger's UI, on top of the dap.scm protocol core: the
 ;; *dap* panel (a lib-section buffer with threads / stack / scopes / watches /
 ;; breakpoints), the sticky debug transient (C-x C-a — the dap-hydra), the panel
-;; keymap, and the mode-line segment. This file sorts after lib-section.scm and
-;; lib-transient.scm (a file may only use earlier definitions); dap.scm sorts
-;; before both, so it knows nothing about this UI — it calls whatever was
-;; registered via `dap-on-change`, which is how the panel stays live.
+;; keymap, and the mode-line segment. dap.scm doesn't require this file (or
+;; lib-section / lib-transient), so it knows nothing about this UI — it calls
+;; whatever was registered via `dap-on-change`, which is how the panel stays live.
 
 (define *dap-panel-name* "*dap*")
 

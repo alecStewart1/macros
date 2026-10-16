@@ -1,3 +1,5 @@
+;; requires:
+
 ;; Ghost text (copilot-style inline suggestions) — the thin Scheme layer over
 ;; the Rust primitives:
 ;;

@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; ediff — file diffing built on the Rust `diff-strings` primitive (the `similar`
 ;; crate), the Macros take on Emacs `ediff` / `diff-mode`.
 ;;

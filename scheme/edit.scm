@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; Editing commands written in Scheme on the new primitives — comment-dwim.
 ;; Each command's edits coalesce into one undo group (the editor wraps a
 ;; command batch), so they undo as a unit.

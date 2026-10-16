@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; steel-anvil.scm — ANVIL: an interactive Steel REPL, the SLIME-style way.
 ;;
 ;; ANVIL evaluates Steel in a SECOND, fully independent interpreter (see

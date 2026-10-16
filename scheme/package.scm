@@ -1,3 +1,5 @@
+;; requires: core helm
+
 ;; A tiny git-based package manager. `package-install` clones a repo into
 ;; `(packages-directory)` (<config-dir>/packages) on first launch, optionally pins
 ;; it to a commit/tag, then `load`s its entry file — so a user's init.scm can pull

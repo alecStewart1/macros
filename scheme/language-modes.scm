@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; language-modes.scm — an M-x major-mode command per bundled tree-sitter
 ;; language. Emacs exposes `rust-mode`, `python-mode`, … as interactive commands
 ;; you can invoke on any buffer; this generates the same set from the grammars

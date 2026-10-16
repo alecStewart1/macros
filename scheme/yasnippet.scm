@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; yasnippet — template expansion with tab-stops, the Macros port of YASnippet.
 ;; Type a snippet key and press the expand key: the key is replaced with the
 ;; template, point lands on the first field (its placeholder selected so typing

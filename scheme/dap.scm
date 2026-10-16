@@ -1,3 +1,5 @@
+;; requires: core persistence
+
 ;; dap.scm — a Debug Adapter Protocol client (Emacs dap-mode / dape): the
 ;; protocol core. The transport is Rust and deliberately dumb — `dap-start`
 ;; (stdio) / `dap-connect` (socket) spawn or reach an adapter and deliver every
@@ -8,10 +10,8 @@
 ;; breakpoints with gutter dots, stepping, the stopped-frame jump, scopes and
 ;; variables, watches, and the *dap-console* REPL.
 ;;
-;; NOTE this file sorts before lib-section.scm / lib-transient.scm, so it may
-;; not use them (scheme/ files evaluate in sorted filename order and a file may
-;; only use earlier definitions). The panel and transient UI live in
-;; ui-dap.scm, which sorts after both; it registers itself via `dap-on-change`.
+;; This is the UI-free protocol core. The panel and transient UI live in
+;; ui-dap.scm, which requires this file; it registers itself via `dap-on-change`.
 ;;
 ;; Adapters: debugpy (python) and delve (go) ship registered; add more with
 ;;   (dap-register-adapter id exts start-thunk launch-args-fn)
@@ -409,27 +409,26 @@
     (when (and (dap--alive?) (not (equal? path "")) (not (null? (dap--bps-for path))))
       (dap--sync-file-breakpoints path))))
 
-;; --- persistence (self-contained: persistence.scm loads after this file) -------
-(define (dap--bp-file) (string-append (persistence-directory) "/dap-breakpoints"))
+;; --- persistence (breakpoints survive restarts; helpers from persistence.scm) --
+(define (dap--bp-file) (persistence-file "dap-breakpoints"))
 (define (dap--save-breakpoints)
-  (write-file (dap--bp-file)
-    (join-lines (map (lambda (bp) (string-append (car bp) "\t"
-                                                 (int->string (nth bp 1)) "\t"
-                                                 (nth bp 2)))
-                     *dap-breakpoints*))))
+  (persistence-write-lines "dap-breakpoints"
+    (map (lambda (bp) (string-append (car bp) "\t"
+                                     (int->string (nth bp 1)) "\t"
+                                     (nth bp 2)))
+         *dap-breakpoints*)))
 (define (dap--load-breakpoints)
-  (when (file-exists? (dap--bp-file))
-    (for-each
-      (lambda (line)
-        (let ((parts (split-many line "\t")))
-          (when (>= (length parts) 2)
-            (let ((n (string->number (nth parts 1))))
-              (when (and n (file-exists? (nth parts 0)))
-                (set! *dap-breakpoints*
-                      (cons (list (dap--truename (nth parts 0)) (exact (round n))
-                                  (if (>= (length parts) 3) (nth parts 2) ""))
-                            *dap-breakpoints*)))))))
-      (non-empty-lines (read-file (dap--bp-file))))))
+  (for-each
+    (lambda (line)
+      (let ((parts (split-many line "\t")))
+        (when (>= (length parts) 2)
+          (let ((n (string->number (nth parts 1))))
+            (when (and n (file-exists? (nth parts 0)))
+              (set! *dap-breakpoints*
+                    (cons (list (dap--truename (nth parts 0)) (exact (round n))
+                                (if (>= (length parts) 3) (nth parts 2) ""))
+                          *dap-breakpoints*)))))))
+    (persistence-read-lines "dap-breakpoints")))
 
 ;; --- execution control ------------------------------------------------------------
 (define (dap--exec command)

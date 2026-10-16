@@ -1,3 +1,5 @@
+;; requires: core helm projectile tutorial
+
 ;; welcome.scm — the startup splash. A read-only special buffer (welcome-mode)
 ;; shown on launch instead of *scratch*: a Macros ASCII banner over a
 ;; getting-started menu. Each menu line carries an action via per-line metadata;

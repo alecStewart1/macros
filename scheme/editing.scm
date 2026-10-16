@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; editing.scm — core Emacs editing commands, on the range-edit / regexp / read
 ;; primitives. Region-aware where Emacs is.
 

@@ -1,3 +1,5 @@
+;; requires: core completion help
+
 ;; macros-steel-mode — the editor-aware major mode for *Macros* config and
 ;; extension code (your init.scm, anything under ~/.config/macros, or a file
 ;; named *.macros.scm). It is deliberately distinct from plain `steel` mode:
@@ -20,7 +22,7 @@
 ;; `M-x macros-steel-mode` — the Rust builtin re-attaches the `macros-scheme`
 ;; language (highlighter + editor-API server), not just this keymap.
 ;;
-;; Loaded after completion.scm and help.scm, whose `capf-word-char?`,
+;; Requires completion.scm and help.scm, whose `capf-word-char?`,
 ;; `doc-summary`, and `describe-function-show` it reuses.
 
 ;; --- keymap -----------------------------------------------------------------

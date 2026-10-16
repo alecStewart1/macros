@@ -7,15 +7,148 @@ use include_dir::{Dir, include_dir};
 /// `themes/*.scm` are loaded on demand by `load-theme`.
 static SCHEME: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/scheme");
 
-/// The contents of the top-level `scheme/*.scm` files, sorted by name, for
-/// startup evaluation. (Subdirectories like `themes/` are not included.)
-pub fn startup_scripts() -> Vec<&'static str> {
-    let mut files: Vec<_> = SCHEME
+/// One top-level `scheme/*.scm` startup script: its file stem, the stems it
+/// declares in its `;; requires:` header, and its source.
+#[derive(Debug, Clone)]
+pub struct StartupScript {
+    pub name: &'static str,
+    pub requires: Vec<&'static str>,
+    pub source: &'static str,
+}
+
+/// The stems named by a script's `;; requires: a b c` header lines. Only the
+/// leading comment block counts (blank and `;` lines up to the first form), so
+/// a "requires:" mentioned in later prose is never mistaken for a dependency.
+/// Several header lines accumulate; `;; requires:` with nothing after it
+/// declares no dependencies.
+pub fn parse_requires(src: &str) -> Option<Vec<&str>> {
+    let mut found = None;
+    for line in src.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(comment) = line.strip_prefix(';') else {
+            break;
+        };
+        if let Some(deps) = comment
+            .trim_start_matches(';')
+            .trim()
+            .strip_prefix("requires:")
+        {
+            found
+                .get_or_insert_with(Vec::new)
+                .extend(deps.split_whitespace());
+        }
+    }
+    found
+}
+
+/// Every top-level `scheme/*.scm` file (subdirectories like `themes/` are not
+/// included), alphabetical by stem, with its declared dependencies.
+pub fn bundled_scripts() -> Vec<StartupScript> {
+    let mut scripts: Vec<_> = SCHEME
         .files()
         .filter(|f| f.path().extension().is_some_and(|e| e == "scm"))
+        .filter_map(|f| {
+            let name = f.path().file_stem()?.to_str()?;
+            let source = f.contents_utf8()?;
+            Some(StartupScript {
+                name,
+                requires: parse_requires(source).unwrap_or_default(),
+                source,
+            })
+        })
         .collect();
-    files.sort_by_key(|f| f.path());
-    files.iter().filter_map(|f| f.contents_utf8()).collect()
+    scripts.sort_by_key(|s| s.name);
+    scripts
+}
+
+/// Order `scripts` so each comes after everything it `requires` (Steel rejects
+/// a reference to a global that isn't defined yet, even inside a function
+/// body). Kahn's algorithm, always taking the alphabetically first ready
+/// script, so the order is deterministic and — when every dependency already
+/// sorts earlier — identical to plain alphabetical order. Errs on a dependency
+/// that names no script or on a cycle.
+pub fn load_order(scripts: &[StartupScript]) -> Result<Vec<&StartupScript>, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let by_name: BTreeMap<&str, &StartupScript> = scripts.iter().map(|s| (s.name, s)).collect();
+    let mut pending: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for s in scripts {
+        for dep in &s.requires {
+            if !by_name.contains_key(dep) {
+                return Err(format!(
+                    "scheme/{}.scm requires `{dep}`, but there is no scheme/{dep}.scm",
+                    s.name
+                ));
+            }
+        }
+        pending.insert(s.name, s.requires.iter().copied().collect());
+    }
+    let mut order = Vec::with_capacity(scripts.len());
+    while !pending.is_empty() {
+        // BTreeMap iterates in name order: the first ready script is the
+        // alphabetically first one.
+        let Some(next) = pending
+            .iter()
+            .find(|(_, deps)| deps.is_empty())
+            .map(|(name, _)| *name)
+        else {
+            let stuck: Vec<String> = pending
+                .iter()
+                .map(|(name, deps)| {
+                    let deps: Vec<&str> = deps.iter().copied().collect();
+                    format!("{name} (waiting on {})", deps.join(", "))
+                })
+                .collect();
+            return Err(format!(
+                "dependency cycle among scheme scripts: {}",
+                stuck.join("; ")
+            ));
+        };
+        pending.remove(next);
+        for deps in pending.values_mut() {
+            deps.remove(next);
+        }
+        order.push(by_name[next]);
+    }
+    Ok(order)
+}
+
+/// The contents of the top-level `scheme/*.scm` files, in dependency order, for
+/// startup evaluation. The bundle is fixed at compile time and its graph is
+/// checked by tests, so a bad `requires:` header is a build bug: panic loudly.
+pub fn startup_scripts() -> Vec<&'static str> {
+    let scripts = bundled_scripts();
+    load_order(&scripts)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .into_iter()
+        .map(|s| s.source)
+        .collect()
+}
+
+/// The sources needed to load the bundled script `name` on its own: its
+/// transitive `requires:` closure, then `name` itself, in startup order. Lets a
+/// test load one module without hand-listing its dependency graph.
+#[cfg(test)]
+pub fn script_with_deps(name: &str) -> Vec<&'static str> {
+    let scripts = bundled_scripts();
+    let order = load_order(&scripts).unwrap_or_else(|e| panic!("{e}"));
+    let by_name: std::collections::HashMap<&str, &StartupScript> =
+        scripts.iter().map(|s| (s.name, s)).collect();
+    assert!(by_name.contains_key(name), "no bundled scheme/{name}.scm");
+    let mut needed = std::collections::HashSet::new();
+    let mut stack = vec![name];
+    while let Some(n) = stack.pop() {
+        if needed.insert(n) {
+            stack.extend(by_name[n].requires.iter().copied());
+        }
+    }
+    order
+        .into_iter()
+        .filter(|s| needed.contains(s.name))
+        .map(|s| s.source)
+        .collect()
 }
 
 /// Names defined at top level by the bundled `scheme/*.scm` library — every
@@ -469,6 +602,92 @@ mod tests {
         assert!(is_macros_scheme_path(&PathBuf::from(
             "/elsewhere/init.macros.scm"
         )));
+    }
+
+    fn script(name: &'static str, requires: &[&'static str]) -> StartupScript {
+        StartupScript {
+            name,
+            requires: requires.to_vec(),
+            source: "",
+        }
+    }
+
+    fn names(order: Vec<&StartupScript>) -> Vec<&str> {
+        order.into_iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn parse_requires_reads_only_the_header() {
+        assert_eq!(
+            parse_requires(";; requires: core lib-section\n\n;; prose\n(define x 1)"),
+            Some(vec!["core", "lib-section"])
+        );
+        // Empty header = no deps; several header lines accumulate.
+        assert_eq!(parse_requires(";; requires:\n(define x 1)"), Some(vec![]));
+        assert_eq!(
+            parse_requires(";; requires: a\n;; requires: b\n"),
+            Some(vec!["a", "b"])
+        );
+        // No header at all, or one after the first form, is not a declaration.
+        assert_eq!(parse_requires(";; prose\n(define x 1)"), None);
+        assert_eq!(parse_requires("(define x 1)\n;; requires: core"), None);
+    }
+
+    #[test]
+    fn load_order_puts_deps_first_alphabetical_among_peers() {
+        let scripts = [
+            script("a", &["z"]),
+            script("b", &[]),
+            script("c", &["a"]),
+            script("z", &[]),
+        ];
+        assert_eq!(names(load_order(&scripts).unwrap()), ["b", "z", "a", "c"]);
+        // Already-consistent deps leave plain alphabetical order untouched.
+        let scripts = [script("a", &[]), script("b", &["a"]), script("c", &["a"])];
+        assert_eq!(names(load_order(&scripts).unwrap()), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn load_order_rejects_missing_deps_and_cycles() {
+        let err = load_order(&[script("a", &["nope"])]).unwrap_err();
+        assert!(err.contains("scheme/a.scm requires `nope`"), "{err}");
+
+        let scripts = [script("a", &["b"]), script("b", &["a"]), script("c", &[])];
+        let err = load_order(&scripts).unwrap_err();
+        assert!(err.contains("cycle"), "{err}");
+        assert!(
+            err.contains("a (waiting on b)") && err.contains("b (waiting on a)"),
+            "{err}"
+        );
+        assert!(!err.contains("c ("), "{err}");
+    }
+
+    /// The bundled graph sorts, and declaring dependencies kept startup order
+    /// alphabetical except where a dependency forces a file later.
+    #[test]
+    fn bundled_load_order() {
+        let scripts = bundled_scripts();
+        let order = names(load_order(&scripts).unwrap());
+        assert_eq!(order.len(), scripts.len());
+        let pos = |n: &str| order.iter().position(|o| *o == n).unwrap();
+        for s in &scripts {
+            for dep in &s.requires {
+                assert!(
+                    pos(dep) < pos(s.name),
+                    "{} loads before its dep {dep}",
+                    s.name
+                );
+            }
+        }
+        assert_eq!(order.first(), Some(&"core"));
+        assert!(pos("persistence") < pos("dap") && pos("dap") < pos("ui-dap"));
+        // `script_with_deps` is the closure in startup order, ending with itself.
+        let magit = script_with_deps("magit");
+        let src = |n: &str| scripts.iter().find(|s| s.name == n).unwrap().source;
+        assert_eq!(
+            magit,
+            ["core", "lib-async", "lib-section", "lib-transient", "magit"].map(src)
+        );
     }
 
     #[test]

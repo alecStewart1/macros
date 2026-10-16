@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; avy — jump to any visible character in a couple of keystrokes (the Macros port
 ;; of avy / ace-jump). Type the target character; every on-screen occurrence is
 ;; tagged with a hint letter painted over the buffer; press the letter to jump.

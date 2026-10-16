@@ -1,3 +1,5 @@
+;; requires: core evil modeline
+
 ;; spell.scm — flyspell-style live spell checking with squiggly underlines.
 ;;
 ;; No dictionaries or checkers are bundled. Two backends, probed in order the

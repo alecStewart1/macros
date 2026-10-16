@@ -1,3 +1,5 @@
+;; requires: core lib-results
+
 ;; occur.scm — Emacs `occur`: list every line matching a regexp in `*occur*`.
 ;; The results buffer itself (visiting hits, n/p, and the edit-and-apply cycle of
 ;; occur-edit-mode / wgrep) is the shared framework in lib-results.scm.

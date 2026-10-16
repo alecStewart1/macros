@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; dired-sidebar.scm — the bundled file-tree, à la Emacs `dired-sidebar` +
 ;; `dired-subtree`. A real dired buffer pinned to a side window: you navigate the
 ;; tree AND operate on files (mark, delete, rename, copy, mkdir), and directories

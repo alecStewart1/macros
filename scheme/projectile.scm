@@ -1,3 +1,5 @@
+;; requires: core lib-results persistence
+
 ;; Projectile — project-aware navigation, the projectile.el pattern. The root
 ;; resolver (`project-root`, walk-up-to-marker) lives in core.scm (Emacs's
 ;; project.el concept); this file adds the interactive surface — find-file,
@@ -121,8 +123,8 @@
 ;; A ring of project roots, newest-first, written through to
 ;; ~/.config/macros/projects (one root per line) so the welcome/home screen can
 ;; list recently-opened projects on the NEXT launch — unlike *project-known*,
-;; which is session-only. Reuses persistence.scm's config dir (loads before this
-;; file) and core.scm's mru-push.
+;; which is session-only. Reuses persistence.scm's config dir (required above)
+;; and core.scm's mru-push.
 (define *projectile-recent* '())
 (define *projectile-recent-max* 20)
 (define (projectile-recent-file) (string-append (persistence-dir) "/projects"))

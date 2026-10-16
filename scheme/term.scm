@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; term.scm — embedded terminal emulator (alacritty-backed).
 ;;
 ;; `M-x term` (or `ansi-term`) opens a full VT/ANSI terminal running your login

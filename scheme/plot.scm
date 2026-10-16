@@ -1,3 +1,5 @@
+;; requires: core lib-section
+
 ;; plot.scm — text charts (sparklines, bars, line/scatter plots, function and
 ;; normal-distribution plots with shaded areas, histograms, heatmaps) built on
 ;; the textplot-* primitives in src/textplot.rs.
@@ -17,8 +19,8 @@
 ;; plot-axis, plot-label, plot-title, plot-shade (area under a curve),
 ;; plot-heat-0…7 (+ their -bg backgrounds).
 ;;
-;; Loads after core.scm and lib-section.scm (alphabetical), so it can use
-;; utf8-length / pad-right / string-repeat / section-line.
+;; Requires core.scm and lib-section.scm for utf8-length / pad-right /
+;; string-repeat / section-line.
 
 ;; --- plot values -------------------------------------------------------------
 

@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; lib-section — a generic collapsible-section library, the reusable core
 ;; extracted from magit's status buffer (which builds on it — the "lib-" name
 ;; keeps this file sorting BEFORE magit.scm, since scheme/ files evaluate in

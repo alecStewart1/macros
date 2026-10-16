@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; secrets.scm — one encrypted password store for every package (Emacs
 ;; `auth-source` + ~/.authinfo.gpg).
 ;;

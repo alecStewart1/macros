@@ -1,3 +1,5 @@
+;; requires: core lib-async lib-section lib-transient
+
 ;; Magit — a git porcelain, built entirely in Scheme on the special-buffer and
 ;; transient primitives (the Rust side knows nothing about git):
 ;;   * `call-process`  — run git, get stdout
@@ -879,8 +881,8 @@
 ;; Optional scoping hook: a thunk returning the git work-tree magit should scope
 ;; to, or #f. perspectives.scm installs one so magit FOLLOWS THE TITLE-BAR
 ;; project — the title bar is the user's project selector, so magit tracks it
-;; rather than whatever buffer happens to be current. Declared here (magit.scm
-;; loads before perspectives.scm) so the installer needn't be known to magit at
+;; rather than whatever buffer happens to be current. Declared here (perspectives.scm
+;; requires magit.scm) so the installer needn't be known to magit at
 ;; definition time; stays #f if perspectives is unloaded. Installers MUST use
 ;; the setter below: a raw top-level `set!` from a later-loaded file mutates a
 ;; binding magit-current-repo never reads (Steel resolves free identifiers at

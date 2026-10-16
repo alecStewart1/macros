@@ -1,6 +1,8 @@
+;; requires: core helm
+
 ;; help.scm — discoverability: an M-x that lists Scheme commands too, plus
-;; describe-key / apropos / describe-bindings. Loads after helm.scm so its
-;; M-x rebinding wins.
+;; describe-key / apropos / describe-bindings. Requires helm.scm so it loads
+;; after it and its M-x rebinding wins.
 
 ;; Drop consecutive duplicates from a SORTED string list (one O(n) pass).
 (define (help--dedup-sorted xs)

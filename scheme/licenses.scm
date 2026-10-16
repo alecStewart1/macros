@@ -1,3 +1,5 @@
+;; requires: core
+
 ;; licenses.scm — `M-x licenses` opens a read-only *licenses* buffer with
 ;; Macros' license and third-party acknowledgments (mirrors the repo NOTICE).
 ;; The full text of every bundled Rust crate license lives in

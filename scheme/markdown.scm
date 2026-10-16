@@ -1,3 +1,5 @@
+;; requires: core folding
+
 ;; markdown-mode — major mode for Markdown, the Macros analogue of markdown-mode.el.
 ;; Tree-sitter (tree-sitter-md) already fontifies once the mode is set, so this
 ;; layer adds the editing affordances: heading navigation, fold-by-heading, and

@@ -1,3 +1,5 @@
+;; requires: core hooks persistence perspectives
+
 ;; session.scm — survive a restart (Emacs `savehist-mode` + `desktop-save-mode`).
 ;;
 ;;   * savehist : minibuffer history, search ring, M-x command history and
@@ -30,8 +32,8 @@
 ;; layout are published on demand — `(session-refresh 'callback)` publishes, then
 ;; calls `callback`, which reads `(session-ring …)`, `(session-file-buffers)` and
 ;; `(window-layout)`; `set-session-ring!`, `restore-file-buffers` and
-;; `set-window-layout` restore. Loads after persistence.scm (`persistence-dir`)
-;; and perspectives.scm (`perspective-current`) — sorted order.
+;; `set-window-layout` restore. Requires persistence.scm (`persistence-dir`) and
+;; perspectives.scm (`perspective-current`).
 
 ;; --- line escaping --------------------------------------------------------------
 ;; Ring entries (kills especially) contain newlines/tabs; the files are one record

@@ -1,3 +1,5 @@
+;; requires:
+
 ;; lib-transient — a popup menu of (key label command) rows, the magit /
 ;; transient.el pattern (the "lib-" name keeps this file sorting BEFORE
 ;; magit.scm, which builds its switch popups on the argument mechanism here). The popup UI and key dispatch live in Rust (`transient` opens it,
