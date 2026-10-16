@@ -1386,7 +1386,11 @@ fn terminal_exit_kills_its_buffer(cx: &mut TestAppContext) {
     ed.update(cx, |e, cx| e.on_terminal_event(id, TermEvent::Exit, cx));
     settle(&ed, cx);
     ed.read_with(cx, |e, _| {
-        assert!(!e.has_buffer("*terminal*"), "buffers: {:?}", e.buffer_names());
+        assert!(
+            !e.has_buffer("*terminal*"),
+            "buffers: {:?}",
+            e.buffer_names()
+        );
         assert!(e.terminals.is_empty());
     });
 }
