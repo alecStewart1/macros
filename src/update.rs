@@ -768,6 +768,8 @@ mod macos {
         let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
             return false;
         };
+        // SAFETY: `libc::statfs` is a plain C struct of integers and byte
+        // arrays, for which the all-zero bit pattern is a valid value.
         let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
         // SAFETY: `c_path` is a valid NUL-terminated string and `sfs` is a valid
         // out-pointer; `statfs` only writes into it on success.

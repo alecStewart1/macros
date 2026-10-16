@@ -291,6 +291,8 @@ mod process_tests {
     /// Is any process left in group `pgid`?
     #[cfg(not(target_os = "linux"))]
     fn group_alive(pgid: i32) -> bool {
+        // SAFETY: `kill` with signal 0 takes no pointers and only probes for
+        // existence; it sends nothing.
         unsafe { libc::kill(-pgid, 0) == 0 }
     }
 
@@ -300,6 +302,8 @@ mod process_tests {
     #[cfg(target_os = "linux")]
     fn group_alive(pgid: i32) -> bool {
         let Ok(entries) = std::fs::read_dir("/proc") else {
+            // SAFETY: `kill` with signal 0 takes no pointers and only probes
+            // for existence; it sends nothing.
             return unsafe { libc::kill(-pgid, 0) == 0 };
         };
         entries.flatten().any(|e| {

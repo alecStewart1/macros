@@ -835,6 +835,8 @@ mod config_integration {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("init.scm"), "(include \"more.scm\")\n").unwrap();
         std::fs::write(dir.join("more.scm"), "(set-option \"font-size\" \"17\")\n").unwrap();
+        // SAFETY: `TEST_ENV_LOCK` is held, so no other test reads or writes the
+        // environment concurrently.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", &root);
         }
@@ -857,6 +859,7 @@ mod config_integration {
             result.commands
         );
 
+        // SAFETY: `TEST_ENV_LOCK` is still held (see above).
         unsafe {
             std::env::remove_var("XDG_CONFIG_HOME");
         }

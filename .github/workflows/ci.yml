@@ -1,16 +1,20 @@
-# GitHub Actions CI for Forge (Forgemacs).
+# GitHub Actions CI for Macros.
 #
-# Jobs: rustfmt (formatting), the dependency license gate, clippy (lints), and
-# the test suite. `fmt` is light (no compile, no system libs). `clippy` and
-# `test` must compile the crate, which links gpui's Linux backend, ~18
-# tree-sitter C grammars, and git2's vendored OpenSSL — hence the apt build
-# dependencies below.
+# Jobs: rustfmt (formatting), the cargo-deny dependency gate (job `licenses`), and clippy (lints)
+# plus the test suite on Linux and macOS, and a `cargo check` on Windows. `fmt`
+# and `deny` are light (no compile, no system libs). The Linux jobs compile the
+# crate, which links gpui's Linux backend and ~18 tree-sitter C grammars —
+# hence the apt build dependencies below. macOS is the primary platform, so it
+# gets clippy and tests too: that is the only place the AppKit spellchecker
+# (src/spell.rs), the self-update bundle swap (src/update.rs) and the vendored
+# gpui Metal shader patch are compiled.
 #
 # Release builds and the web deploy stay on the self-hosted Forgejo runners
 # (.forgejo/workflows/), which hold the signing and publishing secrets.
 #
-# If a `*-sys` crate fails to build complaining about a missing library, add
-# the corresponding `-dev` package to the "Install system deps" step.
+# If a `*-sys` crate fails to build on Linux complaining about a missing
+# library, add the corresponding `-dev` package to the "Install system deps"
+# step.
 
 name: CI
 
@@ -50,13 +54,15 @@ jobs:
         run: cargo fmt --all --check
 
   licenses:
-    # Dependency license gate: fail if any crate is only available under a
-    # license that conflicts with redistributing Macros under MIT (GPL/AGPL/
-    # LGPL/etc.). Policy lives in deny.toml. No project compile needed, so this
-    # job is light — just cargo metadata + cargo-deny.
+    # Dependency gate (policy in deny.toml). The job keeps its old `licenses`
+    # id because the main-branch ruleset requires a check by that name, but it
+    # now runs every cargo-deny check: RustSec advisories, licenses that
+    # conflict with redistributing Macros under MIT (GPL/AGPL/LGPL/etc.),
+    # duplicate versions (warn only) and non-crates.io sources. No project
+    # compile needed, so this job is light — just cargo metadata + cargo-deny.
     runs-on: ubuntu-latest
     env:
-      CARGO_DENY_VERSION: "0.19.0"
+      CARGO_DENY_VERSION: "0.20.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -75,8 +81,8 @@ jobs:
             | tar -xz --strip-components=1 -C "$HOME/.cargo/bin" "${tarball}/cargo-deny"
           cargo-deny --version
 
-      - name: Check dependency licenses
-        run: cargo deny check licenses
+      - name: Check dependencies
+        run: cargo deny check
 
   clippy:
     runs-on: ubuntu-latest
@@ -149,3 +155,68 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --locked
+
+  macos:
+    # The primary platform: clippy and the test suite against the AppKit/Metal
+    # backend, which the Linux jobs never compile.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (clippy)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal --component clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # gpui's build script compiles the (patched) Metal shaders with
+      # `xcrun metal`. Recent Xcode releases ship the Metal toolchain as a
+      # separate download, so fetch it when it's missing.
+      - name: Ensure Metal toolchain
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-v2-macos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-v2-macos-
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  windows:
+    # Compile-only: keeps the Windows-specific code (grammar .dll builds,
+    # winresource icon embedding) from rotting between releases.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup is preinstalled on GitHub's Windows images; this installs the
+      # toolchain pinned in rust-toolchain.toml.
+      - name: Install Rust
+        shell: bash
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-v2-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-v2-check-
+
+      - name: Cargo check
+        run: cargo check --workspace --all-targets --locked

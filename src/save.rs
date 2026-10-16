@@ -333,6 +333,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         // Root bypasses file mode bits (access(W_OK) succeeds on a 0444 file),
         // so the write legitimately goes through — e.g. CI running as root.
+        // SAFETY: `geteuid` takes no arguments and cannot fail.
         if unsafe { libc::geteuid() } == 0 {
             return;
         }

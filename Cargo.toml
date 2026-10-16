@@ -201,7 +201,6 @@ libc = ">=0.2, <0.2.187"
 # the tree transitively via gpui, so these add no new compilation units —
 # they only surface the AppKit spell-checking API to this crate.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSDictionary", "NSValue", "NSTextCheckingResult", "NSOrthography"] }
 objc2-app-kit = { version = "0.3", features = ["NSSpellChecker", "block2"] }
 block2 = "0.6"
@@ -212,6 +211,16 @@ block2 = "0.6"
 # `LanguageFn` binding in src/highlight.rs.
 [build-dependencies]
 cc = "1"
+
+# Lint policy. Every `unsafe` block must say why it is sound (`// SAFETY:`),
+# and debugging leftovers (`dbg!`, `todo!`) never reach main.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+todo = "deny"
 
 [profile.dev]
 # gpui + steel are large; a touch of opt keeps the editor responsive while

@@ -92,6 +92,8 @@ mod native {
                   _orthography: NonNull<NSOrthography>,
                   _word_count: NSInteger| {
                 let mut out = Vec::new();
+                // SAFETY: AppKit hands the completion handler a valid, non-null
+                // NSArray that it keeps alive for the duration of the call.
                 for result in unsafe { results.as_ref() } {
                     if !result.resultType().contains(NSTextCheckingType::Spelling) {
                         continue;
@@ -104,6 +106,8 @@ mod native {
                 deliver(out);
             },
         );
+        // SAFETY: every argument is a live, correctly typed Objective-C object or
+        // plain value; AppKit retains `block` (an `RcBlock`) until it has run.
         unsafe {
             checker.requestCheckingOfString_range_types_options_inSpellDocumentWithTag_completionHandler(
                 &ns,

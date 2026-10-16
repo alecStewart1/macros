@@ -18,6 +18,9 @@ mod mermaid {
         fn tree_sitter_mermaid() -> *const ();
     }
 
+    // SAFETY: `tree_sitter_mermaid` is the generated parser entry point that
+    // build.rs compiles and links; it takes no arguments and returns a pointer
+    // to a static `TSLanguage`, which is the contract `from_raw` requires.
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_mermaid) };
 }
 
@@ -32,6 +35,9 @@ mod racket {
         fn tree_sitter_racket() -> *const ();
     }
 
+    // SAFETY: `tree_sitter_racket` is the generated parser entry point that
+    // build.rs compiles and links; it takes no arguments and returns a pointer
+    // to a static `TSLanguage`, which is the contract `from_raw` requires.
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_racket) };
 }
 
