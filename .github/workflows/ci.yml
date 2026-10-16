@@ -1,6 +1,6 @@
 # GitHub Actions CI for Macros.
 #
-# Jobs: rustfmt (formatting), the cargo-deny dependency gate, and clippy (lints)
+# Jobs: rustfmt (formatting), the cargo-deny dependency gate (job `licenses`), and clippy (lints)
 # plus the test suite on Linux and macOS, and a `cargo check` on Windows. `fmt`
 # and `deny` are light (no compile, no system libs). The Linux jobs compile the
 # crate, which links gpui's Linux backend and ~18 tree-sitter C grammars —
@@ -53,8 +53,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-  deny:
-    # Dependency gate (policy in deny.toml): RustSec advisories, licenses that
+  licenses:
+    # Dependency gate (policy in deny.toml). The job keeps its old `licenses`
+    # id because the main-branch ruleset requires a check by that name, but it
+    # now runs every cargo-deny check: RustSec advisories, licenses that
     # conflict with redistributing Macros under MIT (GPL/AGPL/LGPL/etc.),
     # duplicate versions (warn only) and non-crates.io sources. No project
     # compile needed, so this job is light — just cargo metadata + cargo-deny.
