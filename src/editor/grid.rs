@@ -1910,7 +1910,7 @@ impl Editor {
         let mut xlsx_text = Default::default();
         let mut xlsx_formats = Vec::new();
         let (wb, background) = if ext.as_deref() == Some("xlsx") {
-            match super::grid_xlsx::load(&bytes, 0) {
+            match super::grid_xlsx::load(&bytes, 0, &self.grid_fn_names()) {
                 Ok(l) => {
                     xlsx_lossy = l.lossy;
                     xlsx_sheets = l.sheets;
@@ -3495,7 +3495,11 @@ impl Editor {
         };
         let ext = g.ext.clone();
         let parsed = if ext.as_deref() == Some("xlsx") {
-            Parsed::Xlsx(Box::new(super::grid_xlsx::load(&bytes, g.xlsx.sheet)?))
+            Parsed::Xlsx(Box::new(super::grid_xlsx::load(
+                &bytes,
+                g.xlsx.sheet,
+                &self.grid_fn_names(),
+            )?))
         } else if total <= SYNC_PARSE_LIMIT {
             Parsed::Csv(Box::new(
                 crate::grid::parse::parse_now(bytes.clone(), ext.as_deref())
