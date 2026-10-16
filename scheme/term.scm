@@ -32,6 +32,12 @@
 (register-command 'ansi-term)
 (register-command 'term-run)
 
+;; When the shell exits (`exit`, C-d), kill its buffer rather than leave a dead
+;; terminal behind. Opt out in init.scm with
+;; (remove-hook "terminal-exit-hook" "term-kill-on-exit").
+(define (term-kill-on-exit name) (kill-buffer-named name))
+(add-hook "terminal-exit-hook" "term-kill-on-exit")
+
 ;; A convenient default binding (Emacs uses no global key for term; pick the
 ;; project leader prefix). Users can rebind in init.scm.
 (define-key "fundamental" "ctrl-c ctrl-t" 'term)
