@@ -62,22 +62,19 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         crate::process::push_dynamic(crate::process::EnvOverrides::parse(&env));
     });
     reg.register_fn("process-env-pop!", crate::process::pop_dynamic);
-    // `(getenv name)` → the variable's value, or "" if unset. Reads the same
-    // process environment that all subprocess spawns inherit (see
-    // `import_shell_env`), so config can inspect the resolved PATH.
+    // `(getenv name)` → the variable's value, or "" if unset. Sees `setenv`
+    // and any open `with-process-env` extent — what a child spawned now gets.
     reg.register_fn("getenv", |name: String| -> String {
-        std::env::var(&name).unwrap_or_default()
+        crate::process::getenv(&name).unwrap_or_default()
     });
-    // `(setenv name value)` → set a process env var, visible to every
-    // subsequently spawned subprocess (LSP servers, call-process, make-process).
-    // Lets a config extend PATH or pin a toolchain, e.g.
+    // `(setenv name value)` → set an env var for every subsequently spawned
+    // subprocess (LSP servers, call-process, make-process, terminals). Lets a
+    // config extend PATH or pin a toolchain, e.g.
     //   (setenv "PATH" (string-append (getenv "PATH") ":" ...))
-    // Runs on the single engine thread during `init.scm` eval, before any
-    // process is spawned from Scheme, so the mutation is sound.
+    // Recorded in an overlay applied at spawn time, never via
+    // `std::env::set_var`: other threads read the environment concurrently.
     reg.register_fn("setenv", |name: String, value: String| {
-        // SAFETY: the engine is single-threaded and config eval happens at
-        // startup before subprocess threads read the environment.
-        unsafe { std::env::set_var(&name, &value) };
+        crate::process::set_global(&name, &value);
     });
     {
         // `(make-process program args on-output on-exit)` → a process id (used by

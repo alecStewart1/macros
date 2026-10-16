@@ -4,12 +4,17 @@
 //! These methods extend the same `Editor` type; cross-module entry points are
 //! `pub(super)`.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
 use futures::StreamExt;
 use gpui::Context;
 
 use super::*;
+
+/// How long `http-serve` waits for a client's request line before dropping it.
+const HTTP_SERVE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The longest request line `http-serve` reads (a browser's is far shorter).
+const HTTP_SERVE_MAX_LINE: u64 = 16 * 1024;
 
 impl Editor {
     /// Open a streaming HTTP POST (`make-http-stream`): a worker thread sends the
@@ -146,12 +151,13 @@ impl Editor {
             on_request,
         } = args;
 
-        let Some(listener) = listener.lock().unwrap().take() else {
+        let Some(listener) = listener.lock().ok().and_then(|mut l| l.take()) else {
             return;
         };
         // Non-blocking accept + short sleep so the stop flag is honored promptly
         // without a second wakeup mechanism.
-        if listener.set_nonblocking(true).is_err() {
+        if let Err(e) = listener.set_nonblocking(true) {
+            self.echo(format!("http-serve {port}: {e}"), cx);
             return;
         }
 
@@ -174,11 +180,23 @@ impl Editor {
                     Ok((mut conn, _)) => {
                         // Read the request line ("GET /path?query HTTP/1.1") to
                         // pull out the target; ignore the rest of the request.
-                        conn.set_nonblocking(false).ok();
+                        // Bounded in time and size: this one thread serves
+                        // every connection, so a client that connects and
+                        // sends nothing (or never sends a newline) must not
+                        // wedge the server or `http-server-stop`.
+                        if conn.set_nonblocking(false).is_err()
+                            || conn
+                                .set_read_timeout(Some(HTTP_SERVE_READ_TIMEOUT))
+                                .is_err()
+                        {
+                            continue;
+                        }
                         let target = {
-                            let mut reader = BufReader::new(&conn);
+                            let mut reader = BufReader::new(&conn).take(HTTP_SERVE_MAX_LINE);
                             let mut line = String::new();
-                            let _ = reader.read_line(&mut line);
+                            if reader.read_line(&mut line).is_err() || !line.ends_with('\n') {
+                                continue;
+                            }
                             line.split_whitespace().nth(1).unwrap_or("").to_string()
                         };
                         let _ = conn.write_all(response.as_bytes());
@@ -190,6 +208,15 @@ impl Editor {
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
+                    // A client that hung up mid-handshake isn't the server's
+                    // failure; keep accepting.
+                    Err(ref e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::Interrupted
+                        ) => {}
                     Err(_) => break,
                 }
             }

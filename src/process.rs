@@ -8,6 +8,11 @@
 //!   `process-environment` let-binding): every process spawned inside the
 //!   thunk's extent picks the overrides up, whichever primitive spawned it.
 //!
+//! A third, process-wide layer sits under both: `(setenv KEY VALUE)` records
+//! into [`set_global`] instead of mutating the real process environment
+//! (`std::env::set_var` is unsound once other threads exist, and the UI,
+//! executor, LSP readers and fs watcher all do). Every spawn applies it first.
+//!
 //! The dynamic stack is thread-local to the Steel engine thread (where every
 //! spawning primitive runs or, for async spawns, *captures* its env before the
 //! command is queued). The engine resets it at the start of each job, so a
@@ -16,7 +21,7 @@
 
 use std::cell::RefCell;
 use std::process::{Child, ExitStatus};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Child-process env overrides: `(KEY, Some(value))` sets, `(KEY, None)`
@@ -61,8 +66,10 @@ impl EnvOverrides {
         )
     }
 
-    /// Apply to a `Command`, on top of the environment it inherits.
+    /// Apply to a `Command`, on top of the environment it inherits and the
+    /// global `setenv` overlay.
     pub fn apply(&self, cmd: &mut std::process::Command) {
+        apply_global(cmd);
         for (k, v) in &self.0 {
             match v {
                 Some(v) => cmd.env(k, v),
@@ -76,10 +83,66 @@ impl EnvOverrides {
     /// (the closest a set-only map gets; `${X-default}` will still see it as
     /// set).
     pub fn apply_to_map(&self, map: &mut std::collections::HashMap<String, String>) {
+        for (k, v) in global_snapshot() {
+            map.insert(k, v);
+        }
         for (k, v) in &self.0 {
             map.insert(k.clone(), v.clone().unwrap_or_default());
         }
     }
+}
+
+/// The `setenv` overlay: process-wide, insertion-ordered, one entry per key.
+static GLOBAL: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
+
+fn global_snapshot() -> Vec<(String, String)> {
+    GLOBAL.read().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// `(setenv key value)`: set `key` for every process spawned from now on.
+pub fn set_global(key: &str, value: &str) {
+    let Ok(mut g) = GLOBAL.write() else { return };
+    match g.iter_mut().find(|(k, _)| k == key) {
+        Some(entry) => entry.1 = value.to_string(),
+        None => g.push((key.to_string(), value.to_string())),
+    }
+}
+
+/// Apply only the global `setenv` overlay — for spawners that take no
+/// Scheme overrides (grammar compiles, gpg). Keys the command already sets
+/// explicitly keep their value, as they would over a real inherited env.
+pub fn apply_global(cmd: &mut std::process::Command) {
+    let explicit: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+    for (k, v) in global_snapshot() {
+        if !explicit.iter().any(|e| *e == *k) {
+            cmd.env(k, v);
+        }
+    }
+}
+
+/// `(getenv key)`: what a child spawned right now would see — the innermost
+/// `with-process-env` override, then the `setenv` overlay, then the real
+/// environment. `None` when unset (or unset by an override).
+pub fn getenv(key: &str) -> Option<String> {
+    let dynamic = DYNAMIC.with(|d| {
+        d.borrow().iter().rev().find_map(|e| {
+            e.0.iter()
+                .rev()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        })
+    });
+    if let Some(v) = dynamic {
+        return v;
+    }
+    if let Some(v) = GLOBAL
+        .read()
+        .ok()
+        .and_then(|g| g.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+    {
+        return Some(v);
+    }
+    std::env::var(key).ok()
 }
 
 thread_local! {

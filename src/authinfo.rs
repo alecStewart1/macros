@@ -222,6 +222,7 @@ fn run_gpg(
     gnupg_home: Option<&Path>,
 ) -> Result<Vec<u8>, AuthError> {
     let mut cmd = Command::new(gpg);
+    crate::process::apply_global(&mut cmd);
     cmd.args([
         "--batch",
         "--quiet",

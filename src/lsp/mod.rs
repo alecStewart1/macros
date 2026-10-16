@@ -194,6 +194,18 @@ impl LanguageServer for LspClient {
         self.notify("initialized", json!({}));
     }
 
+    /// The spec's polite exit: servers flush caches and stop their own
+    /// children (rust-analyzer's proc-macro server, tsserver, …) on `exit`,
+    /// which a group SIGKILL can't do for anything that left the group.
+    /// The response to `shutdown` isn't awaited — servers process requests in
+    /// order, and the caller's grace period covers both.
+    fn begin_shutdown(&mut self) -> Option<ProcessGroup> {
+        let group = self.child.take()?;
+        self.send_request("shutdown", Value::Null);
+        self.notify("exit", Value::Null);
+        Some(group)
+    }
+
     fn did_open(&mut self, uri: &str, language_id: &str, version: i32, text: &str) {
         self.notify(
             "textDocument/didOpen",
@@ -1523,6 +1535,13 @@ pub trait LanguageServer {
     /// Acknowledge the server's `initialize` response.
     fn initialized(&mut self) {}
 
+    /// Ask the server to exit (`shutdown` + `exit`) and hand back its process
+    /// group for the caller to reap with a grace period. `None` for an
+    /// in-process backend, or once already called.
+    fn begin_shutdown(&mut self) -> Option<ProcessGroup> {
+        None
+    }
+
     fn did_open(&mut self, uri: &str, language_id: &str, version: i32, text: &str);
 
     /// Full-document sync.
@@ -1630,6 +1649,52 @@ pub fn normalize_uri(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `begin_shutdown` sends `shutdown` + `exit`, and a well-behaved server
+    /// exits on its own (status 0) inside the grace period instead of being
+    /// SIGKILLed. A tiny python server stands in for a real one.
+    #[cfg(unix)]
+    #[test]
+    fn begin_shutdown_lets_the_server_exit_cleanly() {
+        if std::process::Command::new("python3")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let script = r#"
+import sys, json
+inp = sys.stdin.buffer
+while True:
+    n = 0
+    while True:
+        line = inp.readline()
+        if not line:
+            sys.exit(2)
+        line = line.strip()
+        if not line:
+            break
+        if line.lower().startswith(b"content-length:"):
+            n = int(line.split(b":")[1])
+    if json.loads(inp.read(n)).get("method") == "exit":
+        sys.exit(0)
+"#;
+        let dir = std::env::temp_dir().join(format!("macros-lsp-shutdown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.py");
+        std::fs::write(&path, script).unwrap();
+        let command = format!("python3 {}", path.display());
+        let (mut client, _rx) = LspClient::start(&command, &dir, &EnvOverrides::default()).unwrap();
+        let mut group = client
+            .begin_shutdown()
+            .expect("external server has a group");
+        let status = group.reap_with_grace(std::time::Duration::from_secs(5));
+        assert_eq!(status.and_then(|s| s.code()), Some(0));
+        assert!(client.begin_shutdown().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn client_capabilities_advertise_what_we_handle() {

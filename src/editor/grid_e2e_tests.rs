@@ -2416,7 +2416,7 @@ fn formatted_csv_saves_as_xlsx_and_reopens_formatted(cx: &mut TestAppContext) {
     let xlsx = path.with_extension("xlsx");
     ed.update(cx, |e, cx| e.grid_save_as_xlsx(&xlsx.to_string_lossy(), cx));
     settle(&ed, cx);
-    let l = super::grid_xlsx::load(&std::fs::read(&xlsx).unwrap(), 0).unwrap();
+    let l = super::grid_xlsx::load(&std::fs::read(&xlsx).unwrap(), 0, &Default::default()).unwrap();
     assert!(l.lossy.is_empty(), "{:?}", l.lossy);
     let mut formats = l.formats.clone();
     formats.sort_by_key(|(at, _)| *at);
@@ -2444,7 +2444,7 @@ fn formatted_csv_saves_as_xlsx_and_reopens_formatted(cx: &mut TestAppContext) {
     // Saving the .xlsx in place keeps it too.
     keys(&ed, cx, "f %");
     save(&ed, cx);
-    let l = super::grid_xlsx::load(&std::fs::read(&xlsx).unwrap(), 0).unwrap();
+    let l = super::grid_xlsx::load(&std::fs::read(&xlsx).unwrap(), 0, &Default::default()).unwrap();
     let e2 = l.formats.iter().find(|(at, _)| *at == (1, 4)).unwrap().1;
     assert_eq!(e2.num, NumCode::intern("0.00%"));
 }

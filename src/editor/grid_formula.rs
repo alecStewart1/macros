@@ -456,6 +456,12 @@ impl GridDoc {
 }
 
 impl Editor {
+    /// The Scheme grid functions defined now, upper case (as formulas call
+    /// them).
+    pub(super) fn grid_fn_names(&self) -> HashSet<String> {
+        self.grid_fns.names.keys().cloned().collect()
+    }
+
     /// After a grid command: absorb edits into the formula engine, and if a
     /// large recalculation didn't finish in one slice, keep it going on later
     /// frames (stale results draw until then).
@@ -622,7 +628,7 @@ impl Editor {
         // A (re)definition — of a function, or of a helper one calls —
         // changes what calls return: recompute everything that might call
         // one.
-        let names: HashSet<String> = self.grid_fns.names.keys().cloned().collect();
+        let names = self.grid_fn_names();
         for doc in std::iter::once(&mut self.active).chain(self.inactive.iter_mut()) {
             if let Some(g) = doc.grid.as_deref_mut() {
                 g.formulas.functions_redefined(names.clone());

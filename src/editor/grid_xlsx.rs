@@ -82,8 +82,43 @@ fn value_text(v: &XValue) -> String {
     }
 }
 
-/// Load sheet `index` (0 = the first) of an `.xlsx` package.
-pub(super) fn load(bytes: &[u8], index: usize) -> Result<Loaded, String> {
+/// The functions and defined names in formula `text` that would evaluate
+/// to `#NAME?` here: not built in, not an evaluator form, and not one of the
+/// Scheme `define-grid-function`s in `externals`. Empty if it doesn't parse
+/// (the cell then loads as it always did).
+fn unsupported_names(text: &str, externals: &HashSet<String>) -> Vec<String> {
+    use crate::formula::ast::Expr;
+    use crate::formula::func;
+    fn walk(e: &Expr, externals: &HashSet<String>, out: &mut Vec<String>) {
+        match e {
+            Expr::Call(name, _)
+                if func::lookup(name).is_none()
+                    && func::special(name).is_none()
+                    && !externals.contains(&**name) =>
+            {
+                out.push(name.to_string());
+            }
+            Expr::Name(name) => out.push(name.to_string()),
+            _ => {}
+        }
+        e.for_each_child(&mut |c| walk(c, externals, out));
+    }
+    let mut out = Vec::new();
+    if let Ok(expr) = crate::formula::parse::parse(text) {
+        walk(&expr, externals, &mut out);
+    }
+    out
+}
+
+/// Load sheet `index` (0 = the first) of an `.xlsx` package. `externals` are
+/// the Scheme grid functions defined now (upper case): formulas calling only
+/// those and built-ins load live; any other formula keeps the result Excel
+/// saved for it (see [`unsupported_names`]).
+pub(super) fn load(
+    bytes: &[u8],
+    index: usize,
+    externals: &HashSet<String>,
+) -> Result<Loaded, String> {
     if bytes.is_empty() {
         // A new file: an empty sheet, created on first save.
         return Ok(Loaded {
@@ -119,6 +154,8 @@ pub(super) fn load(bytes: &[u8], index: usize) -> Result<Loaded, String> {
     let mut cells = Vec::with_capacity(sheet.cells.len());
     let mut text_cells = HashMap::new();
     let mut formats = Vec::new();
+    // Names this grid can't evaluate, across the sheet (sorted for the message).
+    let mut unsupported = std::collections::BTreeSet::new();
     for c in &sheet.cells {
         if let Some(st) = book.styles.get(c.style).filter(|s| !s.is_default()) {
             match cell_fmt(st) {
@@ -129,26 +166,35 @@ pub(super) fn load(bytes: &[u8], index: usize) -> Result<Loaded, String> {
                 None => {}
             }
         }
-        let text = match &c.formula {
+        let formula = match &c.formula {
             Some(XFormula::Normal(f)) | Some(XFormula::SharedMaster { text: f, .. }) => {
-                store_formula(&format!("={f}"))
+                Some(format!("={f}"))
             }
-            Some(XFormula::Array { text, .. }) => store_formula(&format!("={text}")),
-            Some(XFormula::SharedChild { si }) => match masters.get(si) {
-                Some((mr, mc, f)) => {
-                    let moved = super::grid_formula::translated(
-                        &format!("={f}"),
-                        c.row as isize - *mr as isize,
-                        c.col as isize - *mc as isize,
-                    );
-                    store_formula(&moved)
-                }
-                None => value_text(&c.value),
-            },
+            Some(XFormula::Array { text, .. }) => Some(format!("={text}")),
+            Some(XFormula::SharedChild { si }) => masters.get(si).map(|(mr, mc, f)| {
+                super::grid_formula::translated(
+                    &format!("={f}"),
+                    c.row as isize - *mr as isize,
+                    c.col as isize - *mc as isize,
+                )
+            }),
+            None => None,
+        };
+        // A formula we can't evaluate would recalculate to `#NAME?` and
+        // replace the result Excel computed: keep that result instead.
+        let formula = formula.filter(|f| {
+            let missing = unsupported_names(f, externals);
+            let ok = missing.is_empty();
+            unsupported.extend(missing);
+            ok
+        });
+        let live = formula.is_some();
+        let text = match formula {
+            Some(f) => store_formula(&f),
             None => value_text(&c.value),
         };
         if !text.is_empty() {
-            if c.formula.is_none()
+            if !live
                 && matches!(c.value, XValue::Text(_))
                 && !matches!(plain_value(&text), XValue::Text(_))
             {
@@ -166,6 +212,17 @@ pub(super) fn load(bytes: &[u8], index: usize) -> Result<Loaded, String> {
         return Err(format!(
             "sheet \"{}\" spans {rows} rows × {cols} columns, too large to open",
             sheet.name
+        ));
+    }
+    if !unsupported.is_empty() {
+        const SHOWN: usize = 5;
+        let mut names: Vec<_> = unsupported.iter().take(SHOWN).cloned().collect();
+        if unsupported.len() > SHOWN {
+            names.push(format!("{} more", unsupported.len() - SHOWN));
+        }
+        lossy.push(format!(
+            "formulas using {} (unsupported here; showing their saved results)",
+            names.join(", ")
         ));
     }
     let wb = Workbook::from_cells(&sheet.name, cells);
@@ -306,7 +363,10 @@ impl Editor {
         let buffer = self.unique_buffer_name(&format!("{base}<{sheet}>"), &path);
         let loaded = std::fs::read(&path)
             .map_err(|e| e.to_string())
-            .and_then(|bytes| Ok((load(&bytes, index)?, super::grid::bytes_hash(&bytes))));
+            .and_then(|bytes| {
+                let l = load(&bytes, index, &self.grid_fn_names())?;
+                Ok((l, super::grid::bytes_hash(&bytes)))
+            });
         let (l, hash) = match loaded {
             Ok(l) => l,
             Err(e) => {
@@ -559,7 +619,7 @@ mod tests {
             }),
             false,
         );
-        let loaded = load(&bytes, 0).unwrap();
+        let loaded = load(&bytes, 0, &HashSet::new()).unwrap();
         assert!(loaded.lossy.is_empty(), "{:?}", loaded.lossy);
         assert_eq!(loaded.wb.cell(SHEET, 2, 0), "007");
         assert_eq!(loaded.wb.cell(SHEET, 3, 0), store_formula("=A2*10"));
@@ -584,12 +644,35 @@ mod tests {
     /// Load `bytes` as a grid and save it again, through the grid's own
     /// save path.
     fn resave_grid(bytes: &[u8]) -> crate::xlsx::Book {
-        let l = load(bytes, 0).unwrap();
+        let l = load(bytes, 0, &HashSet::new()).unwrap();
         assert!(l.lossy.is_empty(), "{:?}", l.lossy);
         let opts = super::super::grid::GridOptions::default();
         let mut g = GridDoc::new(l.wb, Some("xlsx".into()), 0, &opts);
         g.xlsx.text = l.text_cells;
         xlsx::read(&g.xlsx_bytes()).unwrap()
+    }
+
+    /// A formula calling a function the grid lacks keeps Excel's saved
+    /// result (not `#NAME?`), cells built on it compute from that result, and
+    /// the load is flagged lossy so a save can't overwrite the original. A
+    /// Scheme grid function of that name makes the formula live.
+    #[test]
+    fn unsupported_functions_keep_their_cached_results() {
+        let bytes = book_of(&[
+            (0, 0, XValue::Number(-150.0), Some("PMT(0.05,10,1000)")),
+            (1, 0, XValue::Number(-300.0), Some("A1*2")),
+            (2, 0, XValue::Number(3.0), Some("SUM(1,2)")),
+        ]);
+        let l = load(&bytes, 0, &HashSet::new()).unwrap();
+        assert_eq!(l.wb.cell(SHEET, 0, 0), "-150");
+        assert_eq!(l.wb.cell(SHEET, 1, 0), store_formula("=A1*2"));
+        assert_eq!(l.wb.cell(SHEET, 2, 0), store_formula("=SUM(1,2)"));
+        assert!(l.lossy.iter().any(|m| m.contains("PMT")), "{:?}", l.lossy);
+
+        let externals: HashSet<String> = ["PMT".to_string()].into_iter().collect();
+        let l = load(&bytes, 0, &externals).unwrap();
+        assert_eq!(l.wb.cell(SHEET, 0, 0), store_formula("=PMT(0.05,10,1000)"));
+        assert!(l.lossy.is_empty(), "{:?}", l.lossy);
     }
 
     #[test]
@@ -599,7 +682,7 @@ mod tests {
             (1, 0, XValue::Number(0.1 + 0.2), None),
             (2, 0, XValue::Number(2.5), None),
         ]);
-        let l = load(&bytes, 0).unwrap();
+        let l = load(&bytes, 0, &HashSet::new()).unwrap();
         // Shown as Excel would where that's exact.
         assert_eq!(l.wb.cell(SHEET, 2, 0), "2.5");
         let book = resave_grid(&bytes);
@@ -646,13 +729,13 @@ mod tests {
     #[test]
     fn a_far_away_cell_is_refused() {
         let bytes = book_of(&[(1_048_575, 16_383, XValue::Number(1.0), None)]);
-        assert!(load(&bytes, 0).is_err_and(|e| e.contains("too large")));
+        assert!(load(&bytes, 0, &HashSet::new()).is_err_and(|e| e.contains("too large")));
     }
 
     #[test]
     fn text_from_the_file_never_becomes_a_formula() {
         let bytes = book_of(&[(0, 0, XValue::Text("\u{1}=1+1".into()), None)]);
-        let l = load(&bytes, 0).unwrap();
+        let l = load(&bytes, 0, &HashSet::new()).unwrap();
         assert!(!is_formula(l.wb.cell(SHEET, 0, 0)));
         assert_eq!(l.wb.cell(SHEET, 0, 0), "=1+1");
     }
@@ -660,7 +743,7 @@ mod tests {
     #[test]
     fn regression_text_number_keeps_type_after_edit_and_undo() {
         let bytes = book_of(&[(0, 0, XValue::Text("12".into()), None)]);
-        let l = load(&bytes, 0).unwrap();
+        let l = load(&bytes, 0, &HashSet::new()).unwrap();
         let opts = super::super::grid::GridOptions::default();
         let mut g = GridDoc::new(l.wb, Some("xlsx".into()), 0, &opts);
         g.xlsx.text = l.text_cells;

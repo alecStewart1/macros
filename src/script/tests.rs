@@ -3987,8 +3987,9 @@ mod magit_tests {
         assert_eq!(out.value.as_deref(), Some("\"hello world\""));
     }
 
-    /// `setenv` mutates the process env and `getenv` reads it back — the bridge
-    /// config uses to extend PATH for subprocess spawns.
+    /// `setenv` records into the spawn overlay and `getenv` reads it back — the
+    /// bridge config uses to extend PATH for subprocess spawns. Children see
+    /// it; the real process env (unsound to mutate from a thread) does not.
     #[test]
     fn setenv_then_getenv_roundtrips() {
         let (engine, _rx) = ScriptEngine::new();
@@ -3996,6 +3997,29 @@ mod magit_tests {
             .eval(r#"(begin (setenv "MACROS_TEST_VAR" "abc/123") (getenv "MACROS_TEST_VAR"))"#)
             .unwrap();
         assert_eq!(out.value.as_deref(), Some("\"abc/123\""));
+        assert!(std::env::var("MACROS_TEST_VAR").is_err());
+        let out = engine
+            .eval(r#"(trim-end (call-process "/bin/sh" (list "-c" "printf %s \"$MACROS_TEST_VAR\"")))"#)
+            .unwrap();
+        assert_eq!(out.value.as_deref(), Some("\"abc/123\""));
+    }
+
+    /// A blocking call with a deadline interrupts a runaway function instead
+    /// of hanging (the UI thread waits on these), and the engine stays usable.
+    #[test]
+    fn call_action_within_interrupts_a_runaway_loop() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval("(define (spin) (spin)) (define (quick) (message \"hi\"))")
+            .unwrap();
+        let started = std::time::Instant::now();
+        let (_, error) = engine.call_action_within("spin", std::time::Duration::from_millis(200));
+        assert!(error.is_some_and(|e| e.contains("timed out")));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let (commands, error) =
+            engine.call_action_within("quick", std::time::Duration::from_secs(5));
+        assert_eq!(error, None);
+        assert!(matches!(commands.as_slice(), [EditorCommand::Message(_)]));
     }
 
     /// `(render-buffer name mode text faces)` enqueues a `RenderBuffer` with the

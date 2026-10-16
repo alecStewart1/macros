@@ -104,7 +104,7 @@ pub fn spawn_stdio(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(SpawnError::NotFound {
                 program: program.to_string(),
-                path: std::env::var("PATH").unwrap_or_default(),
+                path: crate::process::getenv("PATH").unwrap_or_default(),
             });
         }
         Err(error) => {
