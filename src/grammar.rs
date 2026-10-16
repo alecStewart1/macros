@@ -353,8 +353,8 @@ fn compile_unix(src_dir: &Path, out: &Path) -> Result<(), String> {
     let obj_dir = out.with_extension("objs");
     std::fs::create_dir_all(&obj_dir).map_err(|e| format!("obj dir: {e}"))?;
 
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
+    let cc = crate::process::getenv("CC").unwrap_or_else(|| "cc".into());
+    let cxx = crate::process::getenv("CXX").unwrap_or_else(|| "c++".into());
     let mut objects = Vec::new();
     let mut cxx_link = false;
 
@@ -647,6 +647,7 @@ fn unique_temp(base: &Path) -> PathBuf {
 /// Run a command, mapping a non-zero exit or spawn failure to its stderr.
 fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
     use crate::util::HideConsole;
+    crate::process::apply_global(cmd);
     let out = cmd
         .hide_console()
         .output()
