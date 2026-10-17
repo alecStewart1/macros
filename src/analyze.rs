@@ -34,6 +34,8 @@ const BAIL_HEADS: &[&str] = &[
     "struct",
     "define-struct",
     "parameterize",
+    // Clause lists `((a b) body)` read as calls of `a`.
+    "case-lambda",
 ];
 
 /// Identifiers that appear in operator position inside common macros but aren't
@@ -142,9 +144,10 @@ fn collect_bound(expr: &ExprKind, set: &mut HashSet<String>) {
             if let Some(head) = list.args.first().and_then(ident) {
                 if matches!(head, "let" | "let*" | "letrec" | "letrec*") {
                     collect_let_like_bindings(&list.args[1..], set);
-                } else if head == "define-command" {
+                } else if matches!(head, "define-command" | "define/contract") {
                     // (define-command (name a b) …) binds name + params;
-                    // (define-command name value) binds name.
+                    // (define-command name value) binds name. `define/contract`
+                    // (Steel's contracted define) has the same shape.
                     match list.args.get(1) {
                         Some(ExprKind::List(sig)) => {
                             for arg in &sig.args {
@@ -235,6 +238,35 @@ pub fn bindings_in_scope_at(text: &str, cursor: usize) -> HashSet<String> {
             out.insert(name);
         }
         scope_at(expr, cursor, &mut out);
+    }
+    out
+}
+
+/// Names bound *locally* at byte offset `cursor` — lambda / define params,
+/// let-family bindings and internal defines of the forms enclosing it — but
+/// not the file's top-level defines. A reference to a top-level name at a spot
+/// where this contains that name is shadowed. Empty when `text` doesn't parse.
+pub fn local_bindings_at(text: &str, cursor: usize) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Some(exprs) = parse(text) else {
+        return out;
+    };
+    for expr in &exprs {
+        match expr {
+            // A top-level define's own name is global; only its params and
+            // body bindings are local.
+            ExprKind::Define(define) => {
+                if let ExprKind::List(sig) = &define.name
+                    && covers(byte_span(&define.body), cursor)
+                {
+                    for param in sig.args.iter().skip(1) {
+                        insert_ident(param, &mut out);
+                    }
+                }
+                scope_at(&define.body, cursor, &mut out);
+            }
+            _ => scope_at(expr, cursor, &mut out),
+        }
     }
     out
 }

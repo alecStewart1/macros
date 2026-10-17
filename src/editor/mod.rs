@@ -4271,6 +4271,10 @@ impl Editor {
 
     /// Request completions from the active buffer's language server.
     fn completion_at_point_lsp(&mut self, cx: &mut Context<Self>) {
+        // A full-sync server (the builtin Steel one) gets edits debounced: send
+        // the pending text first, or it completes against the line as it was
+        // before the last keystrokes (wrong prefix, wrong scope).
+        self.flush_lsp_fullsync();
         let (Some(language), Some(uri)) = (self.active_language(), self.active_uri()) else {
             // Same contract as the !sent path below: drop the auto flag (or it
             // jams auto-completion for the session) and only echo for explicit
