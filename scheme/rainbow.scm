@@ -56,20 +56,23 @@
               (nth parts 3))
         #f)))
 
-;; Insertion sort bracket records by start offset — depth counting needs strict
-;; left-to-right order (query match order isn't guaranteed across patterns).
-(define (rainbow--insert x sorted)
-  (cond ((null? sorted) (list x))
-        ((< (car x) (car (car sorted))) (cons x sorted))
-        (else (cons (car sorted) (rainbow--insert x (cdr sorted))))))
-(define (rainbow--sort lst)
-  (if (null? lst) '() (rainbow--insert (car lst) (rainbow--sort (cdr lst)))))
+;; Sort bracket records by start offset — depth counting needs strict left-to-
+;; right order (query match order isn't guaranteed across patterns).
+(define (rainbow--sort lst) (sort-by car < lst))
+
+;; Remove only the rainbow overlays: clearing every overlay face also wiped
+;; spell squiggles, LSP highlights and the debugger's stopped line.
+(define (rainbow--clear)
+  (let loop ((i 1))
+    (when (<= i *rainbow-count*)
+      (clear-overlay-faces-matching (string-append "rainbow-" (number->string i)))
+      (loop (+ i 1)))))
 
 ;; Callback for `tree-sitter-query`: `records` is newline-separated bracket
 ;; captures. Sweep left to right, tracking depth, and overlay each bracket with
 ;; its depth's face (an opener and its matching closer get the same color).
 (define (rainbow--apply records)
-  (clear-overlay-faces)
+  (rainbow--clear)
   (let ((brackets (rainbow--sort
                    (filter (lambda (x) x)
                            (map rainbow--parse (non-empty-lines records))))))
@@ -117,6 +120,7 @@
 ;; --- public configuration API -----------------------------------------------
 (define (rainbow-set-colors colors)
   (when (> (length colors) 0)
+    (rainbow--clear) ; the old palette's faces, before the count changes
     (set! *rainbow-colors* colors)
     (set! *rainbow-count* (length colors))
     (rainbow--register-faces)
@@ -136,7 +140,7 @@
 
 (define (rainbow-disable)
   (set! *rainbow-enabled* #f)
-  (clear-overlay-faces))
+  (rainbow--clear))
 
 ;; M-x rainbow-delimiters — toggle for the current view.
 (define (rainbow-delimiters)

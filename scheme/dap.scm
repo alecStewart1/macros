@@ -273,6 +273,13 @@
   (set! *dap-scopes* '())
   (set! *dap-watch-vals* '())
   (set! *dap--pending-jump* #f)
+  ;; Per-session state must not leak into the next session: a stale thread id
+  ;; made `dap-pause` target the old session's thread, and stale "pending"
+  ;; marks showed already-verified breakpoints as unbound.
+  (set! *dap-thread* 1)
+  (set! *dap-frame-idx* 0)
+  (set! *dap-bp-unverified* '())
+  (set! *dap--cond-target* '())
   (dap--clear-stopped-highlight)
   (clear-line-suffixes)
   (when (>= *dap-server-proc* 0)
@@ -310,9 +317,11 @@
 ;; Paint the ACTIVE buffer's breakpoint dots. Dots are stored per document, so
 ;; one paint on visit persists across window/buffer switches.
 (define (dap--paint-breakpoints)
-  (clear-gutter-dots)
   (let ((path (dap--buffer-truename)))
+    ;; Only file buffers carry dots (painting from the *dap* panel cleared the
+    ;; panel and left the source file's stale dots on screen).
     (when (not (equal? path ""))
+      (clear-gutter-dots)
       (for-each
         (lambda (bp)
           (set-gutter-dot (- (nth bp 1) 1)
@@ -738,5 +747,8 @@
 
 ;; --- wiring ---------------------------------------------------------------------------
 (add-hook "find-file-hook" "dap--on-visit")
+;; Breakpoints changed from another buffer (the *dap* panel) repaint when the
+;; file's buffer is shown again, not only when it's first visited.
+(add-hook "buffer-switch-hook" "dap--paint-breakpoints")
 (add-hook "after-save-hook" "dap--after-save")
 (dap--load-breakpoints)

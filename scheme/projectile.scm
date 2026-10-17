@@ -89,18 +89,17 @@
   (read-string "Grep project (regexp): " 'projectile-grep-buffer-run))
 
 ;; `path:line:text` (as grep-files reports it) -> a results record, with the
-;; path shown relative to `root`. Paths are absolute and colon-free (the same
-;; assumption compile-match makes), so the first two fields are path and line.
+;; path shown relative to `root`, or #f for a line that isn't a hit.
 (define (projectile-grep-record root hit)
-  (let* ((parts (split-many hit ":"))
-         (path (car parts))
-         (line (string->number (cadr parts)))
-         (prefix-len (+ (string-length path) (string-length (cadr parts)) 2))
-         (text (substring hit prefix-len (string-length hit)))
-         (rel (if (starts-with? path (path-join root ""))
-                  (substring path (string-length (path-join root "")) (string-length path))
-                  path)))
-    (results-record "" path (- line 1) (string-append rel ":" (cadr parts) ":") text)))
+  (let ((parts (grep-hit-parts hit)))
+    (and parts
+         (let* ((path (car parts))
+                (line (string->number (cadr parts)))
+                (text (nth parts 2))
+                (rel (if (starts-with? path (path-join root ""))
+                         (substring path (string-length (path-join root "")) (string-length path))
+                         path)))
+           (results-record "" path (- line 1) (string-append rel ":" (cadr parts) ":") text)))))
 
 (define (projectile-grep-buffer-run pattern)
   (let ((root (project-root (buffer-directory))))
@@ -115,7 +114,9 @@
                                              (if (= (length matches) 1) "" "es")
                                              " for \"" pattern "\" in " root)
                               "grep-mode" pattern
-                              (map (lambda (hit) (projectile-grep-record root hit)) matches))
+                              (filter (lambda (r) r)
+                                      (map (lambda (hit) (projectile-grep-record root hit))
+                                           matches)))
                 (results-render "*grep*")
                 (goto-line 1)))))))
 

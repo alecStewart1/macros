@@ -4337,6 +4337,10 @@ mod magit_tests {
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
         assert_eq!(v(r#"(car (sort-strings (list "c" "a" "b")))"#), "\"a\"");
         assert_eq!(v(r#"(capitalize-token "hELLO")"#), "\"Hello\"");
+        assert_eq!(
+            v(r#"(capitalize-words "foo\nbAR\tbaz qux")"#),
+            "\"Foo\\nBar\\tBaz Qux\""
+        );
         assert_eq!(v(r#"(string-join (list "a" "b" "c") "-")"#), "\"a-b-c\"");
         // sort-lines registered itself for M-x.
         assert_eq!(
@@ -4650,6 +4654,11 @@ mod magit_tests {
             v(r#"(org--shift-stamp "<2026-06-25 Thu +1d>")"#),
             "\"<2026-06-26 Fri +1d>\""
         );
+        // The time of day and a warning period survive the shift.
+        assert_eq!(
+            v(r#"(org--shift-stamp "<2026-06-25 Thu 10:00 +1w -2d>")"#),
+            "\"<2026-07-02 Thu 10:00 +1w -2d>\""
+        );
 
         // --- Layer 7b: property drawers -------------------------------------
         assert_eq!(
@@ -4725,6 +4734,9 @@ mod magit_tests {
         );
         assert_eq!(v(r#"(if (org--list-line-prefix "- item") 1 0)"#), "1");
         assert_eq!(v(r#"(if (org--list-line-prefix "plain") 1 0)"#), "0");
+        // `* Foo` at column 0 is a heading; an indented `*` is a bullet.
+        assert_eq!(v(r#"(if (org--list-line-prefix "* Foo") 1 0)"#), "0");
+        assert_eq!(v(r#"(if (org--list-line-prefix "  * item") 1 0)"#), "1");
     }
 
     /// org-roam.scm loads on top of core + org and its new pure helpers behave.
@@ -5071,6 +5083,11 @@ mod magit_tests {
         assert_eq!(v("(md-heading-level \"# Top\")"), "1");
         assert_eq!(v("(md-heading-level \"not a heading\")"), "0");
         assert_eq!(v("(md-heading-level \"#nospace\")"), "0");
+        // `#` lines inside fenced code are masked (same length), not headings.
+        assert_eq!(
+            v("(md--mask-fences (list \"```sh\" \"# c\" \"```\" \"# H\"))"),
+            "(\"```sh\" \"  c\" \"```\" \"# H\")"
+        );
 
         // Scale tapers from h1 down, and every heading is larger than body text.
         assert_eq!(

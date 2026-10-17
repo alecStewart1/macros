@@ -1384,9 +1384,13 @@ impl Editor {
             SpellLearnWord(word) => crate::spell::learn_async(word),
             LoadTheme(name) => match crate::runtime::theme_script(&name) {
                 Some(source) => {
-                    // Reset to an empty palette, then apply the theme's set-face
-                    // calls so switching themes never leaves stale faces.
-                    cx.update_global::<Theme, ()>(|theme, _| *theme = Theme::default());
+                    // Clear the theme-owned faces, then apply the theme's set-face
+                    // calls, so switching themes never leaves stale faces —
+                    // while faces only a module or the config sets are kept.
+                    let owned = crate::runtime::theme_face_names();
+                    cx.update_global::<Theme, ()>(|theme, _| {
+                        theme.clear_faces(|name| owned.contains(name))
+                    });
                     self.run_script(source, cx);
                 }
                 None => self.echo(format!("No theme named {name}"), cx),

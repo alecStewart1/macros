@@ -34,6 +34,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             .unwrap_or_default()
     });
     reg.register_fn("list-directory", |path: String| -> Vec<String> {
+        let path = crate::util::expand_tilde(&path);
         let mut entries = Vec::new();
         if let Ok(read) = std::fs::read_dir(&path) {
             for entry in read.flatten() {
@@ -72,10 +73,15 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         );
     }
     // --- File-system primitives (pure, run on the engine thread) ----------
+    // Every path argument has a leading `~` expanded, as `open-file` and the
+    // process primitives do: a config path like "~/org/inbox.org" otherwise
+    // read as empty or got written to a literal `./~/org/` directory.
     reg.register_fn("file-exists?", |path: String| -> bool {
+        let path = crate::util::expand_tilde(&path);
         std::path::Path::new(&path).exists()
     });
     reg.register_fn("file-directory?", |path: String| -> bool {
+        let path = crate::util::expand_tilde(&path);
         std::path::Path::new(&path).is_dir()
     });
     // `(file-truename path)` → the canonical absolute path (symlinks and
@@ -83,6 +89,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // doesn't exist. Lets dap.scm match an adapter's frame paths (e.g. macOS
     // `/private/tmp/…`) against the buffer that visits `/tmp/…`.
     reg.register_fn("file-truename", |path: String| -> String {
+        let path = crate::util::expand_tilde(&path);
         std::fs::canonicalize(&path)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(path)
@@ -123,9 +130,11 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             .unwrap_or_default()
     });
     reg.register_fn("read-file", |path: String| -> String {
+        let path = crate::util::expand_tilde(&path);
         std::fs::read_to_string(&path).unwrap_or_default()
     });
     reg.register_fn("write-file", |path: String, text: String| -> bool {
+        let path = crate::util::expand_tilde(&path);
         // Create parent directories first (Emacs's `make-directory ... t` before
         // writing). Without this, the very first write to a fresh config dir like
         // ~/.config/macros/ fails silently and persistence (recent projects,
@@ -142,6 +151,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // `delete-file`; a package managing its own on-disk queue (an outbox, a
     // cache) needs to retract entries, not just append.
     reg.register_fn("delete-file", |path: String| -> bool {
+        let path = crate::util::expand_tilde(&path);
         match std::fs::remove_file(&path) {
             Ok(()) => true,
             Err(e) => e.kind() == std::io::ErrorKind::NotFound,
@@ -152,9 +162,11 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // → hex of the file's bytes, "" on error; `write-file-hex` decodes hex
     // and writes the bytes, creating parent dirs like `write-file`.
     reg.register_fn("read-file-hex", |path: String| -> String {
+        let path = crate::util::expand_tilde(&path);
         std::fs::read(&path).map(hex::encode).unwrap_or_default()
     });
     reg.register_fn("write-file-hex", |path: String, hex_str: String| -> bool {
+        let path = crate::util::expand_tilde(&path);
         let Ok(bytes) = hex::decode(hex_str.trim()) else {
             return false;
         };

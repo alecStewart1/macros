@@ -20,8 +20,8 @@ pub struct Theme {
 
 /// One face's attributes. Every attribute is independent: a face may have
 /// only a background, or only bold, and each `set-face-*` primitive touches
-/// just its own field. Like colors, all of it is wiped by `load-theme` (a
-/// fresh palette).
+/// just its own field. `load-theme` resets the faces themes own (see
+/// `runtime::theme_face_names`); other faces keep their attributes.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Face {
     /// Foreground color (`set-face`). Without one, `color()` falls back to the
@@ -55,6 +55,12 @@ pub enum Underline {
 impl Global for Theme {}
 
 impl Theme {
+    /// Drop every face whose name `owned` says belongs to a theme, keeping the
+    /// rest (faces a module or the user's config set, e.g. `diff-added`).
+    pub fn clear_faces(&mut self, owned: impl Fn(&str) -> bool) {
+        self.faces.retain(|name, _| !owned(name));
+    }
+
     fn face(&self, name: &str) -> Option<&Face> {
         self.faces.get(name)
     }

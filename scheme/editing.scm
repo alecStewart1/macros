@@ -40,11 +40,20 @@
       tok
       (string-append (string-upcase (substring tok 0 1))
                      (string-downcase (substring tok 1 (string-length tok))))))
+;; Capitalize every whitespace-separated word, keeping the separators as they
+;; are: splitting on " " alone left words after a newline or tab untouched.
+(define (capitalize-words str)
+  (let loop ((cs (string->list str)) (word-start #t) (acc '()))
+    (if (null? cs)
+        (list->string (reverse acc))
+        (let ((c (car cs)))
+          (if (char-whitespace? c)
+              (loop (cdr cs) #t (cons c acc))
+              (loop (cdr cs) #f (cons (if word-start (char-upcase c) (char-downcase c)) acc)))))))
 (define (capitalize-region)
   (let* ((r (region-or (point) (point))) (s (car r)) (e (cadr r)))
     (when (< s e)
-      (replace-region s e (string-join (map capitalize-token
-                                            (split-many (buffer-substring s e) " ")) " "))
+      (replace-region s e (capitalize-words (buffer-substring s e)))
       (message "Capitalized region"))))
 
 ;; --- goto-line (M-g g) ------------------------------------------------------
@@ -67,8 +76,10 @@
 (define (zap-to-char) (read-string "Zap to char: " 'zap-to-char-finish))
 (define (zap-to-char-finish s)
   (when (> (string-length s) 0)
-    (let ((idx (search-forward (substring s 0 1))))
-      (when (>= idx 0) (delete-region (point) (+ idx 1))))))
+    ;; Through the WHOLE target char: `(+ idx 1)` stopped inside a multibyte
+    ;; char (é), which floored back and left it in place.
+    (let* ((ch (substring s 0 1)) (idx (search-forward ch)))
+      (when (>= idx 0) (delete-region (point) (+ idx (utf8-length ch)))))))
 
 ;; --- transpose-lines (C-x C-t): swap this line with the previous -------------
 (define (transpose-lines)

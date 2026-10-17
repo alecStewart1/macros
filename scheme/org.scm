@@ -1773,6 +1773,10 @@
                 "\\documentclass[preview,border=2pt]{standalone}\n"
                 "\\usepackage{amsmath,amssymb,amsfonts}\n"
                 "\\begin{document}\n\\( " inner " \\)\n\\end{document}\n")))
+    ;; A previous run's output must not stand in for this one: when latex fails
+    ;; on an edited fragment, the stale .dvi/.png would show the old formula.
+    (delete-file dvi)
+    (delete-file png)
     (write-file tex doc)
     (call-process-full "latex"
       (list "-interaction=nonstopmode" "-halt-on-error" "-output-directory" dir tex) "")
@@ -2080,9 +2084,15 @@
                                (let lp ((d (org--apply-offset offset days)))
                                  (if (> d today) d (lp (org--apply-offset offset d)))))
                               (else (org--apply-offset offset days)))))
-          (string-append (substring stamp 0 1)
-                         (org--days->date-str newdays) " " mark (number->string num) unit
-                         (substring stamp (- (string-length stamp) 1) (string-length stamp)))))))
+          ;; Replace only the date and weekday: the time of day (`10:00`), the
+          ;; repeater and any warning period (`-2d`) after it are kept as-is.
+          (let* ((head (regexp-captures "^.[0-9]{4}-[0-9]{2}-[0-9]{2}( [^ >\\]0-9+.-]+)?" stamp))
+                 (rest (if (null? head)
+                           (string-append " " mark (number->string num) unit
+                                          (substring stamp (- (string-length stamp) 1)
+                                                     (string-length stamp)))
+                           (substring stamp (string-length (car head)) (string-length stamp)))))
+            (string-append (substring stamp 0 1) (org--days->date-str newdays) rest))))))
 
 ;; Shift every repeating active timestamp on a planning line.
 (define (org--shift-planning line)
@@ -2292,7 +2302,9 @@
          (Et (org--subtree-end tline tlvl headings total))
          (without (append (org--slice lines 0 (- H 1)) (org--slice lines (+ E 1) (- total 1))))
          (blocklen (+ (- E H) 1))
-         (insert-idx (if (> tline H) (- (+ Et 1) blocklen) (+ Et 1)))
+         ;; The target's end sits after the moved block (a later heading, or an
+         ;; ANCESTOR whose subtree contains it): removing the block shifts it up.
+         (insert-idx (if (> Et E) (- (+ Et 1) blocklen) (+ Et 1)))
          (newlines (append (org--slice without 0 (- insert-idx 1)) block
                            (org--slice without insert-idx (- (length without) 1)))))
     (org--replace-all (join-lines newlines))))
@@ -2328,13 +2340,26 @@
     (if (not tgt) (message "No such refile target")
         (let* ((H *org--refile-source*)
                (tpath (nth tgt 0)) (tline (nth tgt 1)) (tlvl (nth tgt 2)))
-          (if (equal? tpath (org--current-file-path))
-              (org--inbuffer-refile H tline tlvl)
-              (let* ((st (org--subtree-text H))
-                     (block (org--shift-levels (cdr st) (- (+ tlvl 1) (car st)))))
-                (org--insert-into-file tpath tline tlvl block)
-                (org--delete-subtree H)))
-          (message (string-append "Refiled to " (basename tpath)))))))
+          (cond
+            ;; Same file however it's spelled (`~`, relative, symlinked).
+            ((same-file? tpath (org--current-file-path))
+             (let ((E (org--subtree-end H (nth (org--find-heading (org--headings) H) 1)
+                                        (org--headings) (length (org--lines)))))
+               (if (and (>= tline H) (<= tline E))
+                   (message "Can't refile a subtree under itself")
+                   (begin (org--inbuffer-refile H tline tlvl)
+                          (message (string-append "Refiled to " (basename tpath)))))))
+            ;; Writing to disk under a buffer that visits the file would be lost
+            ;; (or clobber it) when that buffer is saved.
+            ((find-buffer-visiting tpath)
+             (message (string-append (basename tpath)
+                                     " is open in a buffer: save and kill it, then refile")))
+            (else
+             (let* ((st (org--subtree-text H))
+                    (block (org--shift-levels (cdr st) (- (+ tlvl 1) (car st)))))
+               (org--insert-into-file tpath tline tlvl block)
+               (org--delete-subtree H)
+               (message (string-append "Refiled to " (basename tpath))))))))))
 
 ;; C-c C-x C-a — archive the subtree to <file>_archive.
 (define (org--archive-file-path) (string-append (org--current-file-path) "_archive"))
@@ -2991,7 +3016,12 @@
 ;; (whole indent bullet) for a plain-list line, or #f.
 (define (org--list-line-prefix line)
   (let ((c (regexp-captures "^([ \t]*)([-+*]|[0-9]+[.)])[ \t]+" line)))
-    (if (null? c) #f c)))
+    ;; A `*` bullet at column 0 is a heading, not a list item (as in Org): M-RET,
+    ;; M-left/right on `* Foo` must insert / promote / demote headings.
+    (if (or (null? c)
+            (and (equal? (nth c 2) "*") (equal? (nth c 1) "")))
+        #f
+        c)))
 ;; M-RET on a list item — insert a sibling item below (incrementing an ordinal).
 (define-command (org-insert-item)
   (let* ((L (buffer-line)) (line (org--line-text L)) (c (org--list-line-prefix line)))

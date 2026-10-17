@@ -392,15 +392,25 @@
               prev
               (loop prev (or seen (not (blank-line-at? (- ls 1))))))))))
 
-;; Keyed insertion sort (Steel has no builtin `sort`): order `lst` by `(key x)`
-;; under `less?`. Stable enough for the small lists Scheme sorts here.
-(define (insert-sorted-by x sorted key less?)
-  (cond ((null? sorted) (list x))
-        ((less? (key x) (key (car sorted))) (cons x sorted))
-        (else (cons (car sorted) (insert-sorted-by x (cdr sorted) key less?)))))
+;; Keyed, STABLE merge sort: order `lst` by `(key x)` under `less?`, keeping
+;; equal keys in their original order (tabulated columns and helix selections
+;; rely on that, so Steel's builtin quicksort `sort` won't do). O(n log n) with
+;; an iterative merge: the old insertion sort was O(n²) and recursed once per
+;; element, which `sort-lines` on a large buffer felt.
+(define (merge-sorted-by a b key less?)
+  (let loop ((a a) (b b) (acc '()))
+    (cond ((null? a) (append (reverse acc) b))
+          ((null? b) (append (reverse acc) a))
+          ((less? (key (car b)) (key (car a))) (loop a (cdr b) (cons (car b) acc)))
+          (else (loop (cdr a) b (cons (car a) acc))))))
 (define (sort-by key less? lst)
-  (if (null? lst) '()
-      (insert-sorted-by (car lst) (sort-by key less? (cdr lst)) key less?)))
+  (let ((n (length lst)))
+    (if (< n 2)
+        lst
+        (let ((half (quotient n 2)))
+          (merge-sorted-by (sort-by key less? (take lst half))
+                           (sort-by key less? (list-tail lst half))
+                           key less?)))))
 (define (sort-strings lst) (sort-by (lambda (x) x) string<? lst))
 
 ;; --- Gregorian calendar arithmetic (pure) ------------------------------------
@@ -518,6 +528,13 @@
 (register-command 'load-theme)
 ;; In-buffer completion of `(load-theme 'mac…)` is wired in completion.scm, which
 ;; owns the argument-aware CAPF machinery.
+
+;; Split a grep hit `path:line:text` into (path line-string text), or #f. The
+;; path is the shortest prefix followed by `:<digits>:`, so a path that itself
+;; contains a colon (`notes:2024.md`) still parses.
+(define (grep-hit-parts hit)
+  (let ((c (regexp-captures "^(.+?):([0-9]+):(.*)$" hit)))
+    (if (null? c) #f (list (nth c 1) (nth c 2) (nth c 3)))))
 
 (define (path-join a b)
   (if (ends-with? a "/") (string-append a b) (string-append a "/" b)))
