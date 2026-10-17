@@ -41,7 +41,7 @@
 
 (define (dap-ui--emit-var v depth)
   (let* ((name (dap--str v 'name))
-         (val (dap--truncate (dap--str v 'value) 60))
+         (val (truncate-string (dap--str v 'value) 60))
          (ref (dap--int (dap--get v 'variablesReference)))
          (open (member ref *dap-var-open*))
          (marker (cond ((= ref 0) "  ") (open "v ") (else "> "))))
@@ -117,7 +117,7 @@
     (for-each
       (lambda (expr)
         (let ((v (alist-ref *dap-watch-vals* expr)))
-          (section-line (string-append "  " expr " ⇒ " (if v (dap--truncate v 60) "…")))))
+          (section-line (string-append "  " expr " ⇒ " (if v (truncate-string v 60) "…")))))
       *dap-watches*)
     (section-close 'dap-watch))
 

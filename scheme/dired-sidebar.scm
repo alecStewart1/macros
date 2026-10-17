@@ -46,8 +46,6 @@
 
 ;; Drop a trailing "/" (list-directory marks dirs with one; the editor reports
 ;; changed directories without one — normalize before comparing/keying).
-(define (dired-subtree-strip-slash p)
-  (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
 
 ;; Vertical indent guides: one "│ " per ancestor level below the top. Each is 2
 ;; columns wide — the width of the chevron column — so a rail sits under its
@@ -85,7 +83,7 @@
                 (loop (cdr ls)
                       (hash-insert acc
                                    (string-append prefix
-                                                  (dired-subtree-strip-slash (car ls)))
+                                                  (strip-trailing-slash (car ls)))
                                    #t))))))))
 
 ;; Extension → Lucide icon (assets/icons/<name>.svg). Customize freely.
@@ -134,7 +132,7 @@
   (define (walk dir depth acc)
     (foldl (lambda (full acc)
              (let* ((is-dir (ends-with? full "/"))
-                    (clean (dired-subtree-strip-slash full))
+                    (clean (strip-trailing-slash full))
                     (open (and is-dir (member clean expanded)))
                     (acc (cons (list (basename clean) full is-dir open depth) acc)))
                (if open (walk clean (+ depth 1) acc) acc)))
@@ -160,7 +158,7 @@
                (chev-col (+ mw gb))
                (icon-col (+ chev-col dired-subtree-chevron-width))
                (face (dired-subtree-face
-                       name (hash-contains? ignored (dired-subtree-strip-slash path)))))
+                       name (hash-contains? ignored (strip-trailing-slash path)))))
           (set! lines (cons text lines))
           (set! entries (cons (list n path is-dir) entries))
           (if is-dir
@@ -223,7 +221,7 @@
 ;; The root to open a tree at: the project root of the current buffer's directory,
 ;; else that directory; slash stripped.
 (define (dired-subtree-default-root)
-  (dired-subtree-strip-slash
+  (strip-trailing-slash
     (or (project-root (buffer-directory)) (buffer-directory))))
 
 ;; Directories to open so PATH (a file) becomes visible under ROOT: every ancestor
@@ -231,8 +229,8 @@
 ;; isn't under ROOT (nothing to reveal). Walks up parent-by-parent, so it stops at
 ;; the filesystem root even when the prefix never matches.
 (define (dired-subtree-ancestors root path)
-  (let ((root (dired-subtree-strip-slash root)))
-    (let loop ((dir (parent-directory (dired-subtree-strip-slash path))) (acc '()))
+  (let ((root (strip-trailing-slash root)))
+    (let loop ((dir (parent-directory (strip-trailing-slash path))) (acc '()))
       (cond ((equal? dir root) acc)
             ((or (equal? dir "")
                  (not (starts-with? (string-append dir "/")
@@ -242,7 +240,7 @@
 ;; Toggle PATH in EXPANDED (a list of dir paths), returning the new list.
 (define (dired-subtree-toggled expanded path)
   (if (member path expanded)
-      (filter (lambda (p) (not (equal? p path))) expanded)
+      (remove-equal path expanded)
       (cons path expanded)))
 
 ;; ===========================================================================
@@ -266,7 +264,7 @@
 ;; Is the sidebar already on screen? Its buffer must still exist and its pane must
 ;; still be live (the user may have killed either).
 (define (dired-sidebar-live?)
-  (and (member "*dired-sidebar*" (buffer-names))
+  (and (buffer-live? "*dired-sidebar*")
        *dired-sidebar-window*
        (member *dired-sidebar-window* (window-list))))
 
@@ -277,10 +275,10 @@
 ;; the tree. Entries are (line path is-dir); dirs carry a trailing slash, so both
 ;; sides are stripped before comparing.
 (define (dired-sidebar-goto-path path)
-  (let ((target (dired-subtree-strip-slash path)))
+  (let ((target (strip-trailing-slash path)))
     (let loop ((es *dired-sidebar-entries*))
       (cond ((null? es) #f)
-            ((equal? (dired-subtree-strip-slash (nth (car es) 1)) target)
+            ((equal? (strip-trailing-slash (nth (car es) 1)) target)
              (goto-line (nth (car es) 0)))
             (else (loop (cdr es)))))))
 
@@ -311,8 +309,8 @@
 ;; directory-changed-hook handler: re-render only when the sidebar buffer is alive
 ;; and the change is in a directory the tree shows (root or an expanded subdir).
 (define (dired-sidebar-on-fs-change dir)
-  (when (and (member "*dired-sidebar*" (buffer-names))
-             (member (dired-subtree-strip-slash dir)
+  (when (and (buffer-live? "*dired-sidebar*")
+             (member (strip-trailing-slash dir)
                      (cons *dired-sidebar-root* *dired-sidebar-expanded*)))
     (set! *dired-sidebar-quiet* #t)
     (dired-sidebar-render)
@@ -336,7 +334,7 @@
 (define (dired-sidebar-context-dir)
   (let ((e (dired-sidebar-entry)))
     (if e
-        (let ((path (dired-subtree-strip-slash (car e))) (is-dir (car (cdr e))))
+        (let ((path (strip-trailing-slash (car e))) (is-dir (car (cdr e))))
           (if is-dir path (parent-directory path)))
         *dired-sidebar-root*)))
 
@@ -351,7 +349,7 @@
             (begin
               (set! *dired-sidebar-expanded*
                     (dired-subtree-toggled *dired-sidebar-expanded*
-                                           (dired-subtree-strip-slash path)))
+                                           (strip-trailing-slash path)))
               (dired-sidebar-render))
             (open-file-other-window path))))))
 
@@ -360,7 +358,7 @@
   (let ((p (dired-sidebar-path)))
     ;; Never flag the root row — `x` would `rm -rf` the whole tree.
     (when (and p
-               (not (equal? (dired-subtree-strip-slash p) *dired-sidebar-root*))
+               (not (equal? (strip-trailing-slash p) *dired-sidebar-root*))
                (not (member p *dired-sidebar-marks*)))
       (set! *dired-sidebar-marks* (cons p *dired-sidebar-marks*))
       (dired-sidebar-render)
@@ -368,7 +366,7 @@
 (define (dired-sidebar-unmark)
   (let ((p (dired-sidebar-path)))
     (when p
-      (set! *dired-sidebar-marks* (filter (lambda (m) (not (equal? m p))) *dired-sidebar-marks*))
+      (set! *dired-sidebar-marks* (remove-equal p *dired-sidebar-marks*))
       (dired-sidebar-render)
       (next-line))))
 
@@ -379,7 +377,7 @@
                 'dired-sidebar-delete-confirmed)))
 (define (dired-sidebar-delete-confirmed ans)
   (when (equal? ans "yes")
-    (for-each (lambda (p) (call-process "rm" (list "-rf" (dired-subtree-strip-slash p))))
+    (for-each (lambda (p) (call-process "rm" (list "-rf" (strip-trailing-slash p))))
               *dired-sidebar-marks*)
     (set! *dired-sidebar-marks* '())
     (dired-sidebar-render)
@@ -391,7 +389,7 @@
     (when p
       ;; The source is captured in the closure — the callback runs with the
       ;; minibuffer current, so the entry under point can't be re-read there.
-      (let ((src (dired-subtree-strip-slash p)))
+      (let ((src (strip-trailing-slash p)))
         (read-string (string-append "Rename " (basename src) " to: ")
           (lambda (name)
             (when (not (equal? (trim-end name) ""))
@@ -401,7 +399,7 @@
 (define (dired-sidebar-copy)
   (let ((p (dired-sidebar-path)))
     (when p
-      (let ((src (dired-subtree-strip-slash p)))
+      (let ((src (strip-trailing-slash p)))
         (read-string (string-append "Copy " (basename src) " to: ")
           (lambda (name)
             (when (not (equal? (trim-end name) ""))

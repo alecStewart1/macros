@@ -1142,7 +1142,7 @@
 
 ;; ":a:b:" / "a:b" → ("a" "b").
 (define (org--split-tag-string s)
-  (filter (lambda (x) (not (equal? x ""))) (split-many s ":")))
+  (remove-equal "" (split-many s ":")))
 ;; a ∪ b, preserving a's order then b's new tags.
 (define (org--union a b) (append a (filter (lambda (x) (not (member x a))) b)))
 
@@ -2406,9 +2406,8 @@
     s))
 ;; `$` in a replace-regexp-in-string replacement is a group reference; double it
 ;; so user text (a captured "$5 lunch") is inserted literally.
-(define (org--replacement-literal s) (replace-regexp-in-string "\\$" "$$$$" s))
 (define (org--expand-template-final s input)
-  (replace-regexp-in-string "%\\?" (org--replacement-literal input) s))
+  (replace-regexp-in-string "%\\?" (replacement-literal input) s))
 
 (define (org--capture-pick)
   (completing-read "Template: "
@@ -2464,7 +2463,7 @@
      (let any ((as (split-many expr "|")))
        (cond ((null? as) #f) ((org--tag-match (string-trim (car as)) tags) #t) (else (any (cdr as))))))
     (else
-     (let all ((ts (filter (lambda (x) (not (equal? x ""))) (split-many expr "+"))))
+     (let all ((ts (remove-equal "" (split-many expr "+"))))
        (cond ((null? ts) #t)
              (else (let* ((t (car ts)) (neg (>= (string-match "^-" t) 0))
                           (name (if neg (substring t 1 (string-length t)) t))
@@ -2925,7 +2924,7 @@
                   (if (null? c) (loop (cdr ls)) (nth c 1)))))))
 ;; "%[width]NAME" tokens → list of (width . name).
 (define (org--parse-columns spec)
-  (let loop ((toks (filter (lambda (x) (not (equal? x ""))) (split-many spec " "))) (acc '()))
+  (let loop ((toks (remove-equal "" (split-many spec " "))) (acc '()))
     (if (null? toks) (reverse acc)
         (let ((c (regexp-captures "^%([0-9]*)([A-Za-z_]+)" (car toks))))
           (if (null? c) (loop (cdr toks) acc)

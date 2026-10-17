@@ -66,13 +66,8 @@
 (define *org-roam-graph-width* 1200)
 (define *org-roam-graph-dpi* 150)
 
-(define (org-roam--home-expand d)
-  (if (>= (string-match "^~/" d) 0)
-      (path-join (getenv "HOME") (substring d 2 (string-length d)))
-      d))
-
 (define (org-roam-directory)
-  (org-roam--home-expand
+  (expand-file-name
    (if (equal? *org-roam-directory* "")
        (path-join (getenv "HOME") "org-roam")
        *org-roam-directory*)))
@@ -83,7 +78,6 @@
 
 ;; `$` in a replace-regexp-in-string replacement is a group reference; double
 ;; it so user text (a title like "Cost in $USD") is inserted literally.
-(define (org-roam--replacement-literal s) (replace-regexp-in-string "\\$" "$$$$" s))
 
 ;; A filesystem-safe slug from a title: lowercased, non-alphanumerics collapsed
 ;; to single dashes, trimmed.
@@ -96,7 +90,7 @@
 
 ;; ":a:b:" filetags string → ("a" "b").
 (define (org-roam--split-tags s)
-  (filter (lambda (x) (not (equal? x ""))) (split-many (string-trim s) ":")))
+  (remove-equal "" (split-many (string-trim s) ":")))
 
 ;; ===========================================================================
 ;; The node index, scanned and cached
@@ -178,7 +172,7 @@
     (let ((m (string-match "\"([^\"]*)\"" str)))
       (if (< m 0)
           (if (null? acc)
-              (filter (lambda (x) (not (equal? x ""))) (split-many (string-trim s) " "))
+              (remove-equal "" (split-many (string-trim s) " "))
               (reverse acc))
           (let* ((c (regexp-captures "\"([^\"]*)\"" str)) (whole (car c)))
             (loop (byte-drop str (+ m (utf8-length whole))) (cons (nth c 1) acc)))))))
@@ -565,7 +559,7 @@
 (define (org-roam--rewrite-links text id newtitle)
   (replace-regexp-in-string
    (string-append "\\[\\[id:" (regexp-quote id) "\\]\\[[^]]*\\]\\]")
-   (org-roam--replacement-literal (string-append "[[id:" id "][" newtitle "]]")) text))
+   (replacement-literal (string-append "[[id:" id "][" newtitle "]]")) text))
 ;; C-c n r — rename the current node (the node id rides in the closure).
 (define-command (org-roam-rename-node)
   (let ((id (org-roam--current-id)))
@@ -579,7 +573,7 @@
       ;; current buffer: rewrite #+title and any self-links
       (let* ((text (buffer-string))
              (t2 (replace-regexp-in-string "(?im)^#\\+title:[ \t]*.*$"
-                                           (org-roam--replacement-literal (string-append "#+title: " nt))
+                                           (replacement-literal (string-append "#+title: " nt))
                                            text)))
         (replace-region 0 (point-max) (org-roam--rewrite-links t2 id nt)))
       ;; every other file: rewrite inbound link descriptions
@@ -645,9 +639,9 @@
                      (let ((parts (split-many line "\t")))
                        (if (< (length parts) 5) #f
                            (list (nth parts 0) (nth parts 1) (nth parts 2)
-                                 (filter (lambda (x) (not (equal? x ""))) (split-many (nth parts 3) ","))
+                                 (remove-equal "" (split-many (nth parts 3) ","))
                                  (string->number (nth parts 4))))))
-                   (filter (lambda (l) (not (equal? l ""))) (split-many (read-file f) "\n")))))
+                   (remove-equal "" (split-many (read-file f) "\n")))))
           (set! *org-roam-synced* #t)
           (message (string-append "org-roam: loaded " (int->string (length *org-roam-nodes*)) " node(s) from cache"))))))
 
@@ -655,9 +649,9 @@
 ;; Templated node creation
 ;; ===========================================================================
 (define (org-roam--expand-tmpl s title slug id)
-  (let* ((s (replace-regexp-in-string "\\$\\{title\\}" (org-roam--replacement-literal title) s))
-         (s (replace-regexp-in-string "\\$\\{slug\\}" (org-roam--replacement-literal slug) s))
-         (s (replace-regexp-in-string "\\$\\{id\\}" (org-roam--replacement-literal id) s))
+  (let* ((s (replace-regexp-in-string "\\$\\{title\\}" (replacement-literal title) s))
+         (s (replace-regexp-in-string "\\$\\{slug\\}" (replacement-literal slug) s))
+         (s (replace-regexp-in-string "\\$\\{id\\}" (replacement-literal id) s))
          (s (replace-regexp-in-string "\\$\\{date\\}" (current-time "%Y-%m-%d") s))
          (s (replace-regexp-in-string "\\$\\{time\\}" (current-time "%Y%m%d%H%M%S") s)))
     s))

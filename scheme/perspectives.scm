@@ -21,7 +21,7 @@
 ;; --- display names -----------------------------------------------------------
 
 (define (perspective-parts root)
-  (filter (lambda (s) (not (equal? s ""))) (split-many root "/")))
+  (remove-equal "" (split-many root "/")))
 
 ;; The trailing `n` path segments of `root`, joined ("b/proj" for n = 2); the
 ;; whole root when it has fewer than `n` segments.

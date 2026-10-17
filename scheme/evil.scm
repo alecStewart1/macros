@@ -89,17 +89,6 @@
   (let* ((p (point)) (r (evil-lines-range (evil-count))))
     (set-region (car r) (cadr r)) (kill-ring-save) (evil-set-linewise)
     (goto-char p)))
-(define (evil-yank-to-eol)
-  (let ((p (point)))
-    (set-mark) (move-end-of-line) (kill-ring-save) (evil-set-charwise)
-    (goto-char p)))
-(define (evil-yank-word)
-  ;; yw — character-wise, using the vim `w` motion (to the start of the next
-  ;; word) so the trailing whitespace is included, matching `w`.
-  (let ((p (point)) (e (evil-word-op-end (point))))
-    (when (< p e)
-      (set-region p e) (kill-ring-save) (evil-set-charwise))
-    (goto-char p)))
 
 ;; --- more operators & motions (the rest of the common Vim verbs) -------------
 ;; NOTE on the snapshot model: a command script reads buffer state (point,
@@ -198,7 +187,6 @@
 (define (evil-delete-word)
   (let ((p (point)))
     (kill-region-between p (evil-word-op-end p)) (evil-set-charwise)))
-(define (evil-delete-word-back) (set-mark) (backward-word-start) (kill-region) (evil-set-charwise))
 ;; cw — Vim treats it as `ce`, but from INSIDE a word it stops at that word's
 ;; end (on its last char, `ce` would jump to the next word). So: kill to the end
 ;; of the char run under point (word, punctuation, or blanks).
@@ -207,7 +195,6 @@
     (when (and r (< p (cdr r)))
       (kill-region-between p (cdr r)) (evil-set-charwise))
     (evil-insert-state)))
-(define (evil-change-word-back) (set-mark) (backward-word-start) (kill-region) (evil-insert-state))
 
 ;; ~ — toggle the case of the char under the cursor; the replace leaves the
 ;; cursor on the next char, matching Vim's advance. Only cased letters change.
@@ -274,7 +261,6 @@
       ;; old point into the new text (Vim restores it exactly).
       (goto-char (if keep-point (min (point) (+ s (utf8-length new))) s)))))
 (define (evil-fill-line)      (let ((b (line-bounds))) (evil-fill-range (car b) (cadr b) #f)))
-(define (evil-fill-line-keep) (let ((b (line-bounds))) (evil-fill-range (car b) (cadr b) #t)))
 (define (evil-fill-paragraph)
   (let ((b (paragraph-bounds (point))))
     (when b (evil-fill-range (car b) (cadr b) #f))))
@@ -294,19 +280,12 @@
 (define (evil-forward-paragraph-visual)  (select-to  (paragraph-forward-pos (point))))
 (define (evil-backward-paragraph-visual) (select-to  (paragraph-backward-pos (point))))
 
-;; --- gJ and line case operators ------------------------------------------------
+;; --- gJ ------------------------------------------------------------------------
 ;; gJ — join the next line up with NO space inserted (vim gJ): remove just the
 ;; newline, keeping the next line's indentation.
 (define (evil-join-line-no-space)
   (let* ((b (line-bounds)) (e (cadr b)))
     (when (< e (point-max)) (delete-region e (+ e 1)))))
-;; guu / gUU / g~~ — case-fold the whole current line.
-(define (evil-fold-line folder)
-  (let* ((b (line-bounds)) (s (car b)) (e (cadr b)))
-    (when (< s e) (replace-region s e (folder (buffer-substring s e))))))
-(define (evil-downcase-line)    (evil-fold-line string-downcase))
-(define (evil-upcase-line)      (evil-fold-line string-upcase))
-(define (evil-toggle-case-line) (evil-fold-line string-toggle-case))
 
 ;; --- visual p — paste over the selection ---------------------------------------
 ;; Replace the selection with the register: delete WITHOUT touching the kill

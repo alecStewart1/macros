@@ -1,4 +1,4 @@
-;; requires: core helm
+;; requires: core
 
 ;; A tiny git-based package manager. `package-install` clones a repo into
 ;; `(packages-directory)` (<config-dir>/packages) on first launch, optionally pins

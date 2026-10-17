@@ -40,31 +40,9 @@
 ;; Make C-x b the Helm buffer picker (overrides the minibuffer switch-buffer).
 (define-key "fundamental" "ctrl-x b" 'helm-buffers)
 
-;; Expand a typed path the way Emacs' minibuffer does, so you can jump elsewhere
-;; without first deleting the pre-filled prefix. A "~" or "//" SHADOWS everything
-;; before it (Emacs `file-name-shadow`):
-;;   "~" or "~/…"  -> your home directory   (the quick "go home")
-;;   "//"          -> the filesystem root "/"
-;; e.g. with the input sitting at /a/b/c/, typing "~/" jumps home and "//" jumps
-;; to root.
-(define (path-contains? s sub) (> (length (split-many s sub)) 1))
-;; The path segments after the LAST segment that is exactly "~" (a "~" at the
-;; start or right after a "/"), or #f when there is none — so "foo~bar" and
-;; "backup.txt~" are left alone.
-(define (tilde-tail segs)
-  (let loop ((ss segs) (found #f))
-    (cond ((null? ss) found)
-          ((equal? (car ss) "~") (loop (cdr ss) (cdr ss)))
-          (else (loop (cdr ss) found)))))
-(define (expand-file-name path)
-  (let ((home (getenv "HOME"))
-        (tail (tilde-tail (split-many path "/"))))
-    (cond
-      (tail
-       (string-append home "/" (string-join tail "/")))
-      ((path-contains? path "//")
-       (string-append "/" (last (split-many path "//"))))
-      (else path))))
+;; Typed paths go through `expand-file-name` (core.scm), so you can jump
+;; elsewhere without first deleting the pre-filled prefix: a "~" or "//"
+;; SHADOWS everything before it (Emacs `file-name-shadow`).
 
 ;; A DYNAMIC directory source: `find-file-candidates` lists `(directory-of
 ;; pattern)` and re-runs as you type. `list-directory` marks directories with a

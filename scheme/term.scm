@@ -32,7 +32,7 @@
 ;; command line: its first word is the program, the rest its arguments
 ;; (`htop -d 5` used to try to exec a binary literally named "htop -d 5").
 (define (term-run-command line)
-  (let ((words (filter (lambda (w) (not (equal? w ""))) (split-many line " "))))
+  (let ((words (remove-equal "" (split-many line " "))))
     (if (null? words)
         (message "No program given")
         (term-open-args (car words) (cdr words)))))

@@ -61,14 +61,12 @@
 
 ;; basename/parent helpers keep a trailing "/", but the editor reports changed
 ;; directories without one — strip both sides before comparing.
-(define (dired-strip-slash p)
-  (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
 
 ;; directory-changed-hook handler: re-render when the directory dired is showing
 ;; changes on disk, and only while the dired buffer is still alive.
 (define (dired-on-fs-change dir)
-  (when (and (member "*dired*" (buffer-names))
-             (equal? (dired-strip-slash dir) (dired-strip-slash *dired-dir*)))
+  (when (and (buffer-live? "*dired*")
+             (equal? (strip-trailing-slash dir) (strip-trailing-slash *dired-dir*)))
     (set! *dired-quiet* #t)
     (dired-render)
     (set! *dired-quiet* #f)))
@@ -88,7 +86,7 @@
 (define (dired-unmark)
   (let ((p (dired-at-point)))
     (when p
-      (set! *dired-marks* (filter (lambda (m) (not (equal? m p))) *dired-marks*))
+      (set! *dired-marks* (remove-equal p *dired-marks*))
       (dired-render)
       (next-line))))
 

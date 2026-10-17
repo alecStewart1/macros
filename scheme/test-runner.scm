@@ -73,8 +73,6 @@
 
 ;; --- small pure helpers -------------------------------------------------------------
 
-(define (test-shell-quote s)
-  (string-append "'" (string-replace s "'" "'\\''") "'"))
 
 ;; Fill `{key}` placeholders from an alist of (key . value) strings.
 (define (test-expand template vars)
@@ -208,7 +206,7 @@
       (else (cons "" "")))))
 
 (define (test-join-path segs)
-  (string-join (filter (lambda (s) (not (equal? s ""))) segs) "::"))
+  (string-join (remove-equal "" segs) "::"))
 
 ;; --- python -------------------------------------------------------------------------
 
@@ -339,11 +337,11 @@
                    (cons #f "Point is not inside a #[test] function"))))))
       ((equal? runner "python")
        (if (equal? k "file")
-           (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel)))) #f)
+           (cons (test-expand tmpl (list (cons "file" (shell-quote rel)))) #f)
            (let ((node (test-python-point text line)))
              (if node
-                 (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel))
-                                               (cons "node" (test-shell-quote
+                 (cons (test-expand tmpl (list (cons "file" (shell-quote rel))
+                                               (cons "node" (shell-quote
                                                               (string-append rel "::" node)))))
                        #f)
                  (cons #f "Point is not inside a test")))))
@@ -352,39 +350,39 @@
            (let ((names (test-go-file-names text)))
              (if (null? names)
                  (cons #f "No Test functions in this file")
-                 (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel))
+                 (cons (test-expand tmpl (list (cons "file" (shell-quote rel))
                                                (cons "file-regex"
-                                                     (test-shell-quote
+                                                     (shell-quote
                                                        (string-append "^(" (string-join names "|") ")$")))))
                        #f)))
            (let ((name (test-go-point text line)))
              (if name
-                 (cons (test-expand tmpl (list (cons "name" (test-shell-quote name))
+                 (cons (test-expand tmpl (list (cons "name" (shell-quote name))
                                                (cons "name-regex"
-                                                     (test-shell-quote (string-append "^" name "$")))))
+                                                     (shell-quote (string-append "^" name "$")))))
                        #f)
                  (cons #f "Point is not inside a Test function")))))
       ((member runner (list "jest" "vitest" "npm"))
        (if (equal? k "file")
-           (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel)))) #f)
+           (cons (test-expand tmpl (list (cons "file" (shell-quote rel)))) #f)
            (let ((name (test-js-point text line)))
              (if name
-                 (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel))
-                                               (cons "name" (test-shell-quote name))
-                                               (cons "name-regex" (test-shell-quote (regexp-quote name)))))
+                 (cons (test-expand tmpl (list (cons "file" (shell-quote rel))
+                                               (cons "name" (shell-quote name))
+                                               (cons "name-regex" (shell-quote (regexp-quote name)))))
                        #f)
                  (cons #f "Point is not inside a test")))))
       ((equal? runner "zig")
        (if (equal? k "file")
-           (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel)))) #f)
+           (cons (test-expand tmpl (list (cons "file" (shell-quote rel)))) #f)
            (let ((name (test-zig-point text line)))
              (if name
-                 (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel))
-                                               (cons "name" (test-shell-quote name))))
+                 (cons (test-expand tmpl (list (cons "file" (shell-quote rel))
+                                               (cons "name" (shell-quote name))))
                        #f)
                  (cons #f "Point is not inside a test block")))))
       ((equal? runner "steel")
-       (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel)))) #f))
+       (cons (test-expand tmpl (list (cons "file" (shell-quote rel)))) #f))
       (else (cons (test-expand tmpl '()) #f)))))
 
 ;; --- impure glue --------------------------------------------------------------------
