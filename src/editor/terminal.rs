@@ -372,16 +372,17 @@ impl Editor {
     }
 
     /// A render snapshot of terminal `id`'s visible grid, with theme defaults for
-    /// default-colored cells.
+    /// default-colored cells and the theme's 16 ANSI system colors.
     pub fn terminal_snapshot(
         &self,
         id: u64,
         default_fg: u32,
         default_bg: u32,
+        ansi: &[u32; 16],
     ) -> Option<crate::terminal::TermSnapshot> {
         self.terminals
             .get(&id)
-            .map(|t| t.snapshot(default_fg, default_bg))
+            .map(|t| t.snapshot(default_fg, default_bg, ansi))
     }
 
     /// Apply a terminal event from its background event loop.

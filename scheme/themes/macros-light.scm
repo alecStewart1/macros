@@ -212,3 +212,23 @@
 (set-face-font "plot-heat-5" "Macros Plot")
 (set-face-font "plot-heat-6" "Macros Plot")
 (set-face-font "plot-heat-7" "Macros Plot")
+
+;; Embedded terminal (term / ansi-term) — the 16 ANSI system colors, darkened
+;; for a light background (yellow/white especially would vanish otherwise).
+;; 0–7 normal, 8–15 bright; unset ones fall back to a VS Code-style default.
+(set-face "terminal-color-0"  "#141414")  ; black
+(set-face "terminal-color-1"  "#c72e2e")  ; red
+(set-face "terminal-color-2"  "#1f7a3a")  ; green
+(set-face "terminal-color-3"  "#a86d00")  ; yellow
+(set-face "terminal-color-4"  "#206595")  ; blue
+(set-face "terminal-color-5"  "#8a3fa8")  ; magenta
+(set-face "terminal-color-6"  "#0f7f8a")  ; cyan
+(set-face "terminal-color-7"  "#5c5c5c")  ; white
+(set-face "terminal-color-8"  "#999999")  ; bright black (fish autosuggestions)
+(set-face "terminal-color-9"  "#e51400")  ; bright red
+(set-face "terminal-color-10" "#2e9c4f")  ; bright green
+(set-face "terminal-color-11" "#bf8803")  ; bright yellow
+(set-face "terminal-color-12" "#1a85ff")  ; bright blue
+(set-face "terminal-color-13" "#b052c9")  ; bright magenta
+(set-face "terminal-color-14" "#13a3b0")  ; bright cyan
+(set-face "terminal-color-15" "#2a2a2a")  ; bright white

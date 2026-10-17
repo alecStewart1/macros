@@ -288,12 +288,14 @@ impl Terminal {
 
     /// Build a plain-data snapshot of the visible grid for rendering. `default_fg`
     /// / `default_bg` are the editor theme's terminal colors (`0xRRGGBB`), used
-    /// for cells that reference the default foreground/background.
-    pub fn snapshot(&self, default_fg: u32, default_bg: u32) -> TermSnapshot {
+    /// for cells that reference the default foreground/background; `ansi` is the
+    /// theme's 16 system colors (see [`DEFAULT_ANSI16`]).
+    pub fn snapshot(&self, default_fg: u32, default_bg: u32, ansi: &[u32; 16]) -> TermSnapshot {
         let term = self.term.lock();
         let content = term.renderable_content();
         let dfg = unpack(default_fg);
         let dbg = unpack(default_bg);
+        let sys = ansi.map(unpack);
         let display_offset = content.display_offset as i32;
         let rows = self.size.screen_lines;
         let cols = self.size.columns;
@@ -323,11 +325,11 @@ impl Terminal {
             if inverse {
                 std::mem::swap(&mut fg, &mut bg);
             }
-            let mut fg_rgb = resolve(fg, content.colors, dfg, dbg);
+            let mut fg_rgb = resolve(fg, content.colors, &sys, dfg, dbg);
             if cell.flags.contains(Flags::DIM) {
                 fg_rgb = dim(fg_rgb);
             }
-            let bg_rgb = resolve(bg, content.colors, dfg, dbg);
+            let bg_rgb = resolve(bg, content.colors, &sys, dfg, dbg);
             let paint_bg = bg_rgb != dbg;
 
             let ch = cell.c;
@@ -459,12 +461,35 @@ fn dim((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     )
 }
 
+/// The 16 system colors used when a theme sets no `terminal-color-N` face —
+/// VS Code's terminal palette, legible on both dark and light backgrounds.
+/// (xterm's own `#800000`-style values are near-invisible on a dark theme.)
+pub const DEFAULT_ANSI16: [u32; 16] = [
+    0x000000, // 0 black
+    0xcd3131, // 1 red
+    0x0dbc79, // 2 green
+    0xe5e510, // 3 yellow
+    0x2472c8, // 4 blue
+    0xbc3fbc, // 5 magenta
+    0x11a8cd, // 6 cyan
+    0xe5e5e5, // 7 white
+    0x666666, // 8 bright black
+    0xf14c4c, // 9 bright red
+    0x23d18b, // 10 bright green
+    0xf5f543, // 11 bright yellow
+    0x3b8eea, // 12 bright blue
+    0xd670d6, // 13 bright magenta
+    0x29b8db, // 14 bright cyan
+    0xffffff, // 15 bright white
+];
+
 /// Resolve an ANSI [`Color`](AnsiColor) to concrete RGB, honoring any palette
-/// overrides the program installed (OSC 4) and falling back to the standard
-/// xterm-256 palette / the theme defaults.
+/// overrides the program installed (OSC 4), then the theme's system colors
+/// `sys` / defaults, then the standard xterm-256 cube and grayscale ramp.
 fn resolve(
     color: AnsiColor,
     palette: &Colors,
+    sys: &[(u8, u8, u8); 16],
     dfg: (u8, u8, u8),
     dbg: (u8, u8, u8),
 ) -> (u8, u8, u8) {
@@ -473,53 +498,45 @@ fn resolve(
         AnsiColor::Named(NamedColor::Foreground) => dfg,
         AnsiColor::Named(NamedColor::Background) => dbg,
         AnsiColor::Named(NamedColor::Cursor) => dfg,
+        AnsiColor::Named(NamedColor::BrightForeground) => dfg,
+        AnsiColor::Named(NamedColor::DimForeground) => dim(dfg),
         AnsiColor::Named(named) => {
             let idx = named as usize;
             if idx < 256 {
-                palette_lookup(palette, idx)
+                palette_lookup(palette, sys, idx)
             } else {
-                // Dim/Bright foreground variants without an explicit color.
-                dfg
+                // DimBlack..=DimWhite: the dimmed system colors 0–7.
+                let base = idx.saturating_sub(NamedColor::DimBlack as usize);
+                if base < 8 {
+                    dim(palette_lookup(palette, sys, base))
+                } else {
+                    dfg
+                }
             }
         }
-        AnsiColor::Indexed(i) => palette_lookup(palette, i as usize),
+        AnsiColor::Indexed(i) => palette_lookup(palette, sys, i as usize),
     }
 }
 
-/// A palette index, preferring a program-installed override, else the built-in
-/// xterm-256 color for that index.
-fn palette_lookup(palette: &Colors, idx: usize) -> (u8, u8, u8) {
+/// A palette index, preferring a program-installed override, then the theme's
+/// system colors for 0–15, else the built-in xterm-256 color for that index.
+fn palette_lookup(palette: &Colors, sys: &[(u8, u8, u8); 16], idx: usize) -> (u8, u8, u8) {
     if idx < 256
         && let Some(Rgb { r, g, b }) = palette[idx]
     {
         return (r, g, b);
     }
-    ansi256(idx)
+    match idx {
+        0..=15 => sys[idx],
+        _ => ansi256(idx),
+    }
 }
 
-/// The standard xterm 256-color palette: 16 system colors, a 6×6×6 cube, then a
-/// 24-step grayscale ramp.
+/// The xterm 256-color palette: 16 system colors ([`DEFAULT_ANSI16`]), a
+/// 6×6×6 cube, then a 24-step grayscale ramp.
 fn ansi256(idx: usize) -> (u8, u8, u8) {
-    const SYSTEM: [(u8, u8, u8); 16] = [
-        (0x00, 0x00, 0x00), // 0 black
-        (0x80, 0x00, 0x00), // 1 red
-        (0x00, 0x80, 0x00), // 2 green
-        (0x80, 0x80, 0x00), // 3 yellow
-        (0x00, 0x00, 0x80), // 4 blue
-        (0x80, 0x00, 0x80), // 5 magenta
-        (0x00, 0x80, 0x80), // 6 cyan
-        (0xc0, 0xc0, 0xc0), // 7 white
-        (0x80, 0x80, 0x80), // 8 bright black
-        (0xff, 0x00, 0x00), // 9 bright red
-        (0x00, 0xff, 0x00), // 10 bright green
-        (0xff, 0xff, 0x00), // 11 bright yellow
-        (0x00, 0x00, 0xff), // 12 bright blue
-        (0xff, 0x00, 0xff), // 13 bright magenta
-        (0x00, 0xff, 0xff), // 14 bright cyan
-        (0xff, 0xff, 0xff), // 15 bright white
-    ];
     match idx {
-        0..=15 => SYSTEM[idx],
+        0..=15 => unpack(DEFAULT_ANSI16[idx]),
         16..=231 => {
             let i = idx - 16;
             let levels = [0u8, 95, 135, 175, 215, 255];
@@ -548,6 +565,26 @@ mod tests {
         // Grayscale ramp endpoints.
         assert_eq!(ansi256(232), (8, 8, 8));
         assert_eq!(ansi256(255), (8 + 23 * 10, 8 + 23 * 10, 8 + 23 * 10));
+    }
+
+    /// System colors 0–15 come from the theme palette (named, indexed and dim
+    /// forms), an OSC 4 override still wins, and 16+ use the xterm cube.
+    #[test]
+    fn theme_palette_resolves_system_colors() {
+        let mut sys = [(0u8, 0u8, 0u8); 16];
+        sys[1] = (0xf1, 0x4c, 0x4c);
+        let mut colors = Colors::default();
+        let (fg, bg) = ((1, 2, 3), (4, 5, 6));
+        let r = |c, colors: &Colors| resolve(c, colors, &sys, fg, bg);
+        assert_eq!(r(AnsiColor::Named(NamedColor::Red), &colors), sys[1]);
+        assert_eq!(r(AnsiColor::Indexed(1), &colors), sys[1]);
+        assert_eq!(
+            r(AnsiColor::Named(NamedColor::DimRed), &colors),
+            dim(sys[1])
+        );
+        assert_eq!(r(AnsiColor::Indexed(196), &colors), (255, 0, 0));
+        colors[1] = Some(Rgb { r: 9, g: 9, b: 9 });
+        assert_eq!(r(AnsiColor::Named(NamedColor::Red), &colors), (9, 9, 9));
     }
 
     /// End-to-end: spawn a real shell, run a command, and confirm its output
@@ -582,7 +619,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut found = String::new();
         while std::time::Instant::now() < deadline {
-            let snap = term.snapshot(0xffffff, 0x000000);
+            let snap = term.snapshot(0xffffff, 0x000000, &DEFAULT_ANSI16);
             found = snap.cells.iter().map(|c| c.ch).collect();
             if found.contains("ZXCV") {
                 break;
@@ -625,7 +662,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut found = String::new();
         while std::time::Instant::now() < deadline {
-            let snap = term.snapshot(0xffffff, 0x000000);
+            let snap = term.snapshot(0xffffff, 0x000000, &DEFAULT_ANSI16);
             found = snap.cells.iter().map(|c| c.ch).collect();
             if found.contains("DA1OK") {
                 break;
@@ -662,7 +699,7 @@ mod tests {
         // Wait for the marker to render on row 0.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let snap = term.snapshot(0xffffff, 0x000000);
+            let snap = term.snapshot(0xffffff, 0x000000, &DEFAULT_ANSI16);
             let row0: String = snap.cells.iter().map(|c| c.ch).collect();
             if row0.contains("ABCD") || std::time::Instant::now() >= deadline {
                 break;
