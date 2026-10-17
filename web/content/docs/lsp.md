@@ -101,11 +101,21 @@ Declaring a language is idempotent — re-declaring it (e.g. to flip `'inlay-hin
 
 ## The built-in Scheme server
 
-The in-process Scheme server needs no binary and runs automatically for `.scm` files. Editor config and extension code (anything under `~/.config/macros`, or a `*.macros.scm` file) get the `macros-scheme` variant, which additionally seeds the whole editor API. It provides **completion**, **"unknown function" diagnostics**, **go-to-definition** (<kbd>M-.</kbd>), **find-references** (<kbd>M-?</kbd>), **hover** (<kbd>C-c C-l h</kbd>), and **rename** (<kbd>C-c C-l n</kbd>).
+The in-process Scheme server needs no binary and runs automatically for `.scm` files. Editor config and extension code (anything under `~/.config/macros`, or a `*.macros.scm` file) get the `macros-scheme` variant, which additionally seeds the whole editor API. It provides:
+- **Diagnostics**: compile errors and "unknown function" warnings.
+- **Completion**, including the names defined in files you `include`, `require` or `load`.
+- **Go-to-definition** (<kbd>M-.</kbd>), which finds internal defines too.
+- **Find-references** (<kbd>M-?</kbd>).
+- **Hover** (<kbd>C-c C-l h</kbd>): your own `;;` doc comments, then the editor API's docs, then Steel's built-in docs.
+- **Signature help** for the call you're typing.
+- **Document symbols** for your top-level definitions.
+- **Rename** (<kbd>C-c C-l n</kbd>).
+
+The server runs on its own thread, so checking a large file never stalls typing. Files are compiled with their path, so a relative `(require "util.scm")` resolves against the file's directory. Steel's prelude macros (`while`, `case-lambda`, `define/contract`, `->`, …) are known names. A `define-syntax` in one file doesn't carry over into another.
 
 Because command/keybinding references are `'symbols` rather than strings, the server sees them as real identifiers: <kbd>M-.</kbd> on `'magit-status` in a keybinding jumps to its `(define …)` (in your config or the bundled source), <kbd>M-?</kbd> lists its uses — quoted references included — and hover shows its docs. The leading quote is a word boundary, so the bare name is what resolves.
 
-Rename is **scoped to the current document and to symbols it defines** — renaming a command you wrote in `init.scm` updates its definition, keybindings, and calls there (quoted references included). A symbol defined elsewhere (a bundled command, another file) is declined ("Cannot rename this symbol"), since the built-in server can't safely update across files. (In config buffers, <kbd>C-c C-d</kbd> / <kbd>C-c C-f</kbd> also give doc-at-point via the Scheme-side `macros-eldoc` / `macros-describe-point` — see [Scripting](/docs/scripting).)
+Rename is **scoped to the current document and to symbols it defines** — renaming a command you wrote in `init.scm` updates its definition, keybindings, and calls there (quoted references included). References and rename read the code, not the text: a word inside a string or comment is never touched, a `#:keyword` is not the symbol, and a parameter or `let` binding that shadows the name (with its uses) is left alone. The new name must be a valid identifier. A symbol defined elsewhere (a bundled command, another file) is declined ("Cannot rename this symbol"), since the built-in server can't safely update across files. (In config buffers, <kbd>C-c C-d</kbd> / <kbd>C-c C-f</kbd> also give doc-at-point via the Scheme-side `macros-eldoc` / `macros-describe-point` — see [Scripting](/docs/scripting).)
 
 ## Navigation & refactoring commands
 
