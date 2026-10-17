@@ -4044,6 +4044,23 @@ mod magit_tests {
         assert_eq!(out.value.as_deref(), Some("\"abc/123\""));
     }
 
+    /// A lambda where a callback *name* is expected is an error that says how
+    /// to pass one, instead of being silently dropped (output went nowhere).
+    #[test]
+    fn lambda_callbacks_are_rejected_with_a_hint() {
+        let (engine, _rx) = ScriptEngine::new();
+        let Err(err) = engine.eval(r#"(make-process "true" '() (lambda (s) s) "")"#) else {
+            panic!("a lambda callback should be refused");
+        };
+        assert!(err.contains("callback->name"), "{err}");
+        // Names and "no callback" still work.
+        assert!(
+            engine
+                .eval(r#"(make-process "true" '() 'ignore #f)"#)
+                .is_ok()
+        );
+    }
+
     /// Negative integers for unsigned parameters are refused instead of
     /// wrapping to 2^64 (a line indent of 1.8e19 columns, a timer that never
     /// fires) — both for helper-registered commands and direct closures.

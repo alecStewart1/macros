@@ -201,10 +201,12 @@ impl Editor {
     /// enclosing top-level form up to `pos`. `None` when `pos` is inside a string
     /// or block comment, whose content must not be reindented.
     pub(super) fn lisp_indent_context(&self, pos: usize) -> Option<String> {
-        let text = self
-            .active
-            .buffer
-            .slice_to_string(self.lisp_defun_start(pos)..pos);
+        // From the start of the form's *line*: columns are measured from the
+        // start of the text, so a form opening mid-line (`x (foo`) must not
+        // have its own `(` taken for column 0.
+        let defun = self.lisp_defun_start(pos);
+        let from = self.active.buffer.line_range_at(defun).start;
+        let text = self.active.buffer.slice_to_string(from..pos);
         (!crate::sexp::parse(&text).ends_in_literal).then_some(text)
     }
 

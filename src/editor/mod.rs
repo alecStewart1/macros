@@ -1606,6 +1606,9 @@ impl Editor {
         // terminal SIGHUP reaches them) and embedded terminals down with us.
         cx.on_app_quit(|editor, _| {
             editor.shutdown_processes();
+            // Dropping a DAP client kills its adapter's process group / socket,
+            // so no adapter or debuggee outlives the editor.
+            editor.dap_sessions.clear();
             async {}
         })
         .detach();

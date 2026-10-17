@@ -63,8 +63,8 @@ impl Editor {
     /// Drain a session's incoming messages on the foreground, calling the
     /// Steel `on_message` per message; when the channel closes (adapter died,
     /// was killed, or never connected) reap it OFF the UI thread and call
-    /// `on_exit` with the exit code. Also kills the adapter if the app quits
-    /// mid-session, so no adapter/debuggee outlives the editor.
+    /// `on_exit` with the exit code. (Quitting the app mid-session kills the
+    /// adapter too: `shutdown_processes` drops every session.)
     fn dap_pump(
         &mut self,
         id: u64,
@@ -73,12 +73,6 @@ impl Editor {
         on_exit: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        cx.on_app_quit(move |editor, _| {
-            // Dropping the client kills its process group / socket.
-            editor.dap_sessions.remove(&id);
-            async {}
-        })
-        .detach();
         cx.spawn(async move |this, cx| {
             while let Some(message) = rx.next().await {
                 let alive = this

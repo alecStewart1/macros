@@ -3409,6 +3409,9 @@ impl Editor {
         }
         let bytes = g.bytes();
         let rows = g.wb.used_rows(SHEET);
+        // What's on disk until the write lands: a failed write restores it,
+        // so external-change detection keeps comparing against the real file.
+        let previous_hash = g.save.disk_hash;
         g.save.disk_hash = bytes_hash(&bytes);
         g.mark_saved();
         g.save.failed = false;
@@ -3436,6 +3439,7 @@ impl Editor {
                         d.modified = true;
                         if let Some(g) = d.grid.as_deref_mut() {
                             g.save.failed = true;
+                            g.save.disk_hash = previous_hash;
                         }
                     }
                     editor.echo(format!("Save of {name} failed: {err}"), cx);
@@ -3544,11 +3548,13 @@ impl Editor {
                 g.wb = crate::grid::parse::parse_prefix(&bytes, ext.as_deref(), PREFIX_ROWS);
                 let cancel = Arc::new(AtomicBool::new(false));
                 let progress = Arc::new(AtomicUsize::new(0));
+                // A save requested during the previous load still applies.
+                let save_after = g.loading.as_ref().is_some_and(|l| l.save_after);
                 if let Some(old) = g.loading.replace(GridLoading {
                     cancel: cancel.clone(),
                     progress: progress.clone(),
                     total,
-                    save_after: false,
+                    save_after,
                 }) {
                     old.cancel.store(true, Ordering::Relaxed);
                 }

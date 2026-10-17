@@ -147,8 +147,10 @@ pub fn ws_run(
                     break;
                 }
             }
-            Ok(Message::Ping(p)) => {
-                let _ = ws.send(Message::Pong(p));
+            // tungstenite queues the Pong itself on reading a Ping (sending one
+            // here too answered every ping twice); just flush it out.
+            Ok(Message::Ping(_)) => {
+                let _ = ws.flush();
             }
             Ok(Message::Close(_)) => break,
             Ok(_) => {}

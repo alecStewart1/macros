@@ -41,6 +41,9 @@ impl<'a> Query<'a> {
 enum AuthError {
     /// An empty or multi-line passphrase.
     BadPassphrase,
+    /// A secret spanning lines: the netrc format has no way to write one, and
+    /// a raw newline would split the entry across two lines of the file.
+    MultiLineSecret,
     Locked,
     WrongPassphrase,
     /// gpg failed; its last stderr line, minus the `gpg: ` prefix.
@@ -55,6 +58,7 @@ impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BadPassphrase => f.write_str("the passphrase must be one non-empty line"),
+            Self::MultiLineSecret => f.write_str("a secret must be a single line"),
             Self::Locked => f.write_str("authinfo is locked"),
             Self::WrongPassphrase => f.write_str("wrong passphrase"),
             Self::Gpg(msg) => f.write_str(msg),
@@ -442,6 +446,11 @@ fn lookup(q: Query) -> Option<String> {
 /// Add or replace the entry for `q` and re-encrypt the file. On a failed
 /// write the in-memory store is left as it was.
 fn save(q: Query, password: &str) -> Result<(), AuthError> {
+    // A pasted key often carries a trailing newline; anything inside is an error.
+    let password = password.trim_end_matches(['\r', '\n']);
+    if password.contains(['\r', '\n']) {
+        return Err(AuthError::MultiLineSecret);
+    }
     STORE.with_borrow_mut(|s| {
         let store = s.as_mut().ok_or(AuthError::Locked)?;
         let before = store.lines.clone();

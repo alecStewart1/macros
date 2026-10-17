@@ -700,6 +700,12 @@ impl Editor {
                 let edits = lsp::parse_text_edits(result);
                 self.apply_format_response(edits, &target, save, cx);
             }
+            // A code action's edits are positions in the text it was computed
+            // for: once the buffer moves on (typing while the request or its
+            // resolve was in flight) they'd land in the wrong place.
+            CodeAction | ResolveCodeAction(_) if self.target_tick(&target) != Some(target.tick) => {
+                self.echo("Buffer changed; code action not applied", cx);
+            }
             CodeAction => {
                 let actions = lsp::parse_code_actions(result);
                 self.show_code_actions(actions, cx);
@@ -1716,7 +1722,7 @@ impl Editor {
                     let current = self.inactive[idx].buffer.full_text();
                     let formatted = lsp::apply_edits_to_text(&current, &edits);
                     if formatted != current {
-                        self.replace_inactive_text(idx, &formatted);
+                        self.replace_inactive_text(idx, &formatted, true);
                     }
                 }
                 None => {}
@@ -1730,24 +1736,6 @@ impl Editor {
         if let Some(token) = save {
             self.finish_format_on_save(&target.uri, token, cx);
         }
-    }
-
-    /// Replace all of `inactive[idx]`'s text with `new` as one undoable step
-    /// (recorded in that document's own undo tree, so undo stays consistent
-    /// when it's next shown), and sync it to its language servers.
-    fn replace_inactive_text(&mut self, idx: usize, new: &str) {
-        let doc = &mut self.inactive[idx];
-        let len = doc.buffer.len();
-        let record = UndoRecord {
-            at: 0,
-            removed: doc.buffer.full_text(),
-            inserted: new.to_string(),
-        };
-        doc.undo.record(record);
-        doc.buffer.replace(0..len, new);
-        doc.modified = true;
-        let uri = document_uri(doc);
-        self.lsp_sync_document(&uri, new);
     }
 
     /// Apply a workspace edit (rename / code action / `workspace/applyEdit`):
@@ -1794,7 +1782,7 @@ impl Editor {
                 let current = self.inactive[idx].buffer.full_text();
                 let updated = lsp::apply_edits_to_text(&current, edits);
                 if updated != current {
-                    self.replace_inactive_text(idx, &updated);
+                    self.replace_inactive_text(idx, &updated, true);
                 }
                 // Write/re-watch via the buffer's own spelling of the path — the
                 // file watch is keyed by it.

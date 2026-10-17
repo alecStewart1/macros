@@ -201,27 +201,36 @@ impl Editor {
     /// input region — in place, whether or not the REPL is the active buffer,
     /// and without switching to it.
     pub(super) fn anvil_repl_render(&mut self, entry: &str, cx: &mut Context<Self>) {
-        let active = self.active.name == ANVIL_REPL_BUFFER;
         let shift = |p: usize, at: usize| if p >= at { p + entry.len() } else { p };
-        let doc = if active {
-            &mut self.active
-        } else {
-            match self.inactive_doc_mut(ANVIL_REPL_BUFFER) {
-                Some(doc) => doc,
-                None => return, // the REPL buffer was killed
-            }
-        };
-        let len = doc.buffer.len();
-        let at = doc.repl_input.unwrap_or(len).min(len);
-        doc.buffer.replace(at..at, entry);
-        doc.repl_input = Some(at + entry.len());
-        let sel = doc.selected_range.clone();
-        doc.selected_range = shift(sel.start, at)..shift(sel.end, at);
-        if active {
-            self.lines.clear();
-            self.parse_full();
+        if self.active.name == ANVIL_REPL_BUFFER {
+            // Through `edit`, as its own undo step, so the undo history (and
+            // everything else tracking positions) stays in step with the text
+            // the user typed after the insertion point.
+            let len = self.active.buffer.len();
+            let at = self.active.repl_input.unwrap_or(len).min(len);
+            let sel = self.active.selected_range.clone();
+            self.undo_grouping.boundary();
+            self.edit(at..at, entry);
+            self.undo_grouping.boundary();
+            self.active.repl_input = Some(at + entry.len());
+            self.active.selected_range = shift(sel.start, at)..shift(sel.end, at);
+            self.active.modified = false;
             self.ensure_cursor_visible();
         } else {
+            let Some(doc) = self.inactive_doc_mut(ANVIL_REPL_BUFFER) else {
+                return; // the REPL buffer was killed
+            };
+            let len = doc.buffer.len();
+            let at = doc.repl_input.unwrap_or(len).min(len);
+            doc.undo.record(UndoRecord {
+                at,
+                removed: String::new(),
+                inserted: entry.to_string(),
+            });
+            doc.buffer.replace(at..at, entry);
+            doc.repl_input = Some(at + entry.len());
+            let sel = doc.selected_range.clone();
+            doc.selected_range = shift(sel.start, at)..shift(sel.end, at);
             for pane in self
                 .panes
                 .iter_mut()
