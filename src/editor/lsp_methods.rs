@@ -784,7 +784,9 @@ impl Editor {
                         Some((s, e)) => {
                             let sb = self.active.buffer.position_to_byte(s.line, s.character);
                             let eb = self.active.buffer.position_to_byte(e.line, e.character);
-                            self.active.buffer.slice_to_string(sb..eb)
+                            // A server-sent range may be inverted; slicing one
+                            // trips `slice_to_string`'s debug assertion.
+                            self.active.buffer.slice_to_string(sb.min(eb)..sb.max(eb))
                         }
                         None => self.identifier_at_point(),
                     });

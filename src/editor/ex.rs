@@ -1103,7 +1103,10 @@ impl Editor {
         let sorted = sort_lines(&self.ex_lines(s, e), &line.arg, line.bang);
         let span = self.ex_text_span(s, e);
         let start = span.start;
-        self.edit(span, &sorted.join("\n"));
+        // The lines exclude their breaks (`\r\n` too): rejoin with the
+        // buffer's own, or a CRLF file comes out with mixed endings.
+        let eol = self.ex_eol();
+        self.edit(span, &sorted.join(eol));
         self.collapse_to(start);
         Ok(())
     }
@@ -1663,5 +1666,19 @@ mod tests {
             take_delimited("a\\/b/rest", '/'),
             ("a/b".to_string(), "rest")
         );
+    }
+
+    #[gpui::test]
+    fn sort_keeps_crlf_line_breaks(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let editor = cx.new(Editor::new);
+        editor.update(cx, |e, cx| {
+            e.switch_to_doc(make_document("t".into(), None, "c\r\nb\r\na\r\n"));
+            e.run_ex_command("sort", cx);
+            assert_eq!(e.active.buffer.full_text(), "a\r\nb\r\nc\r\n");
+        });
     }
 }

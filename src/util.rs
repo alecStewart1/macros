@@ -1,10 +1,12 @@
 //! Small cross-cutting helpers with no better home.
 
-/// Expand a leading `~/` to `$HOME` — the one shell convenience that
-/// `std::process::Command` and the raw filesystem APIs don't provide. Used at
-/// every spot that takes a user-supplied program or file path (LSP commands,
-/// `call-process` / `make-process`, file finding), so `~/bin/foo` resolves
-/// instead of being looked up as a literal path beginning with `~`.
+/// Expand a leading `~/` to the home directory ([`crate::runtime::home_dir`]:
+/// `$HOME`, else `%USERPROFILE%`, since Windows rarely sets `HOME`) — the one
+/// shell convenience that `std::process::Command` and the raw filesystem APIs
+/// don't provide. Used at every spot that takes a user-supplied program or
+/// file path (LSP commands, `call-process` / `make-process`, file finding), so
+/// `~/bin/foo` resolves instead of being looked up as a literal path beginning
+/// with `~`.
 ///
 /// Only a leading `~/` is special; bare names, absolute paths, and a `~` that
 /// appears anywhere else are returned unchanged. `~user` (another user's home)
@@ -12,9 +14,9 @@
 /// anyone means in this editor's configs.
 pub(crate) fn expand_tilde(input: &str) -> String {
     if let Some(rest) = input.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
+        && let Some(home) = crate::runtime::home_dir()
     {
-        return format!("{home}/{rest}");
+        return format!("{}/{rest}", home.display());
     }
     input.to_string()
 }
@@ -128,7 +130,11 @@ pub fn executable_find(name: &str) -> Option<std::path::PathBuf> {
     let candidates = |dir: &Path| -> Vec<PathBuf> {
         let base = dir.join(name);
         if cfg!(windows) {
-            ["", ".exe", ".cmd", ".bat"]
+            // Suffixed forms first (Emacs `exec-suffixes` order): npm installs
+            // an extensionless sh shim next to `foo.cmd`, and every file counts
+            // as "executable" here, so trying the bare name first would return
+            // the shim, which Windows can't run.
+            [".exe", ".cmd", ".bat", ""]
                 .iter()
                 .map(|ext| PathBuf::from(format!("{}{ext}", base.display())))
                 .collect()

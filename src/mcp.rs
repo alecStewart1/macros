@@ -422,6 +422,13 @@ fn serve_connection(stream: TcpStream, token: &str, backend: &dyn Backend) {
     };
     // A batch (2025-03-26) is answered with an array of the responses.
     let reply = match &message {
+        // JSON-RPC 2.0: an empty batch is answered with one Invalid Request
+        // error, not an empty (202) reply.
+        Value::Array(items) if items.is_empty() => Some(rpc_error(
+            Value::Null,
+            -32600,
+            "invalid request: empty batch",
+        )),
         Value::Array(items) => {
             let out: Vec<Value> = items
                 .iter()

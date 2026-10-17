@@ -1446,19 +1446,24 @@ pub fn apply_edits_to_text(text: &str, edits: &[TextEdit]) -> String {
             (a.min(b), a.max(b), i, e.new_text.as_str())
         })
         .collect();
-    // Descending by start so splicing one span never shifts another. Ties
-    // (e.g. several inserts at one position) go in *reverse* array order:
-    // each later splice lands in front of the earlier one, so the final text
-    // reads in array order, as the LSP spec requires.
-    spans.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)));
-    let mut out = text.to_string();
+    // One forward pass over the original text, ascending by start. Ties (e.g.
+    // several inserts at one position, or a replace and an insert sharing a
+    // start) go in array order, so the result reads in array order, as the LSP
+    // spec requires — in either order of the replace and the insert. A span
+    // overlapping one already applied (a server bug) is clipped to the text
+    // after it rather than splicing into replaced text (which could split a
+    // UTF-8 sequence and panic).
+    spans.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
     for (start, end, _, new) in spans {
-        let start = start.min(out.len());
-        let end = end.min(out.len());
-        if start <= end {
-            out.replace_range(start..end, new);
-        }
+        let start = start.clamp(cursor, text.len());
+        let end = end.clamp(start, text.len());
+        out.push_str(&text[cursor..start]);
+        out.push_str(new);
+        cursor = end;
     }
+    out.push_str(&text[cursor..]);
     out
 }
 
@@ -2266,6 +2271,24 @@ while True:
             },
         ];
         assert_eq!(apply_edits_to_text("abcdef", &edits), "abc<Def");
+        // The other array order: the replacement first, then the insert at
+        // its start — the insert must survive and follow it.
+        let edits = [edits[1].clone(), edits[0].clone()];
+        assert_eq!(apply_edits_to_text("abcdef", &edits), "abcD<ef");
+    }
+
+    #[test]
+    fn overlapping_edits_do_not_split_a_codepoint() {
+        // Overlapping ranges are a server bug, but must not panic: here the
+        // second edit ends inside text the first one replaced with a
+        // multi-byte character.
+        let edit = |s: usize, e: usize, t: &str| TextEdit {
+            start: Position::new(0, s),
+            end: Position::new(0, e),
+            new_text: t.into(),
+        };
+        let out = apply_edits_to_text("abcdefgh", &[edit(2, 3, "é"), edit(0, 3, "x")]);
+        assert_eq!(out, "xédefgh");
     }
 
     #[test]

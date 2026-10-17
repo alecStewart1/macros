@@ -190,6 +190,8 @@ fn step_section(sec: &str, up: bool) -> Option<String> {
             '[' if !quote => bracket = true,
             ']' if !quote => bracket = false,
             _ if quote || bracket => {}
+            // Scientific (`0.00E+00`): the exponent's digits aren't decimals.
+            'E' | 'e' => break,
             '0' | '#' | '?' => digits.push(i),
             '.' if point.is_none() => point = Some(i),
             c if "yYmMdDhHsS".contains(c) => return None,
@@ -394,6 +396,8 @@ mod tests {
             Some("#,##0.000;(#,##0.000)")
         );
         assert_eq!(up("0.00\" kg\"").as_deref(), Some("0.000\" kg\""));
+        assert_eq!(up("0.00E+00").as_deref(), Some("0.000E+00"));
+        assert_eq!(down("0.00E+00").as_deref(), Some("0.0E+00"));
         assert_eq!(up("yyyy-mm-dd"), None);
         assert_eq!(up("@"), None);
     }

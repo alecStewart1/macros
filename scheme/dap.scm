@@ -150,7 +150,9 @@
       ((equal? ev "initialized") (dap--configure))
       ((equal? ev "stopped")     (dap--on-stopped body))
       ((equal? ev "continued")   (dap--continue-ui))
-      ((equal? ev "output")      (dap--console-append (dap--str body 'output)))
+      ((equal? ev "output")      ; telemetry output is not for display (DAP spec)
+       (when (not (equal? (dap--str body 'category) "telemetry"))
+         (dap--console-append (dap--str body 'output))))
       ((equal? ev "terminated")  (dap--on-terminated))
       ((equal? ev "exited")
        (dap--console-log (string-append "program exited with code "

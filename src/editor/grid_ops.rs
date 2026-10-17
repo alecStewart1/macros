@@ -115,6 +115,29 @@ impl GridDoc {
         self.view.reveal_cursor();
     }
 
+    /// Rows `start..` were reordered so new row `start + k` is old row
+    /// `perm[k]`: a positional narrowing (`C-x n n`) follows its rows, so
+    /// the rows it showed stay the ones shown. (Rows hidden by an earlier
+    /// filter move through the window too, so positions alone would show
+    /// the wrong ones.)
+    pub(super) fn follow_narrowing(&mut self, start: usize, perm: &[usize]) {
+        let mut new_of = vec![0; perm.len()];
+        for (k, &old) in perm.iter().enumerate() {
+            new_of[old - start] = start + k;
+        }
+        let window = start..start + perm.len();
+        for f in &mut self.filters {
+            if let RowFilter::Rows { rows, .. } = f {
+                for r in rows.iter_mut() {
+                    if window.contains(&*r) {
+                        *r = new_of[*r - start];
+                    }
+                }
+                rows.sort_unstable();
+            }
+        }
+    }
+
     /// Column `c`'s header name (row 1) when the sheet has a header.
     pub(super) fn header_name(&self, c: usize) -> Option<&str> {
         (self.wb.header(SHEET) && c < self.used().1)
@@ -251,8 +274,9 @@ impl Editor {
             // [block][hidden between][next] → [hidden between][next][block]
             let mut perm: Vec<usize> = (r1 + 1..=next).collect();
             perm.extend(r0..=r1);
-            let ok = g.model_op(|wb| wb.permute_rows(SHEET, r0, perm, col));
+            let ok = g.model_op(|wb| wb.permute_rows(SHEET, r0, perm.clone(), col));
             if ok {
+                g.follow_narrowing(r0, &perm);
                 g.shift(Axis::Rows, (next - r1) as isize);
             }
             ok
@@ -269,8 +293,9 @@ impl Editor {
             // [prev][hidden between][block] → [block][prev][hidden between]
             let mut perm: Vec<usize> = (r0..=r1).collect();
             perm.extend(prev..r0);
-            let ok = g.model_op(|wb| wb.permute_rows(SHEET, prev, perm, col));
+            let ok = g.model_op(|wb| wb.permute_rows(SHEET, prev, perm.clone(), col));
             if ok {
+                g.follow_narrowing(prev, &perm);
                 g.shift(Axis::Rows, -((r0 - prev) as isize));
             }
             ok
@@ -956,5 +981,25 @@ mod tests {
         assert!(parse_filter("empty").unwrap().0.test_value(""));
         assert!(parse_filter("  ").is_err());
         assert!(parse_filter(">x").is_err());
+    }
+
+    /// `M-↓` under a narrowing to rows 3, 4 and 6 (row 5 hidden by an
+    /// earlier filter): moving row 4 past row 6 keeps showing the same three
+    /// rows, now at 3, 5 and 6.
+    #[test]
+    fn narrowing_follows_moved_rows() {
+        let wb =
+            crate::grid::parse::parse_now(b"k\n0\n1\n2\n3\n4\n5\n".to_vec(), Some("csv")).unwrap();
+        let mut g = GridDoc::new(wb, Some("csv".into()), 0, &Default::default());
+        g.filters.push(RowFilter::Rows {
+            rows: vec![2, 3, 5],
+            label: "rows".into(),
+        });
+        // Old rows 4 (hidden) and 5 (next shown) move up past row 3.
+        g.follow_narrowing(3, &[4, 5, 3]);
+        let RowFilter::Rows { rows, .. } = &g.filters[0] else {
+            unreachable!()
+        };
+        assert_eq!(rows, &[2, 4, 5]);
     }
 }

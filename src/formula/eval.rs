@@ -281,6 +281,11 @@ fn map_n(evs: Vec<Ev>, ctx: &mut dyn Ctx, f: impl Fn(Vec<Value>) -> Value) -> Ev
         evs.into_iter().map(|e| materialize(e, ctx)).collect();
     let rows = mats.iter().map(|m| m.0).max().unwrap_or(1);
     let cols = mats.iter().map(|m| m.1).max().unwrap_or(1);
+    // Broadcasting a tall column against a wide row multiplies their sizes
+    // (`A1:A1000000*A1:XFD1`): cap the result like any dense array.
+    if func::dense_cells(rows, cols).is_err() {
+        return Ev::V(Value::Error(ErrorKind::Num));
+    }
     let pick = |r: usize, c: usize, (n_r, n_c, d): &(usize, usize, Vec<Value>)| -> Value {
         let rr = if *n_r == 1 { 0 } else { r };
         let cc = if *n_c == 1 { 0 } else { c };

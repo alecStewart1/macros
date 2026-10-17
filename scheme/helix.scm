@@ -207,7 +207,8 @@
                   ;; selection ends at the previous line, so step back to find
                   ;; the last line actually covered.
                   (ls (line-start-pos lo))
-                  (le (line-end-pos (max lo (- hi 1)))))
+                  ;; …and take the line break, like `x` (Helix's line bounds)
+                  (le (grapheme-forward (line-end-pos (max lo (- hi 1))))))
              (cons ls le)))
          (helix-selections))))
 

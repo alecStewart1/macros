@@ -13,8 +13,11 @@
 ;; or helix-mode the plain keys resolve against the modal Normal map, so
 ;; browsing only `fundamental` showed a modal user none of the keys they
 ;; actually press. Resolved per call via `current-modal-keymap` (core.scm), so
-;; it tracks the style as the user switches. Set it explicitly to pin a keymap.
+;; it tracks the style as the user switches. Pin a keymap with
+;; (which-key-set-keymap! "name") — a plain `set!` from another file wouldn't
+;; reach it (Steel inlines a never-`set!` top-level literal as a constant).
 (define *which-key-mode* #f)
+(define (which-key-set-keymap! km) (set! *which-key-mode* km))
 (define (which-key-mode)
   (or *which-key-mode* (current-modal-keymap) "fundamental"))
 

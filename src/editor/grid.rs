@@ -946,9 +946,11 @@ impl GridDoc {
     /// Set column (or row) `idx`'s size, as an undo step.
     fn resize(&mut self, axis: Axis, idx: usize, size: f64) {
         let sizes = self.view.axis_mut(axis);
-        let old = sizes.size(idx);
+        // The stored size, not the shown one: a hidden column shows as 0,
+        // and its new size must still be recorded (and undo to the old).
+        let old = sizes.base(idx);
         sizes.set(idx, size);
-        let new = sizes.size(idx);
+        let new = sizes.base(idx);
         if (old - new).abs() > f64::EPSILON {
             self.record(Hist::Resize {
                 axis,
@@ -4558,6 +4560,20 @@ mod tests {
         // …as one undo step.
         g.apply(GridCmd::Undo, &CmdEnv::default()).unwrap();
         assert_eq!(column(&g, 0), ["k", "a", "b", "a", "b"]);
+    }
+
+    /// Resizing a hidden column (a drag across a column selection that
+    /// spans it) is recorded, and undo restores its stored size.
+    #[test]
+    fn resizing_a_hidden_column_undoes() {
+        use super::{Axis, CmdEnv, GridCmd};
+        let mut g = doc("a,b,c\n1,2,3\n");
+        let default = g.view.cols.default;
+        g.view.cols.set_hidden(1, true);
+        g.resize(Axis::Cols, 1, 100.0);
+        assert_eq!(g.view.cols.base(1), 100.0);
+        g.apply(GridCmd::Undo, &CmdEnv::default()).unwrap();
+        assert_eq!(g.view.cols.base(1), default);
     }
 
     #[test]

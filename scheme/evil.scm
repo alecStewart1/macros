@@ -858,8 +858,8 @@
      (lambda (p n raw)
        (list "line" p (evil-first-nonblank-pos (pos-at-char-column (evil-screen-line which n) 0))))))
  (list "H" "M" "L"))
-(evil-builtin-motion ";" (lambda (p n raw) (evil-find-motion *evil-find-forward* n)))
-(evil-builtin-motion "," (lambda (p n raw) (evil-find-motion (not *evil-find-forward*) n)))
+(evil-builtin-motion ";" (lambda (p n raw) (evil-find-motion *evil-find-forward* n #t)))
+(evil-builtin-motion "," (lambda (p n raw) (evil-find-motion (not *evil-find-forward*) n #t)))
 (evil-builtin-motion "n" (lambda (p n raw) (evil-search-motion (search-query) (search-forward?) n)))
 (evil-builtin-motion "N" (lambda (p n raw) (evil-search-motion (search-query) (not (search-forward?)) n)))
 (evil-builtin-motion "*" (lambda (p n raw) (evil-search-word-motion #t n)))
@@ -871,10 +871,16 @@
   (set! *evil-find-char* ch)
   (set! *evil-find-till* (or (equal? kind "t") (equal? kind "T")))
   (set! *evil-find-forward* (or (equal? kind "f") (equal? kind "t")))
-  (evil-find-motion *evil-find-forward* (evil-mcount)))
-(define (evil-find-motion forward n)
+  (evil-find-motion *evil-find-forward* (evil-mcount) #f))
+;; `repeat` (; and ,): a till re-search starts one grapheme on, as in
+;; `evil-find-repeat-dir`, or it re-finds the char point is parked before.
+(define (evil-find-motion forward n repeat)
   (and *evil-find-char*
-       (let ((tg (evil-find-nth (point) *evil-find-char* *evil-find-till* forward n)))
+       (let* ((p (point))
+              (from (if (and repeat *evil-find-till*)
+                        (if forward (grapheme-forward p) (grapheme-backward p))
+                        p))
+              (tg (evil-find-nth from *evil-find-char* *evil-find-till* forward n)))
          (and tg (evil-mres (if forward "inclusive" "exclusive") tg)))))
 
 ;; Mark motions under an operator: `d'a` (linewise) / `` d`a `` (exclusive).
@@ -1269,7 +1275,9 @@
          (e2 (let loop ((i e))
                (if (and (> i s2) (member (buffer-substring (- i 1) i) '(" " "\t" "\n"))) (loop (- i 1)) i))))
     (and (< s2 e2)
-         (if (> (line-of-pos e2) (line-of-pos s))
+         ;; linewise only when the body has whole lines to itself (the opener's
+         ;; and closer's lines hold nothing of it)
+         (if (and (> (line-of-pos s2) (line-of-pos s)) (< (line-of-pos e2) (line-of-pos e)))
              (let ((ls (line-start-pos s2)) (le (line-end-pos e2)))
                (cons "line" (cons ls (if (< le (point-max)) (+ le 1) le))))
              (cons "char" (cons s2 e2))))))
