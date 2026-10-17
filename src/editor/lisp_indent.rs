@@ -243,39 +243,73 @@ fn lisp_line_end(chars: &[char], j: usize) -> bool {
         || (chars[j] == '#' && j + 1 < chars.len() && chars[j + 1] == '|')
 }
 
+/// Largest prefix (bytes) the Lisp indenter reads from the buffer start.
+const LISP_READ_LIMIT: usize = 1024 * 1024;
+
 impl Editor {
-    /// Byte offset of the nearest enclosing top-level form at or before `pos` —
-    /// the start of the last line whose first character is `(`. Falls back to
-    /// the buffer start. This bounds the Lisp indent scan to one defun, the
-    /// same heuristic Emacs `beginning-of-defun` uses for Lisp.
+    /// Byte offset of the enclosing top-level form at or before `pos` (the
+    /// beginning-of-defun the indent scan starts from), or `pos` itself when it
+    /// sits at top level. Read from the buffer start, so a `(` at column 0
+    /// inside a docstring is never mistaken for a form. A line opening with `(`
+    /// at column 0 after the reader's form start still wins, as Emacs's
+    /// `beginning-of-defun` does, so one unclosed form earlier in the buffer
+    /// doesn't skew the indentation of everything after it. Past
+    /// [`LISP_READ_LIMIT`] only that column-0 heuristic is used.
     pub(super) fn lisp_defun_start(&self, pos: usize) -> usize {
+        let candidate = self.column0_paren_line_before(pos);
+        if pos > LISP_READ_LIMIT {
+            return candidate.unwrap_or(0);
+        }
+        let text = self.active.buffer.slice_to_string(0..pos);
+        match (candidate, crate::sexp::open_form_start(&text)) {
+            (Some(c), Some(open))
+                if c > open && !crate::sexp::parse(&text[..c]).ends_in_literal =>
+            {
+                c
+            }
+            (_, Some(open)) => open,
+            (_, None) => pos,
+        }
+    }
+
+    /// Start of the nearest line at or before `pos` whose first byte is `(`.
+    fn column0_paren_line_before(&self, pos: usize) -> Option<usize> {
         let mut i = self.active.buffer.line_index_at_byte(pos);
         loop {
             let range = self.active.buffer.line_range(i);
             // `(` is ASCII: test the line's first byte, no string needed.
-            if !range.is_empty() && self.active.buffer.rope().byte(range.start) == b'(' {
-                return range.start;
+            if !range.is_empty()
+                && range.start <= pos
+                && self.active.buffer.rope().byte(range.start) == b'('
+            {
+                return Some(range.start);
             }
             if i == 0 {
-                return 0;
+                return None;
             }
             i -= 1;
         }
     }
 
+    /// The text the Lisp indenter scans for a line starting at `pos`: from the
+    /// enclosing top-level form up to `pos`. `None` when `pos` is inside a string
+    /// or block comment, whose content must not be reindented.
+    pub(super) fn lisp_indent_context(&self, pos: usize) -> Option<String> {
+        let text = self
+            .active
+            .buffer
+            .slice_to_string(self.lisp_defun_start(pos)..pos);
+        (!crate::sexp::parse(&text).ends_in_literal).then_some(text)
+    }
+
     /// Reindent the current line to its Lisp indentation (Emacs TAB in a Lisp
-    /// buffer).
+    /// buffer). A line that starts inside a multi-line string is left alone.
     pub(super) fn lisp_reindent_line(&mut self, cx: &mut Context<Self>) {
         let tab = self.structural_indent_width(cx);
         let line = self.active.buffer.line_range_at(self.point());
-        let target = lisp_indent_for(
-            &self
-                .active
-                .buffer
-                .slice_to_string(self.lisp_defun_start(line.start)..line.start),
-            tab,
-        );
-        self.reindent_current_line(target, cx);
+        if let Some(text) = self.lisp_indent_context(line.start) {
+            self.reindent_current_line(lisp_indent_for(&text, tab), cx);
+        }
     }
 }
 

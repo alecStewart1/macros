@@ -25,6 +25,7 @@ use crate::lsp::{
 };
 use crate::mode::{Keymap, Mode, ModeStack};
 use crate::script::{EditorCommand, ScriptEngine, ScriptOutcome};
+use crate::sexp::{last_sexp, top_level_form_at};
 use crate::terminal::{TermEvent, Terminal};
 use crate::theme::Theme;
 
@@ -1035,6 +1036,9 @@ fn parse_snippet(template: &str) -> (String, Vec<(u32, usize, usize)>) {
     fields.sort_by_key(|&(n, _, _)| if n == 0 { u32::MAX } else { n });
     (text, fields)
 }
+
+/// Largest buffer (bytes) the reader-aware Lisp bracket match parses whole.
+const LISP_MATCH_LIMIT: usize = 1024 * 1024;
 
 /// The closing partner for an opening delimiter, if `c` opens a pair.
 fn open_delim_partner(c: char) -> Option<&'static str> {
@@ -2242,6 +2246,11 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> bool {
         let c = ch.chars().next().unwrap();
+        // In Lisp, `'` and `` ` `` are quote prefixes, never paired delimiters:
+        // `'(` must not become `'()'`.
+        if matches!(c, '\'' | '`') && self.is_lisp_buffer() {
+            return false;
+        }
         // Active region: wrap it in the delimiter pair.
         if !range.is_empty() {
             let Some(close) = open_delim_partner(c) else {
@@ -2476,11 +2485,12 @@ impl Editor {
             .is_some_and(is_lisp_language)
         {
             let tab = self.structural_indent_width(cx);
-            let text = self
-                .active
-                .buffer
-                .slice_to_string(self.lisp_defun_start(p)..p);
-            let indent = " ".repeat(lisp_indent_for(&text, tab));
+            // Inside a multi-line string the new line is string content: no
+            // indentation is added to it.
+            let indent = self
+                .lisp_indent_context(p)
+                .map(|text| " ".repeat(lisp_indent_for(&text, tab)))
+                .unwrap_or_default();
             self.insert_text(&format!("\n{indent}"), cx);
             return;
         }
@@ -2664,7 +2674,19 @@ impl Editor {
         {
             return Some(m);
         }
+        // Lisp: a reader-aware match, so a paren in a string, a `;` comment or a
+        // `#\(` char literal never pairs. Bounded like the plain scan.
+        if self.is_lisp_buffer() && self.active.buffer.len() <= LISP_MATCH_LIMIT {
+            return crate::sexp::matching_bracket(&self.active.buffer.full_text(), byte);
+        }
         self.scan_bracket_match(byte)
+    }
+
+    /// Whether the active buffer's language gets Lisp (reader-aware) editing.
+    fn is_lisp_buffer(&self) -> bool {
+        self.active_language()
+            .as_deref()
+            .is_some_and(is_lisp_language)
     }
 
     /// The opener matching the closing bracket at `closer`, by scanning the
@@ -4857,49 +4879,6 @@ fn longest_common_prefix(items: &[String]) -> String {
     first[..end].to_string()
 }
 
-/// The byte range of the last complete s-expression at the end of `text` (a
-/// balanced `(...)` form, or a trailing atom). Used by `eval-last-sexp`. Strings
-/// containing parens aren't accounted for — fine for a first cut.
-fn last_sexp(text: &str) -> Option<Range<usize>> {
-    let bytes = text.as_bytes();
-    let mut end = text.len();
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    if end == 0 {
-        return None;
-    }
-
-    if bytes[end - 1] == b')' {
-        let mut depth = 0;
-        let mut i = end;
-        while i > 0 {
-            i -= 1;
-            match bytes[i] {
-                b')' => depth += 1,
-                b'(' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i..end);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    } else {
-        let mut start = end;
-        while start > 0 {
-            let c = bytes[start - 1];
-            if c.is_ascii_whitespace() || c == b'(' || c == b')' {
-                break;
-            }
-            start -= 1;
-        }
-        Some(start..end)
-    }
-}
-
 /// The startup `default-directory` for fileless buffers: the process cwd, except
 /// that a cwd of `/` (what macOS gives apps launched from the Dock or Finder) or
 /// an unreadable one falls back to the home directory — as Emacs.app does.
@@ -4910,47 +4889,6 @@ fn startup_directory(cwd: Option<PathBuf>, home: Option<PathBuf>) -> String {
     };
     dir.map(|d| d.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-/// The top-level parenthesized form containing `point` — the unit
-/// `anvil-eval-defun` sends. Falls back to the last complete top-level form that
-/// ends at or before `point`. Counts parens only (like [`last_sexp`]); good
-/// enough for well-formed Lisp.
-fn top_level_form_at(text: &str, point: usize) -> Option<Range<usize>> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut open = None;
-    let mut last_before = None;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'(' => {
-                if depth == 0 {
-                    open = Some(i);
-                }
-                depth += 1;
-            }
-            b')' if depth > 0 => {
-                depth -= 1;
-                if depth == 0
-                    && let Some(start) = open.take()
-                {
-                    let range = start..i + 1;
-                    if start <= point && point <= i + 1 {
-                        return Some(range);
-                    }
-                    if i < point {
-                        last_before = Some(range);
-                    } else {
-                        // First form ends after point and nothing enclosed it —
-                        // take the last complete form before point.
-                        return last_before;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    last_before
 }
 
 /// The symbol (identifier) under `point`, for `anvil-doc`. A run of non-delimiter
@@ -5397,8 +5335,7 @@ fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
 mod tests {
     use super::{
         Buffer, EditorCommand, MAX_PREFIX_REPEAT, apply_trailing_rule, file_completions,
-        language_for_path, last_sexp, line_span, prefix_arg_value, scheme_symbol_token, symbol_at,
-        top_level_form_at,
+        language_for_path, line_span, prefix_arg_value, scheme_symbol_token, symbol_at,
     };
 
     #[test]
@@ -5541,47 +5478,6 @@ mod tests {
         );
         // Every candidate extends the typed prefix.
         assert!(matches.iter().all(|m| m.starts_with("assets/fonts/Lilex")));
-    }
-
-    #[test]
-    fn last_sexp_finds_trailing_form() {
-        // Balanced form before point.
-        assert_eq!(
-            last_sexp("(foo 1)\n(bar 2)").map(|r| &"(foo 1)\n(bar 2)"[r]),
-            Some("(bar 2)")
-        );
-        // Trailing whitespace is skipped.
-        assert_eq!(last_sexp("(a)\n  ").map(|r| &"(a)\n  "[r]), Some("(a)"));
-        // A bare atom.
-        assert_eq!(last_sexp("foo bar").map(|r| &"foo bar"[r]), Some("bar"));
-        // Nested parens balance correctly.
-        assert_eq!(
-            last_sexp("(+ (* 2 3) 4)").map(|r| &"(+ (* 2 3) 4)"[r]),
-            Some("(+ (* 2 3) 4)")
-        );
-        assert_eq!(last_sexp("   "), None);
-    }
-
-    #[test]
-    fn top_level_form_at_finds_enclosing_defun() {
-        let src = "(define a 1)\n(define (f x)\n  (+ x 1))\n(define b 2)";
-        // Point inside the middle multi-line defun returns the whole defun.
-        let inside = src.find("+ x").unwrap();
-        assert_eq!(
-            top_level_form_at(src, inside).map(|r| &src[r]),
-            Some("(define (f x)\n  (+ x 1))")
-        );
-        // Point on the first form.
-        assert_eq!(
-            top_level_form_at(src, 2).map(|r| &src[r]),
-            Some("(define a 1)")
-        );
-        // Point in the gap after a form falls back to the last form before it.
-        let gap = src.find("\n(define b").unwrap();
-        assert_eq!(
-            top_level_form_at(src, gap).map(|r| &src[r]),
-            Some("(define (f x)\n  (+ x 1))")
-        );
     }
 
     #[test]
