@@ -137,6 +137,7 @@ impl Editor {
         // blink cycle (no-op timer when `cursor-blink` is off).
         self.reset_blink(cx);
         self.dispatch_keystroke(ks, cx);
+        self.anvil_eldoc_tick();
     }
 
     /// Route one keystroke through the modal layers (see [`Self::on_key_down`]);

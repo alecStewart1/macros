@@ -331,6 +331,26 @@ pub fn open_form_start(text: &str) -> Option<usize> {
         .map(|n| n.start)
 }
 
+/// The operator (head symbol) of the innermost list still open at the end of
+/// `text` — the function whose arguments are being typed, for eldoc.
+pub fn enclosing_operator(text: &str) -> Option<String> {
+    let parsed = parse(text);
+    if parsed.ends_in_literal {
+        return None;
+    }
+    let mut open: Option<&Node> = None;
+    let mut nodes = &parsed.nodes;
+    while let Some(last) = nodes.last().filter(|n| !n.is_complete()) {
+        open = Some(last);
+        nodes = &last.children;
+    }
+    let head = open?.children.first()?;
+    // Only a symbol that is already complete: still typing it means it
+    // continues to the end of `text`.
+    (matches!(head.kind, Kind::Atom) && head.end < text.len())
+        .then(|| text[head.start..head.end].to_string())
+}
+
 /// The bracket matching the one at byte `pos` (an opener's closer, or a
 /// closer's opener), honoring strings, comments and char literals.
 pub fn matching_bracket(text: &str, pos: usize) -> Option<usize> {
@@ -457,6 +477,23 @@ mod tests {
         assert_eq!(matching_bracket(src, sq), Some(sq + 2));
         // The paren in the string matches nothing.
         assert_eq!(matching_bracket(src, 4), None);
+    }
+
+    #[test]
+    fn enclosing_operator_is_the_open_head() {
+        assert_eq!(
+            enclosing_operator("(string-append \"a\" ").as_deref(),
+            Some("string-append")
+        );
+        assert_eq!(
+            enclosing_operator("(map (lambda (x) x) ").as_deref(),
+            Some("map")
+        );
+        assert_eq!(enclosing_operator("(map (car ").as_deref(), Some("car"));
+        // Still typing the head itself.
+        assert_eq!(enclosing_operator("(string-app"), None);
+        assert_eq!(enclosing_operator("(f 1)"), None);
+        assert_eq!(enclosing_operator("(f \"open"), None);
     }
 
     #[test]

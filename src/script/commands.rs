@@ -999,6 +999,12 @@ pub enum EditorCommand {
     },
     /// Cancel the ANVIL REPL's current evaluation (SLIME's `C-c C-c`).
     AnvilInterrupt,
+    /// Open (or switch to) the `*anvil-repl*` buffer.
+    AnvilReplOpen,
+    /// RET in the REPL: submit complete input, or continue it on a new line.
+    AnvilSendInput,
+    /// M-p (`true`, older) / M-n (`false`, newer) through the REPL's input history.
+    AnvilHistory(bool),
     /// Rebuild the ANVIL REPL engine — a fresh image (SLIME's restart).
     AnvilReset,
     /// Evaluate the top-level form at point in the ANVIL image (SLIME `C-M-x`).

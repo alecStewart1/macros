@@ -29,6 +29,7 @@ use crate::sexp::{last_sexp, top_level_form_at};
 use crate::terminal::{TermEvent, Terminal};
 use crate::theme::Theme;
 
+mod anvil_repl;
 mod buffers;
 mod commands;
 mod completion;
@@ -275,6 +276,9 @@ struct Document {
     /// A grid shown as raw text (`grid-toggle-view`): what only the grid
     /// holds, put back when it turns into a grid again.
     grid_stash: Option<Box<grid::GridStash>>,
+    /// For the ANVIL REPL buffer: where its editable input region starts (see
+    /// [`anvil_repl`]). Moves with edits like a marker.
+    repl_input: Option<usize>,
 }
 
 impl Document {
@@ -496,6 +500,12 @@ pub struct Editor {
     pub anvil: AnvilEngine,
     /// Drains async ANVIL REPL results onto the foreground.
     anvil_task: Option<Task<()>>,
+    /// Forms submitted in the ANVIL REPL, oldest first (M-p / M-n).
+    anvil_history: Vec<String>,
+    /// The history entry M-p / M-n last recalled, if any.
+    anvil_history_pos: Option<usize>,
+    /// The operator the REPL's eldoc last looked up (re-query on change only).
+    anvil_eldoc_last: Option<String>,
     /// Global key bindings, shared across all buffers.
     keymap: Keymap,
     /// Echo-area message (the minibuffer line).
@@ -1037,6 +1047,27 @@ fn parse_snippet(template: &str) -> (String, Vec<(u32, usize, usize)>) {
     (text, fields)
 }
 
+/// The single string a Scheme ANVIL callback receives. An error leads with
+/// `error: ` (so a callback can test the prefix) followed by any captured
+/// output; a value follows its output, matching a transcript.
+fn anvil_callback_payload(
+    result: Result<Option<String>, String>,
+    output: Option<String>,
+) -> String {
+    let output = output
+        .as_deref()
+        .map(|o| o.trim_end_matches('\n'))
+        .filter(|o| !o.is_empty())
+        .map(str::to_string);
+    match (result, output) {
+        (Err(error), Some(out)) => format!("error: {error}\n{out}"),
+        (Err(error), None) => format!("error: {error}"),
+        (Ok(Some(value)), Some(out)) => format!("{out}\n{value}"),
+        (Ok(None), Some(out)) => out,
+        (Ok(value), None) => value.unwrap_or_default(),
+    }
+}
+
 /// Largest buffer (bytes) the reader-aware Lisp bracket match parses whole.
 const LISP_MATCH_LIMIT: usize = 1024 * 1024;
 
@@ -1351,6 +1382,9 @@ impl Editor {
             script_task: None,
             anvil,
             anvil_task: None,
+            anvil_history: Vec::new(),
+            anvil_history_pos: None,
+            anvil_eldoc_last: None,
             keymap: Keymap::default(),
             status: "Macros ready".into(),
             is_selecting: false,
@@ -1672,18 +1706,15 @@ impl Editor {
                 result,
                 output,
             } => {
-                // Captured `(display …)` output prints first, then the value (or
-                // error), matching a REPL transcript.
-                let mut payload = String::new();
-                if let Some(out) = output.filter(|o| !o.is_empty()) {
-                    payload.push_str(out.trim_end_matches('\n'));
-                    payload.push('\n');
+                // The REPL transcript renders natively, in place before the
+                // input region (see `anvil_repl`).
+                if callback == anvil_repl::ANVIL_REPL_CALLBACK {
+                    let entry = anvil_repl::format_repl_result(&result, output.as_deref());
+                    self.anvil_repl_render(&entry, cx);
+                    return;
                 }
-                match result {
-                    Err(error) => payload.push_str(&format!("error: {error}")),
-                    Ok(value) => payload.push_str(&value.unwrap_or_default()),
-                }
-                self.script.dispatch_action(&callback, Some(&payload));
+                self.script
+                    .dispatch_action(&callback, Some(&anvil_callback_payload(result, output)));
             }
             // Image-backed completion candidates → the normal completion popup.
             // Empty means no live binding matches; show "No completions" rather
@@ -2192,6 +2223,14 @@ impl Editor {
         // Move any markers tracking positions in this buffer, and the Vim
         // marks / jump list.
         self.script.adjust_markers(start, old_end, new_text.len());
+        if let Some(input) = self.active.repl_input {
+            self.active.repl_input = Some(anvil_repl::shift_repl_input(
+                input,
+                start,
+                old_end,
+                new_text.len(),
+            ));
+        }
         self.shift_vim_positions(start, old_end, new_text.len());
         // Shift byte-range overlays the same way so they stay aligned until the
         // debounced re-fontify runs — otherwise hidden ranges / faces below the
@@ -4726,6 +4765,7 @@ fn blank_document(
         ghost: None,
         grid: None,
         grid_stash: None,
+        repl_input: None,
     }
 }
 
@@ -5230,6 +5270,7 @@ impl EntityInputHandler for Editor {
         cx: &mut Context<Self>,
     ) {
         self.type_text(range_utf16, new_text, cx);
+        self.anvil_eldoc_tick();
     }
 
     fn replace_and_mark_text_in_range(
