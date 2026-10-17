@@ -447,7 +447,11 @@ impl StyleTables {
                         }
                     }
                 }
-                (Some("fill"), Some("patternFill"), "fgColor") => {
+                // Only a `<fills>` fill: a `<dxf>`'s fill (conditional
+                // formatting) has the same shape but isn't in the table.
+                (Some("fill"), Some("patternFill"), "fgColor")
+                    if stack.len() >= 3 && stack[stack.len() - 3] == "fills" =>
+                {
                     if let Some(f) = fills.last_mut() {
                         match t.attr("rgb").and_then(|v| argb(&v)) {
                             Some(c) => f.color = Some(c),
@@ -1331,6 +1335,32 @@ mod tests {
         assert!(
             !book.not_preserved.is_empty(),
             "bold/italic runs dropped silently"
+        );
+    }
+
+    #[test]
+    fn dxf_fills_do_not_touch_cell_fills() {
+        let styles = br#"<styleSheet>
+            <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+            <fills count="3"><fill><patternFill patternType="none"/></fill>
+              <fill><patternFill patternType="gray125"/></fill>
+              <fill><patternFill patternType="solid"><fgColor rgb="FFFFC000"/></patternFill></fill></fills>
+            <borders count="1"><border/></borders>
+            <cellXfs count="2">
+              <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+              <xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0"/>
+            </cellXfs>
+            <dxfs count="2">
+              <dxf><fill><patternFill><fgColor rgb="FF00FF00"/></patternFill></fill></dxf>
+              <dxf><fill><patternFill><fgColor theme="4"/></patternFill></fill></dxf>
+            </dxfs></styleSheet>"#;
+        let styles = parse_styles(styles).unwrap();
+        assert_eq!(
+            styles[1],
+            Some(XStyle {
+                fill: Some(0xFFFFC000),
+                ..XStyle::default()
+            })
         );
     }
 

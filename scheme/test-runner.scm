@@ -157,8 +157,12 @@
                (fn-name (test-capture *test-rust-fn-re* line 1))
                (mod-name (test-capture *test-rust-mod-re* line 1))
                (attr? (and (not (null? (regexp-captures *test-rust-attr-re* line))) #t))
-               ;; a body-less `fn f();` / `mod m;` opens nothing
-               (decl-only? (and (string-contains? line ";") (not (string-contains? line "{"))))
+               ;; a body-less `fn f();` / `mod m;` opens nothing — nor does a
+               ;; one-line body `fn f() { … }` / `mod m {}` (never "opened", it
+               ;; would otherwise never close), unless it's point's own line
+               (decl-only? (or (and (string-contains? line ";") (not (string-contains? line "{")))
+                               (and (not (null? (cdr ls))) (string-contains? line "{")
+                                    (<= (test-brace-delta line) 0))))
                (stack1 (cond ((and fn-name (not decl-only?))
                               (cons (list 'fn fn-name depth #f pending) stack))
                              ((and mod-name (not decl-only?))

@@ -126,14 +126,23 @@ impl Watchdog {
     }
 
     /// Engine thread: job `id` is starting — clear any stale interrupt.
-    fn begin(&self, id: u64) {
-        if let Ok(mut s) = self.state.lock() {
-            s.running = id;
-            s.started = Some(Instant::now());
-            if let Some(c) = &s.controller {
-                c.resume();
-            }
+    /// Returns false (and doesn't start it) when its caller already cancelled
+    /// it. The check and the start happen under one lock: checked separately,
+    /// a `cancel` landing between them saw the job as not running yet, so the
+    /// job then ran late anyway — exactly what `cancel` exists to prevent.
+    fn begin(&self, id: u64) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return true;
+        };
+        if s.cancelled.remove(&id) {
+            return false;
         }
+        s.running = id;
+        s.started = Some(Instant::now());
+        if let Some(c) = &s.controller {
+            c.resume();
+        }
+        true
     }
 
     /// Caller: give up on job `id`. If it hasn't started, it never will.
@@ -143,11 +152,6 @@ impl Watchdog {
         {
             s.cancelled.insert(id);
         }
-    }
-
-    /// Engine thread: whether job `id` was cancelled (consuming the mark).
-    fn take_cancelled(&self, id: u64) -> bool {
-        self.state.lock().is_ok_and(|mut s| s.cancelled.remove(&id))
     }
 
     /// Engine thread: the last job finished; waiting for the next.
@@ -590,10 +594,13 @@ impl ActionHandle {
             Err(RecvTimeoutError::Disconnected) => return Err("script engine stopped".into()),
             Err(RecvTimeoutError::Timeout) => {}
         }
-        self.watchdog.interrupt(id);
         // Not started yet (queued behind something slow): make sure it never
-        // runs late, applying edits after the caller already moved on.
+        // runs late, applying edits after the caller already moved on. Cancel
+        // BEFORE interrupting: a job that starts between the two is then
+        // either skipped (cancelled first) or running when the interrupt
+        // lands — the other order let one slip between them uninterrupted.
         self.watchdog.cancel(id);
+        self.watchdog.interrupt(id);
         let secs = timeout.as_secs_f32();
         match rx.recv_timeout(INTERRUPT_GRACE) {
             // The interrupted job unwound: keep what it queued, but report the
@@ -799,10 +806,9 @@ pub(crate) fn engine_thread(
         else {
             break;
         };
-        if watchdog.take_cancelled(id) {
+        if !watchdog.begin(id) {
             continue; // its caller timed out and gave up before it started
         }
-        watchdog.begin(id);
         // `with-process-env` extents never span jobs (one an error escaped
         // without popping would otherwise leak into every later spawn).
         crate::process::reset_dynamic();

@@ -2289,7 +2289,10 @@ impl Editor {
         let len = self.active.buffer.len();
         self.edit(0..len, new);
         self.parse_full();
-        self.move_to(point.min(self.active.buffer.len()), cx);
+        // Clamp AND floor to a char boundary: the old point can land inside a
+        // multibyte char of the new text.
+        let point = self.active.buffer.snap(point);
+        self.move_to(point, cx);
     }
 
     /// Insert `text`, replacing the active region if any.
@@ -3434,6 +3437,7 @@ impl Editor {
             doc.buffer.replace(end..end, &entry);
             // Bound growth (only while not being viewed): keep the last N lines.
             let lines = doc.buffer.line_count();
+            let mut trimmed = None;
             if lines > LOG_BUFFER_LINES_CAP {
                 let dropped = lines - LOG_BUFFER_LINES_CAP;
                 let cut = doc.buffer.line_range(dropped).start;
@@ -3448,6 +3452,17 @@ impl Editor {
                     .clamp_range(r.start.saturating_sub(cut)..r.end.saturating_sub(cut));
                 let scroll = f32::from(doc.scroll_offset) - dropped as f32 * lh;
                 doc.scroll_offset = px(scroll.max(0.0));
+                trimmed = Some((cut, dropped, doc.buffer.len()));
+            }
+            // A non-selected window showing the log keeps its own point and
+            // scroll: shift those the same way, or its view drifts a line per
+            // message (and its point can run past the shortened text).
+            if let Some((cut, dropped, len)) = trimmed {
+                for pane in self.panes.iter_mut().filter(|p| p.buffer == name) {
+                    pane.point = pane.point.saturating_sub(cut).min(len);
+                    let scroll = f32::from(pane.scroll) - dropped as f32 * lh;
+                    pane.scroll = px(scroll.max(0.0));
+                }
             }
         } else {
             self.inactive

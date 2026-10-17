@@ -1060,7 +1060,10 @@
 ;; git fix the @@ counts so a hand-built (isolated or partial) hunk applies.
 (define (magit-apply-patch-text patch to-index reverse?)
   (let* ((args (append (list "-C" *magit-dir* "apply" "--recount")
-                       (if to-index (list "--cached") '())
+                       ;; 'both: index AND worktree (discarding a staged change)
+                       (cond ((eq? to-index 'both) (list "--index"))
+                             (to-index (list "--cached"))
+                             (else '()))
                        (if reverse? (list "--reverse") '())
                        (list "-")))
          (r (call-process-full "git" args patch)))
@@ -1187,6 +1190,7 @@
            (if (member (target-arg t) (list "untracked" "unstaged"))
                (magit-stage-section (target-arg t))
                (message "Nothing to stage here")))
+          ((equal? (nth t 1) "staged") (message "Already staged"))
           (else
            (magit-do (list "add" "--" (magit-newpath (nth t 2))) "Staged file"))))))
 
@@ -1216,6 +1220,7 @@
            (if (equal? (target-arg t) "staged")
                (magit-unstage-section)
                (message "Nothing to unstage here")))
+          ((not (equal? (nth t 1) "staged")) (message "Already unstaged"))
           (else
            (magit-do (append (list "reset" "-q" "HEAD" "--") (magit-pathspecs (nth t 2)))
                      "Unstaged file"))))))
@@ -1270,13 +1275,15 @@
           ((eq? (target-tag t) 'hunk)
            (let ((h (target-arg t)))
              (magit-confirm "Discard hunk?"
-               (lambda () (when (magit-apply-hunk h #f #t) (message "Discarded hunk"))))))
+               (lambda () (when (magit-apply-hunk h (if (equal? (nth h 4) "staged") 'both #f) #t)
+                            (message "Discarded hunk"))))))
           ((eq? (target-tag t) 'group)
            (let* ((g (target-arg t)) (patch (magit-group-patch g)))
              (when patch
                (magit-confirm (string-append "Discard "
                                              (magit-group-display (grp-context g)) "?")
-                 (lambda () (when (magit-apply-patch-text patch #f #t)
+                 (lambda () (when (magit-apply-patch-text
+                                    patch (if (equal? (grp-type g) "staged") 'both #f) #t)
                               (message "Discarded group")))))))
           ((eq? (target-tag t) 'section)
            (if (member (target-arg t) (list "untracked" "unstaged"))
@@ -1564,7 +1571,10 @@
   (let* ((b (line-bounds))
          (line (buffer-substring (car b) (cadr b)))
          (parts (filter (lambda (s) (>= (string-length s) 7)) (split-many line " "))))
-    (if (null? parts) "" (car parts))))
+    ;; A stash line's ref is "stash@{0}:" — drop the colon (`X:` names a tree).
+    (if (null? parts) ""
+        (let ((p (car parts)))
+          (if (ends-with? p ":") (substring p 0 (- (string-length p) 1)) p)))))
 
 ;; RET in a log buffer: show the commit whose short hash starts the line, with
 ;; the same colorized diff as the status buffer (see magit-show-commit).

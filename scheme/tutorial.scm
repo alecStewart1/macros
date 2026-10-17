@@ -400,8 +400,8 @@ Visual mode selects a range, then an operator acts on it.
 -----------------------------------------
 Evil only takes over the plain letter keys.  Control- and Meta-chords still run
 their Emacs commands in every mode, and you genuinely need a few for files,
-buffers, help, and quitting.  These are not optional extras — there is no Vim
-':w' wired up; saving is C-x C-s.
+buffers, help, and quitting.  These are not optional extras — they work in
+every mode, even where the Ex line (:w, :e, :q) does not.
 
    C-g        cancel a half-typed command (Vim's Esc cancels modes; C-g cancels
               a pending Emacs chord) — your get-out-of-trouble key

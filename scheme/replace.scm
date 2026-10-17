@@ -531,12 +531,13 @@
                   'pqr-save))))
 
 ;; Save every file the run changed, then come back to the current buffer.
-(define (pqr-save)
-  (let ((here (current-buffer)))
-    (for-each (lambda (p) (open-file p) (save-buffer)) (reverse *pqr-touched*))
-    (switch-to-buffer here)
-    (message (string-append "Saved " (int->string (length *pqr-touched*)) " file"
-                            (if (= (length *pqr-touched*) 1) "" "s")))))
+(define (pqr-save ans)
+  (when (equal? ans "yes")
+    (let ((here (current-buffer)))
+      (for-each (lambda (p) (open-file p) (save-buffer)) (reverse *pqr-touched*))
+      (switch-to-buffer here)
+      (message (string-append "Saved " (int->string (length *pqr-touched*)) " file"
+                              (if (= (length *pqr-touched*) 1) "" "s"))))))
 
 (define-command (project-query-replace) (qr-read 'project))
 (define-command (project-query-replace-regexp) (qr-read 'project-regexp))

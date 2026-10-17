@@ -224,7 +224,8 @@ pub fn parse(text: &str) -> Parsed {
             }
             _ => {
                 let start = i;
-                if c == b'#' && b.get(i + 1) == Some(&b'\\') {
+                let char_lit = c == b'#' && b.get(i + 1) == Some(&b'\\');
+                if char_lit {
                     // Char literal: `#\` plus one char, plus the rest of a named
                     // char (`#\space`, `#\x41`) when that char is alphanumeric.
                     i += 2;
@@ -248,8 +249,10 @@ pub fn parse(text: &str) -> Parsed {
                         i = (i + 1).min(len);
                     }
                 }
-                // `#(`, `#u8(`, `#hash(`: a vector-style prefix on a list.
-                if c == b'#' && matches!(b.get(i), Some(b'(' | b'[')) {
+                // `#(`, `#u8(`, `#hash(`: a vector-style prefix on a list. A char
+                // literal (`#\(`, `#\a`) is never one, even when a bracket
+                // follows it directly.
+                if c == b'#' && !char_lit && matches!(b.get(i), Some(b'(' | b'[')) {
                     let f = stack.last_mut().unwrap();
                     let start = f.prefix.take().unwrap_or(start);
                     stack.push(Frame::new(start, i));
@@ -609,6 +612,10 @@ mod tests {
         assert_eq!(last("(list #\\()"), Some("(list #\\()"));
         assert_eq!(last("(list #\\))"), Some("(list #\\))"));
         assert_eq!(last("#\\space"), Some("#\\space"));
+        // A char literal directly followed by a list is two data, not a
+        // `#(`-style vector prefix.
+        assert_eq!(last("x #\\((b)"), Some("(b)"));
+        assert_eq!(last("x #\\a(b)"), Some("(b)"));
         // A trailing comment is skipped.
         assert_eq!(last("(foo 1) ; done"), Some("(foo 1)"));
         assert_eq!(last("(foo 1) #| (x |#"), Some("(foo 1)"));

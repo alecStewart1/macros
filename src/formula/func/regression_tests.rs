@@ -68,6 +68,8 @@ fn regression_huge_explicit_ranges_are_num_not_an_abort() {
         "=SUMPRODUCT(A1:Z99999999)",
         "=A1:Z99999999+0",
         "=CONCAT(A1:Z99999999)",
+        // Broadcasting a column against a row: 10,000 × 16,384 cells.
+        "=SUMPRODUCT(A1:A10000*A1:XFD1)",
     ] {
         assert_eq!(f(&mut m, src), Value::Error(ErrorKind::Num), "{src}");
     }

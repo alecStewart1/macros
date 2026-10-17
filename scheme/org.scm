@@ -244,7 +244,9 @@
   (let* ((sr (org--heading-split line))
          (stars (nth sr 0)) (rest (nth sr 1))
          (kw (org--leading-keyword rest))
-         (prio (let ((c (regexp-captures org--priority-capture-re rest)))
+         ;; Org only recognizes the cookie right after the keyword (or stars).
+         (prio (let ((c (regexp-captures (if kw "^[A-Z]+[ \t]+\\[#([A-Z])\\]" "^\\[#([A-Z])\\]")
+                                         rest)))
                  (if (null? c) "" (nth c 1))))
          (tags (let ((c (regexp-captures org--tag-re rest)))
                  (if (null? c) "" (nth c 1)))))
@@ -340,7 +342,9 @@
     (let ((c (regexp-captures org--tags-capture-re line)))
       (when (not (null? c))
         (let ((tags (nth c 1)))
-          (org--span (- lend (utf8-length tags)) lend "org-tag"))))))
+          ;; group 0 includes trailing blanks after the tags; measure from it
+          (let ((ts (- lend (utf8-length (car c)))))
+            (org--span ts (+ ts (utf8-length tags)) "org-tag")))))))
 
 (define (org--fontify-plain lstart line)
   ;; checkbox state
@@ -991,10 +995,10 @@
             ((equal? (string-trim line) "") (loop (cdr ls) acc))
             ((org--heading-level line) (loop (cdr ls) (cons (org--parse-heading line) acc)))
             ((org--keyword-line? line) (loop (cdr ls) (cons (org--parse-keyword line) acc)))
-            ((>= (string-match "[bB][eE][gG][iI][nN]_[sS][rR][cC]" line) 0)
+            ((and (org--block-begin? line) (>= (string-match "[bB][eE][gG][iI][nN]_[sS][rR][cC]" line) 0))
              (let ((cd (org--collect-block (cdr ls))))
                (loop (cdr cd) (cons (list "src" (org--block-lang line) (join-lines (car cd))) acc))))
-            ((>= (string-match "[bB][eE][gG][iI][nN]_[eE][xX]" line) 0)
+            ((and (org--block-begin? line) (>= (string-match "[bB][eE][gG][iI][nN]_[eE][xX]" line) 0))
              (let ((cd (org--collect-block (cdr ls))))
                (loop (cdr cd) (cons (list "example" (join-lines (car cd))) acc))))
             ((org--block-begin? line)   ; quote / other block
@@ -1208,7 +1212,9 @@
 ;; C-c t — just the open TODO items.
 (define-command (org-todo-list)
   (org--render-agenda
-   (org--sort-entries (filter (lambda (e) (not (equal? (nth e 4) ""))) (org--all-entries)))))
+   (org--sort-entries (filter (lambda (e) (and (not (equal? (nth e 4) ""))
+                                               (not (org--done-keyword? (nth e 4)))))
+                              (org--all-entries)))))
 
 (define (org-agenda-visit)
   (let ((t (alist-ref *org-agenda-targets* (buffer-line))))
@@ -1572,7 +1578,7 @@
         (let up ((i L))
           (cond ((< i 0) #f)
                 ((and (< i L) (org--block-end? (nth lines i))) #f)
-                ((org--block-begin? (nth lines i))
+                ((>= (string-match "^[ \t]*#\\+[bB][eE][gG][iI][nN]_[sS][rR][cC]" (nth lines i)) 0)
                  (let dn ((j (+ i 1)))
                    (cond ((>= j n) #f)
                          ((org--block-end? (nth lines j))
@@ -2205,7 +2211,7 @@
   (let ((c (regexp-captures "=>[ \t]*([0-9]+):([0-9]{2})" line)))
     (if (null? c) #f (+ (* 60 (string->number (nth c 1))) (string->number (nth c 2))))))
 (define (org--acc-add acc key m)
-  (if (org--assoc-ci acc key)
+  (if (alist-ref acc key)
       (map (lambda (e) (if (equal? (car e) key) (cons (car e) (+ (cdr e) m)) e)) acc)
       (append acc (list (cons key m)))))
 
@@ -2240,7 +2246,7 @@
                (cond ((>= j n) #f)
                      ((>= (string-match "^[ \t]*#\\+END:" (nth lines j)) 0) (cons i j))
                      (else (dn (+ j 1))))))
-            ((>= (string-match "^[ \t]*#\\+END:" (nth lines i)) 0) #f)
+            ((and (< i L) (>= (string-match "^[ \t]*#\\+END:" (nth lines i)) 0)) #f)
             (else (up (- i 1)))))))
 
 ;; C-c C-x C-r — insert or refresh a clock report (dynamic clocktable block).
@@ -2304,7 +2310,7 @@
          (blocklen (+ (- E H) 1))
          ;; The target's end sits after the moved block (a later heading, or an
          ;; ANCESTOR whose subtree contains it): removing the block shifts it up.
-         (insert-idx (if (> Et E) (- (+ Et 1) blocklen) (+ Et 1)))
+         (insert-idx (if (>= Et E) (- (+ Et 1) blocklen) (+ Et 1)))
          (newlines (append (org--slice without 0 (- insert-idx 1)) block
                            (org--slice without insert-idx (- (length without) 1)))))
     (org--replace-all (join-lines newlines))))
@@ -2890,7 +2896,7 @@
        (let* ((title (string-append (if (equal? (nth e 2) "") "" (string-append (nth e 2) " "))
                                     (org--inline->ascii (nth e 4))))
               (ch (cond ((= (nth e 1) 1) "=") ((= (nth e 1) 2) "-") (else "~"))))
-         (string-append title "\n" (string-repeat ch (utf8-length title)) "\n\n")))
+         (string-append title "\n" (string-repeat ch (string-length title)) "\n\n")))
       ((equal? type "para") (string-append (org--inline->ascii (nth e 1)) "\n\n"))
       ((equal? type "src") (string-append (org--indent-lines (nth e 2) "    ") "\n\n"))
       ((equal? type "example") (string-append (org--indent-lines (nth e 1) "    ") "\n\n"))
@@ -2976,7 +2982,7 @@
   (let ((lines (org--lines)) (n (org--total-lines)))
     (let loop ((i 0))
       (cond ((>= i n) #f)
-            ((>= (string-match (string-append "^[ \t]*#\\+name:[ \t]*" (regexp-quote name) "[ \t]*$")
+            ((>= (string-match (string-append "(?i)^[ \t]*#\\+name:[ \t]*" (regexp-quote name) "[ \t]*$")
                                (nth lines i)) 0)
              (let skip ((j (+ i 1)))
                (cond ((>= j n) #f)

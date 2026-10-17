@@ -643,7 +643,9 @@ fn unique_temp(base: &Path) -> PathBuf {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("grammar");
-    base.with_file_name(format!(".{name}.tmp.{}.{}", std::process::id(), n))
+    // The unique part sits before the final `.tmp`, so the `with_extension`
+    // derived object dir (`….objs`, see `install_in`) stays unique too.
+    base.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), n))
 }
 
 /// Run a command, mapping a non-zero exit or spawn failure to its stderr.
@@ -782,6 +784,14 @@ mod tests {
             "real grammar should color JSON, got none"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn concurrent_temp_libs_get_distinct_object_dirs() {
+        let lib = Path::new("/cache/lib/foo-0123.dylib");
+        let (a, b) = (unique_temp(lib), unique_temp(lib));
+        assert_ne!(a, b);
+        assert_ne!(a.with_extension("objs"), b.with_extension("objs"));
     }
 
     #[test]

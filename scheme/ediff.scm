@@ -81,7 +81,9 @@
       (let* ((ta (read-file a)) (tb (read-file b))
              (pairs (ediff-pairs (split-many ta "\n") (split-many tb "\n")
                                  (map ediff-parse-op (diff-strings ta tb)))))
-        (if (null? pairs)
+        ;; Every "equal" op still emits context pairs, so identical files give
+        ;; a non-empty list with no changed (faced) line.
+        (if (all? (lambda (p) (not (cdr p))) pairs)
             (message "ediff: files are identical")
             (begin
               (render-buffer "*ediff*" "diff-mode"
