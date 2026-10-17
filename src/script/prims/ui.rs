@@ -55,4 +55,24 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             },
         );
     }
+    {
+        // `(set-titlebar-menu title labels commands)` — publish a title-bar
+        // menu named `title`, right of the perspectives switcher. `labels` and
+        // `commands` are parallel lists; clicking a row calls its command (a
+        // function name) with no arguments. An empty list removes the menu.
+        // Driven from scheme/titlebar-menu.scm.
+        let q = queue.clone();
+        reg.register_fn(
+            "set-titlebar-menu",
+            move |title: String,
+                  StringList(items): StringList,
+                  StringList(commands): StringList| {
+                q.push(EditorCommand::SetTitlebarMenu {
+                    title,
+                    items,
+                    commands,
+                });
+            },
+        );
+    }
 }

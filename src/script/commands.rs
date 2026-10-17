@@ -811,6 +811,15 @@ pub enum EditorCommand {
         active: String,
         callback: String,
     },
+    /// Publish a Scheme-defined title-bar menu named `title`: one row per
+    /// `items` label, each running the parallel `commands` entry by name (a
+    /// late-bound call, so package-defined commands resolve). An empty `items`
+    /// removes the menu. See scheme/titlebar-menu.scm.
+    SetTitlebarMenu {
+        title: String,
+        items: Vec<String>,
+        commands: Vec<String>,
+    },
     // Transient popup (the magit / `transient.el` pattern).
     /// Open a transient popup: a title plus `(key, label, command)` rows. When
     /// `sticky`, selecting a row keeps the popup open (the row command re-opens
