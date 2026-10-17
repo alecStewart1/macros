@@ -31,6 +31,7 @@ mod save;
 mod script;
 mod secure_input;
 mod settings;
+mod sexp;
 mod spell;
 mod terminal;
 mod textplot;

@@ -1394,3 +1394,34 @@ fn terminal_exit_kills_its_buffer(cx: &mut TestAppContext) {
         assert!(e.terminals.is_empty());
     });
 }
+
+/// Lisp reindent leaves multi-line string content alone — including a docstring
+/// line that starts with `(`, which must not be taken for a top-level form.
+#[gpui::test]
+fn lisp_reindent_skips_string_content(cx: &mut TestAppContext) {
+    let editor = setup_json(
+        cx,
+        "t.scm",
+        "(define (f)\n\"doc\n(f) returns 1\n  kept\")\n(g\nx)\n",
+    );
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::ReindentRegion, cx)
+    });
+    settle(&editor, cx);
+    assert_eq!(
+        text(&editor, cx),
+        "(define (f)\n  \"doc\n(f) returns 1\n  kept\")\n(g\n x)\n"
+    );
+}
+
+/// In a Lisp buffer `'` is a quote prefix, not a paired delimiter.
+#[gpui::test]
+fn lisp_electric_pair_leaves_quote_unpaired(cx: &mut TestAppContext) {
+    let editor = setup_json(cx, "t.scm", "");
+    editor.update(cx, |e, cx| {
+        e.electric_pair = true;
+        assert!(!e.electric_pair_insert(&(0..0), "'", cx));
+        assert!(e.electric_pair_insert(&(0..0), "(", cx));
+        assert_eq!(e.active.buffer.full_text(), "()");
+    });
+}
