@@ -1053,6 +1053,9 @@ impl Editor {
             WsClose { id } => self.ws_close(id),
             AnvilEval { source, on_result } => self.anvil.eval(&source, &on_result),
             AnvilInterrupt => self.anvil.interrupt(),
+            AnvilReplOpen => self.anvil_repl_open(cx),
+            AnvilSendInput => self.anvil_send_input(cx),
+            AnvilHistory(older) => self.anvil_history(older, cx),
             AnvilReset => self.anvil.reset(),
             AnvilEvalDefun => {
                 let text = self.active.buffer.full_text();

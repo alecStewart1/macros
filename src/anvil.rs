@@ -2,26 +2,30 @@
 //! Steel interpreter.
 //!
 //! The editor already embeds one `Engine` (its config/scripting engine, see
-//! [`crate::script`]). ANVIL spins up a separate `Engine` on its own thread so
-//! REPL experiments live in their own image: user `define`s never pollute the
-//! config engine, the image can be restarted from scratch, and — crucially — a
-//! runaway evaluation can be *interrupted* without taking the editor down.
+//! [`crate::script`]). ANVIL runs a separate `Engine` on its own thread so REPL
+//! experiments live in their own image: user `define`s never pollute the config
+//! engine, the image can be restarted from scratch, and — crucially — a runaway
+//! evaluation can be *interrupted* without taking the editor down.
 //!
 //! Interruption is cooperative but free: Steel's VM checks an atomic interrupt
 //! flag on every opcode (`ThreadStateController`). So any pure-Scheme infinite
 //! loop or unbounded recursion — `(define (spin) (spin))` included — unwinds
 //! with an error at its next instruction once [`AnvilEngine::interrupt`] flips
-//! the flag from the UI thread. (The one case it can't reach is code stuck
-//! inside a blocking Rust host call, which isn't executing opcodes — but the
-//! REPL engine registers no such host bridges.)
+//! the flag from the UI thread. Code stuck inside a blocking native call
+//! (`time/sleep-ms`, a read from stdin) executes no opcodes and can't be
+//! interrupted; [`AnvilEngine::reset`] handles that case by abandoning the
+//! wedged thread and starting a fresh image on a new one.
 //!
 //! The plumbing mirrors [`crate::script::ScriptEngine`]: the `!Send` engine is
 //! built on and never leaves its thread; only plain data crosses the channels.
 //! Jobs are delivered over a blocking `std::sync::mpsc` channel (the thread
 //! `recv()`s), and results come back over a `futures` channel the editor drains
-//! on its foreground task.
+//! on its foreground task. The thread is spawned lazily on the first job, so an
+//! editor that never uses ANVIL never builds its interpreter.
 
-use std::sync::mpsc::{Sender, channel};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -30,6 +34,15 @@ use steel::steel_vm::ThreadStateController;
 use steel::steel_vm::engine::Engine;
 
 use crate::script::{format_value, steel_error_string};
+
+/// Stack for the ANVIL thread. Steel's compiler and macro expander recurse on
+/// the shape of the source, so deeply nested input needs more than the 2 MiB a
+/// spawned thread gets by default (overflowing aborts the whole editor).
+const ANVIL_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+/// Most captured `(display …)` output returned per evaluation; a print loop
+/// stopped by an interrupt can have buffered far more than a buffer should hold.
+const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 /// Something the ANVIL engine thread sends back to the editor's foreground drain.
 pub enum AnvilOutcome {
@@ -84,45 +97,106 @@ enum AnvilJob {
         start: usize,
         end: usize,
     },
-    /// Throw away the current image and build a fresh one.
-    Reset,
 }
 
-/// A handle to the ANVIL REPL interpreter. Cheap to hold; all the state lives on
-/// the engine thread.
+/// A handle to the ANVIL REPL interpreter. Cheap to hold; the image itself
+/// lives on the engine thread, which is spawned on first use.
 pub struct AnvilEngine {
-    jobs: Sender<AnvilJob>,
-    /// The running engine's interrupt controller. The UI thread calls
-    /// `interrupt()` here to cancel an in-flight eval; the engine thread swaps
-    /// it on [`AnvilJob::Reset`] (a rebuilt engine has a fresh controller).
-    controller: Arc<Mutex<ThreadStateController>>,
+    /// Where every worker thread delivers its outcomes (cloned per spawn).
+    outcomes: UnboundedSender<AnvilOutcome>,
+    /// The current worker, or `None` before first use and after a reset.
+    worker: Mutex<Option<Worker>>,
+    /// Sequence number of the last job sent (jobs are numbered from 1).
+    last_seq: AtomicU64,
+}
+
+/// One engine thread: its job queue plus the state the UI thread shares with it.
+struct Worker {
+    jobs: Sender<(u64, AnvilJob)>,
+    shared: Arc<WorkerShared>,
+}
+
+/// State shared between the UI thread and one engine thread.
+#[derive(Default)]
+struct WorkerShared {
+    /// The live engine's interrupt controller — `None` until the thread has
+    /// built its engine. Nothing can be running before then, so an interrupt
+    /// arriving early has nothing to cancel.
+    controller: Mutex<Option<ThreadStateController>>,
+    /// Set while a job runs, so callers can skip work that would only queue
+    /// behind a long evaluation (eldoc lookups).
+    busy: AtomicBool,
+    /// Set by [`AnvilEngine::reset`]: the thread must exit after its current
+    /// job and deliver nothing more — its image has been replaced.
+    abandoned: AtomicBool,
+    /// Jobs numbered at or below this were interrupted: one still waiting to
+    /// start is cancelled instead of run. This is what makes an interrupt sent
+    /// before the thread has even built its engine (no controller to flip yet)
+    /// still stop the evaluation it was aimed at.
+    cancel_upto: AtomicU64,
+}
+
+impl WorkerShared {
+    fn interrupt(&self) {
+        if let Some(c) = self.controller.lock().unwrap().as_ref() {
+            c.interrupt();
+        }
+    }
+
+    /// Clear the VM's interrupt flag so the next run starts cleanly.
+    fn resume(&self) {
+        if let Some(c) = self.controller.lock().unwrap().as_ref() {
+            c.resume();
+        }
+    }
 }
 
 impl AnvilEngine {
-    /// Spawn the REPL engine thread; returns the handle and the receiver of
-    /// async outcomes (the editor drains it on a foreground task).
+    /// A handle plus the receiver of async outcomes (the editor drains it on a
+    /// foreground task). No thread or interpreter exists until the first job.
     pub fn new() -> (Self, UnboundedReceiver<AnvilOutcome>) {
-        let (jobs, jobs_rx) = channel::<AnvilJob>();
         let (outcomes, outcomes_rx) = unbounded::<AnvilOutcome>();
-        // A placeholder until the thread installs the real engine's controller.
-        let controller = Arc::new(Mutex::new(ThreadStateController::default()));
-        let thread_controller = controller.clone();
-        // The engine thread signals readiness once it has built its `Engine` and
-        // published the real interrupt controller. We block on it here so the
-        // placeholder is never observable to callers: otherwise an `interrupt()`
-        // arriving before the (sometimes slow) `Engine::new()` finishes would
-        // flip the placeholder's flag instead of the VM's and be silently lost,
-        // leaving a runaway eval spinning forever.
-        let (ready_tx, ready_rx) = channel::<()>();
-        std::thread::spawn(move || anvil_thread(jobs_rx, outcomes, thread_controller, ready_tx));
-        let _ = ready_rx.recv();
-        (Self { jobs, controller }, outcomes_rx)
+        let engine = Self {
+            outcomes,
+            worker: Mutex::new(None),
+            last_seq: AtomicU64::new(0),
+        };
+        (engine, outcomes_rx)
+    }
+
+    /// Hand `job` to the engine thread, spawning one if there is none or the
+    /// previous one died (a panic it couldn't recover from).
+    fn send(&self, job: AnvilJob) {
+        let mut worker = self.worker.lock().unwrap();
+        let seq = self.last_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let job = match worker.as_ref() {
+            Some(w) => match w.jobs.send((seq, job)) {
+                Ok(()) => return,
+                Err(unsent) => unsent.0.1,
+            },
+            None => job,
+        };
+        match spawn_worker(self.outcomes.clone()) {
+            Ok(w) => {
+                let _ = w.jobs.send((seq, job));
+                *worker = Some(w);
+            }
+            Err(e) => {
+                if let Some(callback) = job.callback() {
+                    let _ = self.outcomes.unbounded_send(AnvilOutcome::Result {
+                        callback,
+                        result: Err(format!("could not start the ANVIL interpreter: {e}")),
+                        output: None,
+                    });
+                }
+            }
+        }
     }
 
     /// Queue a REPL evaluation. The printed result is delivered to `callback`
     /// (a function in the main engine) via the outcome channel.
     pub fn eval(&self, source: &str, callback: &str) {
-        let _ = self.jobs.send(AnvilJob::Eval {
+        self.send(AnvilJob::Eval {
             source: source.to_string(),
             callback: callback.to_string(),
         });
@@ -131,7 +205,7 @@ impl AnvilEngine {
     /// Queue an image-introspection query; the rendered result is delivered to
     /// `callback` (a function in the main engine) via the outcome channel.
     pub fn query(&self, kind: AnvilQuery, callback: &str) {
-        let _ = self.jobs.send(AnvilJob::Query {
+        self.send(AnvilJob::Query {
             kind,
             callback: callback.to_string(),
         });
@@ -141,88 +215,180 @@ impl AnvilEngine {
     /// `prefix`, to replace the buffer range `start..end`. The result arrives as
     /// [`AnvilOutcome::Completions`] for the editor's completion popup.
     pub fn complete(&self, prefix: &str, start: usize, end: usize) {
-        let _ = self.jobs.send(AnvilJob::Complete {
+        self.send(AnvilJob::Complete {
             prefix: prefix.to_string(),
             start,
             end,
         });
     }
 
+    /// Whether the engine thread is in the middle of a job.
+    pub fn is_busy(&self) -> bool {
+        self.worker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|w| w.shared.busy.load(Ordering::Acquire))
+    }
+
     /// Cancel the current evaluation (SLIME-style `C-c C-c`). Sets the VM's
     /// interrupt flag; the running eval unwinds at its next opcode. Safe to call
     /// when nothing is running — the next eval clears the flag first.
     pub fn interrupt(&self) {
-        self.controller.lock().unwrap().interrupt();
+        if let Some(w) = self.worker.lock().unwrap().as_ref() {
+            w.shared
+                .cancel_upto
+                .fetch_max(self.last_seq.load(Ordering::Acquire), Ordering::AcqRel);
+            w.shared.interrupt();
+        }
     }
 
-    /// Rebuild the interpreter from scratch — a fresh image with no user
-    /// definitions (SLIME's restart-inferior-lisp). Interrupts any in-flight
-    /// eval first so the queued rebuild can actually be reached even if the REPL
-    /// is wedged in a loop.
+    /// Throw the image away (SLIME's restart-inferior-lisp): the next job runs
+    /// in a fresh interpreter with no user definitions. The current thread is
+    /// interrupted and abandoned rather than asked to rebuild, so this works
+    /// even when it is wedged in a blocking native call that no interrupt can
+    /// reach; it exits on its own once that call returns, delivering nothing.
     pub fn reset(&self) {
-        self.controller.lock().unwrap().interrupt();
-        let _ = self.jobs.send(AnvilJob::Reset);
+        if let Some(w) = self.worker.lock().unwrap().take() {
+            w.shared.abandoned.store(true, Ordering::Release);
+            w.shared.interrupt();
+        }
     }
 }
 
-/// The REPL engine thread: owns the `!Send` `Engine` for its whole life,
-/// processing jobs FIFO.
-fn anvil_thread(
-    jobs: std::sync::mpsc::Receiver<AnvilJob>,
-    outcomes: UnboundedSender<AnvilOutcome>,
-    controller: Arc<Mutex<ThreadStateController>>,
-    ready: Sender<()>,
-) {
-    let mut engine = Engine::new();
-    *controller.lock().unwrap() = engine.get_thread_state_controller();
-    // Real controller is in place — let `new()` return now that an interrupt
-    // can actually reach the VM.
-    let _ = ready.send(());
-
-    while let Ok(job) = jobs.recv() {
-        match job {
-            AnvilJob::Eval { source, callback } => {
-                // Clear any leftover interrupt (e.g. a `reset()` that targeted a
-                // now-finished eval) so this fresh run starts cleanly.
-                controller.lock().unwrap().resume();
-                // Redirect this eval's output to a fresh in-image string port so
-                // `(display …)` lands in the REPL, not the process stdout. Run as
-                // its own top-level form *before* the user's source so the user's
-                // `define`s stay top-level (wrapping them in a `let` wouldn't).
-                let _ = engine.run("(current-output-port (open-output-string))");
-                let result = engine
-                    .run(source)
-                    .map(|values| values.last().and_then(format_value))
-                    .map_err(|e| steel_error_string(&e));
-                // The run may have ended via interrupt, which leaves the VM in
-                // the Interrupted state — reset it so the next eval isn't
-                // immediately poisoned.
-                controller.lock().unwrap().resume();
-                let output = drain_output(&mut engine);
-                let _ = outcomes.unbounded_send(AnvilOutcome::Result {
-                    callback,
-                    result,
-                    output,
-                });
+impl AnvilJob {
+    /// The callback a job's result goes to, for jobs that report one.
+    fn callback(&self) -> Option<String> {
+        match self {
+            AnvilJob::Eval { callback, .. } | AnvilJob::Query { callback, .. } => {
+                Some(callback.clone())
             }
-            AnvilJob::Query { kind, callback } => {
-                controller.lock().unwrap().resume();
-                let value = run_query(&mut engine, kind);
+            AnvilJob::Complete { .. } => None,
+        }
+    }
+}
+
+/// Start an engine thread (its interpreter is built on the thread itself).
+fn spawn_worker(outcomes: UnboundedSender<AnvilOutcome>) -> std::io::Result<Worker> {
+    let (jobs, jobs_rx) = channel::<(u64, AnvilJob)>();
+    let shared = Arc::new(WorkerShared::default());
+    let thread_shared = shared.clone();
+    std::thread::Builder::new()
+        .name("anvil".into())
+        .stack_size(ANVIL_STACK_BYTES)
+        .spawn(move || anvil_thread(jobs_rx, outcomes, thread_shared))?;
+    Ok(Worker { jobs, shared })
+}
+
+/// Build a fresh interpreter and publish its interrupt controller.
+fn fresh_engine(shared: &WorkerShared) -> Engine {
+    let engine = Engine::new();
+    *shared.controller.lock().unwrap() = Some(engine.get_thread_state_controller());
+    engine
+}
+
+/// The text of a caught panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into())
+}
+
+/// The REPL engine thread: owns the `!Send` `Engine` for its whole life,
+/// processing jobs FIFO until its handle is dropped or it is abandoned.
+fn anvil_thread(
+    jobs: Receiver<(u64, AnvilJob)>,
+    outcomes: UnboundedSender<AnvilOutcome>,
+    shared: Arc<WorkerShared>,
+) {
+    let mut engine = fresh_engine(&shared);
+    while let Ok((seq, job)) = jobs.recv() {
+        if shared.abandoned.load(Ordering::Acquire) {
+            return;
+        }
+        shared.busy.store(true, Ordering::Release);
+        let callback = job.callback();
+        // Clear the VM's interrupt flag (one sent while nothing ran), *then*
+        // check for a cancellation aimed at this job: an interrupt landing
+        // between the two is caught by the check, one after it by the flag.
+        shared.resume();
+        if seq <= shared.cancel_upto.load(Ordering::Acquire) {
+            shared.busy.store(false, Ordering::Release);
+            if let Some(callback) = callback {
                 let _ = outcomes.unbounded_send(AnvilOutcome::Result {
                     callback,
-                    result: Ok(Some(value)),
+                    result: Err("Interrupted by user".into()),
                     output: None,
                 });
             }
-            AnvilJob::Complete { prefix, start, end } => {
-                let items = complete_globals(&engine, &prefix);
-                let _ = outcomes.unbounded_send(AnvilOutcome::Completions { start, end, items });
-            }
-            AnvilJob::Reset => {
-                engine = Engine::new();
-                *controller.lock().unwrap() = engine.get_thread_state_controller();
-            }
+            continue;
         }
+        let outcome = catch_unwind(AssertUnwindSafe(|| run_job(&mut engine, &shared, job)));
+        shared.busy.store(false, Ordering::Release);
+        if shared.abandoned.load(Ordering::Acquire) {
+            return;
+        }
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                // A panic inside Steel can leave the image inconsistent: report
+                // it and carry on with a fresh one rather than dying silently.
+                engine = fresh_engine(&shared);
+                callback.map(|callback| AnvilOutcome::Result {
+                    callback,
+                    result: Err(format!(
+                        "the interpreter panicked ({}); the image was restarted",
+                        panic_message(payload.as_ref())
+                    )),
+                    output: None,
+                })
+            }
+        };
+        if let Some(outcome) = outcome {
+            let _ = outcomes.unbounded_send(outcome);
+        }
+    }
+}
+
+/// Run one job against the image, producing the outcome to deliver.
+fn run_job(engine: &mut Engine, shared: &WorkerShared, job: AnvilJob) -> Option<AnvilOutcome> {
+    match job {
+        AnvilJob::Eval { source, callback } => {
+            // Redirect this eval's output to a fresh in-image string port so
+            // `(display …)` lands in the REPL, not the process stdout. Run as its
+            // own top-level form *before* the user's source so the user's
+            // `define`s stay top-level (wrapping them in a `let` wouldn't).
+            let _ = engine.run("(current-output-port (open-output-string))");
+            let result = engine
+                .run(source)
+                .map(|values| values.last().and_then(format_value))
+                .map_err(|e| steel_error_string(&e));
+            // The run may have ended via interrupt, which leaves the VM in the
+            // Interrupted state — reset it so the drain below (and the next
+            // eval) isn't immediately poisoned.
+            shared.resume();
+            let output = drain_output(engine);
+            Some(AnvilOutcome::Result {
+                callback,
+                result,
+                output,
+            })
+        }
+        AnvilJob::Query { kind, callback } => {
+            let value = run_query(engine, kind);
+            Some(AnvilOutcome::Result {
+                callback,
+                result: Ok(Some(value)),
+                output: None,
+            })
+        }
+        AnvilJob::Complete { prefix, start, end } => Some(AnvilOutcome::Completions {
+            start,
+            end,
+            items: complete_globals(engine, &prefix),
+        }),
     }
 }
 
@@ -234,9 +400,26 @@ fn drain_output(engine: &mut Engine) -> Option<String> {
         .run("(get-output-string (current-output-port))")
         .ok()?;
     match vals.into_iter().next_back()? {
-        SteelVal::StringV(s) if !s.is_empty() => Some(s.to_string()),
+        SteelVal::StringV(s) if !s.is_empty() => Some(truncate_output(&s)),
         _ => None,
     }
+}
+
+/// Cap captured output at [`MAX_OUTPUT_BYTES`], keeping the head and noting how
+/// much was dropped.
+fn truncate_output(s: &str) -> String {
+    if s.len() <= MAX_OUTPUT_BYTES {
+        return s.to_string();
+    }
+    let mut cut = MAX_OUTPUT_BYTES;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}\n[… {} more bytes of output dropped]\n",
+        &s[..cut],
+        s.len() - cut
+    )
 }
 
 /// The live image's global bindings whose name passes `keep`, sorted and
@@ -477,5 +660,48 @@ mod tests {
             "binding should be unbound after reset, got {:?}",
             o.value()
         );
+    }
+
+    #[test]
+    fn reset_recovers_from_a_blocking_native_call() {
+        let (engine, mut outcomes) = AnvilEngine::new();
+        // A native sleep runs no opcodes, so no interrupt can reach it.
+        engine.eval("(time/sleep-ms 60000)", "stuck");
+        // Wait for the (lazily built) engine to pick the job up.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !engine.is_busy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !engine.is_busy() {
+            let o = block_on(outcomes.next()).unwrap();
+            panic!("sleep finished early: {:?} / {:?}", o.value(), o.error());
+        }
+        // Reset abandons the wedged thread instead of queueing behind it…
+        engine.reset();
+        let started = std::time::Instant::now();
+        engine.eval("(+ 1 2)", "fresh");
+        let o = block_on(outcomes.next()).unwrap();
+        // …so the next eval answers from a fresh image right away, and the
+        // abandoned eval never reports.
+        assert_eq!(o.callback(), "fresh");
+        assert_eq!(o.value(), Some("3"));
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn captured_output_is_capped() {
+        let (engine, mut outcomes) = AnvilEngine::new();
+        engine.eval(
+            "(let loop ((i 0)) (when (< i 40000) (display \"0123456789\") (loop (+ i 1))))",
+            "cb",
+        );
+        let o = block_on(outcomes.next()).unwrap();
+        let out = o.output().unwrap();
+        assert!(
+            out.len() < MAX_OUTPUT_BYTES + 100,
+            "got {} bytes",
+            out.len()
+        );
+        assert!(out.contains("more bytes of output dropped"));
     }
 }

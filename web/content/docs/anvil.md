@@ -28,14 +28,22 @@ Use in-editor eval to hack on your config; use Anvil to test pure Steel code in 
 
 ## Opening the REPL
 
-<kbd>M-x</kbd> `anvil-repl` opens the `*anvil-repl*` buffer. Type a form on a line and press <kbd>RET</kbd> to evaluate it; the result is appended below as a `;; => …` comment line.
+<kbd>M-x</kbd> `anvil-repl` opens the `*anvil-repl*` buffer. Type a form and press <kbd>RET</kbd>. If the form is complete, it's evaluated and the result is written below it as a `;; => …` comment line. If it isn't complete yet (an open paren or string), <kbd>RET</kbd> starts an indented continuation line, so multi-line definitions work naturally:
 
 ```scheme
 (+ 1 2)
 ;; => 3
-(map (lambda (x) (* x x)) '(1 2 3 4))
+(define (square x)
+  (* x x))
+;; => (no value)
+(map square '(1 2 3 4))
 ;; => (1 4 9 16)
 ```
+
+Everything the REPL writes is a `;;` comment. That includes captured output, errors (`;; error: …`) and every line of a multi-line value, so the transcript is never mistaken for code. Results are inserted just above the input you're typing. You can start the next form while a slow one is still running and its output won't land in the middle of your typing.
+
+- <kbd>M-p</kbd> / <kbd>M-n</kbd> step back and forth through the forms you've submitted.
+- <kbd>RET</kbd> on an earlier form in the transcript copies it down to the input, ready to edit and resubmit, the way SLIME does.
 
 From a Steel source buffer you can pop straight to the REPL with <kbd>C-c C-z</kbd>.
 
@@ -49,11 +57,13 @@ If you evaluate something that never returns — an infinite loop or unbounded r
 ;; error: Interrupted by user
 ```
 
-This works for *any* Steel loop, including raw tail recursion like the above — Steel's VM checks an interrupt flag on every instruction, so there's nowhere for a loop to hide. (The one thing it can't interrupt is code blocked inside a native call, but Anvil registers no such primitives.)
+This works for *any* Steel loop, including raw tail recursion like the above. Steel's VM checks an interrupt flag on every instruction, so there's nowhere for a loop to hide.
+
+The one thing an interrupt can't reach is code blocked inside a native call that runs no instructions, such as `(time/sleep-ms 60000)` or a read from stdin. For those, use <kbd>C-c C-k</kbd> (below). It abandons the stuck evaluation and gives you a fresh image immediately.
 
 ## Restarting the image
 
-<kbd>C-c C-k</kbd> (`anvil-repl-reset`) throws away the interpreter and builds a fresh one — every `define` you made is gone, as if you'd just started Anvil. Handy when the image has accumulated state you want to clear, or to confirm code works from a clean slate.
+<kbd>C-c C-k</kbd> (`anvil-repl-reset`) throws away the interpreter and builds a fresh one. Every `define` you made is gone, as if you'd just started Anvil. Use it to clear accumulated state, to confirm code works from a clean slate, or to get out of an evaluation stuck in a blocking call. The interpreter is built in the background on first use, so Anvil costs nothing until you use it. If the interpreter itself panics, the error is reported and the image restarts automatically.
 
 ## Evaluating from a source buffer
 
@@ -87,7 +97,8 @@ Each evaluation starts with a fresh output buffer, so you only ever see *this* f
 
 These commands answer against the **actual running image** — its real bindings, docstrings, and macros — not a static analysis of your source. (That distinction matters: the [LSP](/docs/lsp) completion/diagnostics you get while editing come from a separate compile-only engine; these come from Anvil itself.)
 
-- <kbd>C-c C-d</kbd> — `anvil-doc`: show the docstring for the symbol at point.
+- <kbd>C-c C-d</kbd> — `anvil-doc`: show the docstring for the symbol at point. In `macros-steel` buffers (your config), <kbd>C-c C-d</kbd> stays bound to the editor-API docs (`macros-eldoc`); use <kbd>M-x</kbd> `anvil-doc` there.
+- <kbd>C-c C-s</kbd> — `anvil-signature`: the one-line signature for the symbol at point, in the echo area.
 - <kbd>C-c C-x</kbd> — `anvil-macroexpand`: macroexpand the region (or the form at point) and show the expansion. Uses the *un-optimized* expansion, so you see the real macro shape — `(when #t 1)` reveals its `if`, rather than being folded to `1`.
 - <kbd>C-c C-a</kbd> — `anvil-apropos`: prompt for a pattern and list every live binding whose name contains it. Because it queries the image, anything you've just `define`d shows up immediately.
 
@@ -97,6 +108,10 @@ Results that don't fit the minibuffer (doc, macroexpand, apropos) are rendered i
 (define my-helper 42)
 ;; C-c C-a, type "my-hel" → *anvil* lists:  my-helper
 ```
+
+### Signatures while you type
+
+In the REPL, the echo area shows the live image's signature for the function whose arguments you're typing. Type `(string-append ` and its documented signature appears. Your own `define`s show up too, as bound but undocumented. Lookups are skipped while an evaluation is running, so they never queue behind it.
 
 ### Completion
 
@@ -116,7 +131,8 @@ This is the SLIME model: completion asks the running interpreter, the same way `
 | Key | Command | Action |
 |---|---|---|
 | <kbd>M-x</kbd> `anvil-repl` | `anvil-repl` | Open / switch to the `*anvil-repl*` buffer |
-| <kbd>RET</kbd> (in REPL) | `anvil-send-input` | Evaluate the current line |
+| <kbd>RET</kbd> (in REPL) | `anvil-send-input` | Evaluate the input once it's complete; otherwise continue it on a new line |
+| <kbd>M-p</kbd> / <kbd>M-n</kbd> (in REPL) | `anvil-history-previous` / `-next` | Recall earlier input |
 | <kbd>C-c C-c</kbd> (in REPL) | `anvil-repl-interrupt` | Interrupt the current evaluation |
 | <kbd>C-c C-k</kbd> (in REPL) | `anvil-repl-reset` | Restart the image (fresh interpreter) |
 | <kbd>M-i</kbd> (in REPL) | `completion-at-point` | Complete the symbol at point against the live image |
@@ -125,8 +141,9 @@ This is the SLIME model: completion asks the running interpreter, the same way `
 | <kbd>C-M-x</kbd> (in `steel`) | `anvil-eval-defun` | Evaluate the top-level form at point |
 | <kbd>C-c C-l</kbd> (in `steel`) | `anvil-load-file` | `(load …)` the visited file into the image |
 | <kbd>C-c C-d</kbd> (in `steel`) | `anvil-doc` | Docstring for the symbol at point |
+| <kbd>C-c C-s</kbd> (in `steel`) | `anvil-signature` | One-line signature for the symbol at point |
 | <kbd>C-c C-x</kbd> (in `steel`) | `anvil-macroexpand` | Macroexpand the region / form at point |
 | <kbd>C-c C-a</kbd> (in `steel`) | `anvil-apropos` | List live image bindings matching a pattern |
 | <kbd>M-x</kbd> `anvil-eval-buffer` | `anvil-eval-buffer` | Evaluate the whole buffer in the Anvil image |
 
-The source-buffer commands are bound in both the `steel` and `macros-steel` modes. All of these are ordinary Steel commands defined in the bundled runtime — see [Scripting with Steel](/docs/scripting) to rebind them or build on `anvil-eval`.
+The source-buffer commands are bound in both the `steel` and `macros-steel` modes, except <kbd>C-c C-d</kbd> (see above). All of these are ordinary Steel commands defined in the bundled runtime — see [Scripting with Steel](/docs/scripting) to rebind them or build on `anvil-eval`.

@@ -1425,3 +1425,59 @@ fn lisp_electric_pair_leaves_quote_unpaired(cx: &mut TestAppContext) {
         assert_eq!(e.active.buffer.full_text(), "()");
     });
 }
+
+/// Wait (real time) until the ANVIL REPL transcript contains `needle`: results
+/// come from the engine's own OS thread, which `run_until_parked` can't see.
+fn wait_for_repl(editor: &Entity<Editor>, cx: &mut TestAppContext, needle: &str) -> String {
+    for _ in 0..400 {
+        settle(editor, cx);
+        let t = editor.read_with(cx, |e, _| {
+            if e.active.name == super::anvil_repl::ANVIL_REPL_BUFFER {
+                e.active.buffer.full_text()
+            } else {
+                String::new()
+            }
+        });
+        if t.contains(needle) {
+            return t;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("REPL never showed {needle:?}");
+}
+
+/// The ANVIL REPL takes multi-line input: RET inside an unfinished form opens
+/// an indented continuation line, RET on a complete form evaluates it, and the
+/// result lands above the input region as a comment. M-p recalls the input.
+#[gpui::test]
+fn anvil_repl_multiline_input_and_history(cx: &mut TestAppContext) {
+    let ed = setup_json(cx, "t.txt", "");
+    ed.update(cx, |e, cx| e.anvil_repl_open(cx));
+    settle(&ed, cx);
+    let type_and_ret = |ed: &Entity<Editor>, cx: &mut TestAppContext, text: &str| {
+        ed.update(cx, |e, cx| {
+            e.type_text(None, text, cx);
+            e.anvil_send_input(cx);
+        });
+    };
+    type_and_ret(&ed, cx, "(define (sq x)");
+    let t = ed.read_with(cx, |e, _| e.active.buffer.full_text());
+    assert!(
+        t.ends_with("(define (sq x)\n  "),
+        "continuation line, got {t:?}"
+    );
+    type_and_ret(&ed, cx, "(* x x))");
+    wait_for_repl(&ed, cx, ";; => (no value)");
+    // While a slow eval runs, typed input stays below its result.
+    type_and_ret(&ed, cx, "(begin (displayln \"hi\") (sq 7))");
+    ed.update(cx, |e, cx| e.type_text(None, "next", cx));
+    let t = wait_for_repl(&ed, cx, ";; => 49");
+    assert!(t.contains(";; hi\n;; => 49\nnext"), "got {t:?}");
+    // M-p replaces the input with the last submitted form.
+    ed.update(cx, |e, cx| e.anvil_history(true, cx));
+    let t = ed.read_with(cx, |e, _| e.active.buffer.full_text());
+    assert!(
+        t.ends_with("(begin (displayln \"hi\") (sq 7))"),
+        "got {t:?}"
+    );
+}
