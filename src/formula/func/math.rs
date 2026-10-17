@@ -307,7 +307,7 @@ fn sumproduct(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
         if *dims.get_or_insert(d) != d {
             return Err(ErrorKind::Value);
         }
-        let vals = ar.values(ctx);
+        let vals = ar.values(ctx)?;
         let mut nums = Vec::with_capacity(vals.len());
         for v in vals {
             nums.push(match v {

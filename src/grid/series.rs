@@ -171,8 +171,10 @@ fn suffix_series(prev: Option<&str>, cur: &str, n: i64) -> Option<String> {
     let step = prev
         .and_then(suffix_number)
         .filter(|(p, _, _)| *p == prefix)
-        .map_or(1, |(_, p, _)| v as i64 - p as i64);
-    let next = (v as i64 + step * n).max(0);
+        .map_or(Some(1), |(_, p, _)| (v as i64).checked_sub(p as i64))?;
+    // Values run up to 10^18: an overflowing step or fill stops the series
+    // (the caller repeats the value) instead of panicking / wrapping.
+    let next = step.checked_mul(n)?.checked_add(v as i64)?.max(0);
     let padded = cur[prefix.len()..].starts_with('0');
     Some(if padded {
         format!("{prefix}{next:0width$}")
@@ -193,6 +195,8 @@ mod tests {
         assert_eq!(next(Some("1.5"), "2"), "2.5");
         assert_eq!(next(None, "0.25"), "1.25");
         assert_eq!(next(None, "007"), "008");
+        // A fill that would overflow i64 stops the series instead of panicking.
+        assert_eq!(suffix_series(Some("a0"), "a999999999999999999", 10), None);
         assert_eq!(next(Some("3"), "1"), "-1");
         assert_eq!(next(None, "2024-02-28"), "2024-02-29");
         assert_eq!(next(Some("2024-01-01"), "2024-01-08"), "2024-01-15");

@@ -227,6 +227,7 @@ pub fn signature(name: &str) -> Option<&'static str> {
 }
 
 pub mod args;
+pub use args::dense_cells;
 mod datefn;
 mod info;
 mod logic;
