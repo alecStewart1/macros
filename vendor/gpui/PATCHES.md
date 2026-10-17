@@ -16,6 +16,10 @@ build. Every local change is marked with a `macros patch:` comment:
    (gamma 1.8, enhanced contrast 1.0).
 3. **Warning fix** (`src/taffy.rs:312`): adds `f32` literal suffixes. This is
    only visible now that gpui builds as a path dependency.
+4. **`stacksafe` 0.1 → 1.0** (`Cargo.toml`): 0.1's macro crate depends on
+   `proc-macro-error2`, which triggers a future-incompatibility warning (it
+   re-exports the private `proc_macro` crate) on every build. 1.0 dropped that
+   dependency; the `StackSafe` / `#[stacksafe]` API gpui uses is unchanged.
 
 To move to a newer gpui, drop the `[patch.crates-io]` entry. Then check
 whether upstream already includes these fixes before you re-vendor.
