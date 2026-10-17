@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use steel::rvals::{IntoSteelVal, SteelVal};
@@ -81,7 +81,7 @@ pub(crate) enum Task {
 }
 
 pub(crate) struct Job {
-    /// Watchdog id (see [`Watchdog`]); 0 for jobs nobody will interrupt.
+    /// Watchdog id (see [`Watchdog`]), unique per job.
     id: u64,
     task: Task,
     interactive: bool,
@@ -89,9 +89,11 @@ pub(crate) struct Job {
 }
 
 /// Lets a blocking caller with a deadline interrupt *its own* job and no
-/// other. The engine thread records the running job's id and resets the VM's
-/// interrupt flag under the lock when each job starts, so an interrupt either
-/// lands on the job it was aimed at or is cleared before the next one runs.
+/// other, and lets C-g interrupt whatever has been running too long. The
+/// engine thread records the running job's id and start time, and resets the
+/// VM's interrupt flag under the lock when each job starts, so an interrupt
+/// either lands on the job it was aimed at or is cleared before the next one
+/// runs.
 #[derive(Clone, Default)]
 pub(crate) struct Watchdog {
     next_id: Arc<AtomicU64>,
@@ -100,7 +102,10 @@ pub(crate) struct Watchdog {
 
 #[derive(Default)]
 struct WatchState {
+    /// The running job's id; 0 while the engine waits for work.
     running: u64,
+    /// When the running job started.
+    started: Option<Instant>,
     controller: Option<ThreadStateController>,
 }
 
@@ -120,10 +125,41 @@ impl Watchdog {
     fn begin(&self, id: u64) {
         if let Ok(mut s) = self.state.lock() {
             s.running = id;
+            s.started = Some(Instant::now());
             if let Some(c) = &s.controller {
                 c.resume();
             }
         }
+    }
+
+    /// Engine thread: the last job finished; waiting for the next.
+    fn idle(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.running = 0;
+            s.started = None;
+        }
+    }
+
+    /// How long the running job has been going, if one is.
+    fn running_for(&self) -> Option<Duration> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.started.map(|t| t.elapsed()))
+    }
+
+    /// Interrupt the running job if it has been going for at least `min_age`
+    /// (Emacs C-g). The age floor keeps a stray C-g from cutting short some
+    /// routine job that happens to be mid-flight. Returns whether it fired.
+    fn interrupt_running(&self, min_age: Duration) -> bool {
+        if let Ok(s) = self.state.lock()
+            && s.started.is_some_and(|t| t.elapsed() >= min_age)
+            && let Some(c) = &s.controller
+        {
+            c.interrupt();
+            return true;
+        }
+        false
     }
 
     /// Caller: interrupt job `id` if (and only if) it is the one running.
@@ -141,6 +177,14 @@ impl Watchdog {
 /// to unwind. Steel checks the flag every opcode, so this only runs out when
 /// the job is stuck inside a native primitive (e.g. a hung `call-process`).
 const INTERRUPT_GRACE: Duration = Duration::from_secs(1);
+
+/// A job running at least this long is "stuck" as far as a blocking caller is
+/// concerned: [`ActionHandle::run_sync_within`] reports the engine busy at once
+/// instead of queueing behind it and freezing the UI for its whole timeout.
+const BUSY_FAIL_FAST: Duration = Duration::from_secs(2);
+
+/// The youngest job C-g will interrupt (see [`Watchdog::interrupt_running`]).
+const QUIT_MIN_AGE: Duration = Duration::from_millis(200);
 
 /// A handle to the Steel interpreter, which runs on its OWN thread so a slow or
 /// runaway script can never freeze the UI (the editor's command loop solves
@@ -378,6 +422,30 @@ impl ScriptEngine {
         }
     }
 
+    /// Like [`Self::eval_collecting`] with a deadline: past `timeout` the eval
+    /// is interrupted (an infinite loop in `init.scm` must not hang startup,
+    /// which waits on this on the UI thread).
+    pub fn eval_collecting_within(
+        &self,
+        source: &str,
+        timeout: Duration,
+    ) -> (Vec<EditorCommand>, Option<String>) {
+        match self
+            .handle
+            .run_sync_within(Task::Eval(source.to_string()), timeout)
+        {
+            Ok(raw) => (raw.commands, raw.error),
+            Err(error) => (Vec::new(), Some(error)),
+        }
+    }
+
+    /// C-g: interrupt the running evaluation if it has been going a moment
+    /// (a runaway `M-:` loop, a stuck command). Returns whether one was
+    /// interrupted.
+    pub fn interrupt_running(&self) -> bool {
+        self.handle.watchdog.interrupt_running(QUIT_MIN_AGE)
+    }
+
     /// Async eval — runs on the engine thread; the outcome is delivered to the
     /// foreground drain task. A slow script never blocks the UI.
     pub fn dispatch(&self, source: &str, interactive: bool) {
@@ -450,7 +518,7 @@ impl ActionHandle {
     /// stopped engine drops it silently.
     fn send_async(&self, task: Task, interactive: bool) {
         let _ = self.jobs.send(Job {
-            id: 0,
+            id: self.watchdog.next_id(),
             task,
             interactive,
             reply: Reply::Async,
@@ -467,7 +535,7 @@ impl ActionHandle {
         let (tx, rx) = channel();
         self.jobs
             .send(Job {
-                id: 0,
+                id: self.watchdog.next_id(),
                 task,
                 interactive: false,
                 reply: Reply::Sync(tx),
@@ -481,6 +549,14 @@ impl ActionHandle {
     /// it ever finishes, is dropped).
     fn run_sync_within(&self, task: Task, timeout: Duration) -> Result<RawResult, String> {
         use std::sync::mpsc::RecvTimeoutError;
+        // Queueing behind a job that is already stuck would just burn the whole
+        // timeout with the UI frozen — and then interrupt the wrong job.
+        if let Some(busy) = self.watchdog.running_for().filter(|t| *t >= BUSY_FAIL_FAST) {
+            return Err(format!(
+                "script engine busy (an evaluation has run {:.0}s; C-g interrupts it)",
+                busy.as_secs_f32()
+            ));
+        }
         let id = self.watchdog.next_id();
         let (tx, rx) = channel();
         self.jobs
@@ -545,13 +621,17 @@ pub(crate) fn engine_thread(
     watchdog.install(engine.get_thread_state_controller());
     let _ = names_tx.send(names);
 
-    while let Ok(Job {
-        id,
-        task,
-        interactive,
-        reply,
-    }) = jobs.recv()
-    {
+    loop {
+        watchdog.idle();
+        let Ok(Job {
+            id,
+            task,
+            interactive,
+            reply,
+        }) = jobs.recv()
+        else {
+            break;
+        };
         watchdog.begin(id);
         // `with-process-env` extents never span jobs (one an error escaped
         // without popping would otherwise leak into every later spawn).

@@ -235,6 +235,9 @@ pub enum EditorCommand {
     // Steel interaction (steel-mode)
     EvalBuffer,
     EvalLastSexp,
+    /// Evaluate the top-level form at point in the live editor engine (Emacs
+    /// `eval-defun`, C-M-x in config code).
+    EvalDefun,
     /// Read a Steel expression in the minibuffer and evaluate it (Emacs `M-:`).
     EvalExpression,
     // Buffers / files
@@ -1007,6 +1010,9 @@ pub enum EditorCommand {
     AnvilHistory(bool),
     /// Rebuild the ANVIL REPL engine — a fresh image (SLIME's restart).
     AnvilReset,
+    /// `eval-last-sexp` into the ANVIL image: the region, else the sexp before
+    /// point; the result is echoed.
+    AnvilEvalLastSexp,
     /// Evaluate the top-level form at point in the ANVIL image (SLIME `C-M-x`).
     /// The editor computes the form's bounds from the buffer and point.
     AnvilEvalDefun,

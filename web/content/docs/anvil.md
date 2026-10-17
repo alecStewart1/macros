@@ -11,7 +11,7 @@ description: An interactive Steel REPL backed by a second, independent interpret
 
 ## Anvil vs. `eval-buffer`
 
-Macros already has [in-editor evaluation](/docs/scripting): <kbd>M-:</kbd> (`eval-expression`), <kbd>C-c C-e</kbd> (`eval-last-sexp`), and <kbd>C-c C-b</kbd> (`eval-buffer`). Those run against the editor's **own** engine — that's exactly what you want for live-editing your config, because a `define` immediately changes the running editor.
+Macros already has [in-editor evaluation](/docs/scripting): <kbd>M-:</kbd> (`eval-expression`), and in `macros-steel` (config) buffers <kbd>C-c C-e</kbd> (`eval-last-sexp`), <kbd>C-M-x</kbd> (`eval-defun`) and <kbd>C-c C-b</kbd> (`eval-buffer`). Those run against the editor's **own** engine — that's exactly what you want for live-editing your config, because a `define` immediately changes the running editor. In plain `steel` buffers the same keys evaluate in Anvil instead.
 
 Anvil is the opposite trade-off, for when you want a clean room:
 
@@ -69,8 +69,10 @@ The one thing an interrupt can't reach is code blocked inside a native call that
 
 While editing a `.scm` file (`steel` or `macros-steel` mode), you can send code into the Anvil image and see the result echoed in the minibuffer, without leaving your buffer:
 
+- <kbd>C-x C-e</kbd> / <kbd>C-c C-e</kbd> (in `steel`) — `anvil-eval-last-sexp`: evaluate the expression before point, or the active region.
 - <kbd>C-c C-n</kbd> — `anvil-eval-region`: evaluate the active region.
-- <kbd>C-M-x</kbd> — `anvil-eval-defun`: evaluate the **top-level form at point** (no need to select it).
+- <kbd>C-M-x</kbd> (in `steel`) — `anvil-eval-defun`: evaluate the **top-level form at point** (no need to select it). In `macros-steel`, <kbd>C-M-x</kbd> is the live `eval-defun`; use <kbd>M-x</kbd> `anvil-eval-defun` there.
+- <kbd>C-c C-b</kbd> (in `steel`) — `anvil-eval-buffer`.
 - <kbd>C-c C-l</kbd> — `anvil-load-file`: `(load …)` the file you're visiting into the image — the SLIME "compile/load file" feel. Because it loads by path, relative `load`/`require` inside the file resolve against the file's directory.
 - <kbd>M-x</kbd> `anvil-eval-buffer` — evaluate the whole buffer's text (works even on an unsaved buffer).
 
@@ -138,12 +140,13 @@ This is the SLIME model: completion asks the running interpreter, the same way `
 | <kbd>M-i</kbd> (in REPL) | `completion-at-point` | Complete the symbol at point against the live image |
 | <kbd>C-c C-z</kbd> (in `steel`) | `anvil-repl` | Pop to the REPL from a source buffer |
 | <kbd>C-c C-n</kbd> (in `steel`) | `anvil-eval-region` | Evaluate the region in the Anvil image |
+| <kbd>C-x C-e</kbd> / <kbd>C-c C-e</kbd> (in `steel`) | `anvil-eval-last-sexp` | Evaluate the expression before point (or the region) |
 | <kbd>C-M-x</kbd> (in `steel`) | `anvil-eval-defun` | Evaluate the top-level form at point |
+| <kbd>C-c C-b</kbd> (in `steel`) | `anvil-eval-buffer` | Evaluate the whole buffer |
 | <kbd>C-c C-l</kbd> (in `steel`) | `anvil-load-file` | `(load …)` the visited file into the image |
 | <kbd>C-c C-d</kbd> (in `steel`) | `anvil-doc` | Docstring for the symbol at point |
 | <kbd>C-c C-s</kbd> (in `steel`) | `anvil-signature` | One-line signature for the symbol at point |
 | <kbd>C-c C-x</kbd> (in `steel`) | `anvil-macroexpand` | Macroexpand the region / form at point |
 | <kbd>C-c C-a</kbd> (in `steel`) | `anvil-apropos` | List live image bindings matching a pattern |
-| <kbd>M-x</kbd> `anvil-eval-buffer` | `anvil-eval-buffer` | Evaluate the whole buffer in the Anvil image |
 
 The source-buffer commands are bound in both the `steel` and `macros-steel` modes, except <kbd>C-c C-d</kbd> (see above). All of these are ordinary Steel commands defined in the bundled runtime — see [Scripting with Steel](/docs/scripting) to rebind them or build on `anvil-eval`.

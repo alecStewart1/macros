@@ -1285,21 +1285,22 @@ impl Editor {
                 // With an active selection, evaluate the whole region (all forms,
                 // top-to-bottom) like Emacs `eval-region`; otherwise fall back to
                 // the single sexp before point (`eval-last-sexp`).
-                if let Some(region) = self.region() {
-                    let source = self.active.buffer.slice_to_string(region);
-                    self.eval_interactive(&source, cx);
-                } else {
-                    let point = self.point();
-                    let text = self.active.buffer.slice_to_string(0..point);
-                    match last_sexp(&text) {
-                        Some(range) => {
-                            let source = text[range].to_string();
-                            self.eval_interactive(&source, cx);
-                        }
-                        None => self.echo("Nothing to evaluate", cx),
-                    }
+                match self.region_or_last_sexp() {
+                    Some(source) => self.eval_interactive(&source, cx),
+                    None => self.echo("Nothing to evaluate", cx),
                 }
             }
+            EvalDefun => {
+                let text = self.active.buffer.full_text();
+                match top_level_form_at(&text, self.point()) {
+                    Some(r) => self.eval_interactive(&text[r], cx),
+                    None => self.echo("No top-level form at point", cx),
+                }
+            }
+            AnvilEvalLastSexp => match self.region_or_last_sexp() {
+                Some(source) => self.anvil.eval(&source, "anvil-on-result-echo"),
+                None => self.echo("anvil: nothing to evaluate", cx),
+            },
             Message(text) => self.echo(text, cx),
             DefineKey(mode, sequence, command) => {
                 self.keymap.define(mode, sequence, format!("({command})"));

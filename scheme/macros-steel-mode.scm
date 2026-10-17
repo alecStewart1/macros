@@ -32,6 +32,7 @@
 (define-key "macros-steel" "ctrl-c ctrl-e" 'eval-last-sexp)
 (define-key "macros-steel" "ctrl-x ctrl-e" 'eval-last-sexp)  ; Emacs muscle memory
 (define-key "macros-steel" "ctrl-c ctrl-b" 'eval-buffer)
+(define-key "macros-steel" "ctrl-alt-x" 'eval-defun)  ; Emacs C-M-x: the defun at point
 ;; Editor-API documentation for the symbol at point: a one-line echo (eldoc), or
 ;; the full doc buffer.
 (define-key "macros-steel" "ctrl-c ctrl-d" 'macros-eldoc)

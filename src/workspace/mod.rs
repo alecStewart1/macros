@@ -113,6 +113,20 @@ impl Workspace {
         });
     }
 
+    /// Run the user's config (`init.scm`) like [`Self::eval`], but interrupt it
+    /// after `timeout`, so an infinite loop in it can't hang startup.
+    pub fn eval_user_config(
+        &self,
+        source: &str,
+        timeout: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let source = source.to_string();
+        self.editor.update(cx, |editor, cx| {
+            editor.run_script_blocking_within(&source, timeout, cx);
+        });
+    }
+
     /// Signal that startup config (bundled scripts + `init.scm`) is fully
     /// applied, so the editor stops swallowing plain keystrokes (which it does
     /// until now so a key pressed before `(evil-mode)` runs can't self-insert).

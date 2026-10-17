@@ -50,6 +50,12 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             EditorCommand::AnvilEvalDefun,
         );
         register_nullary(reg, queue, "anvil-load-file", EditorCommand::AnvilLoadFile);
+        register_nullary(
+            reg,
+            queue,
+            "anvil-eval-last-sexp",
+            EditorCommand::AnvilEvalLastSexp,
+        );
         register_nullary(reg, queue, "anvil-doc", EditorCommand::AnvilDoc);
         register_nullary(
             reg,

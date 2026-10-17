@@ -105,10 +105,9 @@
 (define-key "macros-steel" "ctrl-c ctrl-z" 'anvil-repl)
 (define-key "macros-steel" "ctrl-c ctrl-n" 'anvil-eval-region)
 
-;; SLIME-ish image commands (both Steel modes): C-M-x eval-defun,
-;; C-c C-l load-file, C-c C-x macroexpand, C-c C-a apropos, C-c C-s signature.
+;; SLIME-ish image commands (both Steel modes): C-c C-l load-file,
+;; C-c C-x macroexpand, C-c C-a apropos, C-c C-s signature.
 (define (anvil-bind-image mode)
-  (define-key mode "ctrl-alt-x" 'anvil-eval-defun)
   (define-key mode "ctrl-c ctrl-l" 'anvil-load-file)
   (define-key mode "ctrl-c ctrl-x" 'anvil-macroexpand)
   (define-key mode "ctrl-c ctrl-a" 'anvil-apropos-prompt)
@@ -119,6 +118,9 @@
 ;; editor's own config code) it stays `macros-eldoc`, the editor-API docs,
 ;; which is what that code calls; M-x anvil-doc still asks the image.
 (define-key "steel" "ctrl-c ctrl-d" 'anvil-doc)
+;; C-M-x evaluates the form at point in the image from plain Steel buffers; in
+;; macros-steel it is the live `eval-defun` (consistent with that mode's C-x C-e).
+(define-key "steel" "ctrl-alt-x" 'anvil-eval-defun)
 
 (register-command 'anvil-repl)
 (register-command 'anvil-eval-region)
@@ -128,6 +130,7 @@
 (register-command 'anvil-history-previous)
 (register-command 'anvil-history-next)
 (register-command 'anvil-eval-defun)
+(register-command 'anvil-eval-last-sexp)
 (register-command 'anvil-load-file)
 (register-command 'anvil-doc)
 (register-command 'anvil-signature)

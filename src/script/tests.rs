@@ -4062,6 +4062,47 @@ mod magit_tests {
         assert!(matches!(commands.as_slice(), [EditorCommand::Message(_)]));
     }
 
+    /// C-g interrupts a runaway async eval (a looping `M-:`), but leaves a job
+    /// that only just started alone; the engine keeps working afterwards.
+    #[test]
+    fn interrupt_running_stops_a_runaway_async_eval() {
+        use std::time::{Duration, Instant};
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval("(define (spin) (spin))").unwrap();
+        engine.dispatch("(spin)", true);
+        // Wait until the loop has run past the C-g age floor.
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(engine.interrupt_running(), "C-g should interrupt the loop");
+        let started = Instant::now();
+        assert_eq!(
+            engine.eval("(+ 1 2)").unwrap().value.as_deref(),
+            Some("3"),
+            "the engine survives the interrupt"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Nothing running: C-g has nothing to interrupt.
+        assert!(!engine.interrupt_running());
+    }
+
+    /// A blocking call made while an async job is stuck reports the engine busy
+    /// at once instead of freezing the UI for its whole timeout.
+    #[test]
+    fn call_action_within_fails_fast_behind_a_stuck_job() {
+        use std::time::{Duration, Instant};
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval("(define (spin) (spin)) (define (quick) (message \"hi\"))")
+            .unwrap();
+        engine.dispatch("(spin)", true);
+        std::thread::sleep(Duration::from_millis(2500));
+        let started = Instant::now();
+        let (commands, error) = engine.call_action_within("quick", Duration::from_secs(10));
+        assert!(commands.is_empty());
+        assert!(error.is_some_and(|e| e.contains("busy")));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(engine.interrupt_running());
+    }
+
     /// `(render-buffer name mode text faces)` enqueues a `RenderBuffer` with the
     /// `(line face)` pairs parsed into `line_faces`.
     #[test]

@@ -143,12 +143,19 @@ Define a major mode by giving it a keymap and activating it from `find-file-hook
 
 ## Editing Steel & evaluating it live
 
-Plain `.scm` files open in `steel-mode`. Editor-aware config and extension code — anything under `~/.config/macros`, or a file named `*.macros.scm` — opens in `macros-steel-mode`, the same mode with the editor API seeded for completion and docs. Both let you push code into the running editor without restarting:
+Plain `.scm` files open in `steel-mode`. Editor-aware config and extension code opens in `macros-steel-mode`, the same mode with the editor API seeded for completion and docs. That means anything under `~/.config/macros` or a file named `*.macros.scm`; run <kbd>M-x</kbd> `macros-steel-mode` for any other buffer.
+
+In `macros-steel-mode`, the eval keys push code into the running editor without restarting:
 
 | Key | Command | Action |
 | --- | --- | --- |
-| <kbd>C-c C-e</kbd> | `eval-last-sexp` | Evaluate the expression before point |
+| <kbd>C-c C-e</kbd> / <kbd>C-x C-e</kbd> | `eval-last-sexp` | Evaluate the expression before point (or the active region) |
+| <kbd>C-M-x</kbd> | `eval-defun` | Evaluate the top-level form at point |
 | <kbd>C-c C-b</kbd> | `eval-buffer` | Evaluate the whole buffer |
+
+In plain `steel-mode`, the same keys evaluate in the isolated [Anvil](/docs/anvil) image instead (`anvil-eval-last-sexp`, `anvil-eval-defun`, `anvil-eval-buffer`). Ordinary Steel code that defines a function named `insert` or `message` can't silently replace the editor's own. <kbd>M-x</kbd> `eval-last-sexp` and `eval-buffer` still evaluate live from any buffer.
+
+A live evaluation that runs away (an infinite loop from <kbd>M-:</kbd> or <kbd>C-x C-e</kbd>) can be stopped with <kbd>C-g</kbd>. Steel checks for the interrupt on every instruction, so the loop unwinds with an error and the editor keeps going. Saving while such a loop runs no longer freezes the editor waiting on `before-save-hook`; the hook is skipped with a message. A loop in your `init.scm` is interrupted after two minutes instead of hanging startup.
 
 In `macros-steel-mode` you also get one-key documentation for the API symbol at point:
 

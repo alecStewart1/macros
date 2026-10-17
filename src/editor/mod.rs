@@ -3315,6 +3315,12 @@ impl Editor {
         if self.has_extra_cursors() {
             self.mc_clear(cx); // C-g collapses back to a single cursor
         }
+        // Emacs C-g also quits running Lisp: a runaway `M-:` / C-x C-e loop,
+        // or a command stuck in a loop, unwinds instead of wedging scripting.
+        if self.script.interrupt_running() {
+            self.echo("Quit (interrupted the running evaluation)", cx);
+            return;
+        }
         self.echo("Quit", cx);
     }
 
@@ -4635,6 +4641,34 @@ impl Editor {
         }
         if let Some(err) = error {
             self.echo(format!("error: {err}"), cx);
+        }
+    }
+
+    /// What `eval-last-sexp` evaluates: the active region (all its forms), else
+    /// the complete datum before point. `None` when there is nothing.
+    fn region_or_last_sexp(&self) -> Option<String> {
+        if let Some(region) = self.region() {
+            return Some(self.active.buffer.slice_to_string(region));
+        }
+        let text = self.active.buffer.slice_to_string(0..self.point());
+        last_sexp(&text).map(|range| text[range].to_string())
+    }
+
+    /// [`Self::run_script_blocking`] with a deadline, for the user's `init.scm`:
+    /// startup waits on it from the UI thread, so a loop in the config must be
+    /// interrupted rather than hang the editor.
+    pub fn run_script_blocking_within(
+        &mut self,
+        source: &str,
+        timeout: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let (commands, error) = self.script.eval_collecting_within(source, timeout);
+        for command in commands {
+            self.apply_command(command, cx);
+        }
+        if let Some(err) = error {
+            self.echo(format!("error in init.scm: {err}"), cx);
         }
     }
 
