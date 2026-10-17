@@ -1064,6 +1064,20 @@ impl Editor {
                     None => self.echo("anvil: no top-level form at point", cx),
                 }
             }
+            AnvilTestFile => match self.active.path.clone() {
+                Some(path) => {
+                    // A clean slate, so the run can't pass on leftover state.
+                    self.anvil.reset();
+                    self.anvil_repl_open(cx);
+                    self.anvil_repl_render(
+                        &format!(";; --- {} in a fresh image ---\n", path.display()),
+                        cx,
+                    );
+                    let form = format!("(load {:?})", path.to_string_lossy());
+                    self.anvil.eval(&form, anvil_repl::ANVIL_REPL_CALLBACK);
+                }
+                None => self.echo("anvil: buffer is not visiting a file", cx),
+            },
             AnvilLoadFile => match &self.active.path {
                 Some(path) => {
                     // `{:?}` renders a quoted, escaped Scheme string literal.

@@ -9,6 +9,13 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     let EngineShared { queue, .. } = ctx;
     let async_ids = &ctx.ids;
     reg.section(Section::Processes);
+    // `(executable-find name)` → the full path of `name` on `PATH`, or "" when
+    // it isn't installed (Emacs `executable-find`).
+    reg.register_fn("executable-find", |name: String| -> String {
+        crate::util::executable_find(&name)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
     // `(call-process program args)` — run a subprocess, return stdout. Blocks on
     // the engine thread (never the UI), the same model as `list-directory`.
     reg.register_fn(
