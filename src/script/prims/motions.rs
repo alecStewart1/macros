@@ -43,7 +43,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let shared = snapshot.clone();
         reg.register_fn(
             "buffer-regex-matches",
-            move |pattern: String, start: usize, end: usize| -> Vec<usize> {
+            move |pattern: String, NonNeg(start): NonNeg, NonNeg(end): NonNeg| -> Vec<usize> {
                 let Ok(re) = regex(&pattern) else {
                     return Vec::new();
                 };
@@ -66,7 +66,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let shared = snapshot.clone();
         reg.register_fn(
             "regex-search-pos",
-            move |pattern: String, from: usize, forward: bool| -> isize {
+            move |pattern: String, NonNeg(from): NonNeg, forward: bool| -> isize {
                 let Ok(re) = regex(&pattern) else {
                     return -1;
                 };
@@ -92,7 +92,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     {
         // `(line-start-of-line n)` → first byte of (0-based) line `n`, clamped.
         let shared = snapshot.clone();
-        reg.register_fn("line-start-of-line", move |line: usize| -> usize {
+        reg.register_fn("line-start-of-line", move |NonNeg(line): NonNeg| -> usize {
             let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
             let last = buf.line_count().saturating_sub(1);
             buf.line_range(line.min(last)).start
@@ -106,7 +106,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let shared = snapshot.clone();
         reg.register_fn(
             "pos-at-char-column",
-            move |line: usize, col: usize| -> usize {
+            move |NonNeg(line): NonNeg, NonNeg(col): NonNeg| -> usize {
                 let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
                 buf.byte_at_char_column(line, col)
             },

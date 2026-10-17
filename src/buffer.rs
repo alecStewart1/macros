@@ -234,6 +234,10 @@ impl Buffer {
             range.start <= range.end,
             "slice_to_string inverted range: {range:?}"
         );
+        // Floor both ends to char boundaries (and clamp to the buffer): ropey
+        // panics on a range that splits a UTF-8 sequence, and a byte offset
+        // computed as `len - 1` or `pos + 1` easily lands mid-codepoint.
+        let range = self.snap(range.start)..self.snap(range.end);
         if range.start >= range.end {
             return String::new();
         }
@@ -556,6 +560,16 @@ impl Buffer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slice_to_string_floors_mid_codepoint_ranges() {
+        let b = Buffer::new("café");
+        let len = b.len();
+        // `len - 1` lands inside the 2-byte `é`: floor it, don't panic.
+        assert_eq!(b.slice_to_string(len - 1..len), "é");
+        assert_eq!(b.slice_to_string(0..len - 1), "caf");
+        assert_eq!(b.slice_to_string(2..len + 10), "fé");
+    }
+
     use super::*;
 
     #[test]

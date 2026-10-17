@@ -139,33 +139,45 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
         p(GridOp::SetCells(triples))
     });
     let p = push(queue);
-    reg.register_fn("grid-insert-rows", move |at: SteelVal, n: usize| {
-        p(GridOp::InsertRows {
-            at: steel_index(&at),
-            n,
-        })
-    });
+    reg.register_fn(
+        "grid-insert-rows",
+        move |at: SteelVal, NonNeg(n): NonNeg| {
+            p(GridOp::InsertRows {
+                at: steel_index(&at),
+                n,
+            })
+        },
+    );
     let p = push(queue);
-    reg.register_fn("grid-delete-rows", move |at: SteelVal, n: usize| {
-        p(GridOp::DeleteRows {
-            at: steel_index(&at),
-            n,
-        })
-    });
+    reg.register_fn(
+        "grid-delete-rows",
+        move |at: SteelVal, NonNeg(n): NonNeg| {
+            p(GridOp::DeleteRows {
+                at: steel_index(&at),
+                n,
+            })
+        },
+    );
     let p = push(queue);
-    reg.register_fn("grid-insert-columns", move |at: SteelVal, n: usize| {
-        p(GridOp::InsertCols {
-            at: steel_col(&at),
-            n,
-        })
-    });
+    reg.register_fn(
+        "grid-insert-columns",
+        move |at: SteelVal, NonNeg(n): NonNeg| {
+            p(GridOp::InsertCols {
+                at: steel_col(&at),
+                n,
+            })
+        },
+    );
     let p = push(queue);
-    reg.register_fn("grid-delete-columns", move |at: SteelVal, n: usize| {
-        p(GridOp::DeleteCols {
-            at: steel_col(&at),
-            n,
-        })
-    });
+    reg.register_fn(
+        "grid-delete-columns",
+        move |at: SteelVal, NonNeg(n): NonNeg| {
+            p(GridOp::DeleteCols {
+                at: steel_col(&at),
+                n,
+            })
+        },
+    );
     let p = push(queue);
     reg.register_fn("grid-sort", move |col: SteelVal, descending: bool| {
         p(GridOp::Sort {
@@ -248,7 +260,9 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
         })
     });
     let p = push(queue);
-    reg.register_fn("grid-freeze-rows", move |n: usize| p(GridOp::Freeze(n)));
+    reg.register_fn("grid-freeze-rows", move |NonNeg(n): NonNeg| {
+        p(GridOp::Freeze(n))
+    });
     let p = push(queue);
     reg.register_fn("grid-set-header", move |on: bool| p(GridOp::SetHeader(on)));
     let p = push(queue);

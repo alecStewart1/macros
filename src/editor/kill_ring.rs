@@ -105,7 +105,10 @@ impl Editor {
         match self.region() {
             Some(range) => {
                 self.set_auto_mark('[', range.start);
-                self.set_auto_mark(']', range.end.saturating_sub(1).max(range.start));
+                // `]` marks the last *character*, not the byte before the end
+                // (which would split a multibyte char).
+                let last = self.active.buffer.prev_grapheme(range.end).max(range.start);
+                self.set_auto_mark(']', last);
                 let text = self.active.buffer.slice_to_string(range);
                 self.file_kill(super::registers::KillKind::Yank, reg, text, false, cx);
                 self.active.mark_active = false;

@@ -21,7 +21,11 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         // A face of #f draws uncolored. Malformed ops are skipped.
         reg.register_fn(
             "textplot-render",
-            |width: usize, height: usize, mode: SteelVal, ops: SteelVal| -> SteelVal {
+            |NonNeg(width): NonNeg,
+             NonNeg(height): NonNeg,
+             mode: SteelVal,
+             ops: SteelVal|
+             -> SteelVal {
                 let mode = steel_string(&mode)
                     .and_then(|m| m.parse::<crate::textplot::Mode>().ok())
                     .unwrap_or(crate::textplot::Mode::Braille);
@@ -78,7 +82,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         // `(textplot-hbar value max width)` → bar glyphs at ⅛-cell resolution.
         reg.register_fn(
             "textplot-hbar",
-            |value: SteelVal, max: SteelVal, width: usize| -> String {
+            |value: SteelVal, max: SteelVal, NonNeg(width): NonNeg| -> String {
                 crate::textplot::hbar(
                     steel_f64(&value).unwrap_or(0.0),
                     steel_f64(&max).unwrap_or(0.0),
@@ -89,7 +93,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         // `(textplot-ticks lo hi n)` → `((value label) …)`, ~n nice ticks.
         reg.register_fn(
             "textplot-ticks",
-            |lo: SteelVal, hi: SteelVal, n: usize| -> SteelVal {
+            |lo: SteelVal, hi: SteelVal, NonNeg(n): NonNeg| -> SteelVal {
                 let (Some(lo), Some(hi)) = (steel_f64(&lo), steel_f64(&hi)) else {
                     return SteelVal::ListV(Vec::<SteelVal>::new().into());
                 };
@@ -108,7 +112,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         // `(textplot-nice-range lo hi n)` → `(lo hi)` widened to the tick step.
         reg.register_fn(
             "textplot-nice-range",
-            |lo: SteelVal, hi: SteelVal, n: usize| -> SteelVal {
+            |lo: SteelVal, hi: SteelVal, NonNeg(n): NonNeg| -> SteelVal {
                 let lo = steel_f64(&lo).unwrap_or(0.0);
                 let hi = steel_f64(&hi).unwrap_or(0.0);
                 let (a, b) = crate::textplot::nice_range(lo, hi, n.clamp(1, 100));

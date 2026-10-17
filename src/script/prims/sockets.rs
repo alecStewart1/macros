@@ -76,7 +76,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // already buffered by prior recv calls are dropped — after a STARTTLS "OK"
     // the client must not have read past it, so a non-empty buffer here would
     // be a plaintext-injection attempt; refusing it is correct.
-    reg.register_fn("tls-upgrade", |id: usize, host: String| -> bool {
+    reg.register_fn("tls-upgrade", |NonNeg(id): NonNeg, host: String| -> bool {
         let mut conns = CONNS.lock();
         let Some(conn) = conns.remove(&id) else {
             set_last_error(format!("tls-upgrade: no connection {id}"));
@@ -114,7 +114,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     });
     reg.register_fn(
         "socket-set-timeout",
-        |id: usize, NonNeg(ms): NonNeg| -> bool {
+        |NonNeg(id): NonNeg, NonNeg(ms): NonNeg| -> bool {
             let conns = CONNS.lock();
             let Some(conn) = conns.get(&id) else {
                 set_last_error(format!("socket-set-timeout: no connection {id}"));
@@ -128,29 +128,34 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             conn.reader.get_ref().tcp().set_read_timeout(dur).is_ok()
         },
     );
-    reg.register_fn("socket-send", |id: usize, text: String| -> bool {
+    reg.register_fn("socket-send", |NonNeg(id): NonNeg, text: String| -> bool {
         socket_send_impl(id, text.as_bytes())
     });
-    reg.register_fn("socket-recv-line", |id: usize| -> String {
+    reg.register_fn("socket-recv-line", |NonNeg(id): NonNeg| -> String {
         socket_recv_line_impl(id)
     });
     reg.register_fn(
         "socket-recv-bytes",
-        |id: usize, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
+        |NonNeg(id): NonNeg, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
     );
-    reg.register_fn("socket-close", |id: usize| -> bool { CONNS.remove(id) });
+    reg.register_fn("socket-close", |NonNeg(id): NonNeg| -> bool {
+        CONNS.remove(id)
+    });
     reg.register_fn("socket-last-error", last_error);
     // Back-compat aliases for the original TLS-only names.
-    reg.register_fn("tls-send", |id: usize, text: String| -> bool {
+    reg.register_fn("tls-send", |NonNeg(id): NonNeg, text: String| -> bool {
         socket_send_impl(id, text.as_bytes())
     });
-    reg.register_fn("tls-recv-line", |id: usize| -> String {
+    reg.register_fn("tls-recv-line", |NonNeg(id): NonNeg| -> String {
         socket_recv_line_impl(id)
     });
-    reg.register_fn("tls-recv-bytes", |id: usize, NonNeg(n): NonNeg| -> String {
-        socket_recv_bytes_impl(id, n)
+    reg.register_fn(
+        "tls-recv-bytes",
+        |NonNeg(id): NonNeg, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
+    );
+    reg.register_fn("tls-close", |NonNeg(id): NonNeg| -> bool {
+        CONNS.remove(id)
     });
-    reg.register_fn("tls-close", |id: usize| -> bool { CONNS.remove(id) });
     reg.register_fn("tls-last-error", last_error);
     // TCP server.
     reg.register_fn("tcp-listen", |host: String, Port(port): Port| -> usize {
@@ -158,7 +163,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             .map_err(|e| format!("tcp-listen {host}:{port}: {e}"));
         or_report(listener.map(|l| LISTENERS.insert(l)), 0)
     });
-    reg.register_fn("tcp-listener-port", |id: usize| -> usize {
+    reg.register_fn("tcp-listener-port", |NonNeg(id): NonNeg| -> usize {
         LISTENERS
             .lock()
             .get(&id)
@@ -166,7 +171,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             .map(|a| a.port() as usize)
             .unwrap_or(0)
     });
-    reg.register_fn("tcp-accept", |id: usize| -> usize {
+    reg.register_fn("tcp-accept", |NonNeg(id): NonNeg| -> usize {
         // Clone the listener handle out so the accept doesn't hold the table
         // lock (which would deadlock a concurrent close or another accept).
         let listener = match LISTENERS.lock().get(&id) {
@@ -179,7 +184,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             0,
         )
     });
-    reg.register_fn("tcp-listener-close", |id: usize| -> bool {
+    reg.register_fn("tcp-listener-close", |NonNeg(id): NonNeg| -> bool {
         LISTENERS.remove(id)
     });
     // UDP.
@@ -195,7 +200,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     });
     reg.register_fn(
         "udp-send",
-        |id: usize, host: String, Port(port): Port, hex_data: String| -> bool {
+        |NonNeg(id): NonNeg, host: String, Port(port): Port, hex_data: String| -> bool {
             let Ok(bytes) = hex::decode(hex_data.trim()) else {
                 set_last_error("udp-send: bad hex".into());
                 return false;
@@ -211,22 +216,25 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             or_report(sent.map(|_| true), false)
         },
     );
-    reg.register_fn("udp-recv", |id: usize, NonNeg(max): NonNeg| -> String {
-        let socks = UDP.lock();
-        let Some(sock) = socks.get(&id) else {
-            set_last_error(format!("udp-recv: no socket {id}"));
-            return String::new();
-        };
-        // A UDP datagram can't exceed ~64 KiB; clamp so a huge `max` can't
-        // pre-allocate unboundedly (and 1 is the floor so recv has room).
-        let mut buf = vec![0u8; max.clamp(1, 65535)];
-        let received = sock
-            .recv_from(&mut buf)
-            .map(|(n, from)| format!("{from}\n{}", hex::encode(&buf[..n])))
-            .map_err(|e| format!("udp-recv: {e}"));
-        or_report(received, String::new())
-    });
-    reg.register_fn("udp-close", |id: usize| -> bool { UDP.remove(id) });
+    reg.register_fn(
+        "udp-recv",
+        |NonNeg(id): NonNeg, NonNeg(max): NonNeg| -> String {
+            let socks = UDP.lock();
+            let Some(sock) = socks.get(&id) else {
+                set_last_error(format!("udp-recv: no socket {id}"));
+                return String::new();
+            };
+            // A UDP datagram can't exceed ~64 KiB; clamp so a huge `max` can't
+            // pre-allocate unboundedly (and 1 is the floor so recv has room).
+            let mut buf = vec![0u8; max.clamp(1, 65535)];
+            let received = sock
+                .recv_from(&mut buf)
+                .map(|(n, from)| format!("{from}\n{}", hex::encode(&buf[..n])))
+                .map_err(|e| format!("udp-recv: {e}"));
+            or_report(received, String::new())
+        },
+    );
+    reg.register_fn("udp-close", |NonNeg(id): NonNeg| -> bool { UDP.remove(id) });
     // DNS: resolve `host` for a record `type` ("A" "AAAA" "MX" "TXT" "SRV"
     // "CNAME" "NS"). Returns newline-separated records ("" = none/failure);
     // MX/SRV keep their priority/weight fields space-separated. Hand-rolled
@@ -284,7 +292,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let q = queue.clone();
         reg.register_fn(
             "socket-async-send",
-            move |id: usize, hex_data: String| -> bool {
+            move |NonNeg(id): NonNeg, hex_data: String| -> bool {
                 q.push(EditorCommand::SocketAsyncSend {
                     id: id as u64,
                     hex: hex_data,
@@ -295,7 +303,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     }
     {
         let q = queue.clone();
-        reg.register_fn("socket-async-close", move |id: usize| -> bool {
+        reg.register_fn("socket-async-close", move |NonNeg(id): NonNeg| -> bool {
             q.push(EditorCommand::SocketAsyncClose { id: id as u64 });
             true
         });
@@ -321,7 +329,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     }
     {
         let q = queue.clone();
-        reg.register_fn("ws-send", move |id: usize, text: String| -> bool {
+        reg.register_fn("ws-send", move |NonNeg(id): NonNeg, text: String| -> bool {
             q.push(EditorCommand::WsSend {
                 id: id as u64,
                 text,
@@ -331,7 +339,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     }
     {
         let q = queue.clone();
-        reg.register_fn("ws-close", move |id: usize| -> bool {
+        reg.register_fn("ws-close", move |NonNeg(id): NonNeg| -> bool {
             q.push(EditorCommand::WsClose { id: id as u64 });
             true
         });

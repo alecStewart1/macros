@@ -70,7 +70,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let q = queue.clone();
         reg.register_fn(
             "put-text-property",
-            move |start: usize, end: usize, key: String, value: String| {
+            move |NonNeg(start): NonNeg, NonNeg(end): NonNeg, key: String, value: String| {
                 q.push(EditorCommand::PutTextProperty {
                     start,
                     end,
@@ -89,7 +89,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let shared = snapshot.clone();
         reg.register_fn(
             "get-text-property",
-            move |pos: usize, key: String| -> String {
+            move |NonNeg(pos): NonNeg, key: String| -> String {
                 let snap = shared.load();
                 snap.props
                     .iter()

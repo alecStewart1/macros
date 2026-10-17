@@ -16,7 +16,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     {
         // `(marker-position id)` → its current byte position, or -1.
         let m = markers.clone();
-        reg.register_fn("marker-position", move |id: u64| -> isize {
+        reg.register_fn("marker-position", move |NonNeg64(id): NonNeg64| -> isize {
             m.lock()
                 .unwrap()
                 .positions
@@ -26,13 +26,13 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     }
     {
         let m = markers.clone();
-        reg.register_fn("set-marker", move |id: u64, pos: isize| {
+        reg.register_fn("set-marker", move |NonNeg64(id): NonNeg64, pos: isize| {
             m.lock().unwrap().positions.insert(id, scheme_pos(pos));
         });
     }
     {
         let m = markers.clone();
-        reg.register_fn("delete-marker", move |id: u64| {
+        reg.register_fn("delete-marker", move |NonNeg64(id): NonNeg64| {
             m.lock().unwrap().positions.remove(&id);
         });
     }

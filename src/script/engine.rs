@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use steel::rvals::{IntoSteelVal, SteelVal};
 use steel::steel_vm::ThreadStateController;
+use steel::steel_vm::engine::Engine;
 
 use super::*;
 
@@ -106,6 +107,9 @@ struct WatchState {
     running: u64,
     /// When the running job started.
     started: Option<Instant>,
+    /// Jobs whose blocking caller timed out before they started: skipped
+    /// instead of run late with nobody to receive their result.
+    cancelled: std::collections::HashSet<u64>,
     controller: Option<ThreadStateController>,
 }
 
@@ -130,6 +134,20 @@ impl Watchdog {
                 c.resume();
             }
         }
+    }
+
+    /// Caller: give up on job `id`. If it hasn't started, it never will.
+    fn cancel(&self, id: u64) {
+        if let Ok(mut s) = self.state.lock()
+            && s.running != id
+        {
+            s.cancelled.insert(id);
+        }
+    }
+
+    /// Engine thread: whether job `id` was cancelled (consuming the mark).
+    fn take_cancelled(&self, id: u64) -> bool {
+        self.state.lock().is_ok_and(|mut s| s.cancelled.remove(&id))
     }
 
     /// Engine thread: the last job finished; waiting for the next.
@@ -573,6 +591,9 @@ impl ActionHandle {
             Err(RecvTimeoutError::Timeout) => {}
         }
         self.watchdog.interrupt(id);
+        // Not started yet (queued behind something slow): make sure it never
+        // runs late, applying edits after the caller already moved on.
+        self.watchdog.cancel(id);
         let secs = timeout.as_secs_f32();
         match rx.recv_timeout(INTERRUPT_GRACE) {
             // The interrupted job unwound: keep what it queued, but report the
@@ -607,6 +628,152 @@ impl ActionHandle {
     }
 }
 
+/// The text of a caught panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into())
+}
+
+/// Call a query function (a dynamic Helm source or a CAPF) by name. Queries
+/// aren't commands, so anything they queued is discarded rather than leaking
+/// into — and being attributed to — the next eval's command batch.
+fn call_query(
+    engine: &mut Engine,
+    queue: &Queue,
+    function: &str,
+    arg: String,
+) -> Result<SteelVal, String> {
+    let arg = arg.into_steelval().unwrap_or(SteelVal::Void);
+    let result = engine
+        .call_function_by_name_with_args(function, vec![arg])
+        .map_err(|e| format!("error in {function}: {}", steel_error_string(&e)));
+    drop(queue.drain());
+    result
+}
+
+/// Report a failed query in the echo area (an empty candidate list alone
+/// would hide a typo in the user's function).
+fn report_query_error(outcomes: &UnboundedSender<ScriptOutcome>, error: String) {
+    let _ = outcomes.unbounded_send(ScriptOutcome::Commands {
+        commands: Vec::new(),
+        message: Some(error),
+    });
+}
+
+/// Run one task on the engine. Queries (Helm candidates, CAPFs) answer on the
+/// async channel themselves and return `None`; everything else returns its
+/// result for the caller to deliver.
+fn run_task(
+    engine: &mut Engine,
+    queue: &Queue,
+    outcomes: &UnboundedSender<ScriptOutcome>,
+    task: Task,
+) -> Option<RawResult> {
+    let raw = match task {
+        // Dynamic Helm candidates: call the fn, parse a string list, reply
+        // directly on the async channel (no command/value semantics).
+        Task::Candidates {
+            source,
+            query_id,
+            function,
+            pattern,
+        } => {
+            let candidates = match call_query(engine, queue, &function, pattern) {
+                Ok(value) => steel_candidate_list(&value),
+                Err(error) => {
+                    report_query_error(outcomes, error);
+                    Vec::new()
+                }
+            };
+            let _ = outcomes.unbounded_send(ScriptOutcome::Candidates {
+                source,
+                query_id,
+                candidates,
+            });
+            return None;
+        }
+        // Completion-at-point: call each registered CAPF with the prefix; the
+        // first one returning a non-empty candidate list wins. A CAPF returns
+        // either a flat candidate list, or `(start end (cand …))` to override
+        // the replaced byte range. Reply on the async channel.
+        Task::Capf {
+            functions,
+            prefix,
+            start,
+            end,
+        } => {
+            let mut out_start = start;
+            let mut out_end = end;
+            let mut items: Vec<(String, Option<String>)> = Vec::new();
+            for function in &functions {
+                let value = match call_query(engine, queue, function, prefix.clone()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        report_query_error(outcomes, error);
+                        continue;
+                    }
+                };
+                let (s, e, parsed) = parse_capf_result(&value, start, end);
+                if !parsed.is_empty() {
+                    out_start = s;
+                    out_end = e;
+                    items = parsed;
+                    break;
+                }
+            }
+            let _ = outcomes.unbounded_send(ScriptOutcome::Capf {
+                start: out_start,
+                end: out_end,
+                items,
+            });
+            return None;
+        }
+        Task::Eval(source) => match engine.run(source) {
+            Ok(values) => RawResult {
+                commands: queue.drain(),
+                value: values.last().and_then(format_value),
+                error: None,
+            },
+            Err(error) => RawResult {
+                commands: queue.drain(),
+                value: None,
+                error: Some(steel_error_string(&error)),
+            },
+        },
+        Task::Call(name, arg) => {
+            let args: Vec<SteelVal> = arg
+                .and_then(|c| c.into_steelval().ok())
+                .into_iter()
+                .collect();
+            let error = engine
+                .call_function_by_name_with_args(&name, args)
+                .err()
+                .map(|e| steel_error_string(&e));
+            RawResult {
+                commands: queue.drain(),
+                value: None,
+                error,
+            }
+        }
+        Task::CallSecret(name, secret) => {
+            let args: Vec<SteelVal> = secret.into_steelval().into_iter().collect();
+            let error = engine
+                .call_function_by_name_with_args(&name, args)
+                .err()
+                .map(|_| format!("{name} failed (details hidden: its argument is secret)"));
+            RawResult {
+                commands: queue.drain(),
+                value: None,
+                error,
+            }
+        }
+    };
+    Some(raw)
+}
+
 /// The engine thread: owns the `!Send` `Engine` for its whole life, processing
 /// jobs FIFO so results stay ordered.
 pub(crate) fn engine_thread(
@@ -632,115 +799,31 @@ pub(crate) fn engine_thread(
         else {
             break;
         };
+        if watchdog.take_cancelled(id) {
+            continue; // its caller timed out and gave up before it started
+        }
         watchdog.begin(id);
         // `with-process-env` extents never span jobs (one an error escaped
         // without popping would otherwise leak into every later spawn).
         crate::process::reset_dynamic();
-        let raw = match task {
-            // Dynamic Helm candidates: call the fn, parse a string list, reply
-            // directly on the async channel (no command/value semantics).
-            Task::Candidates {
-                source,
-                query_id,
-                function,
-                pattern,
-            } => {
-                let arg = pattern.into_steelval().unwrap_or(SteelVal::Void);
-                let candidates = engine
-                    .call_function_by_name_with_args(&function, vec![arg])
-                    .ok()
-                    .map(|value| steel_candidate_list(&value))
-                    .unwrap_or_default();
-                // Candidates fns are queries, not commands: any side effects a
-                // dynamic source queued (e.g. a stray `message`) are discarded
-                // here rather than leaking into — and being attributed to — the
-                // next eval's command batch.
-                drop(queue.drain());
-                let _ = outcomes.unbounded_send(ScriptOutcome::Candidates {
-                    source,
-                    query_id,
-                    candidates,
-                });
-                continue;
-            }
-            // Completion-at-point: call each registered CAPF with the prefix; the
-            // first one returning a non-empty candidate list wins. A CAPF returns
-            // either a flat candidate list, or `(start end (cand …))` to override
-            // the replaced byte range. Reply on the async channel.
-            Task::Capf {
-                functions,
-                prefix,
-                start,
-                end,
-            } => {
-                let mut out_start = start;
-                let mut out_end = end;
-                let mut items: Vec<(String, Option<String>)> = Vec::new();
-                for function in &functions {
-                    let arg = prefix.clone().into_steelval().unwrap_or(SteelVal::Void);
-                    let Ok(value) = engine.call_function_by_name_with_args(function, vec![arg])
-                    else {
-                        continue;
-                    };
-                    let (s, e, parsed) = parse_capf_result(&value, start, end);
-                    if !parsed.is_empty() {
-                        out_start = s;
-                        out_end = e;
-                        items = parsed;
-                        break;
-                    }
-                }
-                // CAPFs are queries, not commands: discard anything they queued
-                // so it can't leak into the next eval's command batch.
-                drop(queue.drain());
-                let _ = outcomes.unbounded_send(ScriptOutcome::Capf {
-                    start: out_start,
-                    end: out_end,
-                    items,
-                });
-                continue;
-            }
-            Task::Eval(source) => match engine.run(source) {
-                Ok(values) => RawResult {
-                    commands: queue.drain(),
-                    value: values.last().and_then(format_value),
-                    error: None,
-                },
-                Err(error) => RawResult {
-                    commands: queue.drain(),
-                    value: None,
-                    error: Some(steel_error_string(&error)),
-                },
+        // A panicking primitive must not kill the engine thread: without this
+        // every later eval would fail with "script engine stopped" until the
+        // editor restarts. The job reports the panic as its error instead.
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_task(&mut engine, &queue, &outcomes, task)
+        }));
+        let raw = match ran {
+            Ok(Some(raw)) => raw,
+            Ok(None) => continue, // answered on the async channel itself
+            Err(payload) => RawResult {
+                commands: queue.drain(),
+                value: None,
+                error: Some(format!(
+                    "internal error in a primitive: {}",
+                    panic_message(payload.as_ref())
+                )),
             },
-            Task::Call(name, arg) => {
-                let args: Vec<SteelVal> = arg
-                    .and_then(|c| c.into_steelval().ok())
-                    .into_iter()
-                    .collect();
-                let error = engine
-                    .call_function_by_name_with_args(&name, args)
-                    .err()
-                    .map(|e| steel_error_string(&e));
-                RawResult {
-                    commands: queue.drain(),
-                    value: None,
-                    error,
-                }
-            }
-            Task::CallSecret(name, secret) => {
-                let args: Vec<SteelVal> = secret.into_steelval().into_iter().collect();
-                let error = engine
-                    .call_function_by_name_with_args(&name, args)
-                    .err()
-                    .map(|_| format!("{name} failed (details hidden: its argument is secret)"));
-                RawResult {
-                    commands: queue.drain(),
-                    value: None,
-                    error,
-                }
-            }
         };
-
         match reply {
             Reply::Sync(tx) => {
                 let _ = tx.send(raw);

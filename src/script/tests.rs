@@ -4044,6 +4044,51 @@ mod magit_tests {
         assert_eq!(out.value.as_deref(), Some("\"abc/123\""));
     }
 
+    /// Negative integers for unsigned parameters are refused instead of
+    /// wrapping to 2^64 (a line indent of 1.8e19 columns, a timer that never
+    /// fires) — both for helper-registered commands and direct closures.
+    #[test]
+    fn negative_ints_for_unsigned_params_are_errors() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in [
+            "(set-line-indent 0 -1)",
+            "(run-with-timer -1 'f)",
+            "(line-indentation -1)",
+            "(marker-position -1)",
+        ] {
+            let Err(err) = engine.eval(src) else {
+                panic!("{src} should fail");
+            };
+            assert!(err.contains("non-negative"), "{src}: {err}");
+        }
+        // Valid calls still work, and reals accept integers.
+        assert!(engine.eval("(set-line-indent 0 2)").is_ok());
+        assert!(engine.eval("(split-window-right-ratio 1)").is_ok());
+        assert!(engine.eval("(set-line-scale 0 2)").is_ok());
+    }
+
+    /// A dynamic Helm source that errors reports the error instead of showing
+    /// an empty list with no explanation.
+    #[test]
+    fn failing_candidate_source_reports_its_error() {
+        use futures::StreamExt;
+        let (engine, mut rx) = ScriptEngine::new();
+        engine.dispatch_candidates(0, 1, "no-such-source-fn", "x");
+        let mut saw_error = false;
+        for _ in 0..2 {
+            match futures::executor::block_on(rx.next()).unwrap() {
+                ScriptOutcome::Commands {
+                    message: Some(m), ..
+                } => {
+                    saw_error = m.contains("no-such-source-fn");
+                }
+                ScriptOutcome::Candidates { candidates, .. } => assert!(candidates.is_empty()),
+                _ => {}
+            }
+        }
+        assert!(saw_error);
+    }
+
     /// A blocking call with a deadline interrupts a runaway function instead
     /// of hanging (the UI thread waits on these), and the engine stays usable.
     #[test]

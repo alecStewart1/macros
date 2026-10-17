@@ -40,7 +40,12 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let q = queue.clone();
         reg.register_fn(
             "buffer-copy-lines",
-            move |src: String, ss: usize, se: usize, dst: String, ds: usize, de: usize| {
+            move |src: String,
+                  NonNeg(ss): NonNeg,
+                  NonNeg(se): NonNeg,
+                  dst: String,
+                  NonNeg(ds): NonNeg,
+                  NonNeg(de): NonNeg| {
                 q.push(EditorCommand::BufferCopyLines {
                     src,
                     src_start: ss,
@@ -58,7 +63,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let q = queue.clone();
         reg.register_fn(
             "buffer-highlight-lines",
-            move |name: String, start: usize, end: usize, face: String| {
+            move |name: String, NonNeg(start): NonNeg, NonNeg(end): NonNeg, face: String| {
                 q.push(EditorCommand::BufferHighlightLines {
                     name,
                     start,
