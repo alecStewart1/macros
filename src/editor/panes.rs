@@ -546,6 +546,12 @@ impl Editor {
         ratio: f32,
         cx: &mut Context<Self>,
     ) {
+        // Same bounds every other split path uses; NaN falls back to even.
+        let ratio = if ratio.is_finite() {
+            ratio.clamp(0.1, 0.9)
+        } else {
+            0.5
+        };
         self.save_selected_pane();
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;

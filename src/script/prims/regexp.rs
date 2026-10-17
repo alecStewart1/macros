@@ -52,7 +52,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let shared = snapshot.clone();
         reg.register_fn(
             "buffer-search-all",
-            move |pattern: String, start: usize, end: usize| -> SteelVal {
+            move |pattern: String, NonNeg(start): NonNeg, NonNeg(end): NonNeg| -> SteelVal {
                 let re = match ml_regex(&pattern) {
                     Ok(re) => re,
                     Err(err) => return SteelVal::StringV(err.to_string().into()),

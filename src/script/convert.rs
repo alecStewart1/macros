@@ -129,6 +129,16 @@ impl steel::rvals::FromSteelVal for NonNeg {
     }
 }
 
+/// A non-negative integer argument that the primitive needs as a `u64` (an
+/// id or a duration).
+pub(crate) struct NonNeg64(pub(crate) u64);
+
+impl steel::rvals::FromSteelVal for NonNeg64 {
+    fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
+        int_in_range(val, "a non-negative integer", i64::MAX as u64).map(NonNeg64)
+    }
+}
+
 pub(crate) fn steel_string(value: &SteelVal) -> Option<String> {
     match value {
         SteelVal::StringV(s) => Some(s.to_string()),

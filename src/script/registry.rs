@@ -1,7 +1,7 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 
 use ropey::Rope;
-use steel::rvals::IntoSteelVal;
+use steel::rvals::{IntoSteelVal, SteelVal};
 use steel::steel_vm::engine::Engine;
 use steel::steel_vm::register_fn::RegisterFn;
 
@@ -324,6 +324,19 @@ impl Registrar<'_> {
         self.engine.register_fn(name, func);
     }
 
+    /// [`Self::register_fn`] for a closure that takes raw `SteelVal`s and
+    /// converts them itself: the API reference records `arg_types` (the types
+    /// it converts to) rather than `SteelVal`.
+    fn register_fn_typed<FN, ARGS, RET>(&mut self, name: &'static str, func: FN, arg_types: &[&str])
+    where
+        Engine: RegisterFn<FN, ARGS, RET>,
+    {
+        self.names.push(name.to_string());
+        self.api
+            .push(ApiEntry::with_types(name, self.section, arg_types, "()"));
+        self.engine.register_fn(name, func);
+    }
+
     /// File every following registration under `section` in the API reference.
     pub(crate) fn section(&mut self, section: Section) {
         self.section = section;
@@ -341,6 +354,31 @@ pub(crate) fn register_nullary(
     reg.register_fn(name, move || q.push(cmd.clone()));
 }
 
+/// Convert one argument of a command primitive. Steel converts an integer to
+/// `usize` / `u64` / `u32` with a bare `as` cast, so a Scheme `-1` silently
+/// becomes `usize::MAX` (a line, count or timeout of 2^64); a negative integer
+/// for an unsigned parameter is rejected with a conversion error instead.
+fn command_arg<T: steel::rvals::FromSteelVal + 'static>(val: &SteelVal) -> steel::rvals::Result<T> {
+    use std::any::TypeId;
+    let unsigned = [
+        TypeId::of::<usize>(),
+        TypeId::of::<u64>(),
+        TypeId::of::<u32>(),
+        TypeId::of::<u16>(),
+        TypeId::of::<u8>(),
+    ];
+    if let SteelVal::IntV(n) = val
+        && *n < 0
+        && unsigned.contains(&TypeId::of::<T>())
+    {
+        return Err(steel::SteelErr::new(
+            steel::rerrs::ErrorKind::ConversionError,
+            format!("expected a non-negative integer, found: {n}"),
+        ));
+    }
+    T::from_steelval(val)
+}
+
 /// Register a one-argument Steel command: `name` enqueues the command built by
 /// `make` from its argument. Collapses the `{ let q = queue.clone(); ... push }`
 /// boilerplate for the many single-payload commands.
@@ -353,7 +391,14 @@ pub(crate) fn register_unary<T>(
     T: steel::rvals::FromSteelVal + 'static,
 {
     let q = queue.clone();
-    reg.register_fn(name, move |arg: T| q.push(make(arg)));
+    reg.register_fn_typed(
+        name,
+        move |a: SteelVal| -> steel::rvals::Result<()> {
+            q.push(make(command_arg(&a)?));
+            Ok(())
+        },
+        &[std::any::type_name::<T>()],
+    );
 }
 
 /// Register a two-argument Steel command (see [`register_unary`]).
@@ -367,7 +412,14 @@ pub(crate) fn register_binary<T, U>(
     U: steel::rvals::FromSteelVal + 'static,
 {
     let q = queue.clone();
-    reg.register_fn(name, move |a: T, b: U| q.push(make(a, b)));
+    reg.register_fn_typed(
+        name,
+        move |a: SteelVal, b: SteelVal| -> steel::rvals::Result<()> {
+            q.push(make(command_arg(&a)?, command_arg(&b)?));
+            Ok(())
+        },
+        &[std::any::type_name::<T>(), std::any::type_name::<U>()],
+    );
 }
 
 /// Register a three-argument Steel command (see [`register_unary`]).
@@ -382,7 +434,18 @@ pub(crate) fn register_ternary<T, U, V>(
     V: steel::rvals::FromSteelVal + 'static,
 {
     let q = queue.clone();
-    reg.register_fn(name, move |a: T, b: U, c: V| q.push(make(a, b, c)));
+    reg.register_fn_typed(
+        name,
+        move |a: SteelVal, b: SteelVal, c: SteelVal| -> steel::rvals::Result<()> {
+            q.push(make(command_arg(&a)?, command_arg(&b)?, command_arg(&c)?));
+            Ok(())
+        },
+        &[
+            std::any::type_name::<T>(),
+            std::any::type_name::<U>(),
+            std::any::type_name::<V>(),
+        ],
+    );
 }
 
 /// Register a nullary Steel *read* bridge: `name` returns a value derived from

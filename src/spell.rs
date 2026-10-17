@@ -36,7 +36,7 @@ pub fn available() -> bool {
 /// does for ranges produced by the OS over the same string).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn utf16_range_to_bytes(text: &str, start16: usize, len16: usize) -> Option<(usize, usize)> {
-    let end16 = start16 + len16;
+    let end16 = start16.checked_add(len16)?; // NSNotFound locations overflow
     let (mut u16pos, mut start, mut end) = (0usize, None, None);
     for (bpos, ch) in text.char_indices() {
         if u16pos == start16 {

@@ -17,22 +17,25 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // containing pos, innermost first; `()` without a tree. Synchronous —
         // the published snapshot carries the tree.
         let shared = snapshot.clone();
-        reg.register_fn("ts-ancestors", move |pos: usize| -> Vec<SteelVal> {
-            let snap = shared.load();
-            let Some(tree) = snap.tree.as_ref() else {
-                return Vec::new();
-            };
-            crate::highlight::tree_ancestors(tree, pos)
-                .into_iter()
-                .flat_map(|(k, s, e)| {
-                    [
-                        SteelVal::StringV(k.into()),
-                        SteelVal::IntV(s as isize),
-                        SteelVal::IntV(e as isize),
-                    ]
-                })
-                .collect()
-        });
+        reg.register_fn(
+            "ts-ancestors",
+            move |NonNeg(pos): NonNeg| -> Vec<SteelVal> {
+                let snap = shared.load();
+                let Some(tree) = snap.tree.as_ref() else {
+                    return Vec::new();
+                };
+                crate::highlight::tree_ancestors(tree, pos)
+                    .into_iter()
+                    .flat_map(|(k, s, e)| {
+                        [
+                            SteelVal::StringV(k.into()),
+                            SteelVal::IntV(s as isize),
+                            SteelVal::IntV(e as isize),
+                        ]
+                    })
+                    .collect()
+            },
+        );
     }
     {
         // `(ts-children start end)` → flat `(kind start end named? …)` of the
@@ -40,7 +43,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let shared = snapshot.clone();
         reg.register_fn(
             "ts-children",
-            move |start: usize, end: usize| -> Vec<SteelVal> {
+            move |NonNeg(start): NonNeg, NonNeg(end): NonNeg| -> Vec<SteelVal> {
                 let snap = shared.load();
                 let Some(tree) = snap.tree.as_ref() else {
                     return Vec::new();

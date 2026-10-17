@@ -28,7 +28,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
     });
     reg.register_fn(
         "sqlite-exec",
-        |id: usize, sql: String, StringList(ps): StringList| -> bool {
+        |NonNeg(id): NonNeg, sql: String, StringList(ps): StringList| -> bool {
             let conns = SQLITE.lock();
             let Some(conn) = conns.get(&id) else {
                 set_last_error(format!("sqlite-exec: no db {id}"));
@@ -51,7 +51,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
     );
     reg.register_fn(
         "sqlite-query",
-        |id: usize, sql: String, StringList(ps): StringList| -> Vec<String> {
+        |NonNeg(id): NonNeg, sql: String, StringList(ps): StringList| -> Vec<String> {
             let conns = SQLITE.lock();
             let Some(conn) = conns.get(&id) else {
                 set_last_error(format!("sqlite-query: no db {id}"));
@@ -86,6 +86,8 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
             or_report(rows, Vec::new())
         },
     );
-    reg.register_fn("sqlite-close", |id: usize| -> bool { SQLITE.remove(id) });
+    reg.register_fn("sqlite-close", |NonNeg(id): NonNeg| -> bool {
+        SQLITE.remove(id)
+    });
     reg.register_fn("sqlite-last-error", last_error);
 }

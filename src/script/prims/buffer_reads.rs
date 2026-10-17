@@ -38,7 +38,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let shared = snapshot.clone();
         reg.register_fn(
             "position->byte",
-            move |line: usize, character: usize| -> usize {
+            move |NonNeg(line): NonNeg, NonNeg(character): NonNeg| -> usize {
                 let rope = shared.load().text.clone();
                 // A line past the end clamps to the end of the buffer.
                 if line >= rope.len_lines() {
@@ -88,7 +88,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // line so fold logic can skip blanks. The indentation-based folder builds
         // fold ranges from this.
         let shared = snapshot.clone();
-        reg.register_fn("line-indentation", move |line: usize| -> isize {
+        reg.register_fn("line-indentation", move |NonNeg(line): NonNeg| -> isize {
             let rope = shared.load().text.clone();
             if line >= rope.len_lines() {
                 return -1;

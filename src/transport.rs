@@ -173,7 +173,11 @@ pub fn read_frames<R: BufRead>(mut reader: R, tx: &UnboundedSender<Value>) {
             if line.is_empty() {
                 break; // blank line ends the header block
             }
-            if let Some(value) = line.strip_prefix("Content-Length:") {
+            // Header names are case-insensitive (RFC 7230); some servers send
+            // `content-length:`.
+            if let Some((name, value)) = line.split_once(':')
+                && name.trim().eq_ignore_ascii_case("content-length")
+            {
                 content_length = value.trim().parse().unwrap_or(0);
             }
         }
