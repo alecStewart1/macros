@@ -305,11 +305,18 @@
 (define (lsp--configure-formatter lang spec)
   (if (equal? spec 'lsp)
       (set-lsp-format-on-save lang #t)         ; async LSP format, handled in Rust
-      (for-each (lambda (e) (set! *lsp-formatters* (cons (cons e spec) *lsp-formatters*)))
+      ;; Replace, don't stack: re-declaring a language must not leave the old
+      ;; formatter running too.
+      (for-each (lambda (e) (set! *lsp-formatters* (alist-set *lsp-formatters* e spec)))
                 (or (alist-ref *lsp-lang-exts* lang) '()))))
 
+;; Each (ext . fn) once: re-declaring a language used to add the feature again,
+;; so it ran N times per open / save / edit.
 (define (lsp--auto-feature lang fnname)
-  (for-each (lambda (e) (set! *lsp-auto-features* (cons (cons e fnname) *lsp-auto-features*)))
+  (for-each (lambda (e)
+              (let ((entry (cons e fnname)))
+                (when (not (member entry *lsp-auto-features*))
+                  (set! *lsp-auto-features* (cons entry *lsp-auto-features*)))))
             (or (alist-ref *lsp-lang-exts* lang) '())))
 
 ;; The current buffer's visited path — its NAME may be uniquified

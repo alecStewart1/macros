@@ -1502,3 +1502,17 @@ fn steel_structural_motion_and_slurp(cx: &mut TestAppContext) {
     settle(&ed, cx);
     assert_eq!(text(&ed, cx), "(a \")\" b) c");
 }
+
+/// `;` after `tx` moves to before the NEXT `x` (it used to re-find the same
+/// one and stay put), and `~` toggles a multibyte letter.
+#[gpui::test]
+fn evil_till_repeat_and_multibyte_toggle_case(cx: &mut TestAppContext) {
+    let ed = setup(cx, "a x b x c\n");
+    keys(&ed, cx, "t x");
+    assert_eq!(ed.read_with(cx, |e, _| e.point()), 1);
+    keys(&ed, cx, ";");
+    assert_eq!(ed.read_with(cx, |e, _| e.point()), 5);
+    let ed = setup(cx, "éa\n");
+    keys(&ed, cx, "~");
+    assert_eq!(text(&ed, cx), "Éa\n");
+}

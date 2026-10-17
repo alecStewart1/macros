@@ -133,7 +133,9 @@
 (define *ediff-hunk-lines* '())     ; (display-line . hunk-index), ascending
 (define *ediff-us* (string (integer->char 31)))   ; the U+001F text separator
 
-(define (ediff--decode s) (split-many s *ediff-us*))
+(define *ediff-rs* (string (integer->char 30)))   ; U+001E stands for a tab
+(define (ediff--decode s)
+  (map (lambda (line) (string-replace line *ediff-rs* "\t")) (split-many s *ediff-us*)))
 
 ;; One "tag\tas\tae\tbs\tbe\tabs\tabe\tbbs\tbbe\tatext\tbtext" record -> hunk.
 (define (ediff--parse-hunk rec)

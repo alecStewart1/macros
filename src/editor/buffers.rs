@@ -1585,10 +1585,18 @@ impl Editor {
                         };
                         let (abs, abe) = line_span(abuf, ar.start, ar.end);
                         let (bbs, bbe) = line_span(bbuf, br.start, br.end);
-                        // Hunk text, newlines escaped to U+001F so each hunk
-                        // stays a single tab-delimited record for Scheme.
-                        let atext = abuf.slice_to_string(abs..abe).replace('\n', "\u{1f}");
-                        let btext = bbuf.slice_to_string(bbs..bbe).replace('\n', "\u{1f}");
+                        // Hunk text, escaped so each hunk stays a single tab-
+                        // delimited record for Scheme: newlines to U+001F, tabs
+                        // (Go, Makefiles, TSV) to U+001E. The hunk's final line
+                        // break is dropped, or it decoded to an extra empty line.
+                        let escape = |t: String| {
+                            t.strip_suffix('\n')
+                                .unwrap_or(&t)
+                                .replace('\n', "\u{1f}")
+                                .replace('\t', "\u{1e}")
+                        };
+                        let atext = escape(abuf.slice_to_string(abs..abe));
+                        let btext = escape(bbuf.slice_to_string(bbs..bbe));
                         Some(format!(
                             "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                             ar.start, ar.end, br.start, br.end, abs, abe, bbs, bbe, atext, btext

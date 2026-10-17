@@ -461,7 +461,8 @@
   (let loop ((hs hits) (seen (hash)) (acc '()))
     (if (null? hs)
         (reverse acc)
-        (let ((p (car (split-many (car hs) ":"))))
+        (let ((p (let ((parts (grep-hit-parts (car hs))))
+                   (if parts (car parts) (car hs)))))
           (if (hash-contains? seen p)
               (loop (cdr hs) seen acc)
               (loop (cdr hs) (hash-insert seen p #t) (cons p acc)))))))
@@ -500,7 +501,9 @@
 
 (define (pqr-visit)
   (cond
-    ((equal? (buffer-file-name) *pqr-current*)
+    ;; The same file however it's spelled (grep's path vs the opened buffer's
+    ;; may differ by a symlink / `/private` prefix).
+    ((same-file? (buffer-file-name) *pqr-current*)
      (message (string-append "Replacing in " *pqr-current*))
      (qr-start *pqr-from* *pqr-to* *pqr-regexp?* 0 (point-max) pqr-file-done #t *qr-all-files?*))
     ((< *pqr-tries* 150)

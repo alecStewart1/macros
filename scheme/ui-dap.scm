@@ -144,7 +144,7 @@
     (section-close 'dap-breakpoints))
 
   (section-line "")
-  (section-line "RET visit/expand · TAB fold · c/s/i/o step · b/x breakpoints · ? menu"
+  (section-line "RET visit/expand · TAB fold · c/s/i/o step · x remove breakpoint · ? menu"
                 "dap-dim"))
 
 ;; --- showing / refreshing ------------------------------------------------------------
@@ -245,7 +245,6 @@
 (define-key "dap-ui-mode" "i" 'dap-step-in)
 (define-key "dap-ui-mode" "o" 'dap-step-out)
 (define-key "dap-ui-mode" "r" 'dap-restart)
-(define-key "dap-ui-mode" "b" 'dap-toggle-breakpoint)
 (define-key "dap-ui-mode" "x" 'dap-ui-remove)
 (define-key "dap-ui-mode" "e" 'dap-eval)
 (define-key "dap-ui-mode" "w" 'dap-watch-add)

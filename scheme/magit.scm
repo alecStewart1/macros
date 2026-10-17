@@ -1238,12 +1238,14 @@
                 (magit-discard-files '() files)))))))
 
 ;; Discard one side wholesale: untracked files via `clean`, tracked via `checkout`.
+;; Unstaged changes are restored from the INDEX (`checkout -- path`), so a file's
+;; staged changes survive; `checkout HEAD --` would throw those away too.
 (define (magit-discard-files untracked unstaged)
   (when (not (null? untracked))
     (magit-do (append (list "clean" "-f" "--") (map magit-newpath untracked))
               "Removed untracked file(s)"))
   (when (not (null? unstaged))
-    (magit-do (append (list "checkout" "HEAD" "--") (apply append (map magit-pathspecs unstaged)))
+    (magit-do (append (list "checkout" "--") (apply append (map magit-pathspecs unstaged)))
               "Discarded file(s)")))
 
 ;; k: discard the region (multiple files and/or selected lines), else hunk/file
@@ -1284,11 +1286,17 @@
            (let ((type (nth t 1)) (path (nth t 2)))
              (magit-confirm (string-append "Discard changes to " path "?")
                (lambda ()
-                 (if (equal? type "untracked")
-                     (magit-do (list "clean" "-f" "--" (magit-newpath path))
-                               (string-append "Removed " path))
-                     (magit-do (append (list "checkout" "HEAD" "--") (magit-pathspecs path))
-                               (string-append "Discarded " path)))))))))))
+                 (cond
+                   ((equal? type "untracked")
+                    (magit-do (list "clean" "-f" "--" (magit-newpath path))
+                              (string-append "Removed " path)))
+                   ;; Unstaged: back to the index, keeping what's staged.
+                   ((equal? type "unstaged")
+                    (magit-do (append (list "checkout" "--") (magit-pathspecs path))
+                              (string-append "Discarded " path)))
+                   (else
+                    (magit-do (append (list "checkout" "HEAD" "--") (magit-pathspecs path))
+                              (string-append "Discarded " path))))))))))))
 
 ;; --- commit (c): an editable *git-commit* buffer ----------------------------
 ;; Switch rows toggle commit flags; action rows read them. "Amend HEAD" reuses
@@ -1312,9 +1320,16 @@
   (magit-switch-args (list (cons "commit:signoff" "--signoff")
                            (cons "commit:noverify" "--no-verify"))))
 
-;; Open the message buffer (empty for commit, last message for reword). `amend?`
-;; is stashed in a buffer-local so C-c C-c knows which git command to run.
+;; Open the message buffer (empty for commit, last message for reword). `amend`
+;; ("no" / "yes" / "reword") is stashed in a buffer-local so C-c C-c knows which
+;; git command to run. A commit already being written is resumed, not appended
+;; to (which duplicated the message and diff).
 (define (magit-commit-buffer initial amend)
+  (if (member "*git-commit*" (buffer-names))
+      (begin (switch-to-buffer "*git-commit*")
+             (message "Resuming the commit message in progress"))
+      (magit-commit-buffer-new initial amend)))
+(define (magit-commit-buffer-new initial amend)
   (append-to-buffer "*git-commit*" initial)
   ;; Show the staged diff (commented out) below the message, like `git commit`.
   (append-to-buffer "*git-commit*"
@@ -1331,15 +1346,17 @@
   (if (transient-arg-active? "commit:amend")
       (magit-commit-buffer (gix-head-message *magit-dir*) "yes")
       (magit-commit-buffer "" "no")))
-(define-command (magit-do-reword) (magit-commit-buffer (gix-head-message *magit-dir*) "yes"))
+;; Reword edits only the message: `--only` keeps whatever is staged out of HEAD.
+(define-command (magit-do-reword) (magit-commit-buffer (gix-head-message *magit-dir*) "reword"))
 (define-command (magit-do-amend)
   (save-some-buffers)
   (magit-do (append (list "commit" "--amend" "--no-edit") (magit-commit-flags)) "Amended HEAD")
   (transient-clear-args "commit:"))
 
 (define (magit-commit-confirm)
-  (let ((msg (magit-strip-comments (buffer-string)))
-        (amend (equal? (buffer-local-get "magit-amend") "yes")))
+  (let* ((msg (magit-strip-comments (buffer-string)))
+         (kind (buffer-local-get "magit-amend"))
+         (amend (or (equal? kind "yes") (equal? kind "reword"))))
     (if (equal? msg "")
         (message "Aborting: empty commit message")
         ;; Resolve the real git dir: in a linked worktree or submodule `.git` is
@@ -1351,13 +1368,17 @@
           (let ((r (call-process-full "git"
                      (append (list "-C" *magit-dir* "commit")
                              (if amend (list "--amend") '())
+                             (if (equal? kind "reword") (list "--only") '())
                              (magit-commit-flags)
                              (list "-F" file)) "")))
-            (kill-buffer-named "*git-commit*")
-            (transient-clear-args "commit:")
-            (magit-render)
+            ;; Keep the message buffer when the commit fails (a rejecting
+            ;; hook, nothing staged): the typed message must not be lost.
             (if (equal? (car r) "0")
-                (message (if amend "Amended HEAD" "Committed"))
+                (begin
+                  (kill-buffer-named "*git-commit*")
+                  (transient-clear-args "commit:")
+                  (magit-render)
+                  (message (if amend "Amended HEAD" "Committed")))
                 (magit-error (nth r 2))))))))
 (define (magit-commit-cancel)
   (kill-buffer-named "*git-commit*")

@@ -300,10 +300,18 @@
 
 ;; (prefix . target) for the link on the current line, or #f. `prefix` is one of
 ;; "id:", "file:", "http://", "https://", or "".
+(define *org-roam-link-re* "\\[\\[(id:|file:|https?://)?([^]]+?)\\](\\[[^]]*\\])?\\]")
+;; The link under point when the line has several (point inside its `[[…]]`),
+;; else the line's first link — it used to always be the first.
 (define (org-roam--link-at-point)
-  (let ((c (regexp-captures "\\[\\[(id:|file:|https?://)?([^]]+?)\\](\\[[^]]*\\])?\\]"
-                            (org-roam--current-line))))
-    (if (null? c) #f (cons (nth c 1) (nth c 2)))))
+  (let* ((b (line-bounds)) (p (point))
+         (hits (buffer-search-all *org-roam-link-re* (car b) (cadr b)))
+         (hits (if (string? hits) '() hits))
+         (under (filter (lambda (h) (and (<= (nth h 0) p) (< p (nth h 1)))) hits))
+         (h (cond ((not (null? under)) (car under))
+                  ((not (null? hits)) (car hits))
+                  (else #f))))
+    (and h (cons (nth h 3) (nth h 4)))))
 
 (define (org-roam--visit-id id)
   (org-roam--ensure-index)

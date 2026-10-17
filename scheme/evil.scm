@@ -214,9 +214,13 @@
 (define (evil-toggle-case)
   (let* ((b (line-bounds)) (eol (cadr b)) (p (point)))
     (when (< p eol)
-      (let* ((c (buffer-substring p (+ p 1))) (up (string-upcase c)) (dn (string-downcase c)))
-        (when (not (equal? up dn))
-          (replace-region p (+ p 1) (if (equal? c up) dn up)))))))
+      ;; One grapheme, not one byte: `(+ p 1)` inside a multibyte letter (é)
+      ;; read as "" and nothing changed. An uncased char just advances, as Vim.
+      (let* ((q (grapheme-forward p))
+             (c (buffer-substring p q)) (up (string-upcase c)) (dn (string-downcase c)))
+        (if (not (equal? up dn))
+            (replace-region p q (if (equal? c up) dn up))
+            (when (< q eol) (goto-char q)))))))
 
 ;; J — join the next line onto this one, collapsing its leading indentation to a
 ;; single space (Vim `J`). Kept self-contained here (evil.scm doesn't require
@@ -391,8 +395,15 @@
 ;; stored direction (vim: two `,` in a row go the same way, not back and forth).
 (define (evil-find-repeat-dir forward extend)
   (when *evil-find-char*
-    (evil-find-go (evil-find-nth (point) *evil-find-char* *evil-find-till* forward (evil-count))
-                  extend)))
+    ;; After `tx` point is parked just before the `x`, so searching from point
+    ;; re-finds that same `x` and never moves: a repeated till starts one
+    ;; grapheme further on (Vim's `;` after `t` goes to before the NEXT `x`).
+    (let* ((p (point))
+           (from (if *evil-find-till*
+                     (if forward (grapheme-forward p) (grapheme-backward p))
+                     p)))
+      (evil-find-go (evil-find-nth from *evil-find-char* *evil-find-till* forward (evil-count))
+                    extend))))
 (define (evil-find-repeat)                (evil-find-repeat-dir *evil-find-forward* #f))
 (define (evil-find-repeat-reverse)        (evil-find-repeat-dir (not *evil-find-forward*) #f))
 (define (evil-find-repeat-visual)         (evil-find-repeat-dir *evil-find-forward* #t))
@@ -856,7 +867,10 @@
 (evil-builtin-motion "%"
   (lambda (p n raw)
     (if (> raw 0)
-        (let ((ln (min (evil-last-line) (quotient (+ (* raw (line-count)) 99) 100))))
+        ;; N% → line ceil(N × lines / 100), 1-based, over the real lines (not
+        ;; the phantom one after a trailing newline); `evil-last-line` is 0-based.
+        (let* ((nlines (+ (evil-last-line) 1))
+               (ln (min nlines (quotient (+ (* raw nlines) 99) 100))))
           (list "line" p (pos-at-char-column (max 0 (- ln 1)) 0)))
         (let ((tg (evil-matchit-target))) (and tg (evil-mres "inclusive" tg))))))
 (for-each

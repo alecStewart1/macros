@@ -11,7 +11,24 @@
 (for-each (lambda (e) (set-extension e "markdown"))
           (list "md" "markdown" "mdown" "mkd" "mkdn"))
 
-(define (md-lines) (buffer-lines))
+;; The buffer's lines with fenced code masked: a `#` at the start of a line
+;; inside ``` / ~~~ fences (a shell comment, a C preprocessor line) is not a
+;; heading, so it must not be hidden, scaled, folded or jumped to. The `#` is
+;; swapped for a space — same byte length, so offsets computed from these
+;; lines stay right.
+(define (md--fence? line) (>= (string-match "^ {0,3}(```|~~~)" line) 0))
+(define (md--mask-fences lines)
+  (let loop ((ls lines) (in #f) (acc '()))
+    (if (null? ls)
+        (reverse acc)
+        (let ((line (car ls)))
+          (cond
+            ((md--fence? line) (loop (cdr ls) (not in) (cons line acc)))
+            ((and in (starts-with? line "#"))
+             (loop (cdr ls) in (cons (string-append " " (substring line 1 (string-length line)))
+                                     acc)))
+            (else (loop (cdr ls) in (cons line acc))))))))
+(define (md-lines) (md--mask-fences (buffer-lines)))
 
 (define (md-heading-line? line)
   (>= (string-match "^#+ " line) 0))
@@ -54,7 +71,9 @@
 ;; existing hide/scale overlays automatically on every edit, so whenever this is
 ;; unchanged we skip the clear-and-repaint — which is what kept the document from
 ;; blinking on each keystroke AND on Enter (line indices shift, levels don't).
-(define *md-heading-signature* #f)
+;; Per buffer (an alist keyed by buffer name): with one global, two markdown
+;; buffers whose heading levels happened to match skipped each other's repaint.
+(define *md-heading-signature* '())
 (define (md--heading-signature lines)
   (let loop ((ls lines) (acc ""))
     (if (null? ls)
@@ -93,8 +112,8 @@
     (guard-buffer-unchanged "md--fontify-stale")
     (let* ((lines (md-lines))
            (sig (md--heading-signature lines)))
-      (when (not (equal? sig *md-heading-signature*))
-        (set! *md-heading-signature* sig)
+      (when (not (equal? sig (buffer-state-get *md-heading-signature* #f)))
+        (set! *md-heading-signature* (buffer-state-set *md-heading-signature* sig))
         (clear-overlay-hides)
         (clear-line-scales)
         (let loop ((ls lines) (off 0) (i 0))
@@ -116,7 +135,7 @@
 ;; used after a toggle, where the desired overlays changed but the headings
 ;; didn't.
 (define (md--fontify-force)
-  (set! *md-heading-signature* #f)
+  (set! *md-heading-signature* (buffer-state-set *md-heading-signature* #f))
   (md--fontify))
 
 ;; Debounced live refresh (core's make-debounce): each edit schedules a timer;
@@ -131,7 +150,7 @@
 ;; while it was in flight): the signature describes decorations that never made
 ;; it to the screen, so forget it and repaint once the current burst settles.
 (define (md--fontify-stale)
-  (set! *md-heading-signature* #f)
+  (set! *md-heading-signature* (buffer-state-set *md-heading-signature* #f))
   (md--fontify-schedule))
 
 ;; On open, always repaint (the global signature may carry over from another

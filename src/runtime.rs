@@ -305,6 +305,28 @@ pub fn theme_names() -> Vec<String> {
 }
 
 /// A theme definition by name — the contents of `scheme/themes/<name>.scm`.
+/// Every face name some bundled theme sets (`(set-face "name" …)` and the
+/// `set-face-*` attribute setters). Loading a theme clears exactly these, so
+/// switching themes leaves no stale theme colors while faces that only a
+/// module or the user's config defines (ediff's `diff-added`, rainbow's
+/// `rainbow-N`) survive — they used to be wiped by every `load-theme`.
+pub fn theme_face_names() -> &'static std::collections::HashSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let re = regex::Regex::new(r#"\(set-face[a-z-]*\s+"([^"]+)""#).expect("valid regex");
+        theme_names()
+            .iter()
+            .filter_map(|n| theme_script(n))
+            .flat_map(|src| {
+                re.captures_iter(src)
+                    .map(|c| c[1].to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    })
+}
+
 pub fn theme_script(name: &str) -> Option<&'static str> {
     SCHEME
         .get_file(format!("themes/{name}.scm"))
@@ -556,6 +578,19 @@ pub fn include_prelude(dir: &Path) -> String {
         "(define *config-directory* \"{escaped}\")\n\
          (define (include path) (load (string-append *config-directory* \"/\" path)))\n"
     )
+}
+
+#[cfg(test)]
+mod theme_face_tests {
+    #[test]
+    fn theme_face_names_cover_theme_faces_only() {
+        let names = super::theme_face_names();
+        assert!(names.contains("background"));
+        assert!(names.contains("comment"));
+        // Module-owned faces survive a theme switch.
+        assert!(!names.contains("diff-added"));
+        assert!(!names.contains("rainbow-1"));
+    }
 }
 
 #[cfg(test)]
