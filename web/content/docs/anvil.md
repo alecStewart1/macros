@@ -95,6 +95,17 @@ While editing a `.scm` file (`steel` or `macros-steel` mode), you can send code 
 
 Each evaluation starts with a fresh output buffer, so you only ever see *this* form's output.
 
+## Running Steel tests
+
+The test runner's <kbd>C-c x f</kbd> (`test-file`) and <kbd>C-c x t</kbd> (`test-at-point`) work in `.scm` files too.
+
+- **With the [`steel` CLI](https://github.com/mattwparas/steel) on your `PATH`**, the file runs as `steel <file>` from the nearest `cog.scm` directory. Output goes to `*compilation*`, so failures are clickable.
+- **Without the CLI**, Anvil runs the tests instead.
+  - <kbd>C-c x f</kbd> restarts the image and loads the file into it. Everything the file prints, and its error if it fails, lands in the REPL transcript. A clean run can't pass on state left over from an earlier session.
+  - <kbd>C-c x t</kbd> evaluates the top-level form at point in the current image.
+
+Change the CLI command from `init.scm` with `test-runner-set-command`, e.g. `(test-runner-set-command "steel" 'file "steel test {file}")`.
+
 ## Introspecting the live image
 
 These commands answer against the **actual running image** — its real bindings, docstrings, and macros — not a static analysis of your source. (That distinction matters: the [LSP](/docs/lsp) completion/diagnostics you get while editing come from a separate compile-only engine; these come from Anvil itself.)

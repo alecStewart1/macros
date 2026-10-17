@@ -9855,6 +9855,35 @@ mod test_runner_lib {
         v(engine, &format!("({f} src {line})"))
     }
 
+    #[test]
+    fn steel_files_use_the_steel_runner() {
+        let (engine, _rx) = engine();
+        assert_eq!(
+            v(&engine, r#"(test-language-of "lib/util.scm")"#),
+            r#""steel""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(test-command 'file "steel" "tests/util.scm" "" 0)"#
+            ),
+            r#"("steel 'tests/util.scm'" . #false)"#
+        );
+        // No suite command: the steel CLI runs one file at a time.
+        assert_eq!(
+            v(&engine, r#"(car (test-command 'project "steel" "" "" 0))"#),
+            "#false"
+        );
+        // `executable-find` answers "" for something that isn't installed.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(executable-find "surely-not-a-real-program-xyz")"#
+            ),
+            r#""""#
+        );
+    }
+
     const RUST: &str = r#"use std::fmt;
 
 fn helper() -> u32 { 1 }

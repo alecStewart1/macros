@@ -1018,6 +1018,10 @@ pub enum EditorCommand {
     AnvilHistory(bool),
     /// Rebuild the ANVIL REPL engine — a fresh image (SLIME's restart).
     AnvilReset,
+    /// Load the active buffer's file into a *fresh* ANVIL image, rendering its
+    /// output and result in the REPL — the Steel test runner without a `steel`
+    /// CLI.
+    AnvilTestFile,
     /// `eval-last-sexp` into the ANVIL image: the region, else the sexp before
     /// point; the result is echoed.
     AnvilEvalLastSexp,

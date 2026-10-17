@@ -102,3 +102,61 @@ mod tests {
         assert_eq!(expand_tilde("~user/foo"), "~user/foo");
     }
 }
+
+/// Whether the file at `p` has an execute bit (always true off Unix, where the
+/// extension decides).
+#[cfg(unix)]
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.metadata()
+        .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_: &std::path::Path) -> bool {
+    true
+}
+
+/// The full path of executable `name` on `PATH` (Emacs `executable-find`). A
+/// name with a path separator is checked as given. On Windows, `.exe` / `.cmd`
+/// / `.bat` are tried too.
+pub fn executable_find(name: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+    if name.is_empty() {
+        return None;
+    }
+    let candidates = |dir: &Path| -> Vec<PathBuf> {
+        let base = dir.join(name);
+        if cfg!(windows) {
+            ["", ".exe", ".cmd", ".bat"]
+                .iter()
+                .map(|ext| PathBuf::from(format!("{}{ext}", base.display())))
+                .collect()
+        } else {
+            vec![base]
+        }
+    };
+    let runnable = |p: &Path| p.is_file() && is_executable(p);
+    if name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') {
+        let p = PathBuf::from(name);
+        return runnable(&p).then_some(p);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .flat_map(|dir| candidates(&dir))
+        .find(|p| runnable(p))
+}
+
+#[cfg(test)]
+mod executable_find_tests {
+    use super::executable_find;
+
+    #[test]
+    #[cfg(unix)]
+    fn finds_programs_on_path() {
+        assert!(executable_find("sh").is_some_and(|p| p.ends_with("sh")));
+        assert!(executable_find("surely-not-a-real-program-xyz").is_none());
+        assert!(executable_find("/bin/sh").is_some());
+        assert!(executable_find("").is_none());
+    }
+}

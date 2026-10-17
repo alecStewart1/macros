@@ -24,6 +24,10 @@
 ;;   js/ts   npx jest <file> -t '<name>'  |  npx vitest run <file> -t '<name>'
 ;;           (jest vs vitest from package.json; otherwise `npm test -- <file>`)
 ;;   zig     zig test <file> --test-filter '<name>'
+;;   steel   steel <file>   (the `steel` CLI, run from the nearest cog.scm)
+;;           Without the CLI, test-file loads the file into a fresh ANVIL image
+;;           (output and result in *anvil-repl*), and test-at-point evaluates
+;;           the top-level form at point there.
 ;; Anything else prompts for a command (default: the last one).
 ;;
 ;; Commands are templates — change one from init.scm with
@@ -47,7 +51,9 @@
         (list "jest"   "npx jest"         "npx jest {file}"               "npx jest {file} -t {name-regex}")
         (list "vitest" "npx vitest run"   "npx vitest run {file}"         "npx vitest run {file} -t {name-regex}")
         (list "npm"    "npm test"         "npm test -- {file}"            "npm test -- {file}")
-        (list "zig"    "zig build test"   "zig test {file}"               "zig test {file} --test-filter {name}")))
+        (list "zig"    "zig build test"   "zig test {file}"               "zig test {file} --test-filter {name}")
+        ;; The steel CLI runs a whole file; there's no per-test filter or suite.
+        (list "steel"  #f                 "steel {file}"                  "steel {file}")))
 
 (define (test-kind-index kind)
   (let ((k (if (symbol? kind) (symbol->string kind) kind)))
@@ -302,6 +308,7 @@
              (ends-with? path ".mts") (ends-with? path ".cts"))
          "js")
         ((ends-with? path ".zig") "zig")
+        ((ends-with? path ".scm") "steel")
         (else #f)))
 
 ;; The command for `kind` ('project / 'file / 'point) given the runner, the file
@@ -376,6 +383,8 @@
                                                (cons "name" (test-shell-quote name))))
                        #f)
                  (cons #f "Point is not inside a test block")))))
+      ((equal? runner "steel")
+       (cons (test-expand tmpl (list (cons "file" (test-shell-quote rel)))) #f))
       (else (cons (test-expand tmpl '()) #f)))))
 
 ;; --- impure glue --------------------------------------------------------------------
@@ -409,6 +418,7 @@
                                    ""))
                root)))
       ((equal? lang "zig") (cons "zig" (or (test-find-up fdir (list "build.zig")) fdir)))
+      ((equal? lang "steel") (cons "steel" (or (test-find-up fdir (list "cog.scm")) fdir)))
       ;; Unknown file type: only the project suite can be guessed, from markers.
       ((equal? k "project")
        (let ((dir (project-directory)))
@@ -431,9 +441,18 @@
 (define (test-run-prompted cmd)
   (test-launch (project-directory) cmd))
 
+;; Steel without the `steel` CLI: run in the editor's own isolated ANVIL image.
+(define (test-steel-in-anvil kind)
+  (let ((k (if (symbol? kind) (symbol->string kind) kind)))
+    (cond ((equal? k "file") (anvil-test-file))
+          ((equal? k "point") (anvil-eval-defun))
+          (else (message "No Steel test suite command; set one with test-runner-set-command")))))
+
 (define (test-run kind)
   (let* ((file (buffer-file-name))
          (plan (test-runner-for file kind)))
+    (if (and plan (equal? (car plan) "steel") (equal? (executable-find "steel") ""))
+        (test-steel-in-anvil kind)
     (if (not plan)
         (read-string "Test command: " 'test-run-prompted
                      (if *test-last* (cdr *test-last*) "make test"))
@@ -443,7 +462,7 @@
                (res (test-command kind runner rel (buffer-string) (buffer-line))))
           (if (car res)
               (test-launch dir (car res))
-              (message (cdr res)))))))
+              (message (cdr res))))))))
 
 (define-command (test-at-point) (test-run 'point))
 (define-command (test-file) (test-run 'file))
