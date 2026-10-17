@@ -758,10 +758,10 @@ pub struct Editor {
     image_cache: HashMap<PathBuf, CachedImage>,
     /// The open transient popup, if any (the magit / `transient.el` pattern).
     transient: Option<TransientState>,
-    /// The title-bar dropdown (the perspectives switcher), published from
-    /// Scheme via `set-titlebar-dropdown`. `None` until Scheme pushes a
-    /// non-empty item list (fresh install, no projects yet).
-    titlebar_dropdown: Option<TitlebarDropdownState>,
+    /// The title-bar menus (`set-titlebar-menu`, scheme/titlebar-menu.scm),
+    /// left to right in first-publish order — the perspectives switcher
+    /// registers first. Empty ones are kept (hidden) so they hold their place.
+    titlebar_dropdowns: Vec<TitlebarDropdownState>,
     /// Named mode-line registers written from Scheme (`set-mode-line-slot`),
     /// e.g. "project" → "macros", "git" → "main". A `Slot` segment in
     /// `mode_line_format` looks up its value here; absent/empty = renders nothing.
@@ -888,15 +888,27 @@ pub struct TransientView {
     pub columns: Vec<TransientColumnView>,
 }
 
-/// The title-bar dropdown control (the perspectives switcher), as published
-/// from Scheme via `set-titlebar-dropdown`. The editor owns the open/closed
-/// state, the live filter, and the keyboard selection; the item list and
-/// callback are Scheme's.
+/// One title-bar menu, as published from Scheme via `set-titlebar-menu` (the
+/// perspectives switcher is one). The editor owns the open/closed state, the
+/// live filter, and the keyboard selection; the items and commands are
+/// Scheme's.
 pub(crate) struct TitlebarDropdownState {
+    /// The menu's title: its identity across re-publishes.
+    pub(crate) key: String,
     pub(crate) items: Vec<SharedString>,
+    /// Per-item Scheme command, parallel to `items`; a missing or empty entry
+    /// falls back to `callback`.
+    pub(crate) commands: Vec<String>,
+    /// The checkmarked item, shown on the trigger in place of `trigger`.
     pub(crate) active: SharedString,
     /// The Scheme function a click hands the picked label to.
     pub(crate) callback: String,
+    /// The trigger's label while nothing is active (the title).
+    pub(crate) trigger: SharedString,
+    /// The dim heading over the rows.
+    pub(crate) section: SharedString,
+    /// The empty search field's placeholder.
+    pub(crate) placeholder: SharedString,
     /// Whether the menu is unfolded beneath the title bar.
     pub(crate) open: bool,
     /// The search-field text; filters the visible rows (case-insensitive
@@ -911,10 +923,15 @@ pub(crate) struct TitlebarDropdownState {
     pub(crate) selected: Option<usize>,
 }
 
-/// A render snapshot of the title-bar dropdown for `Workspace::render`. The
+/// A render snapshot of one title-bar dropdown for `Workspace::render`. The
 /// rows are pre-filtered; each carries its index into the full item list so a
 /// click can name the item stably while the filter narrows.
 pub struct TitlebarDropdownView {
+    pub key: String,
+    /// The trigger's label: the active item, else the dropdown's name.
+    pub trigger: SharedString,
+    pub section: SharedString,
+    pub placeholder: SharedString,
     /// `(original_index, label)` for each row surviving the filter.
     pub items: Vec<(usize, SharedString)>,
     pub active: SharedString,
@@ -1488,7 +1505,7 @@ impl Editor {
             recenter_point: usize::MAX,
             image_cache: HashMap::new(),
             transient: None,
-            titlebar_dropdown: None,
+            titlebar_dropdowns: Vec::new(),
             mode_line_slots: HashMap::new(),
             mode_line_format: default_mode_line_format(),
             panes: vec![Pane {
@@ -3895,7 +3912,7 @@ impl Editor {
         })
     }
 
-    // --- Title-bar dropdown (the perspectives switcher) ---------------------
+    // --- Title-bar dropdowns (perspectives switcher + Scheme menus) ----------
 
     /// The rows surviving `filter` as `(original_index, label)` — the shared
     /// definition of "visible" for rendering, arrow keys, and Enter.
@@ -3909,10 +3926,23 @@ impl Editor {
             .collect()
     }
 
-    /// Whether the title-bar dropdown menu is currently unfolded (and thus
+    /// The unfolded title-bar menu, if any (at most one is open at a time).
+    fn titlebar_dropdown_open_mut(&mut self) -> Option<&mut TitlebarDropdownState> {
+        self.titlebar_dropdowns.iter_mut().find(|d| d.open)
+    }
+
+    /// Fold `d` and clear its transient search state.
+    fn titlebar_dropdown_fold(d: &mut TitlebarDropdownState) {
+        d.open = false;
+        d.filter.clear();
+        d.cursor = 0;
+        d.selected = None;
+    }
+
+    /// Whether a title-bar dropdown menu is currently unfolded (and thus
     /// modal: editing keys belong to its search field, not the buffer).
     pub(super) fn titlebar_dropdown_open(&self) -> bool {
-        self.titlebar_dropdown.as_ref().is_some_and(|d| d.open)
+        self.titlebar_dropdowns.iter().any(|d| d.open)
     }
 
     /// Byte offset of char index `cursor` in `filter` (caret ops are
@@ -3925,75 +3955,106 @@ impl Editor {
             .unwrap_or(filter.len())
     }
 
-    /// A render snapshot of the title-bar dropdown, if Scheme published one.
-    pub fn titlebar_dropdown_view(&self) -> Option<TitlebarDropdownView> {
-        self.titlebar_dropdown.as_ref().map(|d| {
-            let items = Self::titlebar_dropdown_filtered(d);
-            TitlebarDropdownView {
-                selected: d.selected.map(|s| s.min(items.len().saturating_sub(1))),
-                items,
-                active: d.active.clone(),
-                open: d.open,
-                filter: d.filter.clone(),
-                cursor: d.cursor.min(d.filter.chars().count()),
-            }
-        })
+    /// Render snapshots of the visible (non-empty) title-bar menus, left to
+    /// right.
+    pub fn titlebar_dropdown_views(&self) -> Vec<TitlebarDropdownView> {
+        self.titlebar_dropdowns
+            .iter()
+            .filter(|d| !d.items.is_empty())
+            .map(|d| {
+                let items = Self::titlebar_dropdown_filtered(d);
+                TitlebarDropdownView {
+                    key: d.key.clone(),
+                    trigger: if d.active.is_empty() {
+                        d.trigger.clone()
+                    } else {
+                        d.active.clone()
+                    },
+                    section: d.section.clone(),
+                    placeholder: d.placeholder.clone(),
+                    selected: d.selected.map(|s| s.min(items.len().saturating_sub(1))),
+                    items,
+                    active: d.active.clone(),
+                    open: d.open,
+                    filter: d.filter.clone(),
+                    cursor: d.cursor.min(d.filter.chars().count()),
+                }
+            })
+            .collect()
     }
 
-    /// A click on the title-bar trigger: unfold or fold the menu. The search
-    /// field starts empty on every unfold, and no row is highlighted until an
-    /// arrow key summons the keyboard selection.
-    pub fn titlebar_dropdown_toggle(&mut self, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut() {
-            d.open = !d.open;
-            d.filter.clear();
-            d.cursor = 0;
-            d.selected = None;
-            cx.notify();
+    /// Insert or replace the menu keyed `state.key`, keeping its position
+    /// and — when it is unfolded (a find-file-hook re-publishing mid-browse) —
+    /// its open state, filter, caret, and selection. A menu emptied of items
+    /// stays in the list (hidden, and folded) so it keeps its slot.
+    pub(super) fn titlebar_dropdown_publish(&mut self, mut state: TitlebarDropdownState) {
+        match self
+            .titlebar_dropdowns
+            .iter()
+            .position(|d| d.key == state.key)
+        {
+            Some(i) => {
+                let old = &self.titlebar_dropdowns[i];
+                if !state.items.is_empty() {
+                    state.open = old.open;
+                    state.filter = old.filter.clone();
+                    state.cursor = old.cursor;
+                    state.selected = old.selected;
+                }
+                self.titlebar_dropdowns[i] = state;
+            }
+            None => self.titlebar_dropdowns.push(state),
         }
     }
 
-    /// Fold the menu without selecting (backdrop click, Escape, C-g).
+    /// A click on the trigger for dropdown `key`: unfold or fold its menu,
+    /// folding any other. The search field starts empty on every unfold, and
+    /// no row is highlighted until an arrow key summons the keyboard selection.
+    pub fn titlebar_dropdown_toggle(&mut self, key: &str, cx: &mut Context<Self>) {
+        for d in &mut self.titlebar_dropdowns {
+            let open = d.key == key && !d.open;
+            Self::titlebar_dropdown_fold(d);
+            d.open = open;
+        }
+        cx.notify();
+    }
+
+    /// Fold the open menu without selecting (backdrop click, Escape, C-g).
     pub fn titlebar_dropdown_close(&mut self, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut()
-            && d.open
-        {
-            d.open = false;
-            d.filter.clear();
-            d.cursor = 0;
-            d.selected = None;
+        if let Some(d) = self.titlebar_dropdown_open_mut() {
+            Self::titlebar_dropdown_fold(d);
             cx.notify();
         }
     }
 
     /// A click on the row for item `index` (an index into the FULL item list,
-    /// as carried by the filtered view): fold the menu and hand the row's label
-    /// to the Scheme callback (e.g. `(perspective-select "macros")`), mirroring
-    /// `transient_click`'s close-then-dispatch shape.
-    pub fn titlebar_dropdown_click(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(d) = self.titlebar_dropdown.as_mut() else {
+    /// as carried by the filtered view) of dropdown `key`: fold the menu, then
+    /// run the row's own command if it has one, else hand the row's label to
+    /// the dropdown's callback (e.g. `(perspective-select "macros")`),
+    /// mirroring `transient_click`'s close-then-dispatch shape.
+    pub fn titlebar_dropdown_click(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
+        let Some(d) = self.titlebar_dropdowns.iter_mut().find(|d| d.key == key) else {
             return;
         };
         let Some(item) = d.items.get(index).cloned() else {
             return;
         };
-        d.open = false;
-        d.filter.clear();
-        d.cursor = 0;
-        d.selected = None;
+        Self::titlebar_dropdown_fold(d);
+        let command = d.commands.get(index).filter(|c| !c.is_empty()).cloned();
         let callback = d.callback.clone();
         cx.notify();
-        self.script.dispatch_action(&callback, Some(item.as_ref()));
+        match command {
+            Some(command) => self.script.dispatch_action(&command, None),
+            None => self.script.dispatch_action(&callback, Some(item.as_ref())),
+        }
     }
 
-    /// Typed text while the menu is open (routed from the IME, like Helm's
+    /// Typed text while a menu is open (routed from the IME, like Helm's
     /// filter): insert at the caret. The keyboard selection resets — the
     /// narrowed list has no highlight until arrows summon one (Enter still
     /// picks the top match).
     pub(super) fn titlebar_dropdown_input(&mut self, text: &str, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut()
-            && d.open
-        {
+        if let Some(d) = self.titlebar_dropdown_open_mut() {
             let at = Self::titlebar_dropdown_byte_at(&d.filter, d.cursor);
             d.filter.insert_str(at, text);
             d.cursor += text.chars().count();
@@ -4004,8 +4065,7 @@ impl Editor {
 
     /// Backspace in the search field: delete the char before the caret.
     pub(super) fn titlebar_dropdown_backspace(&mut self, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut()
-            && d.open
+        if let Some(d) = self.titlebar_dropdown_open_mut()
             && d.cursor > 0
         {
             d.cursor -= 1;
@@ -4018,8 +4078,7 @@ impl Editor {
 
     /// Forward delete in the search field: delete the char under the caret.
     pub(super) fn titlebar_dropdown_delete(&mut self, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut()
-            && d.open
+        if let Some(d) = self.titlebar_dropdown_open_mut()
             && d.cursor < d.filter.chars().count()
         {
             let at = Self::titlebar_dropdown_byte_at(&d.filter, d.cursor);
@@ -4031,9 +4090,7 @@ impl Editor {
 
     /// Move the search-field caret by `delta` chars (Left/Right), clamped.
     pub(super) fn titlebar_dropdown_cursor_move(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut()
-            && d.open
-        {
+        if let Some(d) = self.titlebar_dropdown_open_mut() {
             let max = d.filter.chars().count();
             d.cursor = d.cursor.min(max).saturating_add_signed(delta).min(max);
             cx.notify();
@@ -4043,9 +4100,7 @@ impl Editor {
     /// Place the search-field caret at char index `pos` (a click on the field,
     /// or Home/End via 0 / `usize::MAX`), clamped to the text.
     pub fn titlebar_dropdown_cursor_set(&mut self, pos: usize, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut()
-            && d.open
-        {
+        if let Some(d) = self.titlebar_dropdown_open_mut() {
             d.cursor = pos.min(d.filter.chars().count());
             cx.notify();
         }
@@ -4054,9 +4109,7 @@ impl Editor {
     /// Move the keyboard selection by `delta` within the filtered rows. The
     /// first press summons the highlight at the top row.
     pub(super) fn titlebar_dropdown_move(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if let Some(d) = self.titlebar_dropdown.as_mut()
-            && d.open
-        {
+        if let Some(d) = self.titlebar_dropdown_open_mut() {
             let len = Self::titlebar_dropdown_filtered(d).len();
             if len == 0 {
                 return;
@@ -4073,7 +4126,7 @@ impl Editor {
     /// Enter: pick the keyboard-selected row, or — with no selection but a
     /// non-empty filter — the top match (type-and-enter, the picker idiom).
     pub(super) fn titlebar_dropdown_select_current(&mut self, cx: &mut Context<Self>) {
-        let Some(d) = self.titlebar_dropdown.as_ref() else {
+        let Some(d) = self.titlebar_dropdowns.iter().find(|d| d.open) else {
             return;
         };
         let items = Self::titlebar_dropdown_filtered(d);
@@ -4085,7 +4138,8 @@ impl Editor {
         if let Some(row) = row
             && let Some((index, _)) = items.get(row)
         {
-            self.titlebar_dropdown_click(*index, cx);
+            let (key, index) = (d.key.clone(), *index);
+            self.titlebar_dropdown_click(&key, index, cx);
         }
     }
 

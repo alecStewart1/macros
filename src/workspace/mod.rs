@@ -509,71 +509,56 @@ impl Workspace {
         col.into_any_element()
     }
 
-    /// The title-bar perspectives dropdown trigger: the active perspective's
-    /// name plus a chevron, anchored just right of the macOS traffic lights.
-    /// Clicking toggles the menu (see [`Self::render_titlebar_dropdown_menu`]).
-    /// Like the update pill, it floats above the draggable title layer and
-    /// `occlude`s so a click never starts a window drag.
+    /// One title-bar dropdown trigger: the active item's name (else the
+    /// dropdown's own) plus a chevron. Clicking toggles its menu (see
+    /// [`Self::render_titlebar_dropdown_menu`]). The triggers sit in a row just
+    /// right of the macOS traffic lights; like the update pill, the row floats
+    /// above the draggable title layer and `occlude`s so a click never starts
+    /// a window drag.
     fn render_titlebar_dropdown_trigger(
         &self,
+        index: usize,
         dropdown: &TitlebarDropdownView,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui::Stateful<gpui::Div> {
         let theme = cx.global::<Theme>();
         let dim = theme.color("dim", theme.foreground());
         let mut hover_bg = dim;
         hover_bg.a = 0.15;
-        let label: SharedString = if dropdown.active.is_empty() {
-            "projects".into()
-        } else {
-            dropdown.active.clone()
-        };
-        div()
-            .occlude()
-            .absolute()
-            .left(TITLE_LEFT_INSET + px(8.))
-            .top_0()
-            .h_full()
+        let key = dropdown.key.clone();
+        let mut trigger = div()
+            .id(("titlebar-dropdown-trigger", index))
+            .hover(move |style| style.bg(hover_bg))
             .flex()
+            .flex_row()
             .items_center()
-            .child(
-                div()
-                    .id("titlebar-dropdown-trigger")
-                    .hover(move |style| style.bg(hover_bg))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py(px(1.))
-                    .rounded_md()
-                    .text_size(px(12.))
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _ev, _window, cx| {
-                            this.editor
-                                .update(cx, |editor, cx| editor.titlebar_dropdown_toggle(cx));
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(label)
-                    .child(div().text_color(dim).child(SharedString::from("▾"))),
+            .gap_1()
+            .px_2()
+            .py(px(1.))
+            .rounded_md()
+            .text_size(px(12.))
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _ev, _window, cx| {
+                    this.editor
+                        .update(cx, |editor, cx| editor.titlebar_dropdown_toggle(&key, cx));
+                    cx.stop_propagation();
+                }),
             )
-            .into_any_element()
+            .child(dropdown.trigger.clone())
+            .child(div().text_color(dim).child(SharedString::from("▾")));
+        if dropdown.open {
+            trigger = trigger.bg(hover_bg);
+        }
+        trigger
     }
 
-    /// The unfolded perspectives menu: a full-window transparent backdrop that
-    /// folds the menu on any stray click, then the item panel anchored beneath
-    /// the trigger. Rendered as the workspace root's last children so it paints
-    /// above the editor area.
-    fn render_titlebar_dropdown_menu(
-        &self,
-        dropdown: &TitlebarDropdownView,
-        colors: Colors,
-        cx: &mut Context<Self>,
-    ) -> (gpui::AnyElement, gpui::AnyElement) {
-        let backdrop = div()
+    /// The full-window transparent backdrop behind an unfolded title-bar
+    /// menu: folds it on any stray click. Rendered as the workspace root's
+    /// last child so it covers the editor area.
+    fn render_titlebar_dropdown_backdrop(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
             .occlude()
             .absolute()
             .inset_0()
@@ -585,8 +570,18 @@ impl Workspace {
                     cx.stop_propagation();
                 }),
             )
-            .into_any_element();
+            .into_any_element()
+    }
 
+    /// An unfolded title-bar menu: the search field over the item panel,
+    /// anchored beneath its trigger and `deferred` so it paints above the
+    /// editor area and the backdrop.
+    fn render_titlebar_dropdown_menu(
+        &self,
+        dropdown: &TitlebarDropdownView,
+        colors: Colors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = cx.global::<Theme>();
         let foreground = theme.foreground();
         // Menu chrome: a hairline border and a soft hover pill (both derived
@@ -628,7 +623,7 @@ impl Workspace {
             search_row = search_row.child(caret()).child(
                 div()
                     .text_color(colors.dim)
-                    .child(SharedString::from("Search projects…")),
+                    .child(dropdown.placeholder.clone()),
             );
         } else {
             for (char_index, ch) in filter_chars.iter().enumerate() {
@@ -674,13 +669,16 @@ impl Workspace {
             .pb(px(2.))
             .text_size(px(10.))
             .text_color(colors.dim)
-            .child(SharedString::from("Recent Projects"));
+            .child(dropdown.section.clone());
 
         let mut panel = div()
             .flex()
             .flex_col()
             .pb_1()
             .min_w(px(220.))
+            // Laid out inside the trigger's narrow slot: without nowrap, text
+            // measures as wrapped (tall) but paints on one line, leaving gaps.
+            .whitespace_nowrap()
             .bg(colors.mode_line_bg)
             .border_1()
             .border_color(hairline)
@@ -692,8 +690,9 @@ impl Workspace {
             .child(search_row)
             .child(section_label);
         for (row_index, (item_index, item)) in dropdown.items.iter().enumerate() {
-            let active = *item == dropdown.active;
+            let active = !dropdown.active.is_empty() && *item == dropdown.active;
             let item_index = *item_index;
+            let key = dropdown.key.clone();
             // Rows are inset (mx_1 + rounded) so the highlight reads as a pill
             // inside the panel; the keyboard-selected row is filled the same
             // way a hover is. The id makes the row stateful so gpui tracks its
@@ -715,7 +714,7 @@ impl Workspace {
                     gpui::MouseButton::Left,
                     cx.listener(move |this, _ev, _window, cx| {
                         this.editor.update(cx, |editor, cx| {
-                            editor.titlebar_dropdown_click(item_index, cx)
+                            editor.titlebar_dropdown_click(&key, item_index, cx)
                         });
                         cx.stop_propagation();
                     }),
@@ -743,14 +742,16 @@ impl Workspace {
                     .child(SharedString::from("No matches")),
             );
         }
-        let menu = div()
-            .occlude()
-            .absolute()
-            .top(px(30.))
-            .left(TITLE_LEFT_INSET + px(8.))
-            .child(panel)
-            .into_any_element();
-        (backdrop, menu)
+        gpui::deferred(
+            div()
+                .occlude()
+                .absolute()
+                .top(px(30.))
+                .left_0()
+                .child(panel),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 }
 
@@ -780,7 +781,7 @@ impl Render for Workspace {
         );
         let helm = self.editor.read(cx).helm_view(helm_lines);
         let minibuffer = self.editor.read(cx).minibuffer_view();
-        let titlebar_dropdown = self.editor.read(cx).titlebar_dropdown_view();
+        let titlebar_dropdowns = self.editor.read(cx).titlebar_dropdown_views();
 
         // The bottom region is, in priority order: a transient popup, the Helm
         // selection panel, the minibuffer, or the status / mode line.
@@ -887,17 +888,40 @@ impl Render for Workspace {
             .text_color(title_bar_fg)
             .text_size(px(13.))
             .child(drag_layer);
-        let title_bar_has_content = update_pill.is_some() || titlebar_dropdown.is_some();
+        let title_bar_has_content = update_pill.is_some() || !titlebar_dropdowns.is_empty();
         if let Some(pill) = update_pill {
             title_bar = title_bar.child(pill);
         }
         if let Some((_, buttons)) = caption {
             title_bar = title_bar.child(buttons);
         }
-        // The perspectives dropdown trigger floats left of the centered title,
-        // just past the traffic lights (the same layering as the update pill).
-        if let Some(dropdown) = &titlebar_dropdown {
-            title_bar = title_bar.child(self.render_titlebar_dropdown_trigger(dropdown, cx));
+        // The dropdown triggers float left of the centered title, just past
+        // the traffic lights (the same layering as the update pill); an open
+        // menu hangs beneath its own trigger.
+        if !titlebar_dropdowns.is_empty() {
+            let mut row = div()
+                .occlude()
+                .absolute()
+                .left(TITLE_LEFT_INSET + px(8.))
+                .top_0()
+                .h_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1();
+            for (index, dropdown) in titlebar_dropdowns.iter().enumerate() {
+                let mut slot = div()
+                    .relative()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(self.render_titlebar_dropdown_trigger(index, dropdown, cx));
+                if dropdown.open {
+                    slot = slot.child(self.render_titlebar_dropdown_menu(dropdown, colors, cx));
+                }
+                row = row.child(slot);
+            }
+            title_bar = title_bar.child(row);
         }
 
         // The editor fills the central region.
@@ -915,13 +939,10 @@ impl Render for Workspace {
             })
             .child(editor_area)
             .child(bottom);
-        // The unfolded perspectives menu paints above everything: a backdrop
-        // that folds it on a stray click, then the panel under the trigger.
-        if let Some(dropdown) = &titlebar_dropdown
-            && dropdown.open
-        {
-            let (backdrop, menu) = self.render_titlebar_dropdown_menu(dropdown, colors, cx);
-            root = root.child(backdrop).child(menu);
+        // Behind an unfolded title-bar menu (itself deferred above
+        // everything), a backdrop folds it on a stray click.
+        if titlebar_dropdowns.iter().any(|d| d.open) {
+            root = root.child(self.render_titlebar_dropdown_backdrop(cx));
         }
         match client_tiling {
             Some(tiling) => client_frame(root, tiling, colors.dim.opacity(0.4), window),

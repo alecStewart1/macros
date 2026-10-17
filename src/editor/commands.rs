@@ -1173,32 +1173,34 @@ impl Editor {
                 self.mode_line_format = parse_mode_line_format(tokens);
                 cx.notify();
             }
-            SetTitlebarDropdown {
-                items,
-                active,
-                callback,
-            } => {
-                // Re-publishing while the menu is unfolded (a find-file-hook
-                // firing mid-browse) keeps it unfolded — filter, caret, and
-                // selection included — rather than snapping shut.
-                let (open, filter, cursor, selected) = self
-                    .titlebar_dropdown
-                    .as_ref()
-                    .map(|d| (d.open, d.filter.clone(), d.cursor, d.selected))
-                    .unwrap_or_default();
-                self.titlebar_dropdown = if items.is_empty() {
-                    None
-                } else {
-                    Some(TitlebarDropdownState {
-                        items: items.into_iter().map(SharedString::from).collect(),
-                        active: active.into(),
-                        callback,
-                        open,
-                        filter,
-                        cursor,
-                        selected,
-                    })
-                };
+            SetTitlebarMenu(menu) => {
+                let crate::script::TitlebarMenuArgs {
+                    title,
+                    items,
+                    commands,
+                    active,
+                    section,
+                    callback,
+                } = *menu;
+                self.titlebar_dropdown_publish(TitlebarDropdownState {
+                    placeholder: format!("Search {}…", title.to_lowercase()).into(),
+                    section: if section.is_empty() {
+                        title.clone()
+                    } else {
+                        section
+                    }
+                    .into(),
+                    trigger: title.clone().into(),
+                    key: title,
+                    items: items.into_iter().map(SharedString::from).collect(),
+                    commands,
+                    active: active.into(),
+                    callback,
+                    open: false,
+                    filter: String::new(),
+                    cursor: 0,
+                    selected: None,
+                });
                 cx.notify();
             }
             StartKbdMacro => self.start_kbd_macro(cx),

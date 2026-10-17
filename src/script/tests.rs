@@ -3017,6 +3017,9 @@ mod magit_tests {
             ))
             .unwrap();
         engine
+            .eval(include_str!("../../scheme/titlebar-menu.scm"))
+            .unwrap();
+        engine
             .eval(include_str!("../../scheme/perspectives.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/shell.scm")).unwrap();
@@ -3115,6 +3118,9 @@ mod magit_tests {
                 "#,
                 fresh_persistence_dir()
             ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/titlebar-menu.scm"))
             .unwrap();
         engine
             .eval(include_str!("../../scheme/perspectives.scm"))
@@ -8754,6 +8760,9 @@ mod perspectives_lib {
             )
             .unwrap();
         engine
+            .eval(include_str!("../../scheme/titlebar-menu.scm"))
+            .unwrap();
+        engine
             .eval(include_str!("../../scheme/perspectives.scm"))
             .unwrap();
         (engine, rx)
@@ -8852,18 +8861,14 @@ mod perspectives_lib {
             .commands
             .as_slice()
         {
-            [
-                EditorCommand::SetTitlebarDropdown {
-                    items,
-                    active,
-                    callback,
-                },
-            ] => {
-                assert_eq!(items, &["proj", "other"]);
-                assert_eq!(active, "other");
-                assert_eq!(callback, "perspective-select");
+            [EditorCommand::SetTitlebarMenu(m)] => {
+                assert_eq!(m.title, "Projects");
+                assert_eq!(m.items, ["proj", "other"]);
+                assert_eq!(m.commands, ["", ""]);
+                assert_eq!(m.active, "other");
+                assert_eq!(m.callback, "perspective-select");
             }
-            other => panic!("expected SetTitlebarDropdown, got {other:?}"),
+            other => panic!("expected SetTitlebarMenu, got {other:?}"),
         }
     }
 
@@ -8889,13 +8894,13 @@ mod perspectives_lib {
             .as_slice()
         {
             [
-                EditorCommand::SetTitlebarDropdown { active, .. },
+                EditorCommand::SetTitlebarMenu(m),
                 EditorCommand::Helm(sources),
             ] => {
-                assert_eq!(active, "macros-persp-test-missing-file");
+                assert_eq!(m.active, "macros-persp-test-missing-file");
                 assert_eq!(sources.len(), 1);
             }
-            other => panic!("expected SetTitlebarDropdown + Helm fallback, got {other:?}"),
+            other => panic!("expected SetTitlebarMenu + Helm fallback, got {other:?}"),
         }
     }
 
@@ -8924,9 +8929,9 @@ mod perspectives_lib {
         assert!(
             outcome.commands.iter().any(|c| matches!(
                 c,
-                EditorCommand::SetTitlebarDropdown { items, .. } if items.is_empty()
+                EditorCommand::SetTitlebarMenu(m) if m.items.is_empty()
             )),
-            "expected an empty SetTitlebarDropdown, got {:?}",
+            "expected an empty SetTitlebarMenu, got {:?}",
             outcome.commands
         );
     }
@@ -8957,6 +8962,9 @@ mod perspectives_lib {
                 "#,
                 fresh_persistence_dir()
             ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/titlebar-menu.scm"))
             .unwrap();
         engine
             .eval(include_str!("../../scheme/perspectives.scm"))
@@ -9004,6 +9012,9 @@ mod perspectives_lib {
                 "#,
                 fresh_persistence_dir()
             ))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/titlebar-menu.scm"))
             .unwrap();
         engine
             .eval(include_str!("../../scheme/perspectives.scm"))
@@ -9058,13 +9069,13 @@ mod perspectives_lib {
             .as_slice()
         {
             [
-                EditorCommand::SetTitlebarDropdown { active, .. },
+                EditorCommand::SetTitlebarMenu(m),
                 EditorCommand::OpenFile(path),
             ] => {
-                assert_eq!(active, "macros-persp-test");
+                assert_eq!(m.active, "macros-persp-test");
                 assert!(path.ends_with("resume.rs"), "path: {path}");
             }
-            other => panic!("expected SetTitlebarDropdown + OpenFile, got {other:?}"),
+            other => panic!("expected SetTitlebarMenu + OpenFile, got {other:?}"),
         }
     }
 }
@@ -12346,5 +12357,105 @@ mod org_plot_tests {
             val(&e, r#"(key-binding "org-mode" "ctrl-c \" g")"#),
             r#""org-plot/text""#
         );
+    }
+}
+
+#[cfg(test)]
+mod titlebar_menu_lib {
+    use super::*;
+
+    /// The last `SetTitlebarMenu` an eval emitted, as `(title, items, commands)`.
+    fn published(engine: &ScriptEngine, q: &str) -> (String, Vec<String>, Vec<String>) {
+        let commands = engine.eval(q).unwrap().commands;
+        match commands.into_iter().last() {
+            Some(EditorCommand::SetTitlebarMenu(m)) => (m.title, m.items, m.commands),
+            other => panic!("expected SetTitlebarMenu, got {other:?}"),
+        }
+    }
+
+    /// Rows keep insertion order; re-adding a label rebinds it in place; a
+    /// symbol command passes through by name and a lambda gets a stub name.
+    #[test]
+    fn add_publishes_rows_in_order() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "titlebar-menu");
+        published(
+            &engine,
+            r#"(titlebar-menu-add "Dashboards" "Postgres" 'psql-dashboard)"#,
+        );
+        let (title, items, commands) = published(
+            &engine,
+            r#"(titlebar-menu-add "Dashboards" "Kubernetes" "k8s-dashboard")"#,
+        );
+        assert_eq!(title, "Dashboards");
+        assert_eq!(items, ["Postgres", "Kubernetes"]);
+        assert_eq!(commands, ["psql-dashboard", "k8s-dashboard"]);
+
+        let (_, items, commands) = published(
+            &engine,
+            r#"(titlebar-menu-add "Dashboards" "Postgres" (lambda () 1))"#,
+        );
+        assert_eq!(items, ["Postgres", "Kubernetes"]);
+        assert!(commands[0].starts_with("hook-fn-"), "{commands:?}");
+    }
+
+    /// Removing the last row publishes an empty menu (which drops it from the
+    /// title bar); clearing does the same in one step.
+    #[test]
+    fn remove_and_clear_empty_the_menu() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "titlebar-menu");
+        engine
+            .eval(r#"(titlebar-menu-add "Tools" "A" 'a) (titlebar-menu-add "Tools" "B" 'b)"#)
+            .unwrap();
+        let (_, items, _) = published(&engine, r#"(titlebar-menu-remove "Tools" "A")"#);
+        assert_eq!(items, ["B"]);
+        let (_, items, commands) = published(&engine, r#"(titlebar-menu-clear "Tools")"#);
+        assert!(items.is_empty() && commands.is_empty());
+    }
+
+    /// A hidden menu publishes no rows however its owner refreshes it, and
+    /// showing it again restores them.
+    #[test]
+    fn hide_survives_refresh_until_shown() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "titlebar-menu");
+        engine
+            .eval(r#"(titlebar-menu-add "Tools" "A" 'a)"#)
+            .unwrap();
+        let (_, items, _) = published(&engine, r#"(titlebar-menu-hide "Tools")"#);
+        assert!(items.is_empty());
+        let (_, items, _) = published(
+            &engine,
+            r#"(titlebar-menu-set! "Tools" (list (cons "B" "")) "")"#,
+        );
+        assert!(items.is_empty());
+        let (_, items, _) = published(&engine, r#"(titlebar-menu-show "Tools")"#);
+        assert_eq!(items, ["B"]);
+    }
+
+    /// `titlebar-menu-configure!` sets the heading and the on-select function
+    /// (by name) that rows without a command of their own fall back to.
+    #[test]
+    fn configure_sets_section_and_on_select() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "titlebar-menu");
+        engine
+            .eval(r#"(titlebar-menu-configure! "Projects" 'section "Recent Projects" 'on-select 'perspective-select)"#)
+            .unwrap();
+        let commands = engine
+            .eval(r#"(titlebar-menu-set! "Projects" (list (cons "macros" "")) "macros")"#)
+            .unwrap()
+            .commands;
+        match commands.as_slice() {
+            [EditorCommand::SetTitlebarMenu(m)] => {
+                assert_eq!(m.items, ["macros"]);
+                assert_eq!(m.commands, [""]);
+                assert_eq!(m.active, "macros");
+                assert_eq!(m.section, "Recent Projects");
+                assert_eq!(m.callback, "perspective-select");
+            }
+            other => panic!("expected one SetTitlebarMenu, got {other:?}"),
+        }
     }
 }
