@@ -8414,7 +8414,7 @@ mod dired_subtree_lib {
         assert_eq!(v(r#"(dired-subtree-icon "logo.png")"#), "\"image\"");
         assert_eq!(v(r#"(dired-subtree-icon "README.md")"#), "\"file-text\"");
         assert_eq!(v(r#"(dired-subtree-icon "notes")"#), "\"file\"");
-        assert_eq!(v(r#"(dired-subtree-strip-slash "/a/b/")"#), "\"/a/b\"");
+        assert_eq!(v(r#"(strip-trailing-slash "/a/b/")"#), "\"/a/b\"");
         // Reveal: ancestors of a file from just inside the root down to its parent,
         // ordered root-first so they expand top-down.
         assert_eq!(

@@ -61,8 +61,6 @@
 (define (dap--str o k) (let ((v (dap--get o k))) (if (string? v) v "")))
 (define dap--int json-int)
 (define (dap--list x) (if (list? x) x '()))
-(define (dap--truncate s n)
-  (if (> (string-length s) n) (string-append (substring s 0 n) "…") s))
 
 (define (dap--alive?) (>= *dap-session* 0))
 
@@ -585,7 +583,7 @@
            (txt (string-join
                   (map (lambda (v)
                          (string-append (dap--str v 'name) " = "
-                                        (dap--truncate (dap--str v 'value) 40)))
+                                        (truncate-string (dap--str v 'value) 40)))
                        shown)
                   ", ")))
       (when (not (equal? txt ""))

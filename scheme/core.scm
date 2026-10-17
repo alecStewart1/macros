@@ -17,13 +17,6 @@
          (goto-char saved-point)
          result)))))
 
-;; Function form for callers that prefer passing a thunk.
-(define (with-saved-excursion thunk)
-  (let ((saved (point)))
-    (let ((result (thunk)))
-      (goto-char saved)
-      result)))
-
 ;; --- small list/path utilities ---------------------------------------------
 
 (define (last lst)
@@ -121,7 +114,7 @@
           (else (loop (- i 1))))))
 
 (define (non-empty-lines s)
-  (filter (lambda (l) (not (equal? l ""))) (split-many s "\n")))
+  (remove-equal "" (split-many s "\n")))
 
 ;; Join a list of strings with `sep` in one pass (one string-append over the
 ;; interleaved pieces — no per-element recursion, so it's linear and safe on a
@@ -174,7 +167,7 @@
 ;; Most-recently-used ring: `x` moved (or added) to the front of `lst`, any
 ;; other copy dropped, capped at `n` entries.
 (define (mru-push x lst n)
-  (take (cons x (filter (lambda (y) (not (equal? y x))) lst)) n))
+  (take (cons x (remove-equal x lst)) n))
 
 ;; Trim leading and trailing spaces/tabs.
 (define (string-trim s)
@@ -830,6 +823,50 @@
 ;; snapshot. Pending: (bufname path line0 byte-col tries); a newer jump replaces
 ;; an older one, and it gives up after ~2s.
 (define *visit-pending* #f)
+
+;; --- small shared helpers -----------------------------------------------------
+;; Drop one trailing "/" (list-directory marks dirs with one; the editor reports
+;; changed directories without one — normalize before comparing or keying).
+(define (strip-trailing-slash p)
+  (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
+
+;; `s` cut to `n` chars with a trailing "…" when it's longer.
+(define (truncate-string s n)
+  (if (> (string-length s) n) (string-append (substring s 0 n) "…") s))
+
+;; `s` as a literal `replace-regexp-in-string` replacement (`$` would otherwise
+;; reference a capture group).
+(define (replacement-literal s) (replace-regexp-in-string "\\$" "$$$$" s))
+
+;; Whether a buffer named `name` exists.
+(define (buffer-live? name) (if (member name (buffer-names)) #t #f))
+
+;; `lst` without the elements `equal?` to `x`.
+(define (remove-equal x lst) (filter (lambda (y) (not (equal? y x))) lst))
+
+;; Expand a path the way the file prompt does (Emacs `file-name-shadow`):
+;;   "~" or "~/…"  -> your home directory   (the quick "go home")
+;;   "//"          -> the filesystem root "/"
+;; e.g. with the input sitting at /a/b/c/, typing "~/" jumps home and "//" jumps
+;; to root.
+(define (path-contains? s sub) (> (length (split-many s sub)) 1))
+;; The path segments after the LAST segment that is exactly "~" (a "~" at the
+;; start or right after a "/"), or #f when there is none — so "foo~bar" and
+;; "backup.txt~" are left alone.
+(define (tilde-tail segs)
+  (let loop ((ss segs) (found #f))
+    (cond ((null? ss) found)
+          ((equal? (car ss) "~") (loop (cdr ss) (cdr ss)))
+          (else (loop (cdr ss) found)))))
+(define (expand-file-name path)
+  (let ((home (getenv "HOME"))
+        (tail (tilde-tail (split-many path "/"))))
+    (cond
+      (tail
+       (string-append home "/" (string-join tail "/")))
+      ((path-contains? path "//")
+       (string-append "/" (last (split-many path "//"))))
+      (else path))))
 
 ;; Quote `s` as ONE POSIX shell word: wrap in single quotes, each embedded ' as
 ;; '\''. Use for every path / user-supplied value spliced into a `sh -c` string.

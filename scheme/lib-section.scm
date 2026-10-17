@@ -171,6 +171,6 @@
       (let ((id (section-id s)))
         (set! *section-toggled*
               (if (member id *section-toggled*)
-                  (filter (lambda (x) (not (equal? x id))) *section-toggled*)
+                  (remove-equal id *section-toggled*)
                   (cons id *section-toggled*))))
       (section-apply-overlays))))

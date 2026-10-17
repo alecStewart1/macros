@@ -1325,7 +1325,7 @@
 ;; git command to run. A commit already being written is resumed, not appended
 ;; to (which duplicated the message and diff).
 (define (magit-commit-buffer initial amend)
-  (if (member "*git-commit*" (buffer-names))
+  (if (buffer-live? "*git-commit*")
       (begin (switch-to-buffer "*git-commit*")
              (message "Resuming the commit message in progress"))
       (magit-commit-buffer-new initial amend)))
@@ -1540,7 +1540,6 @@
                 (list "l" "Current branch" 'magit-log-current)
                 (list "a" "All branches"   'magit-log-all)
                 (list "f" "File at point"  'magit-log-file))))))
-(define (magit-log-flags) (magit-switch-args (list (cons "log:graph" "--graph"))))
 ;; gix renders the oneline+decorate log (no subprocess); the `--graph` toggle
 ;; falls back to git, whose ASCII commit-graph art gix can't reproduce.
 (define-command (magit-log-current)
@@ -1700,7 +1699,7 @@
               (key (grp-key g)))
           (set! *magit-collapsed-groups*
                 (if (member key *magit-collapsed-groups*)
-                    (filter (lambda (k) (not (equal? k key))) *magit-collapsed-groups*)
+                    (remove-equal key *magit-collapsed-groups*)
                     (cons key *magit-collapsed-groups*)))
           (magit-apply-overlays)
           (scroll-cursor-to-row row))
@@ -1711,7 +1710,7 @@
             (let ((key (sec-key s)))
               (set! *magit-expanded*
                     (if (member key *magit-expanded*)
-                        (filter (lambda (k) (not (equal? k key))) *magit-expanded*)
+                        (remove-equal key *magit-expanded*)
                         (cons key *magit-expanded*))))
             (magit-render))))))
 
@@ -1891,10 +1890,7 @@
 (define (magit-blame-uncommitted? rec)
   (let ((sha (magit-blame-rec-sha rec)))
     (equal? (substring sha 0 (min 8 (string-length sha))) "00000000")))
-(define (magit-blame-trim s)          ; keep summaries from overflowing the line
-  (if (> (string-length s) 50)
-      (string-append (substring s 0 50) "…")
-      s))
+(define (magit-blame-trim s) (truncate-string s 50)) ; keep summaries from overflowing the line
 (define (magit-blame-rec-suffix rec)
   (if (magit-blame-uncommitted? rec)
       "  Not committed yet"
@@ -2065,7 +2061,7 @@
 
 ;; --- process buffer ($) + opportunistic refresh -----------------------------
 (define (magit-process-buffer)
-  (if (member "*magit-process*" (buffer-names))
+  (if (buffer-live? "*magit-process*")
       (switch-to-buffer "*magit-process*")
       (render-buffer "*magit-process*" "magit-log-mode" "(no git process output yet)" '())))
 ;; Refresh the status whenever *magit* is open — including while you're editing
@@ -2073,7 +2069,7 @@
 ;; place) since the save happens from a different buffer. Cheap now that the
 ;; whole render is gix-backed (no subprocess per refresh).
 (define (magit-maybe-refresh)
-  (when (member "*magit*" (buffer-names))
+  (when (buffer-live? "*magit*")
     (set! *magit-quiet* #t)
     (magit-render)
     (set! *magit-quiet* #f)))
@@ -2094,11 +2090,9 @@
 ;; *magit* is in front, quietly (in place, no overlays) when it's in a background
 ;; window — overlays target the active buffer, so a background refresh must skip
 ;; them. Only reacts to our own repo (the hook also fires for dired/dired-sidebar).
-(define (magit-fs-strip-slash p)
-  (if (ends-with? p "/") (substring p 0 (- (string-length p) 1)) p))
 (define (magit-on-fs-change dir)
-  (when (and (member "*magit*" (buffer-names))
-             (equal? (magit-fs-strip-slash dir) (magit-fs-strip-slash *magit-dir*)))
+  (when (and (buffer-live? "*magit*")
+             (equal? (strip-trailing-slash dir) (strip-trailing-slash *magit-dir*)))
     (if (equal? (current-buffer) "*magit*")
         (magit-render)
         (begin (set! *magit-quiet* #t) (magit-render) (set! *magit-quiet* #f)))))

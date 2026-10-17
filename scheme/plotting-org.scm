@@ -82,7 +82,7 @@
 (define (org-plot--parse-deps s)
   (filter (lambda (n) (>= n 0))
           (map (lambda (w) (let ((n (string->number w))) (if (integer? n) (- n 1) -1)))
-               (filter (lambda (w) (not (equal? w ""))) (split-many (string-trim s) " ")))))
+               (remove-equal "" (split-many (string-trim s) " ")))))
 
 ;; --- chart ------------------------------------------------------------------
 
