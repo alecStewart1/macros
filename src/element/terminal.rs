@@ -121,6 +121,11 @@ impl Element for TerminalElement {
         );
         let dfg = hsla_to_rgb_u32(default_fg);
         let dbg = hsla_to_rgb_u32(default_bg);
+        // The 16 ANSI system colors: `terminal-color-0`…`15` faces, else defaults.
+        let ansi: [u32; 16] = std::array::from_fn(|i| {
+            let fallback = crate::terminal::DEFAULT_ANSI16[i];
+            hsla_to_rgb_u32(theme.color(&format!("terminal-color-{i}"), rgb(fallback).into()))
+        });
 
         let settings = cx.global::<crate::settings::Settings>();
         let cursor_width = px(settings.cursor_width());
@@ -163,7 +168,7 @@ impl Element for TerminalElement {
             );
         });
 
-        let snapshot = self.editor.read(cx).terminal_snapshot(id, dfg, dbg);
+        let snapshot = self.editor.read(cx).terminal_snapshot(id, dfg, dbg, &ansi);
         let background = fill(bounds, default_bg);
         let mut cell_backgrounds = Vec::new();
         let mut selection: Vec<PaintQuad> = Vec::new();
