@@ -70,6 +70,7 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
         ("check-for-updates", CheckForUpdates),
         ("eval-buffer", EvalBuffer),
         ("eval-last-sexp", EvalLastSexp),
+        ("eval-defun", EvalDefun),
         ("eval-expression", EvalExpression),
         ("find-file", FindFile),
         ("switch-buffer", SwitchBuffer),
