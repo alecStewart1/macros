@@ -1,14 +1,16 @@
-;; requires: core magit persistence
+;; requires: core magit persistence titlebar-menu
 
 ;; Perspectives — one workspace context per project, switched from the title
 ;; bar. Visiting a file inside a project (find-file-hook) creates that
 ;; project's perspective on first touch and records the file as its resume
-;; point; the title-bar dropdown (`set-titlebar-dropdown`, workspace.rs) lists
+;; point; the title bar's "Projects" menu (a titlebar-menu.scm menu) lists
 ;; every perspective and reopens the picked project at its last visited file.
+;; It's on by default; turn it off with (titlebar-menu-hide "Projects") — the
+;; perspectives keep tracking, and `perspective-switch` still works.
 ;; The list survives restarts via ~/.config/macros/perspectives.
 ;;
-;; All the logic lives here — Rust only draws the dropdown and hands the
-;; clicked label back to `perspective-select`. This file doesn't
+;; All the logic lives here — titlebar-menu.scm publishes the menu and hands
+;; the clicked label back to `perspective-select`. This file doesn't
 ;; require projectile.scm and Steel resolves free identifiers at definition
 ;; time, so it must not call projectile functions; the root
 ;; resolver (`project-root`) lives in core.scm, which is fine.
@@ -56,11 +58,20 @@
 
 ;; --- title bar ----------------------------------------------------------------
 
+(define perspective-menu "Projects")
+
+;; Registered at load, before the user's init.scm, so it sits leftmost.
+(titlebar-menu-configure! perspective-menu
+                          'section "Recent Projects"
+                          'on-select 'perspective-select)
+
+;; Rows carry no command of their own: a click hands the label to the
+;; 'on-select function, `perspective-select`.
 (define (perspective-sync-titlebar)
-  (set-titlebar-dropdown
-    (map (lambda (kv) (perspective-display (car kv))) *perspectives*)
-    (if *perspective-current* (perspective-display *perspective-current*) "")
-    'perspective-select))
+  (titlebar-menu-set!
+    perspective-menu
+    (map (lambda (kv) (cons (perspective-display (car kv)) "")) *perspectives*)
+    (if *perspective-current* (perspective-display *perspective-current*) "")))
 
 ;; --- tracking -----------------------------------------------------------------
 
@@ -83,7 +94,7 @@
 ;; *scratch* (fileless buffers whose buffer-directory can't attribute them to
 ;; a project), or a stray file outside every root — leaves the title bar on
 ;; the project you were working in rather than flapping to the neutral
-;; "projects" trigger on every sidebar or terminal visit.
+;; "Projects" trigger on every sidebar or terminal visit.
 (define (perspective-track)
   (let ((root (project-root (buffer-directory)))
         (file (buffer-file-name)))
@@ -162,7 +173,7 @@
                                *perspectives*))))
 
 ;; Restore at startup, dropping projects whose roots no longer exist. The bar
-;; starts with no active perspective (the trigger shows "projects") until the
+;; starts with no active perspective (the trigger shows "Projects") until the
 ;; first file visit picks one.
 (define (perspective-load)
   (when (file-exists? (perspectives-file))

@@ -38,39 +38,29 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         );
     }
     {
-        // `(set-titlebar-dropdown items active callback)` — publish the
-        // title-bar dropdown (the perspectives switcher). `items` is a list of
-        // display labels, `active` the one shown in the bar; clicking an item
-        // calls `(callback label)`. An empty list removes the control. Driven
-        // from scheme/perspectives.scm.
-        let q = queue.clone();
-        reg.register_fn(
-            "set-titlebar-dropdown",
-            move |StringList(items): StringList, active: String, callback: Callback| {
-                q.push(EditorCommand::SetTitlebarDropdown {
-                    items,
-                    active,
-                    callback: callback.0,
-                });
-            },
-        );
-    }
-    {
-        // `(set-titlebar-menu title labels commands)` — publish a title-bar
-        // menu named `title`, right of the perspectives switcher. `labels` and
-        // `commands` are parallel lists; clicking a row calls its command (a
-        // function name) with no arguments. An empty list removes the menu.
-        // Driven from scheme/titlebar-menu.scm.
+        // `(set-titlebar-menu title labels commands active section callback)` —
+        // publish the title-bar menu named `title`. `labels` and `commands` are
+        // parallel lists; clicking a row calls its command (a function name)
+        // with no arguments, or — when that entry is "" — `(callback label)`.
+        // `active` is checkmarked and shown on the trigger ("" for none);
+        // `section` heads the rows. An empty list hides the menu. Driven from
+        // scheme/titlebar-menu.scm, which is the API to use.
         let q = queue.clone();
         reg.register_fn(
             "set-titlebar-menu",
             move |title: String,
                   StringList(items): StringList,
-                  StringList(commands): StringList| {
+                  StringList(commands): StringList,
+                  active: String,
+                  section: String,
+                  callback: Callback| {
                 q.push(EditorCommand::SetTitlebarMenu {
                     title,
                     items,
                     commands,
+                    active,
+                    section,
+                    callback: callback.0,
                 });
             },
         );

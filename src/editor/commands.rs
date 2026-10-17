@@ -1173,41 +1173,28 @@ impl Editor {
                 self.mode_line_format = parse_mode_line_format(tokens);
                 cx.notify();
             }
-            SetTitlebarDropdown {
-                items,
-                active,
-                callback,
-            } => {
-                self.titlebar_dropdown_publish(TitlebarDropdownState {
-                    key: PROJECTS_DROPDOWN.to_string(),
-                    items: items.into_iter().map(SharedString::from).collect(),
-                    commands: Vec::new(),
-                    active: active.into(),
-                    callback,
-                    trigger: "projects".into(),
-                    section: "Recent Projects".into(),
-                    placeholder: "Search projects…".into(),
-                    open: false,
-                    filter: String::new(),
-                    cursor: 0,
-                    selected: None,
-                });
-                cx.notify();
-            }
             SetTitlebarMenu {
                 title,
                 items,
                 commands,
+                active,
+                section,
+                callback,
             } => {
                 self.titlebar_dropdown_publish(TitlebarDropdownState {
                     placeholder: format!("Search {}…", title.to_lowercase()).into(),
+                    section: if section.is_empty() {
+                        title.clone()
+                    } else {
+                        section
+                    }
+                    .into(),
                     trigger: title.clone().into(),
-                    section: title.clone().into(),
                     key: title,
                     items: items.into_iter().map(SharedString::from).collect(),
                     commands,
-                    active: SharedString::default(),
-                    callback: String::new(),
+                    active: active.into(),
+                    callback,
                     open: false,
                     filter: String::new(),
                     cursor: 0,

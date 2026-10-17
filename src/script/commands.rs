@@ -803,22 +803,19 @@ pub enum EditorCommand {
     /// Replace the mode-line format with tab-encoded segment tokens (see
     /// `parse_mode_line_format`).
     SetModeLineFormat(Vec<String>),
-    /// Publish the title-bar dropdown (the perspectives switcher): the display
-    /// labels, the active one, and the Scheme function a click hands the picked
-    /// label to. An empty `items` removes the control.
-    SetTitlebarDropdown {
-        items: Vec<String>,
-        active: String,
-        callback: String,
-    },
-    /// Publish a Scheme-defined title-bar menu named `title`: one row per
-    /// `items` label, each running the parallel `commands` entry by name (a
-    /// late-bound call, so package-defined commands resolve). An empty `items`
-    /// removes the menu. See scheme/titlebar-menu.scm.
+    /// Publish the title-bar menu named `title` (see scheme/titlebar-menu.scm):
+    /// one row per `items` label, each running the parallel `commands` entry
+    /// by name (a late-bound call, so package-defined commands resolve). A row
+    /// with an empty command hands its label to `callback` instead. `active`
+    /// (if non-empty) is checkmarked and shown on the trigger; `section` heads
+    /// the rows. An empty `items` hides the menu but keeps its position.
     SetTitlebarMenu {
         title: String,
         items: Vec<String>,
         commands: Vec<String>,
+        active: String,
+        section: String,
+        callback: String,
     },
     // Transient popup (the magit / `transient.el` pattern).
     /// Open a transient popup: a title plus `(key, label, command)` rows. When

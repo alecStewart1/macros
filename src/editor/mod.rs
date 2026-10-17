@@ -758,9 +758,9 @@ pub struct Editor {
     image_cache: HashMap<PathBuf, CachedImage>,
     /// The open transient popup, if any (the magit / `transient.el` pattern).
     transient: Option<TransientState>,
-    /// The title-bar dropdowns, left to right: the perspectives switcher
-    /// (`set-titlebar-dropdown`, absent until a project exists) and any menus
-    /// Scheme defines with `set-titlebar-menu` (scheme/titlebar-menu.scm).
+    /// The title-bar menus (`set-titlebar-menu`, scheme/titlebar-menu.scm),
+    /// left to right in first-publish order — the perspectives switcher
+    /// registers first. Empty ones are kept (hidden) so they hold their place.
     titlebar_dropdowns: Vec<TitlebarDropdownState>,
     /// Named mode-line registers written from Scheme (`set-mode-line-slot`),
     /// e.g. "project" → "macros", "git" → "main". A `Slot` segment in
@@ -888,17 +888,12 @@ pub struct TransientView {
     pub columns: Vec<TransientColumnView>,
 }
 
-/// The key of the perspectives switcher among the title-bar dropdowns; Scheme
-/// menus are keyed by their title.
-pub(crate) const PROJECTS_DROPDOWN: &str = "\u{0}projects";
-
-/// One title-bar dropdown control: the perspectives switcher (published from
-/// Scheme via `set-titlebar-dropdown`) or a Scheme-defined menu
-/// (`set-titlebar-menu`). The editor owns the open/closed state, the live
-/// filter, and the keyboard selection; the items and commands are Scheme's.
+/// One title-bar menu, as published from Scheme via `set-titlebar-menu` (the
+/// perspectives switcher is one). The editor owns the open/closed state, the
+/// live filter, and the keyboard selection; the items and commands are
+/// Scheme's.
 pub(crate) struct TitlebarDropdownState {
-    /// Identifies the dropdown across re-publishes ([`PROJECTS_DROPDOWN`] or
-    /// the menu's title).
+    /// The menu's title: its identity across re-publishes.
     pub(crate) key: String,
     pub(crate) items: Vec<SharedString>,
     /// Per-item Scheme command, parallel to `items`; a missing or empty entry
@@ -908,7 +903,7 @@ pub(crate) struct TitlebarDropdownState {
     pub(crate) active: SharedString,
     /// The Scheme function a click hands the picked label to.
     pub(crate) callback: String,
-    /// The trigger's label while nothing is active.
+    /// The trigger's label while nothing is active (the title).
     pub(crate) trigger: SharedString,
     /// The dim heading over the rows.
     pub(crate) section: SharedString,
@@ -3960,11 +3955,12 @@ impl Editor {
             .unwrap_or(filter.len())
     }
 
-    /// Render snapshots of the title-bar dropdowns, left to right: the
-    /// perspectives switcher first, then Scheme menus in definition order.
+    /// Render snapshots of the visible (non-empty) title-bar menus, left to
+    /// right.
     pub fn titlebar_dropdown_views(&self) -> Vec<TitlebarDropdownView> {
         self.titlebar_dropdowns
             .iter()
+            .filter(|d| !d.items.is_empty())
             .map(|d| {
                 let items = Self::titlebar_dropdown_filtered(d);
                 TitlebarDropdownView {
@@ -3987,31 +3983,26 @@ impl Editor {
             .collect()
     }
 
-    /// Insert or replace the dropdown keyed `state.key`, keeping its position
+    /// Insert or replace the menu keyed `state.key`, keeping its position
     /// and — when it is unfolded (a find-file-hook re-publishing mid-browse) —
-    /// its open state, filter, caret, and selection. Empty `items` removes it.
+    /// its open state, filter, caret, and selection. A menu emptied of items
+    /// stays in the list (hidden, and folded) so it keeps its slot.
     pub(super) fn titlebar_dropdown_publish(&mut self, mut state: TitlebarDropdownState) {
-        let existing = self
+        match self
             .titlebar_dropdowns
             .iter()
-            .position(|d| d.key == state.key);
-        if state.items.is_empty() {
-            if let Some(i) = existing {
-                self.titlebar_dropdowns.remove(i);
-            }
-            return;
-        }
-        match existing {
+            .position(|d| d.key == state.key)
+        {
             Some(i) => {
                 let old = &self.titlebar_dropdowns[i];
-                state.open = old.open;
-                state.filter = old.filter.clone();
-                state.cursor = old.cursor;
-                state.selected = old.selected;
+                if !state.items.is_empty() {
+                    state.open = old.open;
+                    state.filter = old.filter.clone();
+                    state.cursor = old.cursor;
+                    state.selected = old.selected;
+                }
                 self.titlebar_dropdowns[i] = state;
             }
-            // The perspectives switcher always sits leftmost.
-            None if state.key == PROJECTS_DROPDOWN => self.titlebar_dropdowns.insert(0, state),
             None => self.titlebar_dropdowns.push(state),
         }
     }
