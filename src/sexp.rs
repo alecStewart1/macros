@@ -108,6 +108,16 @@ impl Frame {
     }
 }
 
+/// The closing bracket for opening bracket `open`.
+fn closer_for(open: u8) -> Option<u8> {
+    match open {
+        b'(' => Some(b')'),
+        b'[' => Some(b']'),
+        b'{' => Some(b'}'),
+        _ => None,
+    }
+}
+
 fn is_delimiter(b: u8) -> bool {
     b.is_ascii_whitespace() || matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'"' | b';')
 }
@@ -200,7 +210,11 @@ pub fn parse(text: &str) -> Parsed {
                 i += 1;
             }
             b')' | b']' | b'}' => {
-                if stack.len() > 1 {
+                // Only the closer that matches the innermost opener closes it:
+                // `(a]` is an unclosed list plus a stray `]`, not a pair.
+                let matches =
+                    stack.len() > 1 && closer_for(b[stack.last().unwrap().open]) == Some(c);
+                if matches {
                     let f = stack.pop().unwrap();
                     stack.last_mut().unwrap().push(close_frame(f, Some(i), len));
                 } else {
@@ -656,6 +670,13 @@ mod tests {
         assert!(parse("(f \"abc").ends_in_literal);
         assert!(parse("#| x").ends_in_literal);
         assert!(!parse("(f \"abc\")").ends_in_literal);
+    }
+
+    #[test]
+    fn mismatched_closers_do_not_pair() {
+        assert_eq!(matching_bracket("(a]", 0), None);
+        assert_eq!(parse("(a]").stray_closers, 1);
+        assert_eq!(matching_bracket("[a)]", 0), Some(3));
     }
 
     #[test]

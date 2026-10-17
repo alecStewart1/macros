@@ -121,12 +121,14 @@ pub fn installed_indent(id: &str) -> Option<String> {
 /// `.foo` file highlights once a `.foo` grammar is installed — no restart.
 pub fn language_for_extension(ext: &str) -> Option<&'static str> {
     let reg = registry().read().unwrap();
-    for (id, entry) in reg.iter() {
-        if entry.extensions.iter().any(|e| e == ext) {
-            return Some(intern(id));
-        }
-    }
-    None
+    // The registry is a HashMap: when two grammars claim one extension, pick
+    // deterministically (the alphabetically first id) instead of whichever
+    // the hash order yields this run.
+    reg.iter()
+        .filter(|(_, entry)| entry.extensions.iter().any(|e| e == ext))
+        .map(|(id, _)| id)
+        .min()
+        .map(|id| intern(id))
 }
 
 /// Every runtime-installed language id, sorted. Scheme reads this (alongside

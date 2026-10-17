@@ -71,9 +71,15 @@ impl UndoTree {
         self.current = node;
     }
 
-    /// Append `record` to the current node's edit group.
+    /// Append `record` to the current node's edit group. At the root (history
+    /// was just reset under an open group) there is no group to extend — the
+    /// root can never be undone — so it starts a new node instead.
     pub fn extend_current(&mut self, record: UndoRecord) {
-        self.nodes[self.current].edit.push(record);
+        if self.current == 0 {
+            self.record(record);
+        } else {
+            self.nodes[self.current].edit.push(record);
+        }
     }
 
     /// What undo replays: the current node's parent and the edit group that

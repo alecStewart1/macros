@@ -170,6 +170,12 @@ impl Editor {
     pub(super) fn activate(&mut self, index: usize, deliberate: bool, cx: &mut Context<Self>) {
         let target = self.inactive.remove(index);
         self.switch_to_doc(target);
+        self.after_activation(deliberate, cx);
+    }
+
+    /// The common tail of every way a buffer becomes active: parse it, bring
+    /// point into view, run its mode hooks (once) and the switch hooks.
+    pub(super) fn after_activation(&mut self, deliberate: bool, cx: &mut Context<Self>) {
         self.parse_full();
         self.ensure_cursor_visible();
         self.run_mode_hooks_once(cx);
@@ -227,10 +233,7 @@ impl Editor {
             self.inactive.insert(0, current);
         }
         self.install_active(target);
-        self.parse_full();
-        self.ensure_cursor_visible();
-        self.run_mode_hooks_once(cx);
-        self.switch_hooks(true); // C-x <arrow> cycling is a deliberate switch
+        self.after_activation(true, cx); // C-x <arrow> cycling is a deliberate switch
         let name = self.active.name.clone();
         self.echo(name, cx);
     }
@@ -641,15 +644,42 @@ impl Editor {
                 self.echo(format!("{name} changed on disk (unsaved edits kept)"), cx);
                 return;
             }
-            // An inactive buffer has no live cursor/view to preserve, so rebuild it
-            // wholesale — this also refreshes its mode/highlighter for the new text.
-            let doc_path = doc.path.clone();
-            self.inactive[idx] = make_document(name.clone(), doc_path, &disk);
-            // Its servers still hold the old text under this URI.
-            let uri = document_uri(&self.inactive[idx]);
-            self.lsp_sync_document(&uri, &disk);
+            // Replace the text in place: rebuilding the document would drop its
+            // buffer-locals, breakpoint dots, overlays and window positions.
+            self.replace_inactive_text(idx, &disk, false);
+            self.inactive[idx].modified = false;
             self.echo(format!("Reverted {name} (changed on disk)"), cx);
         }
+    }
+
+    /// Replace inactive document `idx`'s whole text in place, keeping its
+    /// buffer-local state (locals, overlays, gutter dots, mode). `undoable`
+    /// records the change as one undo step (an LSP edit); otherwise history
+    /// restarts (a revert from disk, which old records no longer match). Its
+    /// selection and every window showing it are clamped to the new text, and
+    /// its language servers get the new text. Highlighting is reparsed when the
+    /// buffer is next activated.
+    pub(super) fn replace_inactive_text(&mut self, idx: usize, new: &str, undoable: bool) {
+        let doc = &mut self.inactive[idx];
+        let old = doc.buffer.full_text();
+        if undoable {
+            doc.undo.record(UndoRecord {
+                at: 0,
+                removed: old.clone(),
+                inserted: new.to_string(),
+            });
+            doc.modified = true;
+        } else {
+            doc.undo = UndoTree::default();
+        }
+        doc.buffer.replace(0..old.len(), new);
+        let snap = |p: usize| doc.buffer.snap(p);
+        doc.selected_range = snap(doc.selected_range.start)..snap(doc.selected_range.end);
+        let (name, uri) = (doc.name.clone(), document_uri(doc));
+        for pane in self.panes.iter_mut().filter(|p| p.buffer == name) {
+            pane.point = self.inactive[idx].buffer.snap(pane.point);
+        }
+        self.lsp_sync_document(&uri, new);
     }
 
     /// Fire every `directory-changed-hook` function with `dir` as its argument, so
@@ -1235,8 +1265,9 @@ impl Editor {
         let point = self.point();
         self.repoint_panes_showing(&killed, &shown, point);
         self.drop_terminal_for_buffer(&killed);
-        self.parse_full();
-        self.ensure_cursor_visible();
+        // The revealed buffer was activated: its mode hooks (a fresh
+        // `*scratch*`'s first) and the switch hooks fire, as for any switch.
+        self.after_activation(false, cx);
         self.echo(format!("Killed {killed}"), cx);
         self.reconcile_watches(cx); // stop watching the killed buffer's file
     }

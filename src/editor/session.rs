@@ -362,9 +362,16 @@ impl Editor {
                 } else {
                     Some(PathBuf::from(path))
                 };
+                // By canonical identity, as the buffers were opened (a symlinked
+                // or relative spelling must still find its window's buffer).
                 let by_path = wanted.as_ref().and_then(|w| {
+                    let identity = super::buffers::file_identity(w);
                     self.docs()
-                        .find(|d| d.path.as_deref() == Some(w.as_path()))
+                        .find(|d| {
+                            d.path
+                                .as_deref()
+                                .is_some_and(|p| super::buffers::file_identity(p) == identity)
+                        })
                         .map(|d| d.name.clone())
                 });
                 let name = by_path

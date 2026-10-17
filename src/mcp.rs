@@ -436,7 +436,9 @@ pub fn handle_message(message: &Value, backend: &dyn Backend) -> Option<Value> {
         Message::Response { id, .. } => {
             return Some(rpc_error(id, -32600, "invalid request: no method"));
         }
-        Message::Notification { .. } | Message::Invalid => return None,
+        Message::Notification { .. } => return None,
+        // Not a JSON-RPC object at all: JSON-RPC says answer with a null id.
+        Message::Invalid => return Some(rpc_error(Value::Null, -32600, "invalid request")),
     };
     Some(match method.as_str() {
         "initialize" => {

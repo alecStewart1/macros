@@ -65,14 +65,28 @@ pub(crate) fn parse_transient_columns(value: &SteelVal) -> Vec<TransientColumn> 
 
 /// A callback argument: the *name* of a Scheme function, accepted as a
 /// "name" string or a 'name symbol (the canonical config form) — the same
-/// coercion as [`steel_string`]. Any other value coerces to `""` ("no
-/// callback"), preserving the historical
-/// `steel_string(&v).unwrap_or_default()` behavior at every call site.
+/// coercion as [`steel_string`]. `#f`, void and `'()` mean "no callback"
+/// (`""`). Anything else — notably a lambda, which used to be dropped without
+/// a word, so its output silently went nowhere — is a conversion error that
+/// says how to pass one (`callback->name` wraps a closure).
 pub(crate) struct Callback(pub(crate) String);
 
 impl steel::rvals::FromSteelVal for Callback {
     fn from_steelval(val: &SteelVal) -> steel::rvals::Result<Self> {
-        Ok(Callback(steel_string(val).unwrap_or_default()))
+        if let Some(name) = steel_string(val) {
+            return Ok(Callback(name));
+        }
+        match val {
+            SteelVal::BoolV(false) | SteelVal::Void => Ok(Callback(String::new())),
+            SteelVal::ListV(l) if l.is_empty() => Ok(Callback(String::new())),
+            _ => Err(steel::SteelErr::new(
+                steel::rerrs::ErrorKind::ConversionError,
+                format!(
+                    "expected a callback name ('my-fn or \"my-fn\"), found: {val} \
+                     (wrap a lambda with callback->name)"
+                ),
+            )),
+        }
     }
 }
 

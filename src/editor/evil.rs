@@ -438,7 +438,8 @@ impl Editor {
                         let last = if hi > lo && hi > 0 { hi - 1 } else { hi };
                         let lr = buf.line_range_at(last);
                         if lr.end < buf.len() {
-                            lr.end + 1
+                            // Past the whole line break (`\r\n` is one grapheme).
+                            buf.next_grapheme(lr.end)
                         } else {
                             lr.end
                         }
