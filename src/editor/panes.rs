@@ -571,6 +571,11 @@ impl Editor {
 
     /// `C-x o`: select the next pane in cycle order, activating its buffer.
     pub(super) fn other_window(&mut self, cx: &mut Context<Self>) {
+        self.cycle_window(1, cx);
+    }
+
+    /// Select the window `step` places along the layout order (wrapping).
+    fn cycle_window(&mut self, step: isize, cx: &mut Context<Self>) {
         let leaves = self.layout.leaves();
         if leaves.len() < 2 {
             return;
@@ -579,8 +584,8 @@ impl Editor {
             .iter()
             .position(|&id| id == self.selected_pane)
             .unwrap_or(0);
-        let next = leaves[(pos + 1) % leaves.len()];
-        self.select_pane(next, cx);
+        let next = (pos as isize + step).rem_euclid(leaves.len() as isize) as usize;
+        self.select_pane(leaves[next], cx);
     }
 
     /// Make pane `id` the selected window: save the old pane, activate the
@@ -623,16 +628,7 @@ impl Editor {
 
     /// `C-w W`: the previous window in cycle order.
     pub(super) fn previous_window(&mut self, cx: &mut Context<Self>) {
-        let leaves = self.layout.leaves();
-        if leaves.len() < 2 {
-            return;
-        }
-        let pos = leaves
-            .iter()
-            .position(|&id| id == self.selected_pane)
-            .unwrap_or(0);
-        let prev = leaves[(pos + leaves.len() - 1) % leaves.len()];
-        self.select_pane(prev, cx);
+        self.cycle_window(-1, cx);
     }
 
     /// `C-w p`: the previously selected window.

@@ -141,10 +141,7 @@ enum Target {
 /// 0-based line and byte column of byte `pos` in `text` (clamped), or of
 /// that line's first non-blank when `exact` is false.
 fn line_col_at(text: &str, pos: usize, exact: bool) -> (usize, usize) {
-    let mut pos = pos.min(text.len());
-    while !text.is_char_boundary(pos) {
-        pos -= 1;
-    }
+    let pos = text.floor_char_boundary(pos);
     let line_start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
     let line0 = text[..line_start].matches('\n').count();
     let col = if exact {

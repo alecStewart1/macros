@@ -202,11 +202,7 @@ pub fn encode(text: String, encoding: Encoding, bom: bool) -> Vec<u8> {
 /// The longest prefix of `s` of at most `max` bytes that ends on a char
 /// boundary.
 fn floor_prefix(s: &str, max: usize) -> &str {
-    let mut end = s.len().min(max);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..s.floor_char_boundary(max)]
 }
 
 fn dominant_line_ending(sample: &[u8]) -> Terminator {

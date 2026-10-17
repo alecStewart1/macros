@@ -184,11 +184,32 @@ pub fn current_then(items: &[String]) -> EnvOverrides {
     current().then(EnvOverrides::parse(items))
 }
 
+/// Wait for `child` and collect its output, writing `input` to its stdin (then
+/// closing it, so the child sees EOF — otherwise a filter like `git apply -`
+/// blocks waiting for input). The write runs on its own thread: a child that
+/// fills its stdout pipe before draining stdin would otherwise deadlock
+/// against us while we're still blocked writing.
+pub(crate) fn output_with_stdin(
+    mut child: std::process::Child,
+    input: Vec<u8>,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Write;
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        })
+    });
+    let output = child.wait_with_output();
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+    output
+}
+
 /// Run `program` to completion → `[exit-code, stdout, stderr]` (the Scheme
 /// `call-process-full` shape), writing `input` to stdin (empty = none).
 pub fn call_full(program: &str, args: &[String], input: String, env: &EnvOverrides) -> Vec<String> {
     use crate::util::HideConsole;
-    use std::io::Write;
     use std::process::Stdio;
     let program = crate::util::expand_tilde(program);
     let mut cmd = std::process::Command::new(&program);
@@ -198,25 +219,11 @@ pub fn call_full(program: &str, args: &[String], input: String, env: &EnvOverrid
         .stderr(Stdio::piped())
         .hide_console();
     env.apply(&mut cmd);
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return vec!["-1".into(), String::new(), e.to_string()],
     };
-    // Write stdin on its own thread, then close it (drop) so the child sees
-    // EOF — otherwise a filter like `git apply -` blocks waiting for input.
-    // Not inline: a child that writes more than a pipe buffer of output before
-    // draining its input would deadlock against us while we're still blocked
-    // writing.
-    let writer = child.stdin.take().map(|mut stdin| {
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(input.as_bytes());
-        })
-    });
-    let output = child.wait_with_output();
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
-    match output {
+    match output_with_stdin(child, input.into_bytes()) {
         Ok(o) => vec![
             o.status
                 .code()

@@ -136,12 +136,9 @@ impl Keymap {
     /// Whether `sequence` is a strict prefix of some longer binding in any of
     /// the active modes (a pending prefix awaiting more keys).
     pub fn is_prefix(&self, modes: &ModeStack, sequence: &str) -> bool {
-        let with_sep = format!("{sequence} ");
-        modes.resolution_order().any(|name| {
-            self.maps
-                .get(name)
-                .is_some_and(|m| m.keys().any(|k| k.starts_with(&with_sep)))
-        })
+        modes
+            .resolution_order()
+            .any(|name| self.is_prefix_mode(name, sequence))
     }
 
     /// Resolve an evil `state` keymap (`"evil-normal"` / `"evil-visual"` / …),

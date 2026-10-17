@@ -730,6 +730,9 @@ pub struct Editor {
     config_pending: bool,
     /// The last `/`/`?` or `C-s` regex, for `n`/`N` repeat and match highlight.
     search_query: Option<String>,
+    /// The compiled `search_query`, reused across frames (the match highlight
+    /// asks every paint; recompiling the regex each time was pure waste).
+    search_regex: std::cell::RefCell<Option<(String, regex::Regex)>>,
     /// Direction of the last evil `/` (true) or `?` (false) search, so `n`
     /// repeats it in the same direction and `N` in the opposite (vim semantics).
     evil_search_forward: bool,
@@ -1475,6 +1478,7 @@ impl Editor {
             undo_amalgamate: None,
             config_pending: true,
             search_query: None,
+            search_regex: std::cell::RefCell::new(None),
             evil_search_forward: true,
             evil_yank_linewise: false,
             isearch: None,
@@ -4971,10 +4975,7 @@ fn longest_common_prefix(items: &[String]) -> String {
             .count();
         end = end.min(common);
     }
-    while !first.is_char_boundary(end) {
-        end -= 1;
-    }
-    first[..end].to_string()
+    first[..first.floor_char_boundary(end)].to_string()
 }
 
 /// The startup `default-directory` for fileless buffers: the process cwd, except

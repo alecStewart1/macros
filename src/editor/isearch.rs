@@ -33,7 +33,7 @@ impl Editor {
         let Some(query) = self.search_query.as_ref().filter(|q| !q.is_empty()) else {
             return Vec::new();
         };
-        let Ok(regex) = Regex::new(query) else {
+        let Some(regex) = self.compiled_search(query) else {
             return Vec::new();
         };
         let end = end.min(self.active.buffer.len());
@@ -46,6 +46,20 @@ impl Editor {
             .filter(|m| m.end() > m.start()) // skip zero-width matches
             .map(|m| (start + m.start())..(start + m.end()))
             .collect()
+    }
+
+    /// `query` compiled, from the cache when it's the query compiled last.
+    /// (`Regex` clones share the compiled program.)
+    fn compiled_search(&self, query: &str) -> Option<Regex> {
+        let mut cache = self.search_regex.borrow_mut();
+        if let Some((cached, regex)) = cache.as_ref()
+            && cached == query
+        {
+            return Some(regex.clone());
+        }
+        let regex = Regex::new(query).ok()?;
+        *cache = Some((query.to_string(), regex.clone()));
+        Some(regex)
     }
 
     // --- Incremental search (Emacs `C-s` / `C-r`) -------------------------

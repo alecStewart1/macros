@@ -129,11 +129,7 @@ fn newest(mut items: Vec<String>, max: usize) -> Vec<String> {
 
 /// Largest char boundary `<= pos` in `text` (clamped to its length).
 fn char_floor(text: &str, pos: usize) -> usize {
-    let mut p = pos.min(text.len());
-    while !text.is_char_boundary(p) {
-        p -= 1;
-    }
-    p
+    text.floor_char_boundary(pos)
 }
 
 impl Editor {
@@ -271,7 +267,7 @@ impl Editor {
             }
             "kill" => {
                 // The kill ring's own cap still applies (oldest evicted).
-                self.kill_ring = newest(items, 120);
+                self.kill_ring = newest(items, super::kill_ring::KILL_RING_MAX);
                 self.kill_index = self.kill_ring.len().saturating_sub(1);
             }
             "search" => {

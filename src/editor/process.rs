@@ -70,13 +70,20 @@ impl Drop for ProcessHandle {
     /// on a background thread, so dropping never blocks the UI. No-op for a
     /// process that already exited (the normal exit path drops it too).
     fn drop(&mut self) {
-        if signal_group(&self.child, Signal::Term) {
-            let child = self.child.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(TERM_GRACE);
-                signal_group(&child, Signal::Kill);
-            });
-        }
+        terminate_gracefully(&self.child);
+    }
+}
+
+/// SIGTERM `child`'s group, then SIGKILL it after [`TERM_GRACE`] if it
+/// lingers — on a background thread, so the caller never blocks. No-op for a
+/// process that already exited.
+fn terminate_gracefully(child: &Arc<Mutex<ProcessGroup>>) {
+    if signal_group(child, Signal::Term) {
+        let child = child.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(TERM_GRACE);
+            signal_group(&child, Signal::Kill);
+        });
     }
 }
 
@@ -94,12 +101,8 @@ impl Editor {
     /// exit callbacks still fire as each one is reaped.
     pub(super) fn kill_processes_for_buffer(&mut self, name: &str) {
         for h in self.processes.values() {
-            if h.buffer.as_deref() == Some(name) && signal_group(&h.child, Signal::Term) {
-                let child = h.child.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(TERM_GRACE);
-                    signal_group(&child, Signal::Kill);
-                });
+            if h.buffer.as_deref() == Some(name) {
+                terminate_gracefully(&h.child);
             }
         }
     }

@@ -242,16 +242,28 @@ pub fn bindings_in_scope_at(text: &str, cursor: usize) -> HashSet<String> {
     out
 }
 
-/// Names bound *locally* at byte offset `cursor` — lambda / define params,
-/// let-family bindings and internal defines of the forms enclosing it — but
-/// not the file's top-level defines. A reference to a top-level name at a spot
-/// where this contains that name is shadowed. Empty when `text` doesn't parse.
-pub fn local_bindings_at(text: &str, cursor: usize) -> HashSet<String> {
+/// A file parsed once for repeated scope queries (find-references / rename
+/// ask about every occurrence; re-parsing per question was O(n × size)).
+pub struct Parsed(Vec<ExprKind>);
+
+impl Parsed {
+    /// `None` when `text` doesn't parse (callers then skip scope checks).
+    pub fn new(text: &str) -> Option<Self> {
+        parse(text).map(Parsed)
+    }
+
+    /// Names bound *locally* at byte offset `cursor` — lambda / define
+    /// params, let-family bindings and internal defines of the forms enclosing
+    /// it — but not the file's top-level defines. A reference to a top-level
+    /// name at a spot where this contains that name is shadowed.
+    pub fn local_bindings_at(&self, cursor: usize) -> HashSet<String> {
+        local_bindings_in(&self.0, cursor)
+    }
+}
+
+fn local_bindings_in(exprs: &[ExprKind], cursor: usize) -> HashSet<String> {
     let mut out = HashSet::new();
-    let Some(exprs) = parse(text) else {
-        return out;
-    };
-    for expr in &exprs {
+    for expr in exprs {
         match expr {
             // A top-level define's own name is global; only its params and
             // body bindings are local.
