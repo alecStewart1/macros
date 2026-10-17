@@ -17,10 +17,21 @@
 ;;; just copies the previous line's indent would have no effect.
 
 ;; --- 2-space ---------------------------------------------------------------
-;; Lisps: body indented two columns past the special form.
+;; Lisps: body indented two columns past the special form. `macros-scheme` is
+;; the editor's own config / extension Steel (init.scm, *.macros.scm), a
+;; separate language id from plain `scheme`, so it needs its own entry.
 (set-option "tab-width:scheme" 2)
-(set-option "tab-width:clojure" 2)
+(set-option "tab-width:macros-scheme" 2)
 (set-option "tab-width:racket" 2)
+(set-option "tab-width:clojure" 2)
+(set-option "tab-width:clojurescript" 2)
+(set-option "tab-width:elisp" 2)
+(set-option "tab-width:emacs-lisp" 2)
+(set-option "tab-width:lisp" 2)
+(set-option "tab-width:commonlisp" 2)
+(set-option "tab-width:common-lisp" 2)
+(set-option "tab-width:fennel" 2)
+(set-option "tab-width:janet" 2)
 ;; ML / functional: formatter-enforced 2 (ocamlformat, scalafmt, mix format).
 (set-option "tab-width:ocaml" 2)
 (set-option "tab-width:elixir" 2)

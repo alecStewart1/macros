@@ -1481,3 +1481,24 @@ fn anvil_repl_multiline_input_and_history(cx: &mut TestAppContext) {
         "got {t:?}"
     );
 }
+
+/// Structural editing in a Steel buffer: C-M-f moves over a sexp (a paren in a
+/// string doesn't stop it), and slurp is a single undo step.
+#[gpui::test]
+fn steel_structural_motion_and_slurp(cx: &mut TestAppContext) {
+    let ed = setup_json(cx, "t.scm", "(a \")\" b) c");
+    ed.update(cx, |e, cx| e.move_to(0, cx));
+    ed.update(cx, |e, cx| {
+        e.dispatch_keystroke(&keystroke("ctrl-alt-f"), cx)
+    });
+    settle(&ed, cx);
+    assert_eq!(ed.read_with(cx, |e, _| e.point()), 9);
+    ed.update(cx, |e, cx| {
+        e.move_to(1, cx);
+        e.apply_command(EditorCommand::Structural(StructuralOp::SlurpForward), cx);
+    });
+    assert_eq!(text(&ed, cx), "(a \")\" b c)");
+    ed.update(cx, |e, cx| e.apply_command(EditorCommand::Undo, cx));
+    settle(&ed, cx);
+    assert_eq!(text(&ed, cx), "(a \")\" b) c");
+}

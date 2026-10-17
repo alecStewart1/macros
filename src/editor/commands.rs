@@ -1290,6 +1290,18 @@ impl Editor {
                     None => self.echo("Nothing to evaluate", cx),
                 }
             }
+            SetLispIndent { name, spec } => match LispIndent::parse(&spec) {
+                Some(rule) => {
+                    self.lisp_indent_rules.insert(name, rule);
+                }
+                None => self.echo(
+                    format!(
+                        "lisp-indent-rule: bad spec {spec:?} (body, function, clauses, or a number)"
+                    ),
+                    cx,
+                ),
+            },
+            Structural(op) => self.structural(op, cx),
             EvalDefun => {
                 let text = self.active.buffer.full_text();
                 match top_level_form_at(&text, self.point()) {

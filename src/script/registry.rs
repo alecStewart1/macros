@@ -5,6 +5,8 @@ use steel::rvals::IntoSteelVal;
 use steel::steel_vm::engine::Engine;
 use steel::steel_vm::register_fn::RegisterFn;
 
+use crate::editor::StructuralOp;
+
 use super::*;
 
 /// The nullary commands: each Steel name pushes its variant. Shared by engine
@@ -71,6 +73,23 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
         ("eval-buffer", EvalBuffer),
         ("eval-last-sexp", EvalLastSexp),
         ("eval-defun", EvalDefun),
+        ("forward-sexp", Structural(StructuralOp::ForwardSexp)),
+        ("backward-sexp", Structural(StructuralOp::BackwardSexp)),
+        ("up-list", Structural(StructuralOp::UpList)),
+        ("backward-up-list", Structural(StructuralOp::BackwardUpList)),
+        ("down-list", Structural(StructuralOp::DownList)),
+        ("kill-sexp", Structural(StructuralOp::KillSexp)),
+        (
+            "paredit-forward-slurp-sexp",
+            Structural(StructuralOp::SlurpForward),
+        ),
+        (
+            "paredit-forward-barf-sexp",
+            Structural(StructuralOp::BarfForward),
+        ),
+        ("paredit-raise-sexp", Structural(StructuralOp::Raise)),
+        ("paredit-splice-sexp", Structural(StructuralOp::Splice)),
+        ("paredit-wrap-round", Structural(StructuralOp::WrapRound)),
         ("eval-expression", EvalExpression),
         ("find-file", FindFile),
         ("switch-buffer", SwitchBuffer),

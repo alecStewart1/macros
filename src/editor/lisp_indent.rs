@@ -4,9 +4,12 @@
 //! the step-based tree-sitter indent model can't express, hence the dedicated
 //! engine for Lisp dialects.
 
+use std::collections::HashMap;
+
 use gpui::Context;
 
 use super::*;
+use crate::sexp::Kind;
 
 /// Languages that get Lisp-style (paren-aware) auto-indentation rather than the
 /// generic copy-previous-line-indent behaviour.
@@ -28,219 +31,122 @@ pub(super) fn is_lisp_language(lang: &str) -> bool {
     )
 }
 
-/// Whether a form headed by `head` indents its body by two columns (special
-/// forms / macros: `define`, `let`, `when`, …) rather than aligning
-/// continuation lines under the first argument (ordinary function calls).
-fn lisp_form_indents_body(head: &str) -> bool {
-    if head.starts_with("define") || head.starts_with("with-") {
-        return true;
-    }
-    matches!(
-        head,
-        "lambda"
-            | "λ"
-            | "named-lambda"
-            | "case-lambda"
-            | "let"
-            | "let*"
-            | "letrec"
-            | "letrec*"
-            | "let-values"
-            | "let*-values"
-            | "let-syntax"
-            | "letrec-syntax"
-            | "parameterize"
-            | "fluid-let"
-            | "when"
-            | "unless"
-            | "while"
-            | "until"
-            | "cond"
-            | "case"
-            | "match"
-            | "match-let"
-            | "match-let*"
-            | "begin"
-            | "do"
-            | "dynamic-wind"
-            | "guard"
-            | "syntax-rules"
-            | "syntax-case"
-            | "for"
-            | "delay"
-            | "unwind-protect"
-            | "module"
-            | "library"
-    )
+/// How a form indents its continuation lines, by its head symbol — Emacs's
+/// `lisp-indent-function` property. Built-in rules come from
+/// [`builtin_rule`]; `(lisp-indent-rule "name" "spec")` overrides them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LispIndent {
+    /// An ordinary call: continuation lines align under the first argument.
+    Function,
+    /// A definer (`define`, `with-…`): the body indents one step.
+    Body,
+    /// The first `n` arguments are "distinguished" (`let`'s bindings,
+    /// `lambda`'s formals, `when`'s test): one still to come on its own line
+    /// indents two steps, and the body after them one step.
+    Special(usize),
+    /// Clause lists (`cond`): align under the first clause when it shares the
+    /// head's line, else indent one step.
+    Clauses,
 }
 
-/// A cursor over the scanned text that tracks the column of the char it is on
-/// (a newline starts column 0 on the next line).
-struct Scanner {
-    chars: Vec<char>,
-    i: usize,
-    col: usize,
+impl LispIndent {
+    /// Parse a rule spec: `body`, `function`, `clauses`, or a count of
+    /// distinguished arguments.
+    pub fn parse(spec: &str) -> Option<Self> {
+        match spec.trim() {
+            "body" | "defun" => Some(Self::Body),
+            "function" | "call" => Some(Self::Function),
+            "clauses" => Some(Self::Clauses),
+            n => n.parse().ok().map(Self::Special),
+        }
+    }
 }
 
-impl Scanner {
-    /// The char `ahead` places past the current one.
-    fn peek_at(&self, ahead: usize) -> Option<char> {
-        self.chars.get(self.i + ahead).copied()
-    }
+/// User indent rules (`lisp-indent-rule`), by head symbol.
+pub type LispIndentRules = HashMap<String, LispIndent>;
 
-    fn peek(&self) -> Option<char> {
-        self.peek_at(0)
+/// The built-in rule for a form's head, after Emacs's `scheme-mode` /
+/// `lisp-mode` conventions.
+fn builtin_rule(head: &str) -> LispIndent {
+    use LispIndent::*;
+    if head.starts_with("define") || head.starts_with("with-") || head.starts_with("def") {
+        return Body;
     }
+    match head {
+        "begin" | "dynamic-wind" | "unwind-protect" | "module" | "library" | "delay"
+        | "delay-force" | "make-parameter" => Body,
+        "lambda" | "λ" | "case-lambda" | "let" | "let*" | "letrec" | "letrec*" | "let-values"
+        | "let*-values" | "let-syntax" | "letrec-syntax" | "parameterize" | "fluid-let"
+        | "when" | "unless" | "while" | "until" | "case" | "match" | "match-lambda"
+        | "match-lambda*" | "match-let" | "match-let*" | "match-define" | "syntax-rules"
+        | "guard" | "for" | "for*" | "for/list" | "for/fold" | "with-handler"
+        | "call-with-values" | "receive" | "struct" => Special(1),
+        "named-lambda" | "do" | "syntax-case" | "destructuring-bind" => Special(2),
+        "cond" => Clauses,
+        _ => Function,
+    }
+}
 
-    /// Whether the next two chars are `a` then `b`.
-    fn at(&self, a: char, b: char) -> bool {
-        self.peek() == Some(a) && self.peek_at(1) == Some(b)
-    }
-
-    /// Step over one char (a no-op at the end), keeping the column in step.
-    fn bump(&mut self) {
-        if let Some(c) = self.peek() {
-            self.col = if c == '\n' { 0 } else { self.col + 1 };
-            self.i += 1;
-        }
-    }
-
-    fn bump_n(&mut self, n: usize) {
-        for _ in 0..n {
-            self.bump();
-        }
-    }
-
-    /// Step over spaces and tabs.
-    fn skip_blanks(&mut self) {
-        while matches!(self.peek(), Some(' ' | '\t')) {
-            self.bump();
-        }
-    }
-
-    /// Whether the scanner sits at the end of meaningful content on its line
-    /// (see [`lisp_line_end`]).
-    fn at_line_end(&self) -> bool {
-        lisp_line_end(&self.chars, self.i)
-    }
+/// The column of byte `pos` in `text` (chars since the line start).
+fn column(text: &str, pos: usize) -> usize {
+    let line_start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
+    text[line_start..pos].chars().count()
 }
 
 /// Target indentation column for a line whose preceding text — from the start
-/// of the enclosing top-level form (a line beginning at column 0) up to the
-/// insertion point — is `text`. A pragmatic Lisp indenter: continuation lines
-/// align under the enclosing form's first argument, while the body of a known
-/// special form indents `tab_width` columns past its opening paren (the same
-/// `tab-width` option the tree-sitter languages use). Strings, line and block
-/// comments, and char literals are skipped so their parens don't count.
-pub(super) fn lisp_indent_for(text: &str, tab_width: usize) -> usize {
-    let mut s = Scanner {
-        chars: text.chars().collect(),
-        i: 0,
-        col: 0,
-    };
-    // Open delimiters still unclosed at the end: (column, char-index just past
-    // it, delimiter char).
-    let mut stack: Vec<(usize, usize, char)> = Vec::new();
-    while let Some(ch) = s.peek() {
-        match ch {
-            ';' => {
-                // Leave the '\n' to reset the column on the next pass.
-                while s.peek().is_some_and(|c| c != '\n') {
-                    s.bump();
-                }
-            }
-            '"' => {
-                s.bump();
-                while let Some(c) = s.peek() {
-                    match c {
-                        // The escape and the char it escapes.
-                        '\\' => s.bump_n(2),
-                        '"' => {
-                            s.bump();
-                            break;
-                        }
-                        _ => s.bump(),
-                    }
-                }
-            }
-            // Char literal `#\x` — the `#`, the `\`, and the literal char are
-            // skipped (trailing letters of a named char like `#\space` are
-            // harmless symbol chars that hold no parens).
-            '#' if s.at('#', '\\') => s.bump_n(3),
-            '#' if s.at('#', '|') => {
-                // Nestable block comment `#| ... |#`.
-                s.bump_n(2);
-                let mut depth = 1usize;
-                while depth > 0 && s.peek().is_some() {
-                    if s.at('#', '|') {
-                        depth += 1;
-                        s.bump_n(2);
-                    } else if s.at('|', '#') {
-                        depth -= 1;
-                        s.bump_n(2);
-                    } else {
-                        s.bump();
-                    }
-                }
-            }
-            '(' | '[' | '{' => {
-                stack.push((s.col, s.i + 1, ch));
-                s.bump();
-            }
-            ')' | ']' | '}' => {
-                stack.pop();
-                s.bump();
-            }
-            _ => s.bump(),
+/// of the enclosing top-level form up to the insertion point — is `text`. The
+/// innermost list still open at the end of `text` decides: data (quoted lists,
+/// vectors, `[ ]` / `{ }`) and lists headed by a list align under their first
+/// element; otherwise the head's [`LispIndent`] rule (user `rules` first, then
+/// [`builtin_rule`]) picks between aligning under the first argument and a
+/// body offset of `tab_width` (the same `tab-width` option tree-sitter
+/// languages use). Strings, comments and char literals are skipped by the
+/// reader ([`crate::sexp`]), so their parens never count.
+pub(super) fn lisp_indent_for(text: &str, tab_width: usize, rules: &LispIndentRules) -> usize {
+    let parsed = crate::sexp::parse(text);
+    let mut list = None;
+    let mut nodes = &parsed.nodes;
+    while let Some(last) = nodes.last().filter(|n| !n.is_complete()) {
+        if !matches!(last.kind, Kind::List { .. }) {
+            break; // an unterminated string: the caller skips those lines
         }
+        list = Some(last);
+        nodes = &last.children;
     }
-
-    let Some(&(open_col, after, open)) = stack.last() else {
+    let Some(list) = list else {
         return 0; // top level
     };
-
-    // Walk from just past the opener to the head token / first argument,
-    // tracking columns. The char at `after` sits at column open_col + 1.
-    s.i = after;
-    s.col = open_col + 1;
-    s.skip_blanks();
-    // Nothing but a comment after the opener on its line → indent one past it.
-    if s.at_line_end() {
-        return open_col + 1;
+    let Kind::List { open, .. } = list.kind else {
+        unreachable!()
+    };
+    let open_col = column(text, open);
+    let Some(first) = list.children.first() else {
+        return open_col + 1; // nothing after the opener yet
+    };
+    let quoted = list.start < open && matches!(text.as_bytes()[list.start], b'\'' | b'`' | b'#');
+    if text.as_bytes()[open] != b'(' || quoted || !matches!(first.kind, Kind::Atom) {
+        return column(text, first.start);
     }
-    // Data lists / vectors, or a list used as the head, align under the first
-    // element rather than applying special-form rules.
-    if open != '(' || matches!(s.peek(), Some('(' | '[' | '{')) {
-        return s.col;
+    let head = &text[first.start..first.end];
+    let args = &list.children[1..];
+    let rule = rules
+        .get(head)
+        .copied()
+        .unwrap_or_else(|| builtin_rule(head));
+    let same_line = |pos: usize| !text[first.end..pos].contains('\n');
+    match rule {
+        LispIndent::Body => open_col + tab_width,
+        LispIndent::Special(n) if args.len() < n => open_col + 2 * tab_width,
+        LispIndent::Special(_) => open_col + tab_width,
+        LispIndent::Clauses => match args.first() {
+            Some(a) if same_line(a.start) => column(text, a.start),
+            _ => open_col + tab_width,
+        },
+        LispIndent::Function => match args.first() {
+            Some(a) => column(text, a.start),
+            None => open_col + 1,
+        },
     }
-    let head_start = s.i;
-    while s
-        .peek()
-        .is_some_and(|c| !c.is_whitespace() && !matches!(c, '(' | ')' | '[' | ']' | '{' | '}'))
-    {
-        s.bump();
-    }
-    let head: String = s.chars[head_start..s.i].iter().collect();
-    if lisp_form_indents_body(&head) {
-        return open_col + tab_width;
-    }
-    // Function call: align under the first argument when it shares the head's
-    // line; otherwise one past the opener.
-    s.skip_blanks();
-    if s.at_line_end() {
-        return open_col + 1;
-    }
-    s.col
-}
-
-/// Whether position `j` in `chars` is the end of meaningful content on its line:
-/// end of input, a newline, or the start of a line (`;`) or block (`#|`)
-/// comment. Used to decide there's no argument left to align under.
-fn lisp_line_end(chars: &[char], j: usize) -> bool {
-    j >= chars.len()
-        || chars[j] == '\n'
-        || chars[j] == ';'
-        || (chars[j] == '#' && j + 1 < chars.len() && chars[j + 1] == '|')
 }
 
 /// Largest prefix (bytes) the Lisp indenter reads from the buffer start.
@@ -308,14 +214,19 @@ impl Editor {
         let tab = self.structural_indent_width(cx);
         let line = self.active.buffer.line_range_at(self.point());
         if let Some(text) = self.lisp_indent_context(line.start) {
-            self.reindent_current_line(lisp_indent_for(&text, tab), cx);
+            let target = lisp_indent_for(&text, tab, &self.lisp_indent_rules);
+            self.reindent_current_line(target, cx);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_lisp_language, lisp_indent_for};
+    use super::{LispIndent, LispIndentRules, is_lisp_language};
+
+    fn lisp_indent_for(text: &str, tab: usize) -> usize {
+        super::lisp_indent_for(text, tab, &LispIndentRules::new())
+    }
 
     #[test]
     fn lisp_indent_aligns_and_bodies() {
@@ -372,5 +283,44 @@ mod tests {
         assert!(is_lisp_language("clojure"));
         assert!(!is_lisp_language("rust"));
         assert!(!is_lisp_language("python"));
+    }
+
+    #[test]
+    fn lisp_indent_follows_emacs_conventions() {
+        let ind = |s| lisp_indent_for(s, 2);
+        // A distinguished argument still to come gets two steps.
+        assert_eq!(ind("(let\n"), 4);
+        assert_eq!(ind("(when\n"), 4);
+        assert_eq!(ind("(do ((i 0 (+ i 1)))\n"), 4);
+        assert_eq!(ind("(do ((i 0 (+ i 1)))\n    ((= i 3))\n"), 2);
+        // cond clauses align under the first clause on the head's line…
+        assert_eq!(ind("(cond ((a) 1)\n"), 6);
+        // …else one step.
+        assert_eq!(ind("(cond\n"), 2);
+        // Quoted data and vectors align under their first element.
+        assert_eq!(ind("'(alpha beta\n"), 2);
+        assert_eq!(ind("#(1 2\n"), 2);
+        // Unquoted code inside a quasiquote is code again.
+        assert_eq!(ind("`(a ,(foo bar\n"), 10);
+        // Later arguments follow the first argument's column.
+        assert_eq!(ind("(foo\n bar\n"), 1);
+        // A string holding a paren on a continuation line.
+        assert_eq!(ind("(foo \"a)\"\n"), 5);
+    }
+
+    #[test]
+    fn lisp_indent_user_rules_override_builtins() {
+        let mut rules = LispIndentRules::new();
+        rules.insert("with-db".into(), LispIndent::Function);
+        rules.insert("my-let".into(), LispIndent::Special(1));
+        rules.insert("frob".into(), LispIndent::Body);
+        let ind = |s| super::lisp_indent_for(s, 2, &rules);
+        assert_eq!(ind("(with-db conn\n"), 9);
+        assert_eq!(ind("(my-let ((a 1))\n"), 2);
+        assert_eq!(ind("(my-let\n"), 4);
+        assert_eq!(ind("(frob a b\n"), 2);
+        assert_eq!(LispIndent::parse("body"), Some(LispIndent::Body));
+        assert_eq!(LispIndent::parse("2"), Some(LispIndent::Special(2)));
+        assert_eq!(LispIndent::parse("nope"), None);
     }
 }

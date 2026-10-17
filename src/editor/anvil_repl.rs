@@ -148,7 +148,7 @@ impl Editor {
             let indent = if sexp::parse(&before).ends_in_literal {
                 0 // string content: no indentation added to it
             } else {
-                lisp_indent::lisp_indent_for(&before, REPL_INDENT)
+                lisp_indent_for(&before, REPL_INDENT, &self.lisp_indent_rules)
             };
             self.insert_text(&format!("\n{}", " ".repeat(indent)), cx);
             return;

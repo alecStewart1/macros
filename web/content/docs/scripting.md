@@ -168,6 +168,39 @@ The built-in `macros-scheme` language server also powers completion, "unknown fu
 
 So the workflow is: edit a function in your `init.scm`, press <kbd>C-c C-e</kbd> on it, and keep going — the redefinition is live. <kbd>M-:</kbd> (`eval-expression`) evaluates a one-off expression in the minibuffer.
 
+### Structural editing
+
+Lisp buffers (`steel`, `macros-steel`, and the other Lisp modes) get Emacs's sexp motions and the core paredit edits. They work on reader-aware boundaries, so a paren inside a string, a `;` comment or a `#\(` char literal is never treated as a delimiter.
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-M-f</kbd> / <kbd>C-M-b</kbd> | `forward-sexp` / `backward-sexp` | Move over a sexp |
+| <kbd>C-M-u</kbd> / <kbd>C-M-n</kbd> | `backward-up-list` / `up-list` | Move out of the enclosing list |
+| <kbd>C-M-d</kbd> | `down-list` | Move into the next list |
+| <kbd>C-M-k</kbd> | `kill-sexp` | Kill the sexp after point |
+| <kbd>C-)</kbd> / <kbd>C-}</kbd> | `paredit-forward-slurp-sexp` / `-barf-sexp` | Pull the next sexp in / push the last one out |
+| <kbd>M-(</kbd> | `paredit-wrap-round` | Wrap the sexp at point in parens |
+| <kbd>M-r</kbd> | `paredit-raise-sexp` | Replace the enclosing list with the sexp at point |
+| <kbd>M-s s</kbd> | `paredit-splice-sexp` | Remove the enclosing list's parens |
+
+### Lisp indentation
+
+Lisp buffers indent the way Emacs does:
+- A definer (`define…`, `def…`, `with-…`, `begin`) indents its body one `tab-width` step. The default step is 2 for every Lisp.
+- Forms like `let`, `lambda`, `when`, `case` and `do` treat their first arguments as special: a special argument written on its own line gets two steps, and the body after it gets one.
+- `cond` clauses align under the first clause.
+- Quoted lists and vectors align under their first element.
+- Ordinary calls align under their first argument.
+
+Teach it your own macros with `lisp-indent-rule`, the equivalent of Emacs's `lisp-indent-function`:
+
+```scheme
+(lisp-indent-rule "with-db" "body")     ; body indented one step
+(lisp-indent-rule "my-let" "1")         ; one special argument, then the body
+(lisp-indent-rule "for" "function")     ; align like an ordinary call
+(lisp-indent-rule "my-cond" "clauses")  ; cond-style clause alignment
+```
+
 ## Discoverability is part of the API
 
 Function docs are scraped from the `;;` comments above each definition, so anything you document is searchable from inside the editor:

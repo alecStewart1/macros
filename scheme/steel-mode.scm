@@ -24,3 +24,29 @@
   (set-major-mode "steel")
   (message "Steel mode"))
 (register-command 'steel-mode)
+
+;; --- structural editing ------------------------------------------------------
+;; Sexp motion (Emacs) and the core paredit edits, on reader-aware boundaries:
+;; parens inside strings, comments and `#\(` char literals never count.
+;;   C-M-f / C-M-b  forward / backward over a sexp
+;;   C-M-u / C-M-n  out of the enclosing list, backward / forward
+;;   C-M-d          down into the next list
+;;   C-M-k          kill the sexp after point
+;;   C-)  / C-}     slurp the next sexp in / barf the last one out
+;;   M-(            wrap the sexp at point in parens
+;;   M-r            raise the sexp at point over its enclosing list
+;;   M-s s          splice: remove the enclosing list's parens
+(define (lisp-structural-keys mode)
+  (define-key mode "ctrl-alt-f" 'forward-sexp)
+  (define-key mode "ctrl-alt-b" 'backward-sexp)
+  (define-key mode "ctrl-alt-u" 'backward-up-list)
+  (define-key mode "ctrl-alt-n" 'up-list)
+  (define-key mode "ctrl-alt-d" 'down-list)
+  (define-key mode "ctrl-alt-k" 'kill-sexp)
+  (define-key mode "ctrl-)" 'paredit-forward-slurp-sexp)
+  (define-key mode "ctrl-}" 'paredit-forward-barf-sexp)
+  (define-key mode "alt-(" 'paredit-wrap-round)
+  (define-key mode "alt-r" 'paredit-raise-sexp)
+  (define-key mode "alt-s s" 'paredit-splice-sexp))
+(for-each lisp-structural-keys
+          '("steel" "macros-steel" "racket" "clojure" "lisp" "commonlisp" "elisp" "fennel" "janet"))
