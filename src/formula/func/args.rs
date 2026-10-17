@@ -7,6 +7,18 @@ use super::{Arg, Array, Ctx, RangeRef};
 use crate::formula::date;
 use crate::formula::value::{ErrorKind, Value};
 
+/// Most cells a formula may expand into one dense array (about 8.4M: four
+/// full Excel columns). Past it the result is `#NUM!` rather than an
+/// allocation of billions of values that aborts the whole editor.
+pub const MAX_ARRAY_CELLS: usize = 1 << 23;
+
+/// `rows × cols` when it fits under [`MAX_ARRAY_CELLS`], else `#NUM!`.
+pub fn dense_cells(rows: usize, cols: usize) -> Result<usize, ErrorKind> {
+    rows.checked_mul(cols)
+        .filter(|&n| n <= MAX_ARRAY_CELLS)
+        .ok_or(ErrorKind::Num)
+}
+
 /// A rectangular argument: a (clamped) range, an array, or a lone value
 /// standing in as a 1×1 area.
 #[derive(Clone, Debug)]
@@ -83,6 +95,9 @@ impl Area<'_> {
                 c1: rg.c0 + c0 + cols.max(1) - 1,
             }),
             Area::Array(a) => {
+                if dense_cells(rows, cols).is_err() {
+                    return Area::Scalar(Value::Error(ErrorKind::Num));
+                }
                 let mut data = Vec::with_capacity(rows * cols);
                 for r in r0..r0 + rows {
                     for c in c0..c0 + cols {
@@ -133,8 +148,12 @@ impl Area<'_> {
     }
 
     /// All values, row-major.
-    pub fn values(&self, ctx: &dyn Ctx) -> Vec<Value> {
-        self.window(ctx, self.rows(), self.cols())
+    /// `#NUM!` past [`MAX_ARRAY_CELLS`]: the whole area becomes one dense
+    /// list, so an explicit `A1:Z99999999` would otherwise try to allocate
+    /// billions of cells and abort the app.
+    pub fn values(&self, ctx: &dyn Ctx) -> Result<Vec<Value>, ErrorKind> {
+        dense_cells(self.rows(), self.cols())?;
+        Ok(self.window(ctx, self.rows(), self.cols()))
     }
 
     /// How many leading rows and columns hold any data (the rest of the
@@ -235,7 +254,7 @@ pub fn arg_values(arg: &Arg, ctx: &dyn Ctx) -> Result<Vec<Value>, ErrorKind> {
     match arg {
         Arg::Omitted => Ok(Vec::new()),
         Arg::Value(v) => Ok(vec![v.clone()]),
-        _ => Ok(area(arg, ctx)?.values(ctx)),
+        _ => area(arg, ctx)?.values(ctx),
     }
 }
 

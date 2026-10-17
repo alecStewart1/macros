@@ -57,3 +57,56 @@ fn regression_sum_empty_if() {
     eprintln!("{:?}", f(&mut m, "=SUM(B1:B3)"));
     eprintln!("{:?}", f(&mut m, "=SUM(IF(A1:A3>1,B1:B3))&\"\""));
 }
+
+#[test]
+fn regression_huge_explicit_ranges_are_num_not_an_abort() {
+    use crate::formula::value::ErrorKind;
+    let mut m = Mock::grid(&[&["1", "2"], &["3", "4"]]);
+    m.here = (0, 5);
+    // Each would materialize ~2.6e9 cells.
+    for src in [
+        "=SUMPRODUCT(A1:Z99999999)",
+        "=A1:Z99999999+0",
+        "=CONCAT(A1:Z99999999)",
+    ] {
+        assert_eq!(f(&mut m, src), Value::Error(ErrorKind::Num), "{src}");
+    }
+    // Ordinary ranges are unaffected.
+    assert_eq!(f(&mut m, "=SUMPRODUCT(A1:B2)"), Value::Number(10.0));
+}
+
+#[test]
+fn regression_sorted_lookup_over_mostly_empty_range_is_bounded() {
+    let mut m = Mock::grid(&[&["1", "a"], &["5", "b"], &["9", "c"]]);
+    m.here = (0, 5);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        f(&mut m, "=VLOOKUP(6,A1:B10000000,2)"),
+        Value::Text("b".into())
+    );
+    assert_eq!(f(&mut m, "=MATCH(6,A1:A10000000,1)"), Value::Number(2.0));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn regression_concat_operator_respects_text_limit() {
+    use crate::formula::value::ErrorKind;
+    let mut m = Mock::new();
+    assert_eq!(
+        f(&mut m, "=REPT(\"a\",32767)&\"b\""),
+        Value::Error(ErrorKind::Value)
+    );
+    assert_eq!(
+        f(&mut m, "=SUBSTITUTE(REPT(\"a\",32767),\"a\",\"bb\")"),
+        Value::Error(ErrorKind::Value)
+    );
+    assert_eq!(f(&mut m, "=\"a\"&\"b\""), Value::Text("ab".into()));
+}
+
+#[test]
+fn regression_1904_count_and_choose() {
+    let mut m = Mock::new();
+    m.d1904 = true;
+    let sum = f(&mut m, "=SUM(\"1/1/2024\")");
+    assert_eq!(f(&mut m, "=AVERAGEA(\"1/1/2024\")"), sum);
+}

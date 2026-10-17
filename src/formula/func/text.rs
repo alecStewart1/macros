@@ -208,6 +208,16 @@ fn substitute(args: &[Arg], ctx: &mut dyn Ctx) -> Result<String, ErrorKind> {
     if old.is_empty() {
         return Ok(s.to_string());
     }
+    // Check the result's size before building it: replacing every char of a
+    // 32,767-char string with another 32,767 chars would allocate ~1 GiB
+    // only for the length check afterwards to reject it.
+    if instance.is_none() {
+        let hits = s.matches(&*old).count();
+        let grown = s.chars().count() - hits * old.chars().count() + hits * new.chars().count();
+        if grown > MAX_TEXT_LEN {
+            return Err(ErrorKind::Value);
+        }
+    }
     Ok(match instance {
         None => s.replace(&*old, &new),
         Some(k) => match s.match_indices(&*old).nth(k - 1) {

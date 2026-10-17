@@ -88,12 +88,14 @@ pub(super) const FUNCS: &[FuncDef] = &[
 /// The `…A` functions' view: like [`numbers`], but inside ranges and arrays
 /// text counts as 0 and booleans as 1/0 (empty cells are still skipped).
 fn numbers_a(args: &[Arg], ctx: &mut dyn Ctx) -> Result<Vec<f64>, ErrorKind> {
+    // Date text coerces in the workbook's date system, as `SUM` does.
+    let d1904 = ctx.date1904();
     fold_args(
         args,
         ctx,
         Vec::new(),
         |out, v| {
-            out.push(v.to_number()?);
+            out.push(v.to_number_in(d1904)?);
             Ok(())
         },
         |out, v| {
@@ -128,12 +130,13 @@ fn averagea(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
 /// Values typed directly count when they are numbers, booleans or numeric
 /// text; inside ranges and arrays only numbers count.
 fn count(args: &[Arg], ctx: &mut dyn Ctx) -> Result<f64, ErrorKind> {
+    let d1904 = ctx.date1904();
     let n = fold_args(
         args,
         ctx,
         0usize,
         |n, v| {
-            if !v.is_error() && v.to_number().is_ok() {
+            if !v.is_error() && v.to_number_in(d1904).is_ok() {
                 *n += 1;
             }
             Ok(())

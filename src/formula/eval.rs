@@ -131,6 +131,11 @@ fn binary(op: BinOp, a: Value, b: Value, date1904: bool) -> Value {
         }),
         BinOp::Pow => arith(|x, y| func::math::excel_power(x, y).into_value()),
         BinOp::Concat => match (a.to_text(), b.to_text()) {
+            // Excel's 32,767-character cell limit: `#VALUE!` past it (and no
+            // unbounded growth from a chain of doubling `&`s).
+            (Ok(x), Ok(y)) if x.chars().count() + y.chars().count() > func::MAX_TEXT_LEN => {
+                Value::Error(ErrorKind::Value)
+            }
             (Ok(x), Ok(y)) => Value::Text(Arc::from(format!("{x}{y}"))),
             (Err(e), _) | (_, Err(e)) => Value::Error(e),
         },
@@ -219,6 +224,9 @@ fn materialize(ev: Ev, ctx: &mut dyn Ctx) -> (usize, usize, Vec<Value>) {
                 return (1, 1, vec![Value::Error(ErrorKind::Ref)]);
             };
             let (rows, cols) = (r.rows(), r.cols());
+            if crate::formula::func::dense_cells(rows, cols).is_err() {
+                return (1, 1, vec![Value::Error(ErrorKind::Num)]);
+            }
             let mut data = vec![Value::Empty; rows.saturating_mul(cols)];
             ctx.for_each(&r, &mut |row, col, v| {
                 data[(row - r.r0) * cols + (col - r.c0)] = v;
@@ -420,7 +428,8 @@ fn call(name: &str, args: &[Expr], ctx: &mut dyn Ctx) -> Ev {
             }
         }
         "CHOOSE" => {
-            let i = match to_scalar(eval(&args[0], ctx), ctx).to_number() {
+            let index = to_scalar(eval(&args[0], ctx), ctx);
+            let i = match index.to_number_in(ctx.date1904()) {
                 Ok(n) => n.trunc(),
                 Err(e) => return err(e),
             };

@@ -68,7 +68,7 @@ fn isna(args: &[Arg], ctx: &mut dyn Ctx) -> bool {
 fn parity(args: &[Arg], ctx: &mut dyn Ctx, odd: bool) -> Result<bool, ErrorKind> {
     let n = match scalar(&args[0], ctx) {
         Value::Bool(_) => return Err(ErrorKind::Value),
-        v => v.to_number()?,
+        v => v.to_number_in(ctx.date1904())?,
     };
     let is_odd = (n.trunc() % 2.0).abs() == 1.0;
     Ok(is_odd == odd)

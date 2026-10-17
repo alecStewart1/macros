@@ -59,24 +59,34 @@ fn for_each_span(expr: &mut Expr, sheet: &str, axis: Axis, mut f: impl FnMut(Spa
 
 /// Rows/columns `at..at+n` were inserted (`n > 0`) on `sheet`.
 pub fn insert(expr: &mut Expr, sheet: &str, axis: Axis, at: usize, n: usize) -> bool {
-    let mut changed = false;
-    let mut shift = |c: &mut Coord| {
-        if c.index >= at {
-            c.index += n;
-            changed = true;
-        }
+    use super::parse::{MAX_COL, MAX_ROW};
+    let max = match axis {
+        Axis::Rows => MAX_ROW,
+        Axis::Cols => MAX_COL,
     };
-    for_each_span(expr, sheet, axis, |span| {
-        match span {
-            Span::Point(c) => shift(c),
-            // A range grows when rows go in strictly inside it (or right at
-            // its end-row's position, as Excel does at the last row).
-            Span::Range(a, b) => {
-                shift(a);
-                shift(b);
+    let mut changed = false;
+    // Shift one coordinate; true when it would be pushed off the sheet (past
+    // XFD / the last row), which makes the reference `#REF!` — as `translate`
+    // does — rather than an `XFE1` that re-parses as a name.
+    let mut shift = |c: &mut Coord| {
+        // An open end (`A:A`'s rows) sits past the sheet and never moves.
+        if c.index >= at && c.index <= max {
+            changed = true;
+            match c.index.checked_add(n).filter(|&i| i <= max) {
+                Some(i) => c.index = i,
+                None => return true,
             }
         }
         false
+    };
+    for_each_span(expr, sheet, axis, |span| match span {
+        Span::Point(c) => shift(c),
+        // A range grows when rows go in strictly inside it (or right at
+        // its end-row's position, as Excel does at the last row).
+        Span::Range(a, b) => {
+            let dead_a = shift(a);
+            shift(b) || dead_a
+        }
     });
     changed
 }
@@ -243,6 +253,9 @@ mod tests {
         assert_eq!(ins("=SUM(B:B)"), "=SUM(B:B)");
         let cols = run("=B1+D1", |e| insert(e, "Sheet1", Axis::Cols, 2, 1));
         assert_eq!(cols, "=B1+E1");
+        // Pushed past the last column: #REF!, not `XFE1` (a name).
+        let off = run("=XFD1+A1", |e| insert(e, "Sheet1", Axis::Cols, 0, 1));
+        assert_eq!(off, "=#REF!+B1");
     }
 
     #[test]

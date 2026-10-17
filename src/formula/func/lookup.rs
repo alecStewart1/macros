@@ -213,6 +213,17 @@ fn scan(ctx: &dyn Ctx, vec: &Area, reverse: bool, hit: impl Fn(&Value) -> bool) 
     }
 }
 
+/// How many leading cells of vector `vec` can hold a value of `needle`'s
+/// type: its data extent (everything after is empty), or all of it when the
+/// needle itself is empty.
+fn data_len(ctx: &dyn Ctx, vec: &Area, needle: &Value) -> i64 {
+    if matches!(needle, Value::Empty) {
+        return vec.len() as i64;
+    }
+    let (r, c) = vec.data_dims(ctx);
+    (if vec.cols() == 1 { r } else { c }) as i64
+}
+
 /// Excel's binary search over sorted data: the last position whose value is
 /// ≤ `needle` (ascending) or ≥ `needle` (descending), comparing only cells
 /// of the needle's type and stepping over the rest.
@@ -227,11 +238,15 @@ fn find_sorted(ctx: &dyn Ctx, vec: &Area, needle: &Value, descending: bool) -> O
         let v = vec.vget(ctx, i as usize);
         same_type(&v, needle).then_some((i, v))
     };
+    // Cells past the data are empty and never the needle's type: bound the
+    // probes there, or `VLOOKUP(5, A1:B10000000, 2)` over 10 rows of data
+    // reads ten million empty cells per probe.
+    let limit = data_len(ctx, vec, needle).min(n);
     while lo <= hi {
         let mid = lo + (hi - lo) / 2;
-        let found = (mid..=hi)
+        let found = (mid..=hi.min(limit - 1))
             .find_map(typed)
-            .or_else(|| (lo..mid).rev().find_map(typed));
+            .or_else(|| (lo..mid.min(limit)).rev().find_map(typed));
         let Some((j, v)) = found else { break };
         let o = cmp_same(&v, needle);
         let keep = if descending {
@@ -513,8 +528,10 @@ fn xbinary(
             None
         };
     }
-    let next_typed =
-        |from: usize| (from..look.len()).find(|&i| same_type(&look.vget(ctx, i), needle));
+    let limit = data_len(ctx, look, needle) as usize;
+    let next_typed = |from: usize| {
+        (from..look.len().min(limit)).find(|&i| same_type(&look.vget(ctx, i), needle))
+    };
     // Ascending: j is the last ≤ (next smaller); the next larger follows it.
     // Descending: j is the last ≥ (next larger); the next smaller follows it.
     let toward_j = if descending {

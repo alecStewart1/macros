@@ -907,9 +907,11 @@ impl Ctx for EngineCtx<'_> {
             }
             return;
         }
-        // Several columns: gather each, then emit row-major.
+        // Several columns: gather each over the stored rows only, then emit
+        // row-major (the tail past the data is all empty — never allocated,
+        // so `A1:Z99999999` costs its data, not 2.6e9 cells).
         let width = range.cols();
-        let height = range.rows();
+        let height = row_end - range.r0;
         let mut grid = vec![Value::Empty; width.saturating_mul(height)];
         for (i, col) in (range.c0..=range.c1).enumerate() {
             self.src
@@ -919,6 +921,11 @@ impl Ctx for EngineCtx<'_> {
         }
         for (k, v) in grid.into_iter().enumerate() {
             f(range.r0 + k / width, range.c0 + k % width, v);
+        }
+        for row in tail.into_iter().flatten() {
+            for col in range.c0..=range.c1 {
+                f(row, col, Value::Empty);
+            }
         }
     }
 
@@ -970,6 +977,9 @@ impl Ctx for EngineCtx<'_> {
                     let Some(r) = self.clamp(r) else {
                         return Some(Value::Error(ErrorKind::Ref));
                     };
+                    if crate::formula::func::dense_cells(r.rows(), r.cols()).is_err() {
+                        return Some(Value::Error(ErrorKind::Num));
+                    }
                     let mut rows = vec![vec![Value::Empty; r.cols()]; r.rows()];
                     self.for_each(&r, &mut |row, col, v| rows[row - r.r0][col - r.c0] = v);
                     ExternalArg::Rows(rows)
