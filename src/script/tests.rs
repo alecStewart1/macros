@@ -6163,6 +6163,31 @@ mod magit_tests {
             .unwrap();
         assert_eq!(root, format!("\"{dir}\""));
 
+        // A nested git worktree/submodule (`.git` FILE) is its own project even
+        // inside another repo (`.git` DIRECTORY): the inner checkout wins.
+        let base = std::env::temp_dir().join(format!("macros-wt-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let inner = base.join("wt").join("inner");
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::create_dir_all(inner.join("src")).unwrap();
+        std::fs::write(inner.join(".git"), "gitdir: ../../.git/worktrees/inner\n").unwrap();
+        let (base_s, inner_s) = (base.display(), inner.display());
+        let root = engine
+            .eval(&format!("(project-root \"{inner_s}/src\")"))
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(root, format!("\"{inner_s}\""));
+        // A plain sub-dir of the outer repo still resolves to the outer root.
+        std::fs::create_dir_all(base.join("other")).unwrap();
+        let root = engine
+            .eval(&format!("(project-root \"{base_s}/other\")"))
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(root, format!("\"{base_s}\""));
+        let _ = std::fs::remove_dir_all(&base);
+
         // Porcelain entry parsing.
         assert_eq!(
             engine

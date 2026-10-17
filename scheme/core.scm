@@ -564,10 +564,18 @@
         ((file-exists? (path-join dir (car markers))) #t)
         (else (project-has-marker? dir (cdr markers)))))
 
+;; A `.git` FILE (`gitdir: …`) marks a linked worktree or submodule checkout:
+;; a repo boundary of its own, even when nested inside another repo's tree.
+(define (git-link-root? dir)
+  (let ((git (path-join dir ".git")))
+    (and (file-exists? git) (not (file-directory? git)))))
+
 ;; Walk up from `dir`, tracking two candidates: the OUTERMOST dir with a VCS
 ;; marker, and the NEAREST dir with any marker. Prefer the VCS root when one
 ;; exists (so nested build-tool roots collapse into the repo); otherwise fall
-;; back to the nearest build marker. #f outside any project.
+;; back to the nearest build marker. A git worktree/submodule (`.git` file)
+;; stops the walk, so it never resolves to the enclosing checkout. #f outside
+;; any project.
 (define (project-root-walk dir)
   (let loop ((d dir) (vcs-root #f) (nearest #f))
     (if (equal? d "")
@@ -576,7 +584,7 @@
                (nearest*  (if (and (not nearest) (project-has-marker? d *project-markers*))
                               d nearest))
                (parent (parent-directory d)))
-          (if (equal? parent d)
+          (if (or (equal? parent d) (git-link-root? d))
               (or vcs-root* nearest*)
               (loop parent vcs-root* nearest*))))))
 
