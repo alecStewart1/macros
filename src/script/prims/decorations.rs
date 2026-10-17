@@ -21,7 +21,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             let q = queue.clone();
             reg.register_fn(
                 "add-line-icon",
-                move |line: usize, col: usize, name: String, face: String| {
+                move |NonNeg(line): NonNeg, NonNeg(col): NonNeg, name: String, face: String| {
                     q.push(EditorCommand::AddLineIcon(line, col, name, face));
                 },
             );
@@ -56,7 +56,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let q = queue.clone();
         reg.register_fn(
             "set-line-image-impl",
-            move |line: usize, path: String, max_width: usize| {
+            move |NonNeg(line): NonNeg, path: String, NonNeg(max_width): NonNeg| {
                 q.push(EditorCommand::SetLineImage {
                     line,
                     path,
@@ -101,7 +101,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             let q = queue.clone();
             reg.register_fn(
                 "guard-buffer-tick",
-                move |name: String, tick: usize, on_stale: String| {
+                move |name: String, NonNeg(tick): NonNeg, on_stale: String| {
                     q.push(EditorCommand::GuardBufferUnchanged {
                         name,
                         tick: tick as u64,
@@ -125,12 +125,18 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // `(set-line-scale line scale)` renders buffer `line` at `scale`× the
         // base font size (e.g. a heading); `(clear-line-scales)` resets all.
         let q = queue.clone();
-        reg.register_fn("set-line-scale", move |line: usize, scale: f64| {
-            q.push(EditorCommand::SetLineScale {
-                line,
-                scale: scale as f32,
-            });
-        });
+        reg.register_fn(
+            "set-line-scale",
+            move |NonNeg(line): NonNeg, scale: steel::rvals::SteelVal| {
+                // Any real (an integer `2` too); a non-finite or absurd scale would
+                // make the line's font size meaningless, so clamp to 1–8×.
+                let scale = steel_f64(&scale).filter(|s| s.is_finite()).unwrap_or(1.0);
+                q.push(EditorCommand::SetLineScale {
+                    line,
+                    scale: scale.clamp(1.0, 8.0) as f32,
+                });
+            },
+        );
         register_nullary(
             reg,
             queue,

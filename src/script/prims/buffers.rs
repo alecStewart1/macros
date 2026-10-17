@@ -54,11 +54,14 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         EditorCommand::OpenFileOtherWindow,
     );
     register_unary(reg, queue, "select-window", EditorCommand::SelectWindow);
+    // Any real number (an integer like `1` included); clamped when applied.
     register_unary(
         reg,
         queue,
         "split-window-right-ratio",
-        EditorCommand::SplitWindowRightRatio,
+        |ratio: steel::rvals::SteelVal| {
+            EditorCommand::SplitWindowRightRatio(steel_f64(&ratio).unwrap_or(0.5))
+        },
     );
     {
         // `(window-list)` → pane ids in cycle order; `(selected-window)` → the

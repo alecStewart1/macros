@@ -4693,6 +4693,18 @@ impl Editor {
     // --- Key handling -----------------------------------------------------
 }
 
+/// The byte offset in `s` of UTF-16 offset `u16` (clamped to `s`'s end).
+fn utf16_to_byte_in(s: &str, u16: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in s.char_indices() {
+        if units >= u16 {
+            return i;
+        }
+        units += c.len_utf16();
+    }
+    s.len()
+}
+
 /// The grapheme boundary immediately before `cursor` in `s`.
 fn prev_grapheme(s: &str, cursor: usize) -> usize {
     s[..cursor]
@@ -5360,18 +5372,24 @@ impl EntityInputHandler for Editor {
             .unwrap_or_else(|| self.active.selected_range.clone());
 
         let start = range.start;
-        self.edit(range, new_text);
+        let before = self.active.buffer.len();
+        self.edit(range.clone(), new_text);
+        if self.active.buffer.len() + range.len() != before + new_text.len() {
+            return; // refused (read-only text): no composition to track
+        }
         self.active.marked_range = (!new_text.is_empty()).then(|| start..start + new_text.len());
-        self.active.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|r| self.active.buffer.range_from_utf16(r))
-            .map_or_else(
-                || {
-                    let cursor = start + new_text.len();
-                    cursor..cursor
-                },
-                |r| start + r.start..start + r.end,
-            );
+        // The IME's selection is in UTF-16 units *within `new_text`*, not the
+        // buffer: convert against the composed text itself.
+        self.active.selected_range = new_selected_range_utf16.as_ref().map_or_else(
+            || {
+                let cursor = start + new_text.len();
+                cursor..cursor
+            },
+            |r| {
+                start + utf16_to_byte_in(new_text, r.start)
+                    ..start + utf16_to_byte_in(new_text, r.end)
+            },
+        );
         self.active.mark_active = false;
         self.ensure_cursor_visible();
         cx.notify();

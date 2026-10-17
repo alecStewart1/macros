@@ -23,9 +23,12 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         reg.register_fn("gix-branch", |dir: String| -> String { gix_branch(&dir) });
         // `(gix-log dir n)` → up to `n` recent HEAD commits, newest first, each
         // "shorthash\tauthor\tYYYY-MM-DD\tsummary".
-        reg.register_fn("gix-log", |dir: String, max: usize| -> Vec<String> {
-            gix_log(&dir, max).unwrap_or_default()
-        });
+        reg.register_fn(
+            "gix-log",
+            |dir: String, NonNeg(max): NonNeg| -> Vec<String> {
+                gix_log(&dir, max).unwrap_or_default()
+            },
+        );
         // `(gix-blame dir file)` → one "line\tsha\tauthor\tepoch\tsummary" per
         // line of `file` (absolute or relative to `dir`) as committed at HEAD —
         // or an empty list when the file differs from HEAD (caller falls back to
@@ -68,7 +71,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         // `(gix-log-oneline dir n)` → up to n "<shorthash> <summary>" lines.
         reg.register_fn(
             "gix-log-oneline",
-            |dir: String, max: usize| -> Vec<String> {
+            |dir: String, NonNeg(max): NonNeg| -> Vec<String> {
                 gix_log_oneline(&dir, max).unwrap_or_default()
             },
         );
@@ -87,14 +90,14 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         // `(gix-log-decorated dir all? n)` → `git log --oneline --decorate [--all]`.
         reg.register_fn(
             "gix-log-decorated",
-            |dir: String, all: bool, max: usize| -> Vec<String> {
+            |dir: String, all: bool, NonNeg(max): NonNeg| -> Vec<String> {
                 gix_log_decorated(&dir, all, max).unwrap_or_default()
             },
         );
         // `(gix-log-range dir tip hidden n)` → `git log --oneline hidden..tip`.
         reg.register_fn(
             "gix-log-range",
-            |dir: String, tip: String, hidden: String, max: usize| -> Vec<String> {
+            |dir: String, tip: String, hidden: String, NonNeg(max): NonNeg| -> Vec<String> {
                 gix_log_range(&dir, &tip, &hidden, max).unwrap_or_default()
             },
         );
@@ -105,7 +108,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
         // `(gix-log-file dir file n)` → `git log --oneline --decorate -n N -- file`.
         reg.register_fn(
             "gix-log-file",
-            |dir: String, file: String, max: usize| -> Vec<String> {
+            |dir: String, file: String, NonNeg(max): NonNeg| -> Vec<String> {
                 gix_log_file(&dir, &file, max).unwrap_or_default()
             },
         );

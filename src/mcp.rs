@@ -82,6 +82,15 @@ pub struct EvalReport {
     pub commands: usize,
 }
 
+/// One taken connection slot; dropping it frees the slot.
+struct SlotGuard(Arc<AtomicUsize>);
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// A running server. Dropping it (or [`McpServer::stop`]) shuts it down.
 pub struct McpServer {
     pub port: u16,
@@ -137,18 +146,19 @@ impl McpServer {
                         continue; // dropping `stream` closes it
                     }
                     let (backend, token, active) = (backend.clone(), token.clone(), active.clone());
+
                     // One thread per connection: a long `eval` mustn't block
                     // a concurrent `messages` call.
-                    let spawned = std::thread::Builder::new().name("mcp-conn".into()).spawn({
-                        let active = active.clone();
-                        move || {
+                    // The slot is released when the guard drops — including when
+                    // a tool call panics and unwinds the connection thread, which
+                    // would otherwise leak it until all slots were gone.
+                    let slot = SlotGuard(active);
+                    let _ = std::thread::Builder::new()
+                        .name("mcp-conn".into())
+                        .spawn(move || {
+                            let _slot = slot;
                             serve_connection(stream, &token, backend.as_ref());
-                            active.fetch_sub(1, Ordering::SeqCst);
-                        }
-                    });
-                    if spawned.is_err() {
-                        active.fetch_sub(1, Ordering::SeqCst);
-                    }
+                        });
                 }
             })?;
         Ok(McpServer { port, stop })

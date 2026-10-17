@@ -36,6 +36,17 @@ impl ApiEntry {
             ret: friendly_type(ret_ty),
         }
     }
+
+    /// An entry from explicit argument type names (a primitive whose closure
+    /// takes raw `SteelVal`s and converts them itself).
+    pub(crate) fn with_types(name: &str, section: Section, args: &[&str], ret_ty: &str) -> Self {
+        ApiEntry {
+            name: name.to_string(),
+            section,
+            args: args.iter().map(|t| friendly_type(t)).collect(),
+            ret: friendly_type(ret_ty),
+        }
+    }
 }
 
 /// The API reference's categories. `reg.section(…)` files every following
@@ -188,7 +199,8 @@ fn friendly_type(ty: &str) -> String {
     match base {
         "String" | "str" | "SteelString" | "Cow" | "Name" => "string".into(),
         "bool" => "bool".into(),
-        "isize" | "usize" | "i64" | "u64" | "i32" | "u32" | "u16" | "u8" | "NonNeg" => "int".into(),
+        "isize" | "usize" | "i64" | "u64" | "i32" | "u32" | "u16" | "u8" | "NonNeg"
+        | "NonNeg64" => "int".into(),
         "Port" => "port".into(),
         "f64" | "f32" => "number".into(),
         "SteelVal" => "any".into(),
