@@ -432,8 +432,8 @@ impl Editor {
             // dropped when ReadChar applied (see the ReadChar dispatch), so
             // replay runs `(callback "<char>")` directly instead of re-arming
             // a capture that playback could never satisfy.
-            let escaped = ch.replace('\\', "\\\\").replace('"', "\\\"");
-            self.record_event(MacroEvent::Command(format!("({callback} \"{escaped}\")")));
+            let quoted = super::vim::steel_quote(&ch);
+            self.record_event(MacroEvent::Command(format!("({callback} {quoted})")));
             // The engine passes `ch` as the callback's argument verbatim (no
             // source-string interpolation), so quotes/backslashes are safe.
             self.script.dispatch_action(&callback, Some(&ch));

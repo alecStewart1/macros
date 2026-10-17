@@ -128,34 +128,26 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             conn.reader.get_ref().tcp().set_read_timeout(dur).is_ok()
         },
     );
-    reg.register_fn("socket-send", |NonNeg(id): NonNeg, text: String| -> bool {
-        socket_send_impl(id, text.as_bytes())
-    });
-    reg.register_fn("socket-recv-line", |NonNeg(id): NonNeg| -> String {
-        socket_recv_line_impl(id)
-    });
-    reg.register_fn(
-        "socket-recv-bytes",
-        |NonNeg(id): NonNeg, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
-    );
-    reg.register_fn("socket-close", |NonNeg(id): NonNeg| -> bool {
-        CONNS.remove(id)
-    });
+    // Each under its name and the original TLS-only alias (back-compat).
+    for name in ["socket-send", "tls-send"] {
+        reg.register_fn(name, |NonNeg(id): NonNeg, text: String| -> bool {
+            socket_send_impl(id, text.as_bytes())
+        });
+    }
+    for name in ["socket-recv-line", "tls-recv-line"] {
+        reg.register_fn(name, |NonNeg(id): NonNeg| -> String {
+            socket_recv_line_impl(id)
+        });
+    }
+    for name in ["socket-recv-bytes", "tls-recv-bytes"] {
+        reg.register_fn(name, |NonNeg(id): NonNeg, NonNeg(n): NonNeg| -> String {
+            socket_recv_bytes_impl(id, n)
+        });
+    }
+    for name in ["socket-close", "tls-close"] {
+        reg.register_fn(name, |NonNeg(id): NonNeg| -> bool { CONNS.remove(id) });
+    }
     reg.register_fn("socket-last-error", last_error);
-    // Back-compat aliases for the original TLS-only names.
-    reg.register_fn("tls-send", |NonNeg(id): NonNeg, text: String| -> bool {
-        socket_send_impl(id, text.as_bytes())
-    });
-    reg.register_fn("tls-recv-line", |NonNeg(id): NonNeg| -> String {
-        socket_recv_line_impl(id)
-    });
-    reg.register_fn(
-        "tls-recv-bytes",
-        |NonNeg(id): NonNeg, NonNeg(n): NonNeg| -> String { socket_recv_bytes_impl(id, n) },
-    );
-    reg.register_fn("tls-close", |NonNeg(id): NonNeg| -> bool {
-        CONNS.remove(id)
-    });
     reg.register_fn("tls-last-error", last_error);
     // TCP server.
     reg.register_fn("tcp-listen", |host: String, Port(port): Port| -> usize {

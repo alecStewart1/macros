@@ -256,39 +256,41 @@ impl Editor {
     /// Replicate an insertion of `text` at every cursor (primary + extras),
     /// keeping all of them after their inserted text. One undo group.
     pub(super) fn multi_insert(&mut self, text: &str, cx: &mut Context<Self>) {
-        let primary = self.active.selected_range.start;
-        let pm = self.script.add_marker(primary);
-        let positions = self.all_cursor_positions();
-        self.begin_undo_group();
-        for &pos in positions.iter().rev() {
-            self.edit(pos..pos, text);
-        }
-        self.end_undo_group();
-        let np = self.script.marker_pos(pm).unwrap_or(primary);
-        self.script.remove_marker(pm);
-        self.collapse_to(np);
-        self.parse_full();
-        self.ensure_cursor_visible();
-        cx.notify();
+        self.multi_edit(|_, pos| Some((pos..pos, text.to_string())), cx);
     }
 
     /// Replicate a backspace (delete the grapheme before each cursor).
     pub(super) fn multi_delete_back(&mut self, cx: &mut Context<Self>) {
+        self.multi_edit(
+            |buffer, pos| {
+                let prev = buffer.prev_grapheme(pos);
+                (prev < pos).then(|| (prev..pos, String::new()))
+            },
+            cx,
+        );
+    }
+
+    /// Apply `at(buffer, cursor)`'s edit at every cursor as one undo step,
+    /// last cursor first (so earlier offsets stay valid), keeping the primary
+    /// cursor on its marker.
+    fn multi_edit(
+        &mut self,
+        at: impl Fn(&Buffer, usize) -> Option<(Range<usize>, String)>,
+        cx: &mut Context<Self>,
+    ) {
         let primary = self.active.selected_range.start;
         let pm = self.script.add_marker(primary);
         let positions = self.all_cursor_positions();
         self.begin_undo_group();
         for &pos in positions.iter().rev() {
-            let prev = self.active.buffer.prev_grapheme(pos);
-            if prev < pos {
-                self.edit(prev..pos, "");
+            if let Some((range, text)) = at(&self.active.buffer, pos) {
+                self.edit(range, &text);
             }
         }
         self.end_undo_group();
         let np = self.script.marker_pos(pm).unwrap_or(primary);
         self.script.remove_marker(pm);
         self.collapse_to(np);
-        self.parse_full();
         self.ensure_cursor_visible();
         cx.notify();
     }

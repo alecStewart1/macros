@@ -780,11 +780,7 @@ impl Highlighter {
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range.clone());
 
-        let provider = |node: Node| {
-            rope.byte_slice(node.byte_range())
-                .chunks()
-                .map(str::as_bytes)
-        };
+        let provider = rope_text(rope);
         let mut captures: Vec<(usize, usize, Face)> = Vec::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), provider);
         while let Some(m) = matches.next() {
@@ -827,11 +823,7 @@ impl Highlighter {
         };
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range.clone());
-        let provider = |node: Node| {
-            rope.byte_slice(node.byte_range())
-                .chunks()
-                .map(str::as_bytes)
-        };
+        let provider = rope_text(rope);
         let mut cache = inj.cache.borrow_mut();
         let mut spans_cache = inj.spans.borrow_mut();
         let mut matches = cursor.matches(&inj.query, tree.root_node(), provider);
@@ -908,16 +900,9 @@ impl Highlighter {
     }
 
     pub fn node_at(&self, byte: usize) -> Vec<(String, usize, usize)> {
-        let Some(tree) = self.tree.as_ref() else {
-            return Vec::new();
-        };
-        let mut node = tree.root_node().descendant_for_byte_range(byte, byte);
-        let mut chain = Vec::new();
-        while let Some(n) = node {
-            chain.push((n.kind().to_string(), n.start_byte(), n.end_byte()));
-            node = n.parent();
-        }
-        chain
+        self.tree
+            .as_ref()
+            .map_or_else(Vec::new, |tree| tree_ancestors(tree, byte))
     }
 
     /// The byte offset of the bracket matching the single-char delimiter token
@@ -1015,11 +1000,7 @@ impl Highlighter {
             scope = parent;
         }
 
-        let provider = |node: Node| {
-            rope.byte_slice(node.byte_range())
-                .chunks()
-                .map(str::as_bytes)
-        };
+        let provider = rope_text(rope);
         let mut cursor = QueryCursor::new();
         let mut kinds: HashMap<usize, IndentKind> = HashMap::new();
         let mut outdent_starts: Vec<usize> = Vec::new();
@@ -1099,11 +1080,7 @@ impl Highlighter {
             scope = parent;
         }
 
-        let provider = |node: Node| {
-            rope.byte_slice(node.byte_range())
-                .chunks()
-                .map(str::as_bytes)
-        };
+        let provider = rope_text(rope);
         // Pair each `@align` node with its match's `@anchor` node.
         let mut anchors: HashMap<usize, Node> = HashMap::new();
         let mut cursor = QueryCursor::new();
@@ -1158,11 +1135,7 @@ impl Highlighter {
         let query = Query::new(&self.language, query_src).ok()?;
         let names = query.capture_names();
         let mut cursor = QueryCursor::new();
-        let provider = |node: Node| {
-            rope.byte_slice(node.byte_range())
-                .chunks()
-                .map(str::as_bytes)
-        };
+        let provider = rope_text(rope);
         let mut out = Vec::new();
         let mut matches = cursor.matches(&query, tree.root_node(), provider);
         while let Some(m) = matches.next() {
@@ -1195,6 +1168,18 @@ pub fn parse_for_test(language: &str, text: &str) -> Option<Tree> {
 
 /// `(kind, start, end)` of every node containing `byte`, innermost first —
 /// the chain behind `(ts-ancestors pos)`.
+/// A node's text, chunk by chunk, for tree-sitter queries over a rope
+/// (`QueryCursor::matches`'s text provider).
+type RopeChunks<'a> = std::iter::Map<ropey::iter::Chunks<'a>, fn(&'a str) -> &'a [u8]>;
+
+fn rope_text<'a>(rope: &'a Rope) -> impl Fn(Node) -> RopeChunks<'a> + 'a {
+    move |node: Node| {
+        rope.byte_slice(node.byte_range())
+            .chunks()
+            .map(str::as_bytes as fn(&'a str) -> &'a [u8])
+    }
+}
+
 pub fn tree_ancestors(tree: &Tree, byte: usize) -> Vec<(String, usize, usize)> {
     let mut node = tree.root_node().descendant_for_byte_range(byte, byte);
     let mut chain = Vec::new();

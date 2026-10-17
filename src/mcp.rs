@@ -843,22 +843,9 @@ fn format_eval(report: &EvalReport) -> (String, bool) {
     (out, report.error.is_some())
 }
 
-/// A Rust string as a Steel string literal.
+/// A Scheme string literal for `s` (see [`crate::script::steel_quote`]).
 fn scheme_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    crate::script::steel_quote(s)
 }
 
 /// The inverse of Steel's printed string form (`"a\nb"` → `a` newline `b`);

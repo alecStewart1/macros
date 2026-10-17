@@ -9,7 +9,7 @@ use super::*;
 /// Upper bound on kill-ring entries (the spirit of Emacs `kill-ring-max`).
 /// Pushing past the cap evicts the oldest entry so the ring can't grow without
 /// limit over a long session.
-const KILL_RING_MAX: usize = 120;
+pub(super) const KILL_RING_MAX: usize = 120;
 
 impl Editor {
     /// Record `text` as the newest kill and point the yank index at it,

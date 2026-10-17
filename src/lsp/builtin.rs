@@ -346,12 +346,15 @@ fn scoped_occurrences(text: &str, sym: &str) -> Vec<(usize, usize)> {
             .collect(),
         Some(d) => {
             let binders = local_binder_sites(text, sym);
+            let parsed = crate::analyze::Parsed::new(text);
             occurrences
                 .into_iter()
                 .filter(|(s, _)| {
                     *s == d.start
                         || (!binders.contains(s)
-                            && !crate::analyze::local_bindings_at(text, *s).contains(sym))
+                            && !parsed
+                                .as_ref()
+                                .is_some_and(|p| p.local_bindings_at(*s).contains(sym)))
                 })
                 .collect()
         }

@@ -15,7 +15,6 @@
 //! kept verbatim, so hand edits survive a save.
 
 use std::cell::RefCell;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -245,23 +244,14 @@ fn run_gpg(
     if let Some(home) = gnupg_home {
         cmd.env("GNUPGHOME", home);
     }
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| AuthError::Spawn(gpg.to_path_buf(), e))?;
     let mut input = Vec::with_capacity(passphrase.len() + 1 + data.len());
     input.extend_from_slice(passphrase.as_bytes());
     input.push(b'\n');
     input.extend_from_slice(data);
-    // On its own thread: gpg may fill its stdout pipe before draining stdin.
-    let writer = child.stdin.take().map(|mut stdin| {
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        })
-    });
-    let output = child.wait_with_output()?;
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
+    let output = crate::process::output_with_stdin(child, input)?;
     if output.status.success() {
         return Ok(output.stdout);
     }

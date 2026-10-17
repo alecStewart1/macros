@@ -459,8 +459,10 @@ pub(crate) fn format_value(value: &SteelVal) -> Option<String> {
     }
 }
 
-/// A Steel string literal for `s` (quotes, backslashes, newlines and tabs
-/// escaped), for splicing text into generated Scheme source.
+/// A Steel string literal for `s` (quotes, backslashes, newlines, tabs and
+/// carriage returns escaped), for splicing text into generated Scheme source.
+/// The one escaper: `format!("{:?}")` is not it — Rust's debug escapes
+/// (`\u{200b}`, `\0`) aren't Steel syntax.
 pub(crate) fn steel_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -470,6 +472,7 @@ pub(crate) fn steel_quote(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
             _ => out.push(c),
         }
     }

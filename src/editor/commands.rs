@@ -1073,7 +1073,10 @@ impl Editor {
                         &format!(";; --- {} in a fresh image ---\n", path.display()),
                         cx,
                     );
-                    let form = format!("(load {:?})", path.to_string_lossy());
+                    let form = format!(
+                        "(load {})",
+                        crate::script::steel_quote(&path.to_string_lossy())
+                    );
                     self.anvil.eval(&form, anvil_repl::ANVIL_REPL_CALLBACK);
                 }
                 None => self.echo("anvil: buffer is not visiting a file", cx),
@@ -1081,7 +1084,10 @@ impl Editor {
             AnvilLoadFile => match &self.active.path {
                 Some(path) => {
                     // `{:?}` renders a quoted, escaped Scheme string literal.
-                    let form = format!("(load {:?})", path.to_string_lossy());
+                    let form = format!(
+                        "(load {})",
+                        crate::script::steel_quote(&path.to_string_lossy())
+                    );
                     self.anvil.eval(&form, "anvil-on-result-echo");
                 }
                 None => self.echo("anvil: buffer is not visiting a file", cx),

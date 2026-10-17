@@ -411,10 +411,7 @@ fn truncate_output(s: &str) -> String {
     if s.len() <= MAX_OUTPUT_BYTES {
         return s.to_string();
     }
-    let mut cut = MAX_OUTPUT_BYTES;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
+    let cut = s.floor_char_boundary(MAX_OUTPUT_BYTES);
     format!(
         "{}\n[… {} more bytes of output dropped]\n",
         &s[..cut],
