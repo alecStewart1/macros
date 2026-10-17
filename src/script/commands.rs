@@ -235,6 +235,14 @@ pub enum EditorCommand {
     // Steel interaction (steel-mode)
     EvalBuffer,
     EvalLastSexp,
+    /// `(lisp-indent-rule name spec)`: how forms headed by `name` indent
+    /// (`"body"`, `"function"`, `"clauses"`, or a distinguished-arg count).
+    SetLispIndent {
+        name: String,
+        spec: String,
+    },
+    /// A structural (s-expression) motion or paredit edit.
+    Structural(crate::editor::StructuralOp),
     /// Evaluate the top-level form at point in the live editor engine (Emacs
     /// `eval-defun`, C-M-x in config code).
     EvalDefun,

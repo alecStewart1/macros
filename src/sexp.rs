@@ -351,6 +351,196 @@ pub fn enclosing_operator(text: &str) -> Option<String> {
         .then(|| text[head.start..head.end].to_string())
 }
 
+// --- Structural motion and editing (paredit-style) -------------------------
+
+/// A structural edit: replacements in original-text offsets, applied from the
+/// end of the text backwards so earlier offsets stay valid, after which point
+/// goes to `point` (an offset in the edited text).
+#[derive(Debug, PartialEq, Eq)]
+pub struct StructEdit {
+    pub edits: Vec<(Range<usize>, String)>,
+    pub point: usize,
+}
+
+/// The innermost list whose brackets strictly enclose `pos`, and the data `pos`
+/// moves among: that list's children, or the top level.
+fn container(parsed: &Parsed, pos: usize) -> (Option<&Node>, &[Node]) {
+    let mut list: Option<&Node> = None;
+    let mut kids: &[Node] = &parsed.nodes;
+    'descend: loop {
+        for node in kids {
+            if let Kind::List { open, close } = node.kind
+                && open < pos
+                && close.is_none_or(|c| pos <= c)
+            {
+                list = Some(node);
+                kids = &node.children;
+                continue 'descend;
+            }
+        }
+        return (list, kids);
+    }
+}
+
+/// The datum at or after `pos` among its siblings: the one `pos` is inside or
+/// in front of.
+fn sexp_at_or_after(kids: &[Node], pos: usize) -> Option<&Node> {
+    kids.iter().find(|k| k.end > pos)
+}
+
+/// Emacs `forward-sexp`: the end of the datum at or after `pos`. `None` at the
+/// end of the enclosing list.
+pub fn forward_sexp(text: &str, pos: usize) -> Option<usize> {
+    let parsed = parse(text);
+    sexp_at_or_after(container(&parsed, pos).1, pos).map(|k| k.end)
+}
+
+/// Emacs `backward-sexp`: the start of the datum before (or around) `pos`.
+pub fn backward_sexp(text: &str, pos: usize) -> Option<usize> {
+    let parsed = parse(text);
+    container(&parsed, pos)
+        .1
+        .iter()
+        .rev()
+        .find(|k| k.start < pos)
+        .map(|k| k.start)
+}
+
+/// Emacs `backward-up-list`: the start of the enclosing list.
+pub fn backward_up_list(text: &str, pos: usize) -> Option<usize> {
+    let parsed = parse(text);
+    container(&parsed, pos).0.map(|l| l.start)
+}
+
+/// Emacs `up-list`: just past the enclosing list's closing bracket.
+pub fn up_list(text: &str, pos: usize) -> Option<usize> {
+    let parsed = parse(text);
+    container(&parsed, pos)
+        .0
+        .filter(|l| l.is_complete())
+        .map(|l| l.end)
+}
+
+/// Emacs `down-list`: just inside the next list at or after `pos`.
+pub fn down_list(text: &str, pos: usize) -> Option<usize> {
+    let parsed = parse(text);
+    container(&parsed, pos)
+        .1
+        .iter()
+        .filter(|k| k.end > pos)
+        .find_map(|k| match k.kind {
+            Kind::List { open, .. } if open >= pos || k.start >= pos => Some(open + 1),
+            _ => None,
+        })
+}
+
+/// The enclosing list of `pos` when it is properly closed: (list, open, close).
+fn closed_container(parsed: &Parsed, pos: usize) -> Option<(&Node, usize, usize)> {
+    let list = container(parsed, pos).0?;
+    match list.kind {
+        Kind::List {
+            open,
+            close: Some(close),
+        } => Some((list, open, close)),
+        _ => None,
+    }
+}
+
+/// paredit `forward-slurp-sexp`: pull the datum after the enclosing list into
+/// it — `(a |b) c` → `(a |b c)`.
+pub fn slurp_forward(text: &str, pos: usize) -> Option<StructEdit> {
+    let parsed = parse(text);
+    let (list, _, close) = closed_container(&parsed, pos)?;
+    let next = container(&parsed, list.start)
+        .1
+        .iter()
+        .find(|k| k.start >= list.end)?;
+    let closer = text[close..close + 1].to_string();
+    Some(StructEdit {
+        edits: vec![
+            (next.end..next.end, closer),
+            (close..close + 1, String::new()),
+        ],
+        point: pos,
+    })
+}
+
+/// paredit `forward-barf-sexp`: push the enclosing list's last datum out —
+/// `(a |b c)` → `(a |b) c`.
+pub fn barf_forward(text: &str, pos: usize) -> Option<StructEdit> {
+    let parsed = parse(text);
+    let (list, open, close) = closed_container(&parsed, pos)?;
+    let kids = &list.children;
+    let at = match kids.len() {
+        0 => return None,
+        1 => open + 1,
+        n => kids[n - 2].end,
+    };
+    let closer = text[close..close + 1].to_string();
+    Some(StructEdit {
+        edits: vec![(close..close + 1, String::new()), (at..at, closer)],
+        point: if pos > at { pos + 1 } else { pos },
+    })
+}
+
+/// paredit `raise-sexp`: replace the enclosing list with the datum at point —
+/// `(foo (bar |baz))` → `(foo |baz)`.
+pub fn raise_sexp(text: &str, pos: usize) -> Option<StructEdit> {
+    let parsed = parse(text);
+    let (list, ..) = closed_container(&parsed, pos)?;
+    let sexp = sexp_at_or_after(&list.children, pos)?;
+    Some(StructEdit {
+        edits: vec![(list.range(), text[sexp.range()].to_string())],
+        point: list.start,
+    })
+}
+
+/// paredit `splice-sexp`: remove the enclosing list's brackets (and any quote
+/// prefix) — `(a (b |c) d)` → `(a b |c d)`.
+pub fn splice_sexp(text: &str, pos: usize) -> Option<StructEdit> {
+    let parsed = parse(text);
+    let (list, open, close) = closed_container(&parsed, pos)?;
+    Some(StructEdit {
+        edits: vec![
+            (close..close + 1, String::new()),
+            (list.start..open + 1, String::new()),
+        ],
+        point: pos - (open + 1 - list.start),
+    })
+}
+
+/// paredit `wrap-round`: wrap the datum at point in a new list, point just
+/// inside it — `(a |b)` → `(a (|b))`. With nothing to wrap, insert `()`.
+pub fn wrap_round(text: &str, pos: usize) -> StructEdit {
+    let parsed = parse(text);
+    match sexp_at_or_after(container(&parsed, pos).1, pos) {
+        Some(sexp) => StructEdit {
+            edits: vec![
+                (sexp.end..sexp.end, ")".into()),
+                (sexp.start..sexp.start, "(".into()),
+            ],
+            point: sexp.start + 1,
+        },
+        None => StructEdit {
+            edits: vec![(pos..pos, "()".into())],
+            point: pos + 1,
+        },
+    }
+}
+
+/// Apply a [`StructEdit`] to a string (tests, and a model of what the editor
+/// does with its buffer).
+#[cfg(test)]
+pub fn apply(text: &str, edit: &StructEdit) -> String {
+    let mut edits: Vec<_> = edit.edits.iter().collect();
+    edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+    let mut out = text.to_string();
+    for (range, with) in edits {
+        out.replace_range(range.clone(), with);
+    }
+    out
+}
+
 /// The bracket matching the one at byte `pos` (an opener's closer, or a
 /// closer's opener), honoring strings, comments and char literals.
 pub fn matching_bracket(text: &str, pos: usize) -> Option<usize> {
@@ -494,6 +684,88 @@ mod tests {
         assert_eq!(enclosing_operator("(string-app"), None);
         assert_eq!(enclosing_operator("(f 1)"), None);
         assert_eq!(enclosing_operator("(f \"open"), None);
+    }
+
+    /// `|` in `src` marks point; returns the text and point after `op`.
+    fn run(src: &str, op: impl Fn(&str, usize) -> Option<StructEdit>) -> Option<String> {
+        let pos = src.find('|').unwrap();
+        let text = src.replace('|', "");
+        let edit = op(&text, pos)?;
+        let mut out = apply(&text, &edit);
+        out.insert(edit.point, '|');
+        Some(out)
+    }
+
+    fn motion(src: &str, op: impl Fn(&str, usize) -> Option<usize>) -> Option<String> {
+        let pos = src.find('|').unwrap();
+        let mut text = src.replace('|', "");
+        let to = op(&text, pos)?;
+        text.insert(to, '|');
+        Some(text)
+    }
+
+    #[test]
+    fn sexp_motions() {
+        assert_eq!(
+            motion("|(a b) c", forward_sexp).as_deref(),
+            Some("(a b)| c")
+        );
+        assert_eq!(
+            motion("(a |\"b)\" c)", forward_sexp).as_deref(),
+            Some("(a \"b)\"| c)")
+        );
+        assert_eq!(motion("(a b|)", forward_sexp), None);
+        assert_eq!(
+            motion("(a b) c|", backward_sexp).as_deref(),
+            Some("(a b) |c")
+        );
+        assert_eq!(
+            motion("x '(a b)|", backward_sexp).as_deref(),
+            Some("x |'(a b)")
+        );
+        assert_eq!(
+            motion("(a (b |c))", backward_up_list).as_deref(),
+            Some("(a |(b c))")
+        );
+        assert_eq!(motion("(a (b |c))", up_list).as_deref(), Some("(a (b c)|)"));
+        assert_eq!(motion("|x (a b)", down_list).as_deref(), Some("x (|a b)"));
+        // `#\)` doesn't end the list.
+        assert_eq!(
+            motion("(a #\\) |b)", up_list).as_deref(),
+            Some("(a #\\) b)|")
+        );
+    }
+
+    #[test]
+    fn paredit_edits() {
+        assert_eq!(run("(a |b) c", slurp_forward).as_deref(), Some("(a |b c)"));
+        assert_eq!(
+            run("[a |b] (c d)", slurp_forward).as_deref(),
+            Some("[a |b (c d)]")
+        );
+        assert_eq!(run("(a |b) ", slurp_forward), None);
+        assert_eq!(run("(a |b c)", barf_forward).as_deref(), Some("(a |b) c"));
+        assert_eq!(run("(a b |c)", barf_forward).as_deref(), Some("(a b) |c"));
+        assert_eq!(
+            run("(foo (bar |baz))", raise_sexp).as_deref(),
+            Some("(foo |baz)")
+        );
+        assert_eq!(
+            run("(a (b |c) d)", splice_sexp).as_deref(),
+            Some("(a b |c d)")
+        );
+        assert_eq!(
+            run("(a '(b |c) d)", splice_sexp).as_deref(),
+            Some("(a b |c d)")
+        );
+        assert_eq!(
+            run("(a |b)", |t, p| Some(wrap_round(t, p))).as_deref(),
+            Some("(a (|b))")
+        );
+        assert_eq!(
+            run("(a |)", |t, p| Some(wrap_round(t, p))).as_deref(),
+            Some("(a (|))")
+        );
     }
 
     #[test]

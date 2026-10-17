@@ -67,6 +67,7 @@ mod panes;
 mod process;
 mod registers;
 mod session;
+mod structural;
 mod terminal;
 mod undo;
 mod vim;
@@ -75,13 +76,14 @@ pub use helm::HelmView;
 use helm::{HelmAction, HelmSession, HelmSource, helm_sources_from_specs, wrap_index};
 use input::UargState;
 use isearch::IsearchState;
-use lisp_indent::{is_lisp_language, lisp_indent_for};
+use lisp_indent::{LispIndent, LispIndentRules, is_lisp_language, lisp_indent_for};
 use minibuffer::MinibufferHistory;
 use modeline::{MlSeg, default_mode_line_format, parse_mode_line_format};
 use overlays::{Overlays, shift_line_map};
 use panes::{Child, SplitAxis, WindowLayout, union_bounds};
 use process::ProcessHandle;
 use session::BoundedRing;
+pub use structural::StructuralOp;
 use terminal::keystroke_to_bytes;
 use undo::{UndoGrouping, UndoRecord, UndoTree};
 
@@ -500,6 +502,8 @@ pub struct Editor {
     pub anvil: AnvilEngine,
     /// Drains async ANVIL REPL results onto the foreground.
     anvil_task: Option<Task<()>>,
+    /// User Lisp indent rules by head symbol (`lisp-indent-rule`).
+    lisp_indent_rules: LispIndentRules,
     /// Forms submitted in the ANVIL REPL, oldest first (M-p / M-n).
     anvil_history: Vec<String>,
     /// The history entry M-p / M-n last recalled, if any.
@@ -1382,6 +1386,7 @@ impl Editor {
             script_task: None,
             anvil,
             anvil_task: None,
+            lisp_indent_rules: LispIndentRules::new(),
             anvil_history: Vec::new(),
             anvil_history_pos: None,
             anvil_eldoc_last: None,
@@ -2528,7 +2533,7 @@ impl Editor {
             // indentation is added to it.
             let indent = self
                 .lisp_indent_context(p)
-                .map(|text| " ".repeat(lisp_indent_for(&text, tab)))
+                .map(|text| " ".repeat(lisp_indent_for(&text, tab, &self.lisp_indent_rules)))
                 .unwrap_or_default();
             self.insert_text(&format!("\n{indent}"), cx);
             return;

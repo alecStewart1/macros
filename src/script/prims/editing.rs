@@ -13,6 +13,16 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     register_unary(reg, queue, "clipboard-set", EditorCommand::ClipboardSet);
     // `(reindent-lines first last)` — Vim `=` over 0-based lines.
     register_binary(reg, queue, "reindent-lines", EditorCommand::ReindentLines);
+    // `(lisp-indent-rule "name" "spec")` — how Lisp forms headed by `name`
+    // indent (Emacs `lisp-indent-function`): "body" (definer: body one step),
+    // "function" (align under the first argument), "clauses" (cond-style), or
+    // a count like "1" of distinguished arguments before the body.
+    register_binary(
+        reg,
+        queue,
+        "lisp-indent-rule",
+        |name: String, spec: String| EditorCommand::SetLispIndent { name, spec },
+    );
     register_unary(reg, queue, "snippet-expand", EditorCommand::SnippetExpand);
     register_unary(reg, queue, "goto-char", |n: isize| {
         EditorCommand::GotoChar(scheme_pos(n))
