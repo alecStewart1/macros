@@ -375,7 +375,9 @@ features = ["union"]
 version = "2.0"
 
 [dependencies.stacksafe]
-version = "0.1"
+# macros patch: 0.1 → 1.0, whose macro no longer depends on proc-macro-error2
+# (a future-incompatibility warning: it re-exports the private `proc_macro`).
+version = "1.0"
 
 [dependencies.strum]
 version = "0.27.2"
