@@ -1173,14 +1173,15 @@ impl Editor {
                 self.mode_line_format = parse_mode_line_format(tokens);
                 cx.notify();
             }
-            SetTitlebarMenu {
-                title,
-                items,
-                commands,
-                active,
-                section,
-                callback,
-            } => {
+            SetTitlebarMenu(menu) => {
+                let crate::script::TitlebarMenuArgs {
+                    title,
+                    items,
+                    commands,
+                    active,
+                    section,
+                    callback,
+                } = *menu;
                 self.titlebar_dropdown_publish(TitlebarDropdownState {
                     placeholder: format!("Search {}…", title.to_lowercase()).into(),
                     section: if section.is_empty() {

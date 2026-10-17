@@ -8861,21 +8861,12 @@ mod perspectives_lib {
             .commands
             .as_slice()
         {
-            [
-                EditorCommand::SetTitlebarMenu {
-                    title,
-                    items,
-                    commands,
-                    active,
-                    callback,
-                    ..
-                },
-            ] => {
-                assert_eq!(title, "Projects");
-                assert_eq!(items, &["proj", "other"]);
-                assert_eq!(commands, &["", ""]);
-                assert_eq!(active, "other");
-                assert_eq!(callback, "perspective-select");
+            [EditorCommand::SetTitlebarMenu(m)] => {
+                assert_eq!(m.title, "Projects");
+                assert_eq!(m.items, ["proj", "other"]);
+                assert_eq!(m.commands, ["", ""]);
+                assert_eq!(m.active, "other");
+                assert_eq!(m.callback, "perspective-select");
             }
             other => panic!("expected SetTitlebarMenu, got {other:?}"),
         }
@@ -8903,10 +8894,10 @@ mod perspectives_lib {
             .as_slice()
         {
             [
-                EditorCommand::SetTitlebarMenu { active, .. },
+                EditorCommand::SetTitlebarMenu(m),
                 EditorCommand::Helm(sources),
             ] => {
-                assert_eq!(active, "macros-persp-test-missing-file");
+                assert_eq!(m.active, "macros-persp-test-missing-file");
                 assert_eq!(sources.len(), 1);
             }
             other => panic!("expected SetTitlebarMenu + Helm fallback, got {other:?}"),
@@ -8938,7 +8929,7 @@ mod perspectives_lib {
         assert!(
             outcome.commands.iter().any(|c| matches!(
                 c,
-                EditorCommand::SetTitlebarMenu { items, .. } if items.is_empty()
+                EditorCommand::SetTitlebarMenu(m) if m.items.is_empty()
             )),
             "expected an empty SetTitlebarMenu, got {:?}",
             outcome.commands
@@ -9078,10 +9069,10 @@ mod perspectives_lib {
             .as_slice()
         {
             [
-                EditorCommand::SetTitlebarMenu { active, .. },
+                EditorCommand::SetTitlebarMenu(m),
                 EditorCommand::OpenFile(path),
             ] => {
-                assert_eq!(active, "macros-persp-test");
+                assert_eq!(m.active, "macros-persp-test");
                 assert!(path.ends_with("resume.rs"), "path: {path}");
             }
             other => panic!("expected SetTitlebarMenu + OpenFile, got {other:?}"),
@@ -12377,12 +12368,7 @@ mod titlebar_menu_lib {
     fn published(engine: &ScriptEngine, q: &str) -> (String, Vec<String>, Vec<String>) {
         let commands = engine.eval(q).unwrap().commands;
         match commands.into_iter().last() {
-            Some(EditorCommand::SetTitlebarMenu {
-                title,
-                items,
-                commands,
-                ..
-            }) => (title, items, commands),
+            Some(EditorCommand::SetTitlebarMenu(m)) => (m.title, m.items, m.commands),
             other => panic!("expected SetTitlebarMenu, got {other:?}"),
         }
     }
@@ -12462,21 +12448,12 @@ mod titlebar_menu_lib {
             .unwrap()
             .commands;
         match commands.as_slice() {
-            [
-                EditorCommand::SetTitlebarMenu {
-                    items,
-                    commands,
-                    active,
-                    section,
-                    callback,
-                    ..
-                },
-            ] => {
-                assert_eq!(items, &["macros"]);
-                assert_eq!(commands, &[""]);
-                assert_eq!(active, "macros");
-                assert_eq!(section, "Recent Projects");
-                assert_eq!(callback, "perspective-select");
+            [EditorCommand::SetTitlebarMenu(m)] => {
+                assert_eq!(m.items, ["macros"]);
+                assert_eq!(m.commands, [""]);
+                assert_eq!(m.active, "macros");
+                assert_eq!(m.section, "Recent Projects");
+                assert_eq!(m.callback, "perspective-select");
             }
             other => panic!("expected one SetTitlebarMenu, got {other:?}"),
         }

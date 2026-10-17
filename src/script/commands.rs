@@ -129,6 +129,17 @@ pub struct MakeProcessArgs {
     pub on_exit: Option<String>,
 }
 
+/// Payload for [`EditorCommand::SetTitlebarMenu`] (boxed: keeps the enum small).
+#[derive(Debug, Clone)]
+pub struct TitlebarMenuArgs {
+    pub title: String,
+    pub items: Vec<String>,
+    pub commands: Vec<String>,
+    pub active: String,
+    pub section: String,
+    pub callback: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum EditorCommand {
     /// A grid-buffer command (scheme/grid.scm), with the count or `C-u`
@@ -803,20 +814,13 @@ pub enum EditorCommand {
     /// Replace the mode-line format with tab-encoded segment tokens (see
     /// `parse_mode_line_format`).
     SetModeLineFormat(Vec<String>),
-    /// Publish the title-bar menu named `title` (see scheme/titlebar-menu.scm):
+    /// Publish the title-bar menu named the payload's `title` (see scheme/titlebar-menu.scm):
     /// one row per `items` label, each running the parallel `commands` entry
     /// by name (a late-bound call, so package-defined commands resolve). A row
     /// with an empty command hands its label to `callback` instead. `active`
     /// (if non-empty) is checkmarked and shown on the trigger; `section` heads
     /// the rows. An empty `items` hides the menu but keeps its position.
-    SetTitlebarMenu {
-        title: String,
-        items: Vec<String>,
-        commands: Vec<String>,
-        active: String,
-        section: String,
-        callback: String,
-    },
+    SetTitlebarMenu(Box<TitlebarMenuArgs>),
     // Transient popup (the magit / `transient.el` pattern).
     /// Open a transient popup: a title plus `(key, label, command)` rows. When
     /// `sticky`, selecting a row keeps the popup open (the row command re-opens

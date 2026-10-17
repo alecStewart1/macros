@@ -54,14 +54,16 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
                   active: String,
                   section: String,
                   callback: Callback| {
-                q.push(EditorCommand::SetTitlebarMenu {
-                    title,
-                    items,
-                    commands,
-                    active,
-                    section,
-                    callback: callback.0,
-                });
+                q.push(EditorCommand::SetTitlebarMenu(Box::new(
+                    crate::script::TitlebarMenuArgs {
+                        title,
+                        items,
+                        commands,
+                        active,
+                        section,
+                        callback: callback.0,
+                    },
+                )));
             },
         );
     }
