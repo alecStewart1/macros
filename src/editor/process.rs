@@ -250,6 +250,11 @@ impl Editor {
                             // is a no-op signal-wise.
                             editor.processes.remove(&id);
                             if let Some(cb) = &on_exit {
+                                // Same as the Line branch: a process whose
+                                // output goes elsewhere (a file) fires only
+                                // this callback, which must not see a stale
+                                // `(current-buffer)`.
+                                editor.publish_point();
                                 editor.script.dispatch_action(cb, Some(&code.to_string()));
                             }
                         }
