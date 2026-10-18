@@ -1516,3 +1516,45 @@ fn evil_till_repeat_and_multibyte_toggle_case(cx: &mut TestAppContext) {
     keys(&ed, cx, "~");
     assert_eq!(text(&ed, cx), "Éa\n");
 }
+
+/// A process's on-exit callback sees the buffer the user is in now, not the
+/// one published when it was spawned: a process whose stdout goes to a file
+/// fires only the exit callback, so it can't lean on the Line branch's
+/// republish.
+#[cfg(unix)]
+#[gpui::test]
+fn process_on_exit_sees_current_buffer(cx: &mut TestAppContext) {
+    let ed = setup_json(cx, "before.txt", "");
+    ed.update(cx, |e, cx| {
+        e.script
+            .eval("(define exit-buffer #f) (define (on-done code) (set! exit-buffer (current-buffer)))")
+            .unwrap();
+        e.publish_point();
+        // Switch without republishing, as a render that installs a buffer
+        // and spawns a process from the same command does.
+        let current = e.snapshot_active();
+        e.inactive.push(current);
+        e.install_active(make_document("after.txt".into(), None, ""));
+        e.make_process(
+            crate::script::MakeProcessArgs {
+                id: 4242,
+                program: "true".into(),
+                args: vec![],
+                env: Default::default(),
+                on_output: "ignore".into(),
+                on_exit: Some("on-done".into()),
+            },
+            cx,
+        );
+    });
+    for _ in 0..400 {
+        settle(&ed, cx);
+        let got = ed.read_with(cx, |e, _| e.script.eval("exit-buffer").unwrap().value);
+        if got.as_deref() != Some("#false") {
+            assert_eq!(got.as_deref(), Some("\"after.txt\""));
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("on-exit never ran");
+}
