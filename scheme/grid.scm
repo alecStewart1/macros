@@ -44,6 +44,18 @@
 ;;   (grid-sort-as col descending? 'numeric)   ; or 'alpha 'time 'auto
 ;;   (grid-map-cells f)  — each selected (visible) cell becomes (f value)
 ;;
+;; Copy and Paste Special — a grid copy puts values on the clipboard for
+;; other apps, and remembers its formulas and formatting for a paste back:
+;;   (grid-paste)            formulas, references moved by the offset
+;;   (grid-paste-values)     the copied results as plain values (numbers
+;;     exact, errors as their error value, `=…` text stays text)
+;;   (grid-paste-formats)    only the copied cells' formatting
+;;   (grid-paste-transpose)  rows become columns
+;;   (grid-paste-special)    pick one of these
+;;   (grid-formulas-to-values)  the selected formulas become their results
+;;   Each pastes the newest kill as one undo step; M-y swaps in an older
+;;   kill, pasted the same way.
+;;
 ;; View:
 ;;   (grid-move-to row col)   (grid-select-range r0 c0 r1 c1)
 ;;   (grid-set-column-width col px) (grid-set-row-height row px)   ; 100% px
@@ -176,6 +188,9 @@
       ("ctrl-w" grid-cut)
       ("alt-w" grid-yank)
       ("ctrl-y" grid-paste)
+      ("ctrl-c ctrl-y" grid-paste-values)
+      ("ctrl-c ctrl-v" grid-paste-special)            ; Excel's Ctrl+Alt+V
+      ("ctrl-c ctrl-x v" grid-formulas-to-values)
       ("ctrl-s" grid-search-forward)
       ("ctrl-=" grid-zoom-in)
       ("ctrl--" grid-zoom-out)
@@ -305,6 +320,9 @@
       ("escape" grid-select-cancel)
       ("y" grid-yank)
       ("p" grid-paste)
+      ("z p" grid-paste-values)
+      ("z shift-p" grid-paste-special)
+      ("z v" grid-formulas-to-values)
       ("d x" grid-cut)
       (">" grid-widen-column)
       ("<" grid-narrow-column)
@@ -420,6 +438,21 @@
 (define-command (grid-trim-cells)
   (grid-map-cells string-trim))
 
+;; `C-c C-v` / `zP`: Excel's Paste Special — pick what the newest kill pastes.
+(define grid-paste-special--choices
+  (list (list "values" grid-paste-values)
+        (list "formulas" grid-paste)
+        (list "formats" grid-paste-formats)
+        (list "transpose" grid-paste-transpose)))
+(define (grid-paste-special--pick choice)
+  (let ((hit (assoc choice grid-paste-special--choices)))
+    (if hit
+        ((cadr hit))
+        (message (string-append "No paste called " choice)))))
+(define-command (grid-paste-special)
+  (completing-read "Paste special: " (map car grid-paste-special--choices)
+                   'grid-paste-special--pick))
+
 ;; `C-c ^` / `gs` (and `C-u` before a sort key): org-table's sort prompt —
 ;; one key picks how the cursor's column compares; a capital sorts descending.
 (define (grid-sort-prompt--key k)
@@ -464,6 +497,9 @@
             (list "e" "Edit cell in a buffer" 'grid-edit-popup)
             (list "c" "Complete cell…" 'grid-complete-cell)
             (list "d" "Copy down / fill series" 'grid-copy-down)
+            (list "y" "Paste values" 'grid-paste-values)
+            (list "Y" "Paste special…" 'grid-paste-special)
+            (list "V" "Formulas to values" 'grid-formulas-to-values)
             (list "U" "Upcase" 'grid-upcase)
             (list "L" "Downcase" 'grid-downcase)
             (list "C" "Capitalize" 'grid-capitalize)
