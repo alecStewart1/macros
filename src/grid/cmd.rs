@@ -529,6 +529,18 @@ pub enum GridOp {
         col: Option<usize>,
         values: Vec<String>,
     },
+    /// Remove duplicate rows compared on these columns (`None`: the
+    /// selection's, or every column) — `grid-remove-duplicates`.
+    RemoveDuplicates(Option<Vec<ColName>>),
+}
+
+/// A column as Scheme names it: an index, or a header name / letter /
+/// prompt label (`"email"`, `"C"`, `"email (C)"`), resolved against the
+/// grid when the op applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColName {
+    Index(usize),
+    Name(String),
 }
 
 #[cfg(test)]

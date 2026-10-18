@@ -42,6 +42,8 @@ mod ex;
 mod grammars;
 mod grid;
 #[cfg(test)]
+mod grid_dedup_tests;
+#[cfg(test)]
 mod grid_e2e_tests;
 mod grid_element;
 mod grid_formula;
