@@ -27,7 +27,8 @@
 ;;   (grid-buffer?) (grid-cursor) → (row col)   (grid-selection) → (r0 c0 r1 c1)
 ;;   (grid-dimensions) → (rows cols)   (grid-current-value)   (grid-header?)
 ;;   (grid-header-names)   (grid-column-type col) → "int"/"float"/"bool"/"date"/"text"
-;;   (grid-frozen-rows)   (grid-zoom) → percent   (grid-editing?)
+;;   (grid-frozen-rows)   (grid-frozen-columns)   (grid-zoom) → percent
+;;   (grid-editing?)
 ;;   (grid-sheets) → an .xlsx's sheet names   (grid-current-sheet) → the one shown
 ;;   (grid-cell row col)   (grid-row-values row)   (grid-column-values col)
 ;;     — any cell, synchronously, for grids up to a million cells (a copy
@@ -59,7 +60,8 @@
 ;; View:
 ;;   (grid-move-to row col)   (grid-select-range r0 c0 r1 c1)
 ;;   (grid-set-column-width col px) (grid-set-row-height row px)   ; 100% px
-;;   (grid-freeze-rows n)   (grid-set-header #t)   (grid-set-zoom 125)
+;;   (grid-freeze-rows n)   (grid-freeze-columns n)   ; 0 unfreezes
+;;   (grid-set-header #t)   (grid-set-zoom 125)
 ;;   (grid-set-column-hidden col #t)
 ;;   (grid-open-sheet "Costs")  — show another sheet (see "Workbook sheets")
 ;;   (grid-filter-rows col op value)  — show only rows whose col passes; the
@@ -203,6 +205,8 @@
       ("ctrl-c ctrl-r" grid-sort-descending)
       ("ctrl-c ctrl-h" grid-toggle-header)
       ("ctrl-c ctrl-z" grid-toggle-freeze)
+      ("ctrl-c alt-z" grid-freeze-panes)
+      ("ctrl-c z" grid-freeze-first-column)
       ("ctrl-c ctrl-f" grid-formula-bar)
       ("ctrl-c ctrl-t" grid-toggle-view)
       ("f9" grid-recalculate)
@@ -338,6 +342,8 @@
       ("g n" grid-goto)
       ("g h" grid-toggle-header)
       ("g f" grid-toggle-freeze)
+      ("g shift-f" grid-freeze-panes)
+      ("z f" grid-freeze-first-column)
       ("g r" grid-toggle-view)
       ("g `" grid-show-formulas)
       ("g [" grid-trace-precedents)
@@ -737,6 +743,8 @@
       (list "View"
             (list "t" "Header row on/off" 'grid-toggle-header)
             (list "z" "Freeze rows on/off" 'grid-toggle-freeze)
+            (list "Z" "Freeze panes on/off" 'grid-freeze-panes)
+            (list "1" "Freeze first column on/off" 'grid-freeze-first-column)
             (list "a" "Auto-fit column" 'grid-autofit-column)
             (list "B" "Formula bar on/off" 'grid-formula-bar)
             (list "v" "Raw text view" 'grid-toggle-view))

@@ -90,6 +90,9 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     register_snapshot_read(reg, snapshot, "grid-frozen-rows", |s| {
         s.grid.as_ref().map_or(0, |g| g.frozen_rows)
     });
+    register_snapshot_read(reg, snapshot, "grid-frozen-columns", |s| {
+        s.grid.as_ref().map_or(0, |g| g.frozen_cols)
+    });
     register_snapshot_read(reg, snapshot, "grid-zoom", |s| {
         s.grid.as_ref().map_or(100.0, |g| g.zoom)
     });
@@ -300,6 +303,10 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     let p = push(queue);
     reg.register_fn("grid-freeze-rows", move |NonNeg(n): NonNeg| {
         p(GridOp::Freeze(n))
+    });
+    let p = push(queue);
+    reg.register_fn("grid-freeze-columns", move |NonNeg(n): NonNeg| {
+        p(GridOp::FreezeCols(n))
     });
     let p = push(queue);
     reg.register_fn("grid-set-header", move |on: bool| p(GridOp::SetHeader(on)));
