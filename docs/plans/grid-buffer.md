@@ -730,5 +730,5 @@ Each one needs a `deny.toml` license check and an entry in
   in Excel: the thumb has a 24 px floor, rests at the end once you're past
   the data, and keeps the extent from the press for the whole drag (so it
   tracks the pointer instead of running away as the extent grows), which
-  is recomputed on release. The vertical track starts below the frozen
-  rows. A bar is shown only when there's something to scroll to.
+  is recomputed on release. The tracks start past the frozen rows and
+  columns. A bar is shown only when there's something to scroll to.
