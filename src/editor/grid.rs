@@ -2441,6 +2441,7 @@ impl Editor {
                 | InsertCols { .. }
                 | DeleteCols { .. }
                 | Sort { .. }
+                | RemoveDuplicates(_)
         );
         if data && g.loading.is_some() {
             self.echo(
@@ -2722,6 +2723,27 @@ impl Editor {
                 }
             }
             Choices { col: None, .. } => error = Some("grid-column-choices: invalid column".into()),
+            RemoveDuplicates(names) => {
+                use crate::grid::cmd::ColName;
+                let mut keys = Vec::new();
+                for name in names.iter().flatten() {
+                    match name {
+                        ColName::Index(c) if *c < g.used().1 => keys.push(*c),
+                        ColName::Name(n) if g.find_column(n).is_some() => {
+                            keys.extend(g.find_column(n));
+                        }
+                        ColName::Index(c) => error = Some(format!("no column {c}")),
+                        ColName::Name(n) => error = Some(format!("no column {n:?}")),
+                    }
+                }
+                // Echoed below, like an error.
+                error = match error {
+                    Some(e) => Some(format!("grid-remove-duplicates: {e}")),
+                    None => Some(match g.remove_duplicates(names.map(|_| keys)) {
+                        Ok(msg) | Err(msg) => msg,
+                    }),
+                };
+            }
         }
         if persist {
             self.grid_persist_view();
