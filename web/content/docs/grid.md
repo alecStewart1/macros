@@ -95,12 +95,16 @@ Copies go to the system clipboard as tab-separated values, so pasting into Excel
 | drag a header border, double-click it | | Resize, or auto-fit |
 | <kbd>C-=</kbd> <kbd>C--</kbd> <kbd>C-0</kbd> | | Zoom in / out / reset |
 | <kbd>C-c C-z</kbd> | <kbd>gf</kbd> | Freeze the rows above the cursor (or row 1) |
+| <kbd>C-c M-z</kbd> | <kbd>gF</kbd> | Freeze panes: the rows above and the columns left of the cursor |
+| <kbd>C-c z</kbd> | <kbd>zf</kbd> | Freeze the first column |
 | <kbd>C-c C-h</kbd> | <kbd>gh</kbd> | Treat row 1 as a header (or not) |
 | <kbd>C-x n f</kbd> / <kbd>C-x n v</kbd> / <kbd>C-x n w</kbd> | <kbd>g/</kbd> / <kbd>g*</kbd> / <kbd>zw</kbd> | Filter rows / by this value / show all |
 | <kbd>C-c C-x h</kbd> / <kbd>C-c C-x s</kbd> | <kbd>zc</kbd> / <kbd>zo</kbd> | Hide a column / show hidden ones |
 | <kbd>C-c ?</kbd> | <kbd>?</kbd> | A menu of everything |
 
-Column widths, zoom, frozen rows, and the header choice are remembered per file, outside the CSV.
+Frozen rows and columns stay put while the rest scrolls under them; each freeze key pressed again unfreezes. From Scheme, `(grid-freeze-rows n)` and `(grid-freeze-columns n)` freeze exactly `n` (0 unfreezes).
+
+Column widths, zoom, frozen rows and columns, and the header choice are remembered per file, outside the CSV.
 
 ## Formatting cells
 
