@@ -13,6 +13,7 @@
 //! - [`dialect`]: encoding / delimiter / quoting / header sniffing.
 //! - [`parse`]: the loader. [`write`]: the saver.
 //! - [`cellfmt`]: bold and colors set by hand on single cells.
+//! - [`scrollbar`]: scrollbar thumb geometry over the infinite sheet.
 //! - [`series`]: continuing a series down a column (copy-down / fill).
 //! - [`export`]: cells as org / Markdown / JSON / CSV, and org tables back.
 //! - [`sidecar`]: per-file view settings saved beside the config.
@@ -32,6 +33,7 @@ pub mod model;
 pub mod parse;
 #[cfg(test)]
 mod regression_tests;
+pub mod scrollbar;
 pub mod series;
 pub mod sheet;
 pub mod sidecar;

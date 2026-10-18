@@ -308,6 +308,7 @@ how cells are shown and compared.
   and warns before writing a sheet that Excel couldn't open. That is a check
   when exporting, not a limit on the grid.
 - The scrollbar thumb is sized against that area, not against the used area.
+  Drag it or click its track; see "As built" for the exact mapping.
   `C-End` / `G` jump to the last used cell. `C-Home` / `gg` jump to `A1`.
 - Scrolling is smooth to the pixel. The scroll offset is stored as a cell
   index plus a pixel offset into that cell, not as an absolute pixel value.
@@ -714,4 +715,15 @@ Each one needs a `deny.toml` license check and an entry in
   unsaved changes, but not the undo history. It works for UTF-8 files only.
 - **Helix:** the overlay shares the vim motions, plus `x` for rows, `%` for
   all and `d` to clear. Multi-cursor column editing (`C`) is not built yet.
-- **Scrollbars** are position indicators only (not draggable).
+- **Scrollbars** are draggable overlays (`src/grid/scrollbar.rs`), in the
+  text editor's scroll-bar look (faces `scroll-bar` / `scroll-bar-track`,
+  plus `scroll-bar-hover` / `scroll-bar-active`; 6 px, widening to 10 px
+  with the track shown while hovered or dragged). Dragging the thumb
+  scrolls; a press on the track pages one viewport toward it (once, no
+  auto-repeat). Neither moves the cursor or closes a cell edit, like the
+  wheel. The extent is `max(used range or cursor, offset + viewport)`, as
+  in Excel: the thumb has a 24 px floor, rests at the end once you're past
+  the data, and keeps the extent from the press for the whole drag (so it
+  tracks the pointer instead of running away as the extent grows), which
+  is recomputed on release. The vertical track starts below the frozen
+  rows. A bar is shown only when there's something to scroll to.
