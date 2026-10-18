@@ -1,6 +1,20 @@
 # Macros
 
-Macros is a code editor that works like Emacs, renders on the GPU, and is scripted in [Steel](https://github.com/mattwparas/steel).
+Macros is a code editor that works like Emacs, renders on the GPU, and is scripted in [Steel](https://github.com/mattwparas/steel), a fast embedded Scheme. Like Emacs, it's written in its own extension language, so you can change any part of it while it runs. Magit, evil, helix, Org mode, LSP, a debugger, and a terminal ship in the box. It runs on macOS, Linux, and Windows.
+
+![Editing a Steel package with LSP completion](docs/screenshots/steel-lsp.png)
+
+## What's in it
+
+- **Steel all the way down.** Your config, most modes, and every package are Steel. Evaluate a form in place and the running editor picks it up. Config and package files get a built-in language server that knows the whole editor API, so you get completion, docs, and diagnostics for every editor function.
+- **Your keys.** Emacs bindings by default, or evil (Vim) or helix modal editing.
+- **The usual tools.** A Magit-style git porcelain, Org mode with agenda, capture, tables, and babel, language servers for other languages, a debugger (DAP), Helm, Dired, and a VT terminal in a buffer.
+- **Spreadsheets.** Open a CSV, TSV, or `.xlsx` as a grid with formulas, number formats, and conditional highlighting, then flip back to the raw text with one key.
+- **Charts made of text.** Sparklines, bars, line and scatter plots, histograms, distributions, and heatmaps drawn with braille and block glyphs. Because a chart is just text, it works anywhere text does: an Org file, a dashboard, the REPL.
+
+![An Org file charting a table as bars and plotting a normal distribution from a Steel source block](docs/screenshots/plots.png)
+
+![A CSV of orders open as a grid: currency and percent formats, late and pending statuses colored, and a SUMIFS summary being edited with its references outlined](docs/screenshots/grid.png)
 
 ## Getting it
 
