@@ -1143,15 +1143,17 @@ impl GridDoc {
         for (bi, r) in shown.enumerate() {
             for c in sel.c0..=sel.c1.min(cols.saturating_sub(1)) {
                 // Formulas, and text starting with `=` (as `'=…`, so it
-                // pastes back as text, not a formula).
-                if self
-                    .wb
-                    .cell(SHEET, r, c)
-                    .starts_with(['=', crate::formula::engine::MARK])
-                {
+                // pastes back as text, not a formula); a spilled value
+                // pastes as itself, exactly, even with its formula.
+                let stored = self.wb.cell(SHEET, r, c);
+                if stored.starts_with(['=', crate::formula::engine::MARK]) {
                     clip.cells
                         .push((bi, c - sel.c0, r, c, self.source(r, c).into_owned()));
                     clip.values.push(self.value_input(r, c));
+                } else if self.is_spilled(r, c) {
+                    let v = self.value_input(r, c);
+                    clip.cells.push((bi, c - sel.c0, r, c, v.clone()));
+                    clip.values.push(v);
                 }
                 if formatted && self.formats.touches_col(c) {
                     let f = self.formats.get(r, c);
@@ -1171,15 +1173,28 @@ impl GridDoc {
     /// that isn't a formula gives its own input text.
     pub(super) fn value_input(&self, r: usize, c: usize) -> String {
         let stored = self.wb.cell(SHEET, r, c);
-        if !is_formula(stored) {
-            return crate::formula::engine::input_text(stored).into_owned();
-        }
-        match self.formula_value(r, c) {
+        let formula = is_formula(stored);
+        let value = if formula {
+            self.formula_value(r, c)
+        } else if stored.is_empty() {
+            self.formulas.spilled_value(r, c)
+        } else {
+            None
+        };
+        match value {
             Some(Value::Number(n)) => exact_number(*n),
             Some(Value::Text(s)) => crate::formula::engine::input_text(s).into_owned(),
             Some(v) => v.to_string(),
-            None => self.cell(r, c).to_string(),
+            None if formula => self.cell(r, c).to_string(),
+            None => crate::formula::engine::input_text(stored).into_owned(),
         }
+    }
+
+    /// Whether `(r, c)` shows a value another formula spills into it.
+    pub(super) fn is_spilled(&self, r: usize, c: usize) -> bool {
+        self.formulas.has_spills()
+            && self.wb.cell(SHEET, r, c).is_empty()
+            && self.formulas.spilled_from(r, c).is_some()
     }
 }
 

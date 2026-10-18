@@ -3190,3 +3190,47 @@ fn paste_special_picks_formats_and_transpose(cx: &mut TestAppContext) {
     assert_eq!(source(&ed, cx, 5, 3), "=B6+C6");
     assert_eq!(source(&ed, cx, 5, 4), "=C6/D6");
 }
+
+#[gpui::test]
+fn paste_values_and_formulas_to_values_keep_spills_whole(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, "a,b,c\n1,,\n2,,\n3,,\n", false);
+    scheme(&ed, cx, r#"(grid-set-cell 1 1 "=SEQUENCE(3,1,0.1,0.1)")"#);
+    assert_eq!(cell(&ed, cx, 3, 1), "0.3", "spilled, shown to 15 digits");
+    // Copy the spill range B2:B4, paste values at C2: every value, exact.
+    ed.update(cx, |e, cx| e.grid_goto_address("B2", cx));
+    keys(&ed, cx, "shift-down shift-down alt-w");
+    ed.update(cx, |e, cx| e.grid_goto_address("C2", cx));
+    keys(&ed, cx, "ctrl-c ctrl-y");
+    assert_eq!(
+        (
+            source(&ed, cx, 1, 2),
+            source(&ed, cx, 2, 2),
+            source(&ed, cx, 3, 2)
+        ),
+        ("0.1".into(), "0.2".into(), "0.30000000000000004".into())
+    );
+    // Spilled cells alone (no anchor) aren't converted: that would block it.
+    ed.update(cx, |e, cx| e.grid_goto_address("B3", cx));
+    keys(&ed, cx, "shift-down ctrl-c ctrl-x v");
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("No formulas"), "{}", e.status)
+    });
+    // With the anchor: the whole array becomes values, as one undo step.
+    ed.update(cx, |e, cx| e.grid_goto_address("B2", cx));
+    keys(&ed, cx, "shift-down shift-down ctrl-c ctrl-x v");
+    assert!(!is_formula_cell(&ed, cx, 1, 1));
+    assert_eq!(
+        (
+            source(&ed, cx, 1, 1),
+            source(&ed, cx, 2, 1),
+            source(&ed, cx, 3, 1)
+        ),
+        ("0.1".into(), "0.2".into(), "0.30000000000000004".into())
+    );
+    keys(&ed, cx, "ctrl-/");
+    assert!(is_formula_cell(&ed, cx, 1, 1));
+    assert_eq!(
+        (source(&ed, cx, 2, 1), cell(&ed, cx, 2, 1)),
+        ("".into(), "0.2".into())
+    );
+}

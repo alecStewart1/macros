@@ -321,14 +321,23 @@ impl Editor {
         let edits: Vec<(usize, usize, String)> = g
             .visible_cells(&sel)
             .into_iter()
-            .filter(|&(r, c)| g.is_formula_at(r, c))
+            // A spill's values go with its formula (Excel converts the
+            // whole array); without it they'd only block the spill.
+            .filter(|&(r, c)| {
+                g.is_formula_at(r, c)
+                    || g.formulas.spilled_from(r, c).is_some_and(|(ar, ac)| {
+                        (sel.r0..=sel.r1).contains(&ar)
+                            && (sel.c0..=sel.c1).contains(&ac)
+                            && g.row_shown(ar)
+                    }) && g.is_spilled(r, c)
+            })
             .map(|(r, c)| (r, c, g.value_input(r, c)))
             .collect();
-        if edits.is_empty() {
+        let n = edits.iter().filter(|e| g.is_formula_at(e.0, e.1)).count();
+        if n == 0 {
             self.echo("No formulas to convert here", cx);
             return;
         }
-        let n = edits.len();
         g.set_cells_tracked(&edits);
         self.echo(
             if n == 1 {
