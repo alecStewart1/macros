@@ -7,7 +7,9 @@
 ;; A grid has two states, decided in Rust:
 ;;   grid normal — keys are commands, resolved against the keymaps below;
 ;;   cell insert — keys edit the text of one cell (Esc/Enter/Tab commit,
-;;                 C-g cancels); that small editor is native and not rebindable.
+;;                 C-g cancels; with a range selected, C-RET writes the entry
+;;                 into every selected cell, like grid-fill-selection); that
+;;                 small editor is native and not rebindable.
 ;;
 ;; Keymaps follow the special-buffer convention (see evil.scm's
 ;; evil-collection section):
@@ -44,6 +46,13 @@
 ;;   (grid-sort col descending?)          ; skips the header row
 ;;   (grid-sort-as col descending? 'numeric)   ; or 'alpha 'time 'auto
 ;;   (grid-map-cells f)  — each selected (visible) cell becomes (f value)
+;;   (grid-fill-down) (grid-fill-right)  — Excel's Ctrl+D / Ctrl+R: copy the
+;;     selection's first row (column) into the rest of it, formatting too;
+;;     formulas move their relative references ($A$1 stays). With one row
+;;     (column) or no selection, copy from the cell above (to the left).
+;;   (grid-fill-selection)  — Excel's Ctrl+Enter: the cursor cell (or the
+;;     entry being typed) into every selected cell, formulas adjusted.
+;;   All of them skip rows a filter hides and hidden columns.
 ;;   (grid-remove-duplicates '("email"))  — delete rows repeating an earlier
 ;;     row on these columns (header names, letters or indices; '() for the
 ;;     selection's columns, or all), keeping the first. Looks at the
@@ -274,6 +283,9 @@
       ("alt-left" grid-move-column-left)
       ("alt-right" grid-move-column-right)
       ("shift-enter" grid-copy-down)
+      ("ctrl-c d" grid-fill-down)                     ; Excel's Ctrl+D
+      ("ctrl-c r" grid-fill-right)                    ; Excel's Ctrl+R
+      ("ctrl-enter" grid-fill-selection)              ; Excel's Ctrl+Enter
       ("ctrl-c ^" grid-sort-prompt)
       ("ctrl-c ctrl-x h" grid-hide-column)
       ("ctrl-c ctrl-x s" grid-show-columns)
@@ -410,6 +422,9 @@
       ("alt-left" grid-move-column-left)
       ("alt-right" grid-move-column-right)
       ("shift-enter" grid-copy-down)
+      ("alt-d" grid-fill-down)
+      ("alt-r" grid-fill-right)
+      ("ctrl-enter" grid-fill-selection)
       ("z z" grid-recenter)
       ("z c" grid-hide-column)
       ("z o" grid-show-columns)
@@ -844,6 +859,9 @@
             (list "y" "Paste values" 'grid-paste-values)
             (list "Y" "Paste special…" 'grid-paste-special)
             (list "V" "Formulas to values" 'grid-formulas-to-values)
+            (list "|" "Fill down from first row" 'grid-fill-down)
+            (list "_" "Fill right from first column" 'grid-fill-right)
+            (list "E" "Fill selection with this cell" 'grid-fill-selection)
             (list "U" "Upcase" 'grid-upcase)
             (list "L" "Downcase" 'grid-downcase)
             (list "C" "Capitalize" 'grid-capitalize)
