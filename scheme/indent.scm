@@ -61,6 +61,7 @@
 (set-option "tab-width:cpp" 4)
 (set-option "tab-width:java" 4)
 (set-option "tab-width:zig" 4)        ; zig fmt
+(set-option "tab-width:powershell" 4) ; PSScriptAnalyzer / VS Code default
 ;; Go indents with TABS (gofmt). Auto-indent still inserts spaces here; a save
 ;; under gofmt normalizes them back to tabs. Width is the tab display size.
 (set-option "tab-width:go" 4)

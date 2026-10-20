@@ -395,6 +395,15 @@ const LANGUAGES: &[LangSpec] = &[
         filenames: &[],
         injection_tags: &["elixir", "ex", "exs"],
     },
+    LangSpec {
+        id: "powershell",
+        language: tree_sitter_powershell::LANGUAGE,
+        highlights: tree_sitter_powershell::HIGHLIGHTS_QUERY,
+        indent: None,
+        extensions: &["ps1", "psm1", "psd1"],
+        filenames: &[],
+        injection_tags: &["powershell", "pwsh", "ps1"],
+    },
     // LaTeX, Typst, and Mermaid bundle no highlights query with the parser,
     // so we vendor nvim-treesitter's under `grammars/queries/`. (LaTeX/Typst
     // parsers come from the `codebook-*` crates; Mermaid from build.rs.)
@@ -1554,6 +1563,7 @@ mod tests {
             ("sbt", "scala"),
             ("edn", "clojure"),
             ("exs", "elixir"),
+            ("psm1", "powershell"),
             ("cls", "latex"),
             ("typ", "typst"),
             ("mmd", "mermaid"),
@@ -1985,8 +1995,18 @@ mod tests {
     /// markdown, HTML, CSS, YAML, Lua, etc. effectively uncolored.
     #[test]
     fn every_grammar_capture_resolves_to_a_face() {
-        // Not visible faces: injected-region and spellcheck markers, error nodes.
-        const ALLOWED_UNMAPPED: &[&str] = &["embedded", "spell", "nospell", "conceal", "error"];
+        // Not visible faces: injected-region and spellcheck markers, error nodes,
+        // and PowerShell's whole-span `@array` / `@assignvalue` markers (coloring
+        // those would paint an entire `@(...)` or assignment right-hand side).
+        const ALLOWED_UNMAPPED: &[&str] = &[
+            "embedded",
+            "spell",
+            "nospell",
+            "conceal",
+            "error",
+            "array",
+            "assignvalue",
+        ];
         for lang in BUNDLED_LANGUAGES {
             let lang = *lang;
             let (langfn, query_src) = grammar(lang).unwrap();
