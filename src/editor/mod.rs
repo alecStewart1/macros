@@ -11,7 +11,11 @@ use gpui::{
     actions, div, point, prelude::*, px,
 };
 use notify_debouncer_mini::notify::RecommendedWatcher;
+// `new_debouncer` is skipped in test builds (see the debouncer creation in `new`).
+#[cfg(not(test))]
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
+#[cfg(test)]
+use notify_debouncer_mini::Debouncer;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use unicode_segmentation::UnicodeSegmentation;
@@ -1399,18 +1403,7 @@ impl Editor {
         // `reconcile_watches`; if the platform watcher won't start we keep `None`
         // and the auto-revert / live-refresh features simply no-op.
         let (fs_tx, mut fs_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
-        let fs_debouncer = new_debouncer(
-            Duration::from_millis(400),
-            move |res: DebounceEventResult| {
-                if let Ok(events) = res {
-                    let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
-                    if !paths.is_empty() {
-                        let _ = fs_tx.unbounded_send(paths);
-                    }
-                }
-            },
-        )
-        .ok();
+        let fs_debouncer = new_fs_debouncer(fs_tx);
 
         let mut editor = Self {
             active: Document {
@@ -4952,6 +4945,51 @@ fn scheme_mode_stack(macros: bool) -> ModeStack {
     } else {
         Mode::new("steel").with_language("scheme")
     })
+}
+
+/// Create the filesystem watcher, or `None` if it can't start (auto-revert /
+/// live-refresh then no-op). In test builds the debouncer is skipped entirely:
+/// its thread outlives the test scheduler, and dropping the sender from that
+/// thread wakes the drain task on a foreign thread — gpui-ce's checked test
+/// scheduler panics on that ("Detected activity on thread notify-rs debouncer
+/// loop"). No test relies on real watcher events (auto-revert paths call
+/// `on_fs_events` directly); test contexts opt into foreign-thread wakes via
+/// `test_context` instead.
+fn new_fs_debouncer(
+    fs_tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>,
+) -> Option<Debouncer<RecommendedWatcher>> {
+    #[cfg(test)]
+    {
+        drop(fs_tx); // closes the channel; the drain task just ends
+        return None;
+    }
+    #[cfg(not(test))]
+    new_debouncer(
+        Duration::from_millis(400),
+        move |res: DebounceEventResult| {
+            if let Ok(events) = res {
+                let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
+                if !paths.is_empty() {
+                    let _ = fs_tx.unbounded_send(paths);
+                }
+            }
+        },
+    )
+    .ok()
+}
+
+/// Shared test-context bootstrap for every `#[gpui::test]` setup helper:
+/// allows foreign-thread wakes (the Scheme engine thread sends outcomes from
+/// its own thread; gpui-ce's test scheduler asserts on that unless parking is
+/// allowed — the watcher half of the problem is avoided by `new_fs_debouncer`)
+/// and installs default globals. Call this before creating the test editor.
+#[cfg(test)]
+pub(crate) fn test_context(cx: &mut gpui::TestAppContext) {
+    cx.background_executor.allow_parking();
+    cx.update(|cx| {
+        cx.set_global(crate::theme::Theme::default());
+        cx.set_global(crate::settings::Settings::default());
+    });
 }
 
 /// Build a fresh document for `contents`, choosing modes/highlighter by file type.

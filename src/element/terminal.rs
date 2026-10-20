@@ -248,6 +248,7 @@ impl Element for TerminalElement {
                             wavy: false,
                         }),
                         strikethrough: None,
+                        letter_spacing: None,
                     });
                     if wide {
                         let shaped = window.text_system().shape_line(
@@ -294,7 +295,7 @@ impl Element for TerminalElement {
                 };
                 // A block cursor is translucent so the glyph under it stays legible.
                 if cur.block {
-                    color.a *= BLOCK_CURSOR_ALPHA;
+                    color.alpha *= BLOCK_CURSOR_ALPHA;
                 }
                 cursor = Some(fill(Bounds::new(point(x, y), size(w, line_height)), color));
             }
@@ -364,7 +365,7 @@ impl Element for TerminalElement {
                 window.paint_quad(cursor);
             }
             for (line, origin) in prepaint.rows.drain(..) {
-                line.paint(origin, line_height, window, cx).ok();
+                line.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
             }
         });
         // Report bounds so click-to-focus routes to this pane like any other.
@@ -377,9 +378,9 @@ impl Element for TerminalElement {
 
 /// Pack a [`Hsla`] into a `0xRRGGBB` value for the terminal color resolver.
 fn hsla_to_rgb_u32(color: Hsla) -> u32 {
-    let rgba = gpui::Rgba::from(color);
+    let rgba = gpui::hsla_to_rgba(color);
     let to_u8 = |v: f32| (v.clamp(0., 1.) * 255.0).round() as u32;
-    (to_u8(rgba.r) << 16) | (to_u8(rgba.g) << 8) | to_u8(rgba.b)
+    (to_u8(rgba.color.red) << 16) | (to_u8(rgba.color.green) << 8) | to_u8(rgba.color.blue)
 }
 
 #[cfg(test)]

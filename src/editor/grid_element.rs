@@ -14,8 +14,10 @@ use gpui::{
     App, Bounds, ContentMask, CursorStyle, Element, ElementId, ElementInputHandler, Entity, Font,
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, LayoutId,
     PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun, Window, fill, font, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    prelude::*, px, relative, size, TextAlign,
 };
+
+use crate::color_compat::{rgb, rgba};
 
 use super::Editor;
 use super::grid::{BAR_HEIGHT, GridDoc, GridDrag, GridGeom, NAME_BOX_WIDTH, SHEET};
@@ -111,20 +113,20 @@ impl Palette {
     fn new(theme: &Theme) -> Self {
         let bg = theme.background();
         let fg = theme.foreground();
-        let dim = theme.color("dim", Hsla { a: 0.55, ..fg });
+        let dim = theme.color("dim", Hsla { alpha: 0.55, ..fg });
         let mut line = theme.color("grid-line", fg);
         if theme.background_of("grid-line").is_none() {
-            line.a = 0.14;
+            line.alpha = 0.14;
         }
         // Headers sit on the plain background unless a theme sets the
         // `grid-header` face: they're reference marks, not content.
         let mut header_bg = theme.color("grid-header", fg);
         if theme.background_of("grid-header").is_none() {
-            header_bg.a = 0.0;
+            header_bg.alpha = 0.0;
         }
         let selection = theme.color("region", rgba(0x3a5fcd55).into());
         let cursor = theme.color("cursor", rgb(0x528bff).into());
-        let header_active = Hsla { a: 0.07, ..fg };
+        let header_active = Hsla { alpha: 0.07, ..fg };
         let refs: Vec<Hsla> = [0x4f8bf5, 0xe0533c, 0x9b59d0, 0x2fa36b, 0xd4882a, 0xd14b9b]
             .iter()
             .enumerate()
@@ -133,7 +135,7 @@ impl Palette {
         let trace = theme.color("warning", rgb(0xe5c07b).into());
         let bar_thumb = theme.color("scroll-bar", rgba(0x888888aa).into());
         let brighter = |by: f32| Hsla {
-            a: (bar_thumb.a + by).min(1.0),
+            alpha: (bar_thumb.alpha + by).min(1.0),
             ..bar_thumb
         };
         Self {
@@ -145,11 +147,11 @@ impl Palette {
             line,
             header_bg,
             header_active,
-            header_label: Hsla { a: 0.30, ..fg },
-            header_label_active: Hsla { a: 0.70, ..fg },
+            header_label: Hsla { alpha: 0.30, ..fg },
+            header_label_active: Hsla { alpha: 0.70, ..fg },
             selection,
             cursor,
-            block: Hsla { a: 0.45, ..fg },
+            block: Hsla { alpha: 0.45, ..fg },
             warn: theme.color("warning", rgb(0xe5c07b).into()),
             bar_track: theme.color("scroll-bar-track", rgba(0x88888822).into()),
             bar_thumb,
@@ -180,7 +182,7 @@ fn palette_fill(theme: &Theme, i: u8) -> Hsla {
     theme
         .background_of(&format!("grid-{}", cellfmt::color_name(i)))
         .unwrap_or_else(|| Hsla {
-            a: 0.4,
+            alpha: 0.4,
             ..palette_color(theme, i)
         })
 }
@@ -193,6 +195,7 @@ fn run(len: usize, font: &Font, color: Hsla) -> TextRun {
         background_color: None,
         underline: None,
         strikethrough: None,
+        letter_spacing: None,
     }
 }
 
@@ -395,7 +398,7 @@ impl Element for GridElement {
                 window.paint_quad(quad);
             }
             for (line, origin) in popup.labels {
-                line.paint(origin, popup.hit.row_height, window, cx).ok();
+                line.paint(origin, popup.hit.row_height, TextAlign::Left, None, window, cx).ok();
             }
         }
         for (hitbox, style) in &p.hitboxes {
@@ -729,7 +732,7 @@ impl<'a> Frame<'a> {
         // color when the theme gives the face none.
         let stripe = self.g.style.stripe.as_deref().map(|f| {
             self.theme.background_of(f).unwrap_or(Hsla {
-                a: 0.035,
+                alpha: 0.035,
                 ..self.pal.fg
             })
         });
@@ -1052,7 +1055,7 @@ impl<'a> Frame<'a> {
             }
         }
         let edge = Hsla {
-            a: 0.35,
+            alpha: 0.35,
             ..self.pal.fg
         };
         if self.frozen_h > 0.0 && self.frozen_h < ch {
@@ -1239,7 +1242,7 @@ impl<'a> Frame<'a> {
     /// a cell is edited, what each cursor's cell will become.
     fn extra_cursors(&self, p: &mut GridPrepaint, window: &mut Window) {
         let faint = Hsla {
-            a: self.pal.cursor.a * 0.45,
+            alpha: self.pal.cursor.alpha * 0.45,
             ..self.pal.cursor
         };
         let pad = CELL_PAD * self.zoom;
@@ -1747,7 +1750,7 @@ fn push_border(out: &mut Vec<PaintQuad>, x: f32, y: f32, w: f32, h: f32, t: f32,
 
 fn paint_text(t: Text, window: &mut Window, cx: &mut App) {
     window.with_content_mask(Some(ContentMask { bounds: t.clip }), |window| {
-        t.line.paint(t.origin, t.line_height, window, cx).ok();
+        t.line.paint(t.origin, t.line_height, TextAlign::Left, None, window, cx).ok();
     });
 }
 

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use gpui::{Global, Hsla, rgb, rgba};
+use gpui::{Global, Hsla};
+
+use crate::color_compat::{rgb, rgba};
 
 /// A color theme: a palette mapping face names to their display attributes.
 ///

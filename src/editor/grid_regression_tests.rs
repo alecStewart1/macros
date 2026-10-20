@@ -5,10 +5,7 @@ use gpui::{Entity, Keystroke, TestAppContext, VisualTestContext};
 use std::path::PathBuf;
 
 fn globals(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    test_context(cx);
 }
 
 fn tmp(csv: &str) -> PathBuf {
@@ -495,6 +492,7 @@ fn regression_formula_bar_click_caret(cx: &mut TestAppContext) {
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         };
         f32::from(
             window

@@ -8,10 +8,7 @@ use gpui::{Entity, Keystroke, TestAppContext};
 use super::*;
 
 fn setup(cx: &mut TestAppContext, text: &str) -> Entity<Editor> {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    test_context(cx); // foreign-thread wakes: see new_fs_debouncer in mod.rs
     let editor = cx.new(Editor::new);
     editor.update(cx, |e, cx| {
         for src in crate::runtime::startup_scripts() {
@@ -1096,10 +1093,7 @@ fn minibuffer_paste_and_yank(cx: &mut TestAppContext) {
 /// A JSON buffer (Emacs bindings, no evil) with the bundled Scheme loaded, so
 /// `tab-width:json` is the shipped 2.
 fn setup_json(cx: &mut TestAppContext, name: &str, text: &str) -> Entity<Editor> {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    test_context(cx);
     let editor = cx.new(Editor::new);
     editor.update(cx, |e, cx| {
         for src in crate::runtime::startup_scripts() {

@@ -631,10 +631,7 @@ mod editor_tests {
 
     #[gpui::test]
     fn gutter_dots_and_line_images_follow_line_edits(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            cx.set_global(crate::theme::Theme::default());
-            cx.set_global(crate::settings::Settings::default());
-        });
+        test_context(cx);
         let editor = cx.new(Editor::new);
         editor.update(cx, |e, _| {
             e.switch_to_doc(make_document("t".into(), None, "a\nb\nc\n"));

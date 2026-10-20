@@ -11,10 +11,9 @@ use super::grid::SHEET;
 use super::*;
 
 fn setup(cx: &mut TestAppContext, csv: &str, evil: bool) -> (Entity<Editor>, PathBuf) {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    // Foreign threads (Scheme engine; fs watcher in non-test builds) wake gpui
+    // tasks — see `test_context` and `new_fs_debouncer` in editor/mod.rs.
+    test_context(cx);
     // A counter as well as the clock: parallel tests can read the same
     // timestamp, and a shared directory means one test saves over another's file.
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -592,10 +591,7 @@ fn styling_rules_formats_and_errors(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn load_hook_styles_matching_files(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    test_context(cx);
     let dir = std::env::temp_dir().join(format!("macros-grid-hook-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sales.csv");
@@ -3291,10 +3287,7 @@ fn windowed<'a>(
     cx: &'a mut TestAppContext,
     csv: &str,
 ) -> (Entity<Editor>, &'a mut gpui::VisualTestContext) {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    test_context(cx);
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "macros-grid-e2e-bars-{}-{}.csv",

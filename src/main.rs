@@ -11,6 +11,7 @@ mod anvil;
 mod assets;
 mod authinfo;
 mod buffer;
+mod color_compat;
 mod dap;
 mod editor;
 mod element;
@@ -51,7 +52,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, PromptLevel, WindowBounds, WindowHandle,
+    App, Bounds, KeyBinding, Menu, MenuItem, PromptLevel, WindowBounds, WindowHandle,
     WindowOptions, actions, prelude::*, px, size,
 };
 
@@ -83,10 +84,12 @@ fn app_menus() -> Vec<Menu> {
         Menu {
             name: "Macros".into(),
             items: vec![MenuItem::action("Quit Macros", Quit)],
+            disabled: false,
         },
         Menu {
             name: "File".into(),
             items: vec![MenuItem::action("New Window", NewWindow)],
+            disabled: false,
         },
     ]
 }
@@ -336,7 +339,10 @@ fn main() {
     launch::queue(launch::args());
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
 
-    let app = Application::new().with_assets(assets::Assets);
+    // gpui-ce splits platform construction into gpui_platform (Application::new
+    // no longer exists); `application()` picks the OS backend, and the
+    // `font-kit` feature we enable is what makes macOS rasterize glyphs.
+    let app = gpui_platform::application().with_assets(assets::Assets);
 
     app.on_open_urls(move |urls| {
         let paths: Vec<PathBuf> = urls
@@ -421,7 +427,7 @@ fn main() {
         // them; afterwards, opened in the frontmost window (or a new one).
         cx.spawn(async move |cx| {
             while let Some(paths) = open_rx.next().await {
-                cx.update(|cx| open_paths(launch::queue(paths), cx)).ok();
+                cx.update(|cx| open_paths(launch::queue(paths), cx));
             }
         })
         .detach();

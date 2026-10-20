@@ -6,8 +6,10 @@ use gpui::{
     Entity, Font, FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, LayoutId, PaintQuad, Pixels, Point, RenderImage, ShapedLine, SharedString,
     Style, TextAlign, TextRun, TransformationMatrix, UnderlineStyle, Window, WrappedLine, fill,
-    font, point, prelude::*, px, relative, rgb, rgba, size,
+    font, point, prelude::*, px, relative, size,
 };
+
+use crate::color_compat::{rgb, rgba};
 
 use crate::editor::{CompletionView, Editor};
 use crate::highlight::{HlSpan, face_name};
@@ -43,6 +45,7 @@ fn plain_run(len: usize, font: Font, color: Hsla) -> TextRun {
         background_color: None,
         underline: None,
         strikethrough: None,
+        letter_spacing: None,
     }
 }
 
@@ -463,7 +466,7 @@ impl FrameColors {
         // Themes can set the secondary colors explicitly; otherwise derive
         // them from the primary region/cursor by knocking the alpha down.
         let dimmed = |mut c: Hsla, by: f32| {
-            c.a *= by;
+            c.alpha *= by;
             c
         };
         FrameColors {
@@ -1054,7 +1057,7 @@ fn layout_cursor(
         };
         // Translucent so the character under the block stays readable.
         let mut color = cfg.color;
-        color.a *= BLOCK_CURSOR_ALPHA;
+        color.alpha *= BLOCK_CURSOR_ALPHA;
         (width, color)
     } else {
         (cfg.width, cfg.color)
@@ -1371,7 +1374,7 @@ impl Element for EditorElement {
                 // then to a faded foreground so the suggestion reads as
                 // tentative even on a theme that defines neither.
                 let mut faded = text_color;
-                faded.a *= 0.55;
+                faded.alpha *= 0.55;
                 let color = theme.color("ghost", theme.color("dim", faded));
                 (first, parts.collect::<Vec<_>>(), color)
             }
@@ -1743,7 +1746,7 @@ impl Element for EditorElement {
             }
             // Line-number gutter labels.
             for (label, origin) in prepaint.gutter.drain(..) {
-                label.paint(origin, line_height, window, cx).ok();
+                label.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
             }
             for line in &prepaint.lines {
                 let origin = point(
@@ -1756,7 +1759,7 @@ impl Element for EditorElement {
             }
             // Virtual suffix text (inlay/blame), after the line content.
             for (label, origin) in prepaint.virtual_text.drain(..) {
-                label.paint(origin, line_height, window, cx).ok();
+                label.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
             }
             for quad in prepaint.diagnostics.drain(..) {
                 window.paint_quad(quad);
@@ -1772,7 +1775,7 @@ impl Element for EditorElement {
             // File-tree icons (monochrome SVGs tinted by the line color).
             for (icon_bounds, path, color) in prepaint.icons.drain(..) {
                 window
-                    .paint_svg(icon_bounds, path, TransformationMatrix::unit(), color, cx)
+                    .paint_svg(icon_bounds, path, None, TransformationMatrix::unit(), color, cx)
                     .ok();
             }
             // Fold chevrons in the gutter (monochrome SVGs, tinted like numbers).
@@ -1781,6 +1784,7 @@ impl Element for EditorElement {
                     .paint_svg(
                         chevron_bounds,
                         path,
+                        None,
                         TransformationMatrix::unit(),
                         color,
                         cx,
@@ -1795,7 +1799,7 @@ impl Element for EditorElement {
             // in the rows reserved below their line.
             for (img_bounds, data) in prepaint.images.drain(..) {
                 window
-                    .paint_image(img_bounds, Corners::default(), data, 0, false)
+                    .paint_image(img_bounds, img_bounds, Corners::default(), data, 0, false)
                     .ok();
             }
             if focus_handle.is_focused(window)
@@ -1808,7 +1812,7 @@ impl Element for EditorElement {
                     window.paint_quad(quad);
                 }
                 for (line, origin) in popup.labels {
-                    line.paint(origin, line_height, window, cx).ok();
+                    line.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
                 }
             }
             // Secondary cursors (multiple-cursors), drawn whenever focused.
@@ -1820,7 +1824,7 @@ impl Element for EditorElement {
             // avy hints sit on top of everything (text, cursor, popup).
             for (bg, label, origin) in prepaint.avy.drain(..) {
                 window.paint_quad(bg);
-                label.paint(origin, line_height, window, cx).ok();
+                label.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
             }
         });
 

@@ -9,10 +9,7 @@ use gpui::{Entity, Keystroke, TestAppContext};
 use super::*;
 
 fn setup(cx: &mut TestAppContext, csv: &str, mode: &str) -> Entity<Editor> {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    test_context(cx);
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
         "macros-grid-dedup-{}-{}",

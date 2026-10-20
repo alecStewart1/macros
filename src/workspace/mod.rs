@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use gpui::{App, Context, Entity, SharedString, Window, div, prelude::*, px, relative};
 
+use crate::color_compat::Opacity;
 use crate::editor::{Editor, TitlebarDropdownView};
 use crate::theme::Theme;
 
@@ -101,7 +102,7 @@ impl Workspace {
     /// Move keyboard focus to the editor. Called once after the window opens.
     pub fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.editor.read(cx).focus_handle.clone();
-        window.focus(&handle);
+        window.focus(&handle, cx);
     }
 
     /// Run a Steel snippet against the editor synchronously (startup config:
@@ -534,7 +535,7 @@ impl Workspace {
         let theme = cx.global::<Theme>();
         let dim = theme.color("dim", theme.foreground());
         let mut hover_bg = dim;
-        hover_bg.a = 0.15;
+        hover_bg.alpha = 0.15;
         let key = dropdown.key.clone();
         let mut trigger = div()
             .id(("titlebar-dropdown-trigger", index))
@@ -597,9 +598,9 @@ impl Workspace {
         // Menu chrome: a hairline border and a soft hover pill (both derived
         // from the theme's dim at reduced alpha) over the mode-line panel color.
         let mut hairline = colors.dim;
-        hairline.a *= 0.4;
+        hairline.alpha *= 0.4;
         let mut hover_bg = colors.dim;
-        hover_bg.a = 0.15;
+        hover_bg.alpha = 0.15;
 
         // The search field: typed keys route here while the menu is open (the
         // key layer + IME, like Helm's filter). Rendered like the minibuffer —
@@ -612,7 +613,7 @@ impl Workspace {
         // When blinked off it keeps its 2px slot, just unpainted, so the text
         // doesn't jiggle.
         let mut caret_color = colors.cursor_color;
-        caret_color.a *= 0.6;
+        caret_color.alpha *= 0.6;
         let caret_on = self.editor.read(cx).cursor_blink_visible();
         let caret = move || {
             let slot = div().flex_none().w(px(2.)).h(px(14.));
@@ -661,7 +662,7 @@ impl Workspace {
             // Clicks in the blank space right of the text put the caret at the
             // end (the row itself is taller than this filler; height keeps it
             // clickable inside the centered flex row).
-            search_row = search_row.child(div().flex_grow().h(px(16.)).on_mouse_down(
+            search_row = search_row.child(div().flex_grow(1.).h(px(16.)).on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _ev, _window, cx| {
                     this.editor.update(cx, |editor, cx| {
