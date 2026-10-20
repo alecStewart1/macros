@@ -271,6 +271,15 @@ impl Editor {
         self.read_and_open(name, path, identity, as_grid, cx);
     }
 
+    /// Visit each of `paths` as `C-x C-f` would — the files the OS asked
+    /// Macros to open (command line, Finder, "Open with"; see src/launch.rs).
+    /// The last one ends up as the active buffer.
+    pub fn visit_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        for path in paths {
+            self.find_file(&path.to_string_lossy(), cx);
+        }
+    }
+
     /// The read half of [`Self::find_file`] (also run after the large-grid
     /// confirm): read the file off the UI thread, then install it as a text
     /// buffer or, when `as_grid`, a grid.

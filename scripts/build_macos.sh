@@ -178,6 +178,12 @@ for pair in "${LICENSE_PAIRS[@]}"; do
 done
 
 # ── 3. Info.plist ────────────────────────────────────────────────────────────
+# Document types: every extension in assets/file-types.txt, registered at rank
+# `Alternate` so Macros shows up in Finder's "Open With" without claiming to be
+# the default for anything.
+DOC_EXTENSIONS="$(grep -v '^[[:space:]]*#' "$REPO_ROOT/assets/file-types.txt" \
+    | awk 'NF { printf "                <string>%s</string>\n", $1 }')"
+
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -207,6 +213,39 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Text document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+$DOC_EXTENSIONS
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Text, source, or spreadsheet</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.plain-text</string>
+                <string>public.source-code</string>
+                <string>public.script</string>
+                <string>public.json</string>
+                <string>public.comma-separated-values-text</string>
+                <string>public.tab-separated-values-text</string>
+                <string>org.openxmlformats.spreadsheetml.sheet</string>
+            </array>
+        </dict>
+    </array>
     <key>NSHumanReadableCopyright</key>
     <string>$APP_NAME $VERSION. Copyright (c) 2026 Kyle Gwinnup. Licensed under the MIT License.</string>
 </dict>

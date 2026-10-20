@@ -21,6 +21,7 @@ mod grid_fn;
 mod highlight;
 mod json_format;
 mod jsonrpc;
+mod launch;
 mod lsp;
 mod mcp;
 mod mode;
@@ -43,10 +44,12 @@ mod workspace;
 mod xlsx;
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use gpui::{
     App, Application, Bounds, KeyBinding, Menu, MenuItem, PromptLevel, WindowBounds, WindowHandle,
     WindowOptions, actions, prelude::*, px, size,
@@ -210,6 +213,14 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
                 // keys are let through and before the reveal.
                 workspace.update(cx, |w, cx| w.run_after_init(cx)).ok();
 
+                // Files the launch asked for (command line / Finder), opened
+                // after session restore so a restored desktop can't bury them.
+                // Only the first window drains; later ones find it empty.
+                let files = launch::take_startup();
+                if !files.is_empty() {
+                    workspace.update(cx, |w, cx| w.visit_files(&files, cx)).ok();
+                }
+
                 // Config (incl. any `(evil-mode)`) is fully applied: let
                 // plain keystrokes through again. Done before the reveal so
                 // the very first key the user can press is already modal.
@@ -319,7 +330,23 @@ fn main() {
         eprintln!("macros: {warning}");
     }
 
+    // Files to open: command-line paths now, and on macOS Finder opens, which
+    // arrive as open-URL events — possibly before the first window exists, so
+    // they're forwarded into the app through a channel (see src/launch.rs).
+    launch::queue(launch::args());
+    let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+
     let app = Application::new().with_assets(assets::Assets);
+
+    app.on_open_urls(move |urls| {
+        let paths: Vec<PathBuf> = urls
+            .iter()
+            .filter_map(|url| launch::path_from_file_url(url))
+            .collect();
+        if !paths.is_empty() {
+            open_tx.unbounded_send(paths).ok();
+        }
+    });
 
     // Clicking the dock icon (macOS) with every window closed opens a fresh
     // one; otherwise just bring the app forward. Registered on the builder —
@@ -390,8 +417,38 @@ fn main() {
 
         open_workspace_window(cx, true);
 
+        // Open-file events: queued until the first window's startup drains
+        // them; afterwards, opened in the frontmost window (or a new one).
+        cx.spawn(async move |cx| {
+            while let Some(paths) = open_rx.next().await {
+                cx.update(|cx| open_paths(launch::queue(paths), cx)).ok();
+            }
+        })
+        .detach();
+
         cx.activate(true);
     });
+}
+
+/// Open `paths` in the active Macros window — the first one when none is
+/// focused, or a fresh window when every window is closed (macOS keeps
+/// running with none) — and bring it forward.
+fn open_paths(paths: Vec<PathBuf>, cx: &mut App) {
+    if paths.is_empty() {
+        return;
+    }
+    let window = cx
+        .active_window()
+        .and_then(|w| w.downcast::<Workspace>())
+        .or_else(|| cx.windows().iter().find_map(|w| w.downcast::<Workspace>()))
+        .unwrap_or_else(|| open_workspace_window(cx, false));
+    window
+        .update(cx, |workspace, window, cx| {
+            workspace.visit_files(&paths, cx);
+            window.activate_window();
+        })
+        .ok();
+    cx.activate(true);
 }
 
 /// Update lifecycle, spawned once at startup: on macOS, offer to relocate a
