@@ -1,0 +1,106 @@
+# File extensions Macros registers with the OS as an "Open With" handler — never
+# the default. One lower-case extension per line, no dot; `#` starts a comment.
+#
+# Consumers:
+#   macOS   scripts/build_macos.sh turns this into Info.plist's
+#           CFBundleDocumentTypes at bundle time.
+#   Windows wix/file-types.wxi (OpenWithProgids + SupportedTypes), generated from
+#           this file. Regenerate after editing:
+#             UPDATE_FILE_TYPES=1 cargo test os_file_associations
+#   Linux   assets/linux/macros.desktop lists MIME types, not extensions; keep
+#           its MimeType= line roughly in step by hand.
+#
+# A test (highlight::tests::os_file_associations_cover_bundled_languages) fails
+# if a bundled grammar's or the grid's extension is missing here, or if the
+# .wxi is stale.
+
+# Plain text and notes
+txt
+text
+log
+org
+md
+markdown
+mdown
+mkd
+mkdn
+
+# Grid (CSV/TSV and friends, Excel workbooks)
+csv
+tsv
+tab
+psv
+xlsx
+
+# Lisps
+scm
+ss
+sld
+sls
+steel
+rkt
+clj
+cljs
+cljc
+edn
+
+# Systems
+c
+h
+cc
+cpp
+cxx
+hpp
+hh
+hxx
+rs
+go
+zig
+
+# JVM, .NET-adjacent, scripting
+java
+scala
+sc
+sbt
+py
+pyi
+rb
+lua
+r
+sh
+bash
+zsh
+ps1
+psm1
+psd1
+
+# Web
+js
+jsx
+mjs
+cjs
+ts
+tsx
+html
+htm
+css
+json
+
+# Functional
+ml
+mli
+hs
+ex
+exs
+
+# Data, config, docs
+yaml
+yml
+toml
+sql
+tex
+sty
+cls
+typ
+mmd
+mermaid

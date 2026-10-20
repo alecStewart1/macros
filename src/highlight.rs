@@ -1988,6 +1988,86 @@ mod tests {
         );
     }
 
+    /// The extensions in assets/file-types.txt — what Macros registers with the
+    /// OS as an "Open With" handler.
+    fn os_file_types() -> Vec<&'static str> {
+        include_str!("../assets/file-types.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect()
+    }
+
+    /// wix/file-types.wxi for `exts`: an OpenWithProgids entry (the per-type
+    /// "Open with" list) and a SupportedTypes entry (Macros' own list) each.
+    /// Windows reads only the value names; the data is ignored.
+    fn render_wix_file_types(exts: &[&str]) -> String {
+        let mut out = String::from(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+             <!-- GENERATED from assets/file-types.txt — do not edit. Regenerate with\n     \
+             UPDATE_FILE_TYPES=1 cargo test os_file_associations -->\n\
+             <Include xmlns=\"http://wixtoolset.org/schemas/v4/wxs\">\n",
+        );
+        for ext in exts {
+            out.push_str(&format!(
+                "  <RegistryValue Root=\"HKLM\" Key=\"Software\\Classes\\.{ext}\\OpenWithProgids\" \
+                 Name=\"Macros.File\" Type=\"string\" Value=\"Macros.File\" />\n\
+                 \x20 <RegistryValue Root=\"HKLM\" \
+                 Key=\"Software\\Classes\\Applications\\macros.exe\\SupportedTypes\" \
+                 Name=\".{ext}\" Type=\"string\" Value=\".{ext}\" />\n"
+            ));
+        }
+        out.push_str("</Include>\n");
+        out
+    }
+
+    /// Guard: the OS "Open With" registrations (assets/file-types.txt) cover
+    /// every bundled grammar's extensions and the grid's file types, and the
+    /// generated Windows include is current. Set UPDATE_FILE_TYPES=1 to rewrite
+    /// wix/file-types.wxi after editing the list.
+    #[test]
+    fn os_file_associations_cover_bundled_languages() {
+        let listed = os_file_types();
+        let mut seen = std::collections::HashSet::new();
+        for ext in &listed {
+            assert_eq!(
+                *ext,
+                ext.to_ascii_lowercase(),
+                "file-types.txt: lower case only"
+            );
+            assert!(seen.insert(*ext), "file-types.txt: {ext} listed twice");
+        }
+        // The grid's default `grid-extensions` (src/editor/grid.rs).
+        let grid = ["csv", "tsv", "tab", "psv", "xlsx"];
+        for spec in LANGUAGES {
+            for ext in spec.extensions {
+                let ext = ext.to_ascii_lowercase();
+                assert!(
+                    listed.contains(&ext.as_str()),
+                    "{}: .{ext} missing from assets/file-types.txt",
+                    spec.id
+                );
+            }
+        }
+        for ext in grid {
+            assert!(
+                listed.contains(&ext),
+                "grid: .{ext} missing from assets/file-types.txt"
+            );
+        }
+
+        let wxi = render_wix_file_types(&listed);
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/wix/file-types.wxi");
+        if std::env::var_os("UPDATE_FILE_TYPES").is_some() {
+            std::fs::write(path, &wxi).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap_or_default(),
+            wxi,
+            "wix/file-types.wxi is stale; run UPDATE_FILE_TYPES=1 cargo test os_file_associations"
+        );
+    }
+
     /// Guard: every bundled grammar's highlight captures must resolve to a face,
     /// except a small set of capture names that are deliberately not visible
     /// faces (spell/region markers). Catches a future grammar (or one whose

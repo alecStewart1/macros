@@ -131,12 +131,10 @@ fn steel_path_points(value: &SteelVal) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// The non-flag command-line arguments (files the editor was launched with).
+/// The files the editor was launched to open — command-line paths plus, on
+/// macOS, Finder opens (see src/launch.rs). Empty once startup is done.
 fn command_line_files() -> Vec<String> {
-    std::env::args()
-        .skip(1)
-        .filter(|a| !a.starts_with('-'))
-        .collect()
+    crate::launch::startup_files()
 }
 
 /// Register the session primitives. Reads go through `session` (published by

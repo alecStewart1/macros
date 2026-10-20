@@ -135,6 +135,12 @@ impl Workspace {
             .update(cx, |editor, cx| editor.mark_config_loaded(cx));
     }
 
+    /// Open files the OS handed us (see src/launch.rs) in this window.
+    pub fn visit_files(&self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.visit_files(paths, cx));
+    }
+
     /// Run `after-init-hook` once startup + user config have loaded — where
     /// session restore (desktop / savehist, scheme/session.scm) runs.
     pub fn run_after_init(&self, cx: &mut Context<Self>) {

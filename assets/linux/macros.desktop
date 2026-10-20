@@ -8,5 +8,5 @@ Icon=macros
 Terminal=false
 Categories=Development;TextEditor;Utility;
 StartupWMClass=macros
-MimeType=text/plain;text/x-csrc;text/x-rust;text/x-python;application/json;
+MimeType=text/plain;text/markdown;text/x-markdown;text/x-log;text/x-org;text/csv;text/tab-separated-values;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/rust;text/x-rust;text/x-go;text/x-zig;text/x-java;text/x-scala;text/x-python;text/x-python3;application/x-ruby;text/x-lua;text/x-r;application/x-shellscript;text/x-sh;application/x-powershell;text/javascript;application/javascript;application/x-typescript;text/html;text/css;application/json;text/x-ocaml;text/x-haskell;text/x-elixir;text/x-scheme;text/x-clojure;application/x-yaml;application/yaml;application/toml;application/sql;text/x-sql;text/x-tex;application/x-tex;
 Keywords=editor;emacs;steel;scheme;code;text;

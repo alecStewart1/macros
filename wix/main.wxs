@@ -68,6 +68,36 @@
               Source="$(var.CargoTargetBinDir)\macros.exe"
               KeyPath="yes" />
         </Component>
+        <!-- "Open with" registration: a Macros.File ProgId plus an OpenWithProgids
+             entry per extension (wix/file-types.wxi, generated from
+             assets/file-types.txt). Deliberately NOT a default association — no
+             extension's default value is touched, so existing handlers stay in
+             charge and Macros is offered as an alternative. The Guid is fixed so
+             the component upgrades in place. -->
+        <Component Id="FileAssociations" Guid="B13ED77D-D97F-42E5-AFDC-B8E000AAFAF2">
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\Classes\Macros.File"
+              Type="string"
+              Value="Macros document"
+              KeyPath="yes" />
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\Classes\Macros.File\DefaultIcon"
+              Type="string"
+              Value="[INSTALLDIR]macros.exe,0" />
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\Classes\Macros.File\shell\open\command"
+              Type="string"
+              Value="&quot;[INSTALLDIR]macros.exe&quot; &quot;%1&quot;" />
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\Classes\Applications\macros.exe\shell\open\command"
+              Type="string"
+              Value="&quot;[INSTALLDIR]macros.exe&quot; &quot;%1&quot;" />
+          <?include file-types.wxi ?>
+        </Component>
       </Directory>
     </StandardDirectory>
 
@@ -101,6 +131,7 @@
     <Feature Id="MainApplication" Title="Macros" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="ApplicationShortcut" />
+      <ComponentRef Id="FileAssociations" />
     </Feature>
 
     <!-- License dialog (RTF required by WixUI). -->
