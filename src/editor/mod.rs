@@ -4961,7 +4961,7 @@ fn new_fs_debouncer(
     #[cfg(test)]
     {
         drop(fs_tx); // closes the channel; the drain task just ends
-        return None;
+        None
     }
     #[cfg(not(test))]
     new_debouncer(

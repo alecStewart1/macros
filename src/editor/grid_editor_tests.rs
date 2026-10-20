@@ -13,6 +13,7 @@ use super::*;
 
 /// A grid on a fresh temp file under `mode`: "emacs", "evil" or "helix".
 fn setup(cx: &mut TestAppContext, csv: &str, mode: &str) -> (Entity<Editor>, PathBuf) {
+    test_context(cx);
     cx.update(|cx| {
         cx.set_global(crate::theme::Theme::default());
         cx.set_global(crate::settings::Settings::default());

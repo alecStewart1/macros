@@ -2136,10 +2136,10 @@ mod tests {
     #[test]
     fn overlay_face_overrides_subrange() {
         let mut theme = Theme::default();
-        let red: Hsla = rgb(0xff0000).into();
+        let red: Hsla = rgb(0xff0000);
         theme.set("hl", red);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // Line [0,10), no syntax spans, one overlay [2,5) with face "hl".
         let overlays = vec![(2usize..5usize, SharedString::from("hl"))];
         let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
@@ -2155,9 +2155,9 @@ mod tests {
     #[test]
     fn overlay_outside_line_is_skipped() {
         let mut theme = Theme::default();
-        theme.set("hl", rgb(0xff0000).into());
+        theme.set("hl", rgb(0xff0000));
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // Line [10,20) with its text; overlays wholly before and after it
         // must be skipped, not snapped (snapping one underflowed).
         let overlays = vec![
@@ -2181,13 +2181,13 @@ mod tests {
 
     #[test]
     fn background_face_layers_under_foreground_face() {
-        let red: Hsla = rgb(0xff0000).into();
-        let blue: Hsla = rgb(0x0000ff).into();
+        let red: Hsla = rgb(0xff0000);
+        let blue: Hsla = rgb(0x0000ff);
         let mut theme = Theme::default();
         theme.set("heat-7", red);
         theme.set_background("heat-2-bg", blue);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // Text-plot half-block: a fg face over [0,6), a bg-only face over
         // [3,6) — the overlap keeps red text AND gets the blue background.
         let overlays = vec![
@@ -2215,10 +2215,10 @@ mod tests {
     #[test]
     fn face_font_switches_the_run_family() {
         let mut theme = Theme::default();
-        theme.set("plot-series-0", rgb(0x87c3ff).into());
+        theme.set("plot-series-0", rgb(0x87c3ff));
         theme.set_font("plot-series-0", "Macros Plot");
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         let overlays = vec![(3usize..9usize, SharedString::from("plot-series-0"))];
         let runs = line_runs(&[], &overlays, 0..12, &font, default, false, &theme, None);
         let families: Vec<&str> = runs.iter().map(|r| r.font.family.as_ref()).collect();
@@ -2228,10 +2228,10 @@ mod tests {
     #[test]
     fn overlay_face_underlines_when_set() {
         let mut theme = Theme::default();
-        theme.set("link", rgb(0x4ea1f3).into());
+        theme.set("link", rgb(0x4ea1f3));
         theme.set_underline("link", true);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // One overlay [2,5) with an underlined face; the rest of the line is not.
         let overlays = vec![(2usize..5usize, SharedString::from("link"))];
         let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
@@ -2245,12 +2245,12 @@ mod tests {
 
     #[test]
     fn wavy_face_colors_only_the_squiggle_not_the_text() {
-        let red: Hsla = rgb(0xff0000).into();
+        let red: Hsla = rgb(0xff0000);
         let mut theme = Theme::default();
         theme.set("spell-error", red);
         theme.set_wavy("spell-error", true);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         let overlays = vec![(2usize..5usize, SharedString::from("spell-error"))];
         let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
         let ul = runs[1].underline.as_ref().expect("wavy implies underline");
@@ -2268,7 +2268,7 @@ mod tests {
     fn no_overlays_tiles_whole_line() {
         let theme = Theme::default();
         let font = font("Lilex");
-        let default: Hsla = rgb(0x111111).into();
+        let default: Hsla = rgb(0x111111);
         let runs = line_runs(&[], &[], 0..7, &font, default, false, &theme, None);
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 7);
     }
@@ -2296,8 +2296,8 @@ mod tests {
     #[test]
     fn inject_ghost_run_splits_covering_run() {
         let font = font("Lilex");
-        let c: Hsla = rgb(0x111111).into();
-        let g: Hsla = rgb(0x888888).into();
+        let c: Hsla = rgb(0x111111);
+        let g: Hsla = rgb(0x888888);
         let ghost = plain_run(3, font.clone(), g);
         // Mid-run: [6] at index 4 → [4, 3(ghost), 2].
         let runs = inject_ghost_run(vec![plain_run(6, font.clone(), c)], 4, ghost.clone());
@@ -2331,7 +2331,7 @@ mod tests {
         let mut theme = Theme::default();
         theme.set_bold("feeds-unread", true); // NO color entry on purpose
         let font = font("Lilex");
-        let default: Hsla = rgb(0x222222).into();
+        let default: Hsla = rgb(0x222222);
         // Whole-line-face path: caller resolves the face to `default` (fallback
         // — the face has no color) and passes its bold flag as the base.
         let runs = line_runs(
@@ -2357,10 +2357,10 @@ mod tests {
     #[test]
     fn overlay_face_edges_snap_to_char_boundaries() {
         let mut theme = Theme::default();
-        let red: Hsla = rgb(0xff0000).into();
+        let red: Hsla = rgb(0xff0000);
         theme.set("hl", red);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // "aé b": "é" is bytes 1..3; the face [2,4) starts inside it.
         let text = "aé b";
         let overlays = vec![(2usize..4usize, SharedString::from("hl"))];
@@ -2436,7 +2436,7 @@ mod tests {
         assert_eq!(remove_holes("abcdef", &[(1, 2), (4, 5)]), "acdf");
 
         let font = font("Lilex");
-        let c: Hsla = rgb(0).into();
+        let c: Hsla = rgb(0);
         // One run of len 9 ("*** Title"), collapse [0,2) -> run shrinks to 7.
         let runs = punch_runs(vec![plain_run(9, font.clone(), c)], &[(0, 2)]);
         assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![7]);

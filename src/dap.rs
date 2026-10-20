@@ -218,7 +218,9 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use std::io::{BufRead, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::process::Stdio;
 
     #[test]
     fn start_with_missing_cwd_reports_the_directory() {

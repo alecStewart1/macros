@@ -155,7 +155,8 @@ pub fn executable_find(name: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod executable_find_tests {
-    use super::executable_find;
+    #[cfg(unix)]
+    use crate::util::executable_find;
 
     #[test]
     #[cfg(unix)]
