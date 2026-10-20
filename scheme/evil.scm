@@ -2069,7 +2069,7 @@
         "ibuffer-mode" "grep-mode" "occur-mode" "compile-mode"
         "diagnostics-mode" "help-mode" "diff-mode" "welcome-mode"
         "org-roam-backlinks-mode" "org-roam-unlinked-mode"
-        "org-roam-graph-mode"))
+        "org-roam-graph-mode" "org-agenda-mode" "org-columns-mode"))
 
 ;; Vim motion shared by every special buffer. Only `j`/`k` by default: single
 ;; `g` is `refresh` in several of these modes, so a `g g` top-motion would
