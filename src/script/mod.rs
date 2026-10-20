@@ -38,4 +38,6 @@ pub(crate) use sockets::*;
 pub use state::*;
 
 #[cfg(test)]
+mod commands_tests;
+#[cfg(test)]
 mod tests;

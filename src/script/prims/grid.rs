@@ -748,3 +748,622 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
         o(O::TruncateIndicator(s))
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::grid::cmd::{ColName, GridOp, GridOption};
+    use crate::grid::model::{SortKind, Workbook};
+    use crate::script::{EditorCommand, EditorSnapshot, GridSnapshot, ScriptEngine};
+
+    /// An engine whose active buffer is a 3×2 grid with a header row.
+    fn grid_engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        let wb = Workbook::from_cells(
+            "Sheet1",
+            vec![
+                (0, 0, "name".into()),
+                (0, 1, "qty".into()),
+                (1, 0, "apple".into()),
+                (1, 1, "3".into()),
+                (2, 0, "pear".into()),
+                (2, 1, "=B2*2".into()),
+            ],
+        );
+        engine.set_snapshot(EditorSnapshot {
+            name: "fruit.csv".into(),
+            grid: Some(GridSnapshot {
+                cursor: (1, 1),
+                selection: (1, 0, 2, 1),
+                rows: 3,
+                cols: 2,
+                value: "3".into(),
+                header: true,
+                header_names: vec!["name".into(), "qty".into()],
+                col_types: vec!["text".into(), "int".into()],
+                frozen_rows: 1,
+                zoom: 125.0,
+                formula: Some("=B2*2".into()),
+                cells: Some(Arc::new(wb.cells_snapshot(0))),
+                filter: Some(Arc::new(crate::grid::view::Only {
+                    shown: vec![0, 2],
+                    end: 3,
+                })),
+                visible_rows: 2,
+                sheets: vec!["Sheet1".into(), "Costs".into()],
+                sheet: Some("Sheet1".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        engine
+    }
+
+    fn val(engine: &ScriptEngine, src: &str) -> String {
+        engine
+            .eval(src)
+            .unwrap_or_else(|e| panic!("{src}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    /// The grid ops `src` queues.
+    fn ops(engine: &ScriptEngine, src: &str) -> Vec<GridOp> {
+        engine
+            .eval(src)
+            .unwrap_or_else(|e| panic!("{src}: {e}"))
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                EditorCommand::GridOp(op) => Some(op),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn one(engine: &ScriptEngine, src: &str) -> GridOp {
+        match ops(engine, src).as_slice() {
+            [op] => op.clone(),
+            other => panic!("{src}: expected one op, got {other:?}"),
+        }
+    }
+
+    fn option(engine: &ScriptEngine, src: &str) -> GridOption {
+        match engine.eval(src).unwrap().commands.as_slice() {
+            [EditorCommand::GridOption(o)] => o.clone(),
+            other => panic!("{src}: expected one option, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_come_from_the_published_snapshot() {
+        let e = grid_engine();
+        for (src, want) in [
+            ("(grid-buffer?)", "#true"),
+            ("(equal? (grid-cursor) '(1 1))", "#true"),
+            ("(equal? (grid-selection) '(1 0 2 1))", "#true"),
+            ("(equal? (grid-dimensions) '(3 2))", "#true"),
+            ("(grid-current-value)", "\"3\""),
+            ("(grid-header?)", "#true"),
+            ("(equal? (grid-header-names) '(\"name\" \"qty\"))", "#true"),
+            ("(equal? (grid-sheets) '(\"Sheet1\" \"Costs\"))", "#true"),
+            ("(grid-current-sheet)", "\"Sheet1\""),
+            ("(grid-frozen-rows)", "1"),
+            ("(grid-frozen-columns)", "0"),
+            ("(grid-zoom)", "125"),
+            ("(grid-editing?)", "#false"),
+            ("(grid-formula)", "\"=B2*2\""),
+            ("(grid-filtered?)", "#true"),
+            ("(grid-visible-row-count)", "2"),
+            // By index, letter string or symbol; past the used columns a
+            // column is text.
+            ("(grid-column-type 1)", "\"int\""),
+            ("(grid-column-type \"B\")", "\"int\""),
+            ("(grid-column-type 'A)", "\"text\""),
+            ("(grid-column-type 9)", "\"text\""),
+            ("(grid-column-type -1)", "\"\""),
+        ] {
+            assert!(val(&e, src).starts_with(want), "{src}: {}", val(&e, src));
+        }
+    }
+
+    #[test]
+    fn reads_without_a_grid_fall_back_to_empty_values() {
+        let (e, _rx) = ScriptEngine::new();
+        for (src, want) in [
+            ("(grid-buffer?)", "#false"),
+            ("(null? (grid-cursor))", "#true"),
+            ("(null? (grid-dimensions))", "#true"),
+            ("(grid-current-value)", "\"\""),
+            ("(grid-zoom)", "100"),
+            ("(grid-formula)", "#false"),
+            ("(grid-column-type 0)", "\"\""),
+            ("(grid-row-visible? 0)", "#false"),
+        ] {
+            assert!(val(&e, src).starts_with(want), "{src}: {}", val(&e, src));
+        }
+        let err = e
+            .eval("(grid-cell 0 0)")
+            .err()
+            .expect("an error")
+            .to_string();
+        assert!(err.contains("not a grid"), "{err}");
+    }
+
+    #[test]
+    fn row_visibility_follows_the_filter() {
+        let e = grid_engine();
+        // Rows below `end` show only when listed; rows past it always show.
+        assert_eq!(val(&e, "(grid-row-visible? 0)"), "#true");
+        assert_eq!(val(&e, "(grid-row-visible? 1)"), "#false");
+        assert_eq!(val(&e, "(grid-row-visible? 2)"), "#true");
+        assert_eq!(val(&e, "(grid-row-visible? 7)"), "#true");
+        assert_eq!(val(&e, "(grid-row-visible? -1)"), "#false");
+    }
+
+    #[test]
+    fn synchronous_cell_reads() {
+        let e = grid_engine();
+        assert_eq!(val(&e, "(grid-cell 1 0)"), "\"apple\"");
+        assert_eq!(val(&e, "(grid-cell 1 \"B\")"), "\"3\"");
+        // `from_cells` stores "=B2*2" as text, which reads back quoted so
+        // writing it back keeps it text rather than making it a formula.
+        assert_eq!(val(&e, "(grid-cell 2 1)"), "\"'=B2*2\"");
+        assert!(e.eval("(grid-cell -1 0)").is_err());
+        // Column values skip the header row.
+        assert_eq!(
+            val(&e, "(equal? (grid-column-values 'A) '(\"apple\" \"pear\"))"),
+            "#true"
+        );
+        assert_eq!(
+            val(&e, "(equal? (grid-row-values 0) '(\"name\" \"qty\"))"),
+            "#true"
+        );
+        assert!(e.eval("(grid-row-values \"x\")").is_err());
+        assert!(e.eval("(grid-column-values #f)").is_err());
+    }
+
+    #[test]
+    fn synchronous_reads_need_a_cell_copy() {
+        let (e, _rx) = ScriptEngine::new();
+        e.set_snapshot(EditorSnapshot {
+            grid: Some(GridSnapshot::default()),
+            ..Default::default()
+        });
+        let err = e
+            .eval("(grid-cell 0 0)")
+            .err()
+            .expect("an error")
+            .to_string();
+        assert!(err.contains("grid-read-range"), "{err}");
+    }
+
+    #[test]
+    fn set_cells_queues_one_edit_and_flags_bad_items() {
+        let e = grid_engine();
+        match one(&e, "(grid-set-cell 4 \"C\" 2.5)") {
+            GridOp::SetCells(cells) => {
+                assert_eq!(cells, [(Some(4), Some(2), "2.5".to_string())]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-set-cell 0 0 #t)") {
+            GridOp::SetCells(cells) => assert_eq!(cells, [(Some(0), Some(0), "TRUE".into())]),
+            other => panic!("{other:?}"),
+        }
+        // A value no cell can hold is an invalid position, reported later.
+        match one(&e, "(grid-set-cell 0 0 '(1))") {
+            GridOp::SetCells(cells) => assert_eq!(cells, [(None, None, String::new())]),
+            other => panic!("{other:?}"),
+        }
+        match one(
+            &e,
+            "(grid-set-cells '((0 0 \"a\") (1 B 7) (2) (-1 0 \"x\")))",
+        ) {
+            GridOp::SetCells(cells) => assert_eq!(
+                cells,
+                [
+                    (Some(0), Some(0), "a".to_string()),
+                    (Some(1), Some(1), "7".to_string()),
+                    (None, None, String::new()),
+                    (None, Some(0), "x".to_string()),
+                ]
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn structure_ops_take_rows_and_columns_by_index_or_name() {
+        let e = grid_engine();
+        assert!(matches!(
+            one(&e, "(grid-insert-rows 2 3)"),
+            GridOp::InsertRows { at: Some(2), n: 3 }
+        ));
+        assert!(matches!(
+            one(&e, "(grid-delete-rows -1 1)"),
+            GridOp::DeleteRows { at: None, n: 1 }
+        ));
+        assert!(matches!(
+            one(&e, "(grid-insert-columns \"AA\" 1)"),
+            GridOp::InsertCols { at: Some(26), n: 1 }
+        ));
+        assert!(matches!(
+            one(&e, "(grid-delete-columns 'b 2)"),
+            GridOp::DeleteCols { at: Some(1), n: 2 }
+        ));
+        // A negative count doesn't type-check.
+        assert!(e.eval("(grid-insert-rows 0 -1)").is_err());
+    }
+
+    #[test]
+    fn sort_kinds() {
+        let e = grid_engine();
+        assert!(matches!(
+            one(&e, "(grid-sort 1 #t)"),
+            GridOp::Sort {
+                col: Some(1),
+                descending: true,
+                kind: SortKind::Auto
+            }
+        ));
+        for (name, want) in [
+            ("'numeric", SortKind::Numeric),
+            ("\"number\"", SortKind::Numeric),
+            ("'alpha", SortKind::Alpha),
+            ("'text", SortKind::Alpha),
+            ("'date", SortKind::Time),
+            ("\"\"", SortKind::Auto),
+        ] {
+            match one(&e, &format!("(grid-sort-as 'A #f {name})")) {
+                GridOp::Sort { kind, .. } => assert_eq!(kind, want, "{name}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        let err = e
+            .eval("(grid-sort-as 0 #f 'random)")
+            .err()
+            .expect("an error")
+            .to_string();
+        assert!(err.contains("grid-sort-as"), "{err}");
+    }
+
+    #[test]
+    fn remove_duplicates_accepts_lists_strings_and_false() {
+        let e = grid_engine();
+        let cols = |src: &str| match one(&e, src) {
+            GridOp::RemoveDuplicates(c) => c,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(cols("(grid-remove-duplicates-impl #f)"), None);
+        assert_eq!(cols("(grid-remove-duplicates-impl '())"), None);
+        assert_eq!(
+            cols("(grid-remove-duplicates-impl \"email, name,\")"),
+            Some(vec![
+                ColName::Name("email".into()),
+                ColName::Name("name".into())
+            ])
+        );
+        assert_eq!(
+            cols("(grid-remove-duplicates-impl '(0 \"B\" qty))"),
+            Some(vec![
+                ColName::Index(0),
+                ColName::Name("B".into()),
+                ColName::Name("qty".into())
+            ])
+        );
+        let err = e
+            .eval("(grid-remove-duplicates-impl '(1.5))")
+            .err()
+            .expect("an error")
+            .to_string();
+        assert!(err.contains("not a column"), "{err}");
+    }
+
+    #[test]
+    fn view_ops() {
+        let e = grid_engine();
+        assert!(matches!(
+            one(&e, "(grid-move-to 3 'C)"),
+            GridOp::MoveTo {
+                row: Some(3),
+                col: Some(2)
+            }
+        ));
+        assert!(matches!(
+            one(&e, "(grid-select-range 0 0 2 \"B\")"),
+            GridOp::Select {
+                r0: Some(0),
+                c0: Some(0),
+                r1: Some(2),
+                c1: Some(1)
+            }
+        ));
+        match one(&e, "(grid-set-column-width 0 120)") {
+            GridOp::ColumnWidth { col: Some(0), px } => assert_eq!(px, 120.0),
+            other => panic!("{other:?}"),
+        }
+        // A width that isn't a number arrives as NaN, which the grid reports.
+        match one(&e, "(grid-set-row-height 1 \"tall\")") {
+            GridOp::RowHeight { row: Some(1), px } => assert!(px.is_nan()),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(one(&e, "(grid-freeze-rows 2)"), GridOp::Freeze(2)));
+        assert!(matches!(
+            one(&e, "(grid-freeze-columns 1)"),
+            GridOp::FreezeCols(1)
+        ));
+        assert!(matches!(
+            one(&e, "(grid-set-header #f)"),
+            GridOp::SetHeader(false)
+        ));
+        match one(&e, "(grid-set-zoom 150)") {
+            GridOp::Zoom(z) => assert_eq!(z, 150.0),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn styling_ops() {
+        let e = grid_engine();
+        match one(&e, "(grid-highlight-rule 'B '> 2 'warning)") {
+            GridOp::HighlightRule {
+                col,
+                op,
+                value,
+                face,
+                row,
+            } => {
+                assert_eq!(
+                    (col, op.as_str(), value.as_str(), face.as_str(), row),
+                    (Some(1), ">", "2", "warning", false)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            one(&e, "(grid-row-highlight-rule 0 \"=\" \"x\" 'error)"),
+            GridOp::HighlightRule { row: true, .. }
+        ));
+        match one(&e, "(grid-stripe-rows #t)") {
+            GridOp::Stripe(face) => assert_eq!(face.as_deref(), Some("grid-stripe")),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            one(&e, "(grid-stripe-rows #f)"),
+            GridOp::Stripe(None)
+        ));
+        match one(&e, "(grid-stripe-rows 'zebra)") {
+            GridOp::Stripe(face) => assert_eq!(face.as_deref(), Some("zebra")),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            one(&e, "(grid-set-column-hidden 'C #t)"),
+            GridOp::HideColumn {
+                col: Some(2),
+                hidden: true
+            }
+        ));
+        assert!(matches!(
+            one(&e, "(grid-clear-styles)"),
+            GridOp::ClearStyles
+        ));
+    }
+
+    #[test]
+    fn cell_format_ops_set_only_their_own_field() {
+        let e = grid_engine();
+        match one(&e, "(grid-set-cell-bold 1 1 #t)") {
+            GridOp::CellFormat {
+                bold,
+                text,
+                fill,
+                num,
+                wrap,
+                ..
+            } => assert_eq!(
+                (bold, text, fill, num, wrap),
+                (Some(true), None, None, None, None)
+            ),
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-set-cell-wrap 0 0 #f)") {
+            GridOp::CellFormat { bold, wrap, .. } => assert_eq!((bold, wrap), (None, Some(false))),
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-set-cell-text-color 0 0 'red)") {
+            GridOp::CellFormat {
+                text,
+                fill,
+                bad_color,
+                ..
+            } => {
+                assert!(matches!(text, Some(Some(_))), "{text:?}");
+                assert_eq!((fill, bad_color), (None, None));
+            }
+            other => panic!("{other:?}"),
+        }
+        // #f / 'none removes a color; an unknown name is passed on to report.
+        match one(&e, "(grid-set-cell-fill-color 0 0 #f)") {
+            GridOp::CellFormat {
+                fill, bad_color, ..
+            } => assert_eq!((fill, bad_color), (Some(None), None)),
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-set-cell-fill-color 0 0 'none)") {
+            GridOp::CellFormat { fill, .. } => assert_eq!(fill, Some(None)),
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-set-cell-fill-color 0 0 'mauve)") {
+            GridOp::CellFormat {
+                fill, bad_color, ..
+            } => assert_eq!((fill, bad_color.as_deref()), (Some(None), Some("mauve"))),
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-set-cell-number-format 2 'B \"#,##0.0\")") {
+            GridOp::CellFormat { row, col, num, .. } => assert_eq!(
+                (row, col, num.as_deref()),
+                (Some(2), Some(1), Some("#,##0.0"))
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn sheet_ops() {
+        let e = grid_engine();
+        assert!(matches!(
+            one(&e, "(grid-open-sheet \"Costs\")"),
+            GridOp::OpenSheet(n) if n == "Costs"
+        ));
+        assert!(matches!(
+            one(&e, "(grid-add-sheet-impl \"\")"),
+            GridOp::AddSheet(n) if n.is_empty()
+        ));
+        assert!(matches!(
+            one(&e, "(grid-rename-sheet-impl \"Costs\" \"Q1\")"),
+            GridOp::RenameSheet { from, to } if from == "Costs" && to == "Q1"
+        ));
+        assert!(matches!(
+            one(&e, "(grid-delete-sheet-impl \"Costs\")"),
+            GridOp::DeleteSheet(n) if n == "Costs"
+        ));
+        assert!(matches!(
+            one(&e, "(grid-move-sheet-impl -1)"),
+            GridOp::MoveSheet(-1)
+        ));
+    }
+
+    #[test]
+    fn filter_and_choices() {
+        let e = grid_engine();
+        match one(&e, "(grid-filter-rows 'B '>= 2.5)") {
+            GridOp::Filter { col, op, value } => {
+                assert_eq!((col, op.as_str(), value.as_str()), (Some(1), ">=", "2.5"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-column-choices 0 '(\"a\" \"b\"))") {
+            GridOp::Choices { col, values } => {
+                assert_eq!((col, values), (Some(0), vec!["a".into(), "b".into()]));
+            }
+            other => panic!("{other:?}"),
+        }
+        match one(&e, "(grid-read-range \"A1:B2\" 'on-cells)") {
+            GridOp::ReadRange { range, callback } => {
+                assert_eq!((range.as_str(), callback.as_str()), ("A1:B2", "on-cells"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_matches_lists_changes_in_visible_rows() {
+        let e = grid_engine();
+        // Row 1 is hidden by the filter, so only row 2's "pear" matches.
+        assert_eq!(
+            val(
+                &e,
+                "(equal? (grid-replace-matches \"p\" \"P\" 'literal '(0 0 9 9)) \
+                 '((2 0 \"pear\" \"Pear\")))"
+            ),
+            "#true"
+        );
+        // Nothing to change is an empty list, not an error.
+        assert_eq!(
+            val(
+                &e,
+                "(grid-replace-matches \"zzz\" \"y\" 'literal '(0 0 2 1))"
+            ),
+            "()"
+        );
+        // Errors come back as a message string.
+        for (src, msg) in [
+            (
+                "(grid-replace-matches \"a\" \"b\" 'fuzzy '(0 0 1 1))",
+                "mode",
+            ),
+            (
+                "(grid-replace-matches \"a\" \"b\" 'literal '(0 0))",
+                "range",
+            ),
+            ("(grid-replace-matches \"(\" \"b\" 'regexp '(0 0 1 1))", ""),
+        ] {
+            let v = val(&e, &format!("(string? {src})"));
+            assert_eq!(v, "#true", "{src}");
+            assert!(val(&e, src).contains(msg), "{src}");
+        }
+    }
+
+    #[test]
+    fn editor_wide_options() {
+        let e = grid_engine();
+        assert!(matches!(
+            option(&e, "(grid-auto-header 'detect)"),
+            GridOption::AutoHeader(None)
+        ));
+        assert!(matches!(
+            option(&e, "(grid-auto-header #t)"),
+            GridOption::AutoHeader(Some(true))
+        ));
+        assert!(matches!(
+            option(&e, "(grid-default-column-width 90)"),
+            GridOption::DefaultColumnWidth(w) if w == 90.0
+        ));
+        assert!(matches!(
+            option(&e, "(grid-max-autofit-width 'wide)"),
+            GridOption::MaxAutofitWidth(w) if w.is_nan()
+        ));
+        assert!(matches!(
+            option(&e, "(grid-function-timeout 2)"),
+            GridOption::FunctionTimeout(s) if s == 2.0
+        ));
+        assert!(matches!(
+            option(&e, "(grid-truncate-indicator \"…\")"),
+            GridOption::TruncateIndicator(s) if s == "…"
+        ));
+    }
+
+    #[test]
+    fn editing_section_and_function_registration() {
+        let e = grid_engine();
+        match e
+            .eval("(grid-extensions '(\"csv\" \"tsv\"))")
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [EditorCommand::GridExtensions(exts)] => assert_eq!(exts, &["csv", "tsv"]),
+            other => panic!("{other:?}"),
+        }
+        match e
+            .eval("(grid-goto-address \"B2:D9\")")
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [EditorCommand::GridGotoAddress(a)] => assert_eq!(a, "B2:D9"),
+            other => panic!("{other:?}"),
+        }
+        match e
+            .eval("(grid-register-function \"helper\" \"twice\" '(define (twice x) (* 2 x)))")
+            .unwrap()
+            .commands
+            .as_slice()
+        {
+            [
+                EditorCommand::GridRegisterFunction {
+                    name,
+                    source,
+                    helper,
+                },
+            ] => {
+                assert_eq!(name, "twice");
+                assert!(*helper);
+                assert!(source.contains("twice"), "{source}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
