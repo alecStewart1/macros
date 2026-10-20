@@ -1,6 +1,6 @@
 # GitHub Actions CI for Macros.
 #
-# Jobs: rustfmt (formatting), the cargo-deny dependency gate (job `licenses`), and clippy (lints)
+# Jobs: rustfmt and LF line endings (job `fmt`), the cargo-deny dependency gate (job `licenses`), and clippy (lints)
 # plus the test suite on Linux and macOS, and a `cargo check` on Windows. `fmt`
 # and `deny` are light (no compile, no system libs). The Linux jobs compile the
 # crate, which links gpui's Linux backend and ~18 tree-sitter C grammars —
@@ -52,6 +52,22 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      # rustfmt.toml makes the step above fail on CRLF in .rs files, and
+      # .gitattributes converts CRLF to LF when a file is staged. This catches
+      # the rest: non-Rust files committed by something that skips that
+      # conversion (GitHub's web editor, some GUI clients) or under a changed
+      # .gitattributes. Check the committed content (`i/`), not the checkout,
+      # so a runner's autocrlf setting can't hide or cause a failure. Binary
+      # files report `i/-text` and are skipped.
+      - name: Check line endings (LF only)
+        run: |
+          bad=$(git ls-files --eol | grep -E '^i/(crlf|mixed)' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::These files have CRLF line endings; convert them to LF:"
+            echo "$bad"
+            exit 1
+          fi
 
   licenses:
     # Dependency gate (policy in deny.toml). The job keeps its old `licenses`

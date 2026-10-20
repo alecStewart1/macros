@@ -1,0 +1,4 @@
+# rustfmt's default newline style ("Auto") keeps whatever a file already uses,
+# so a CRLF file passes `cargo fmt --check`. Force LF so the check fails on
+# CRLF and `cargo fmt` converts it.
+newline_style = "Unix"
