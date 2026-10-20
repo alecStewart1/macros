@@ -35,8 +35,12 @@ mod commands;
 mod completion;
 mod dap;
 #[cfg(test)]
+mod dispatch_tests;
+#[cfg(test)]
 mod e2e_tests;
 mod editing_extras;
+#[cfg(test)]
+mod editing_tests;
 mod evil;
 mod ex;
 mod grammars;
@@ -46,6 +50,8 @@ mod grid_cursors;
 mod grid_dedup_tests;
 #[cfg(test)]
 mod grid_e2e_tests;
+#[cfg(test)]
+mod grid_editor_tests;
 mod grid_element;
 mod grid_formula;
 mod grid_ops;
