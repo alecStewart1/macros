@@ -190,10 +190,57 @@
 
 (define (org--replace-all text) (replace-region 0 (point-max) text))
 
+;; Byte length of the longest common prefix of strings `a` and `b` (compared by
+;; character, so the count never splits a multibyte character).
+(define (org--common-prefix-bytes a b)
+  (let loop ((x (string->list a)) (y (string->list b)) (n 0))
+    (if (and (pair? x) (pair? y) (equal? (car x) (car y)))
+        (loop (cdr x) (cdr y) (+ n (char-bytes (car x))))
+        n)))
+(define (org--common-suffix-bytes a b)
+  (org--common-prefix-bytes (list->string (reverse (string->list a)))
+                            (list->string (reverse (string->list b)))))
+
+;; Where point `p` belongs after bytes [start, end) holding `old` become `new`.
+;; Before the edit (or at a pure insertion's spot) it holds still; after it, it
+;; shifts by the size change. Inside a one-line edit it stays on the same
+;; character — the common prefix holds still, the common suffix moves with the
+;; end (C-c C-t on `** Child` keeps point on its letter). Inside a multi-line
+;; rewrite (table align) it keeps its line and column.
+(define (org--point-after-edit p start end old new)
+  (let ((oldlen (- end start)) (newlen (utf8-length new)))
+    (cond
+      ((or (< p start) (and (= start end) (= p start))) p)
+      ((>= p end) (+ p (- newlen oldlen)))
+      ((< (string-match "\n" old) 0)
+       (let* ((pre (org--common-prefix-bytes old new))
+              (suf (min (org--common-suffix-bytes old new)
+                        (- (min oldlen newlen) pre)))
+              (rel (- p start)))
+         (cond ((<= rel pre) p)
+               ((>= rel (- oldlen suf)) (+ start (- newlen (- oldlen rel))))
+               (else (+ start (- newlen suf))))))
+      (else
+       (let* ((before (split-many (byte-take old (- p start)) "\n"))
+              (row (- (length before) 1))
+              (col (utf8-length (last before)))
+              (nls (split-many new "\n"))
+              (r (min row (- (length nls) 1))))
+         (+ start (lines-byte-offset nls r) (min col (utf8-length (nth nls r)))))))))
+
+;; Replace bytes [start, end) (currently `old`) with `new`, keeping point where
+;; it was relative to the text. A bare replace-region leaves the cursor at the
+;; END of the replacement, so every line edit (C-c C-t, tags, a checkbox, a
+;; planning line) would otherwise yank the cursor to the end of the line.
+(define (org--edit-keeping-point start end old new)
+  (let ((p (point)))
+    (replace-region start end new)
+    (goto-char (org--point-after-edit p start end old new))))
+
 (define (org--replace-line i newtext)
   (let* ((line (org--line-text i))
          (start (org--line-start i)))
-    (replace-region start (+ start (utf8-length line)) newtext)))
+    (org--edit-keeping-point start (+ start (utf8-length line)) line newtext)))
 
 ;; Replace the byte range covering lines [start..end] (inclusive) with the
 ;; joined `new-lines`.
@@ -201,7 +248,7 @@
   (let* ((ls (org--lines))
          (sb (org--line-start start))
          (eb (+ (org--line-start end) (utf8-length (nth ls end)))))
-    (replace-region sb eb (join-lines new-lines))))
+    (org--edit-keeping-point sb eb (join-lines (org--slice ls start end)) (join-lines new-lines))))
 
 ;; ===========================================================================
 ;; Heading-component parsing
@@ -216,8 +263,10 @@
 (define org--priority-capture-re "\\[#([A-Z])\\]")
 
 ;; The first whitespace-delimited token of `s` if it is a known TODO keyword.
+;; A keyword may carry digits, `_` and `-` after its first letter, so custom
+;; labels like IN-PROGRESS or P1 are recognized too.
 (define (org--leading-keyword s)
-  (let ((caps (regexp-captures "^([A-Z]+)([ \t]|$)" s)))
+  (let ((caps (regexp-captures "^([A-Z][A-Z0-9_-]*)([ \t]|$)" s)))
     (if (and (not (null? caps)) (org--known-keyword? (nth caps 1)))
         (nth caps 1)
         #f)))
@@ -226,7 +275,7 @@
 
 ;; The headline title with keyword, priority cookie and trailing tags removed.
 (define (org--heading-title rest kw)
-  (let* ((s (if kw (replace-regexp-in-string "^[A-Z]+(?:[ \t]+|$)" "" rest) rest))
+  (let* ((s (if kw (replace-regexp-in-string (string-append "^" (regexp-quote kw) "(?:[ \t]+|$)") "" rest) rest))
          (s (replace-regexp-in-string "^\\[#[A-Z]\\][ \t]*" "" s))
          (s (replace-regexp-in-string org--tag-strip-re "" s)))
     (string-trim s)))
@@ -245,7 +294,9 @@
          (stars (nth sr 0)) (rest (nth sr 1))
          (kw (org--leading-keyword rest))
          ;; Org only recognizes the cookie right after the keyword (or stars).
-         (prio (let ((c (regexp-captures (if kw "^[A-Z]+[ \t]+\\[#([A-Z])\\]" "^\\[#([A-Z])\\]")
+         (prio (let ((c (regexp-captures (if kw
+                                             (string-append "^" (regexp-quote kw) "[ \t]+\\[#([A-Z])\\]")
+                                             "^\\[#([A-Z])\\]")
                                          rest)))
                  (if (null? c) "" (nth c 1))))
          (tags (let ((c (regexp-captures org--tag-re rest)))
@@ -982,9 +1033,26 @@
           ((let ((l (car ls)))
              (or (equal? (string-trim l) "")
                  (org--heading-level l) (org--keyword-line? l) (org--block-begin? l)
-                 (org--table-line? l) (org--ulist-line? l) (org--olist-line? l) (org--hr-line? l)))
+                 (org--table-line? l) (org--ulist-line? l) (org--olist-line? l) (org--hr-line? l)
+                 (org--planning-line? l) (org--drawer-opener? l) (org--fixed-width-line? l)))
            (cons (reverse acc) ls))
           (else (loop (cdr ls) (cons (car ls) acc))))))
+
+;; A fixed-width line (`: text`, or a bare `:`) — how babel writes #+RESULTS.
+(define (org--fixed-width-line? line) (>= (string-match "^[ \t]*:( |$)" line) 0))
+(define (org--collect-fixed ls)
+  (let loop ((ls ls) (acc '()))
+    (if (and (pair? ls) (org--fixed-width-line? (car ls)))
+        (loop (cdr ls) (cons (replace-regexp-in-string "^[ \t]*:( |$)" "" (car ls)) acc))
+        (cons (reverse acc) ls))))
+
+;; The lines after the drawer opened at the head of `ls` (past its `:END:`), or
+;; #f when it is never closed (then it is just text).
+(define (org--skip-drawer ls)
+  (let loop ((rest (cdr ls)))
+    (cond ((null? rest) #f)
+          ((org--drawer-end-line? (car rest)) (cdr rest))
+          (else (loop (cdr rest))))))
 
 (define (org-parse text)
   (let loop ((ls (split-many text "\n")) (acc '()))
@@ -994,6 +1062,13 @@
           (cond
             ((equal? (string-trim line) "") (loop (cdr ls) acc))
             ((org--heading-level line) (loop (cdr ls) (cons (org--parse-heading line) acc)))
+            ;; Planning lines and drawers (PROPERTIES, LOGBOOK, …) are metadata,
+            ;; not content: Emacs's exporters leave them out by default.
+            ((org--planning-line? line) (loop (cdr ls) acc))
+            ((and (org--drawer-opener? line) (org--skip-drawer ls)) (loop (org--skip-drawer ls) acc))
+            ((org--fixed-width-line? line)
+             (let ((cd (org--collect-fixed ls)))
+               (loop (cdr cd) (cons (list "example" (join-lines (car cd))) acc))))
             ((org--keyword-line? line) (loop (cdr ls) (cons (org--parse-keyword line) acc)))
             ((and (org--block-begin? line) (>= (string-match "[bB][eE][gG][iI][nN]_[sS][rR][cC]" line) 0))
              (let ((cd (org--collect-block (cdr ls))))
@@ -1139,10 +1214,24 @@
       (let ((root (or (project-root (buffer-directory)) (buffer-directory))))
         (filter (lambda (p) (ends-with? p ".org")) (walk-files root)))))
 
-;; (date . kind) from a SCHEDULED:/DEADLINE: planning line, or #f.
-(define (org--planning-info line)
-  (let ((c (regexp-captures "(SCHEDULED|DEADLINE):[ \t]*[<\\[]([0-9]{4}-[0-9]{2}-[0-9]{2})" line)))
-    (if (null? c) #f (cons (nth c 2) (nth c 1)))))
+;; Every (date . kind) on a planning line, for SCHEDULED then DEADLINE — one
+;; line may carry both (`DEADLINE: <…> SCHEDULED: <…>`), and the agenda lists
+;; each date.
+(define (org--planning-infos line)
+  (let loop ((kinds (list "SCHEDULED" "DEADLINE")) (acc '()))
+    (if (null? kinds)
+        (reverse acc)
+        (let ((c (regexp-captures (string-append (car kinds) ":[ \t]*[<\\[]([0-9]{4}-[0-9]{2}-[0-9]{2})")
+                                  line)))
+          (loop (cdr kinds) (if (null? c) acc (cons (cons (nth c 1) (car kinds)) acc)))))))
+
+;; The lines of the agenda file `path`: the live buffer when it is the one being
+;; edited (unsaved changes count, and line numbers match what RET / refile will
+;; act on), else the file on disk.
+(define (org--file-lines path)
+  (if (and (org--active?) (same-file? path (org--current-file-path)))
+      (org--lines)
+      (split-many (read-file path) "\n")))
 
 ;; ":a:b:" / "a:b" → ("a" "b").
 (define (org--split-tag-string s)
@@ -1151,36 +1240,39 @@
 (define (org--union a b) (append a (filter (lambda (x) (not (member x a))) b)))
 
 ;; Scan one file → entries (path line date kind todo title tags) for headlines
-;; that carry a TODO keyword and/or a planning date. `tags` includes tags
-;; inherited from ancestor headings (Emacs `org-use-tag-inheritance`). A `stack`
-;; of (level . inherited-tags) tracks the heading ancestry as we descend.
-(define (org--scan-file path)
-  (let loop ((ls (split-many (read-file path) "\n")) (i 0) (stack '()) (acc '()))
-    (if (null? ls)
-        (reverse acc)
-        (let ((line (car ls)))
-          (if (org--heading-level line)
-              (let* ((h (org--parse-headline line))
-                     (lvl (string-length (nth h 0)))
-                     (kw (nth h 1))
-                     (title (nth h 3))
-                     (own (org--split-tag-string (nth h 4)))
-                     (stack2 (filter (lambda (e) (< (car e) lvl)) stack))
-                     (tags (org--union (if (null? stack2) '() (cdr (car stack2))) own))
-                     (plan (if (null? (cdr ls)) #f (org--planning-info (nth ls 1)))))
-                (if (or kw plan)
-                    (loop (cdr ls) (+ i 1) (cons (cons lvl tags) stack2)
-                          (cons (list path i
-                                      (if plan (car plan) "")
-                                      (if plan (cdr plan) "")
-                                      (or kw "") title tags)
-                                acc))
-                    (loop (cdr ls) (+ i 1) (cons (cons lvl tags) stack2) acc)))
-              (loop (cdr ls) (+ i 1) stack acc))))))
+;; that carry a TODO keyword and/or a planning date — one entry per planning
+;; date. With `all?`, every headline yields exactly one entry (the tags view
+;; matches plain tagged notes too). `tags` includes tags inherited from ancestor
+;; headings (Emacs `org-use-tag-inheritance`). A `stack` of
+;; (level . inherited-tags) tracks the heading ancestry as we descend.
+(define (org--scan-file path . all)
+  (let ((all? (and (not (null? all)) (car all))))
+    (let loop ((ls (org--file-lines path)) (i 0) (stack '()) (acc '()))
+      (if (null? ls)
+          (reverse acc)
+          (let ((line (car ls)))
+            (if (org--heading-level line)
+                (let* ((h (org--parse-headline line))
+                       (lvl (string-length (nth h 0)))
+                       (kw (nth h 1))
+                       (title (nth h 3))
+                       (own (org--split-tag-string (nth h 4)))
+                       (stack2 (filter (lambda (e) (< (car e) lvl)) stack))
+                       (tags (org--union (if (null? stack2) '() (cdr (car stack2))) own))
+                       (plans (if (null? (cdr ls)) '() (org--planning-infos (nth ls 1))))
+                       (plans (cond ((and all? (not (null? plans))) (list (car plans)))
+                                    ((or all? (and kw (null? plans))) (list (cons "" "")))
+                                    (else plans)))
+                       (new (map (lambda (p) (list path i (car p) (cdr p) (or kw "") title tags))
+                                 plans)))
+                  (loop (cdr ls) (+ i 1) (cons (cons lvl tags) stack2)
+                        (append (reverse new) acc)))
+                (loop (cdr ls) (+ i 1) stack acc)))))))
 
-(define (org--all-entries)
+(define (org--all-entries . all)
   (let loop ((files (org--agenda-file-list)) (acc '()))
-    (if (null? files) acc (loop (cdr files) (append acc (org--scan-file (car files)))))))
+    (if (null? files) acc
+        (loop (cdr files) (append acc (org--scan-file (car files) (and (not (null? all)) (car all))))))))
 
 ;; Sort by date (undated entries last), lexically — ISO dates order correctly.
 (define (org--entry-key e) (let ((d (nth e 2))) (if (equal? d "") "9999-99-99" d)))
@@ -1207,14 +1299,27 @@
           (loop (cdr es) (+ i 1) (cons text lines)
                 (cons (list i (if (org--done-keyword? todo) "org-done" "org-todo")) faces))))))
 
+;; The view the *Org Agenda* buffer shows, as a thunk → entries, so `g`
+;; recomputes THAT view (the TODO list, a tags match) rather than always
+;; falling back to the full agenda.
+(define *org--agenda-view* #f)
+(define (org--agenda-show thunk)
+  (set! *org--agenda-view* thunk)
+  (org--render-agenda (thunk)))
+;; g in *Org Agenda* — rebuild the current view from the files.
+(define-command (org-agenda-redo)
+  (if *org--agenda-view* (org--agenda-show *org--agenda-view*) (org-agenda)))
+
 ;; C-c a — agenda: every dated/TODO headline across the agenda files.
-(define-command (org-agenda) (org--render-agenda (org--sort-entries (org--all-entries))))
+(define-command (org-agenda)
+  (org--agenda-show (lambda () (org--sort-entries (org--all-entries)))))
 ;; C-c t — just the open TODO items.
 (define-command (org-todo-list)
-  (org--render-agenda
-   (org--sort-entries (filter (lambda (e) (and (not (equal? (nth e 4) ""))
-                                               (not (org--done-keyword? (nth e 4)))))
-                              (org--all-entries)))))
+  (org--agenda-show
+   (lambda ()
+     (org--sort-entries (filter (lambda (e) (and (not (equal? (nth e 4) ""))
+                                                 (not (org--done-keyword? (nth e 4)))))
+                                (org--all-entries))))))
 
 (define (org-agenda-visit)
   (let ((t (alist-ref *org-agenda-targets* (buffer-line))))
@@ -1983,7 +2088,7 @@
 
 (define (org--insert-lines-after idx new-lines)
   (let ((pos (+ (org--line-start idx) (utf8-length (org--line-text idx)))))
-    (insert-at pos (string-append "\n" (join-lines new-lines)))))
+    (org--edit-keeping-point pos pos "" (string-append "\n" (join-lines new-lines)))))
 
 ;; org-entry-put: set property KEY=VALUE on heading H (creating the drawer).
 (define (org-entry-put H key value)
@@ -2319,7 +2424,9 @@
 (define *org-refile-map* '())
 (define *org--refile-source* -1)
 (define (org--refile-file-targets path)
-  (let ((lines (split-many (read-file path) "\n")) (bn (basename path)))
+  ;; Live lines for the current file: an unsaved edit above the target would
+  ;; otherwise point the refile at the wrong heading.
+  (let ((lines (org--file-lines path)) (bn (basename path)))
     (let loop ((ls lines) (i 0) (acc '()))
       (if (null? ls) (reverse acc)
           (let ((lvl (org--heading-level (car ls))))
@@ -2367,16 +2474,30 @@
                (org--delete-subtree H)
                (message (string-append "Refiled to " (basename tpath))))))))))
 
+;; Add the property line `prop` (":KEY: value") to the heading that heads
+;; `block` (a subtree's lines): into its :PROPERTIES: drawer when it has one,
+;; else in a new drawer. Either way the drawer sits after the planning line —
+;; SCHEDULED/DEADLINE must stay directly under the heading to count.
+(define (org--block-add-property block prop)
+  (let* ((head (car block)) (rest (cdr block))
+         (plan (if (and (pair? rest) (org--planning-line? (car rest))) (list (car rest)) '()))
+         (body (if (null? plan) rest (cdr rest))))
+    (if (and (pair? body) (>= (string-match "^[ \t]*:PROPERTIES:[ \t]*$" (car body)) 0))
+        (let loop ((ls (cdr body)) (acc (list (car body))))
+          (cond ((null? ls) (append (list head) plan (reverse acc) (list (string-append "  " prop))))
+                ((>= (string-match "^[ \t]*:END:[ \t]*$" (car ls)) 0)
+                 (append (list head) plan (reverse acc) (list (string-append "  " prop)) ls))
+                (else (loop (cdr ls) (cons (car ls) acc)))))
+        (append (list head) plan (list "  :PROPERTIES:" (string-append "  " prop) "  :END:") body))))
+
 ;; C-c C-x C-a — archive the subtree to <file>_archive.
 (define (org--archive-file-path) (string-append (org--current-file-path) "_archive"))
 (define-command (org-archive-subtree)
   (let ((H (org--heading-line-at-point)))
     (if (not H) (message "Not on a heading")
         (let* ((block (cdr (org--subtree-text H)))
-               (stamp (string-append "  :ARCHIVE_TIME: [" (org--now-stamp) "]"))
-               (with-time (append (list (car block)
-                                        "  :PROPERTIES:" stamp "  :END:")
-                                  (cdr block)))
+               (with-time (org--block-add-property
+                           block (string-append ":ARCHIVE_TIME: [" (org--now-stamp) "]")))
                (apath (org--archive-file-path))
                (existing (if (file-exists? apath) (read-file apath) ""))
                (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
@@ -2390,8 +2511,8 @@
 ;; Each template is (KEY DESCRIPTION TARGET TEMPLATE-STRING) where TARGET is
 ;;   (list "file" PATH)               → append to the file, or
 ;;   (list "file+headline" PATH HEAD) → append under heading HEAD in PATH.
-;; The template string may contain %? (point / prompt), %t %T (active date),
-;; %u %U (inactive date / datetime). Example, from init.scm:
+;; The template string may contain %? (point / prompt), %t %T (active date /
+;; datetime), %u %U (inactive date / datetime). Example, from init.scm:
 ;;   (set! *org-capture-templates*
 ;;     (list (list "t" "Todo" (list "file" "~/org/inbox.org") "* TODO %?\n  %U")
 ;;           (list "n" "Note" (list "file+headline" "~/org/notes.org" "Notes")
@@ -2405,7 +2526,7 @@
 ;; Non-interactive placeholder expansion (everything but %?).
 (define (org--expand-template s)
   (let* ((today (org--days->date-str (org--today-days)))
-         (s (replace-regexp-in-string "%T" (string-append "<" today ">") s))
+         (s (replace-regexp-in-string "%T" (string-append "<" (org--now-stamp) ">") s))
          (s (replace-regexp-in-string "%t" (string-append "<" today ">") s))
          (s (replace-regexp-in-string "%U" (string-append "[" (org--now-stamp) "]") s))
          (s (replace-regexp-in-string "%u" (string-append "[" today "]") s)))
@@ -2449,7 +2570,18 @@
                (E (org--subtree-end-in lines hidx hlvl))
                (before (org--slice lines 0 E))
                (after (org--slice lines (+ E 1) (- n 1))))
-          (write-file path (join-lines (append before (list text) after)))))))
+          (write-file path (join-lines (append before (org--as-child-lines text hlvl) after)))))))
+
+;; The lines of captured `text` re-leveled so its top heading becomes a child of
+;; a level-`plvl` heading (a "* %?" template filed under "** Inbox" lands as
+;; "*** …", as in Emacs). Text without headings is left as is.
+(define (org--as-child-lines text plvl)
+  (let* ((lines (split-many text "\n"))
+         (top (let loop ((ls lines) (m #f))
+                (if (null? ls) m
+                    (let ((l (org--heading-level (car ls))))
+                      (loop (cdr ls) (if (and l (or (not m) (< l m))) l m)))))))
+    (if top (org--shift-levels lines (- (+ plvl 1) top)) lines)))
 (define (org--capture-commit tmpl text)
   (let* ((target (nth tmpl 2))
          (path (org--resolve-path (nth target 1))))
@@ -2461,15 +2593,18 @@
 ;; ===========================================================================
 ;; Layer 7g — tag search + custom agenda views
 ;; ===========================================================================
-;; Match a tag expression against a tag list. "a+b" = AND, "a|b" = OR, a leading
-;; "-" on a term negates it. Combine with care: "|" splits first.
+;; Match a tag expression against a tag list. "a+b" = AND, "a|b" = OR, and a
+;; "-" before a term negates it — as a separator too, like Emacs: "work-done"
+;; is work AND NOT done. Combine with care: "|" splits first.
 (define (org--tag-match expr tags)
   (cond
     ((>= (string-match "\\|" expr) 0)
      (let any ((as (split-many expr "|")))
        (cond ((null? as) #f) ((org--tag-match (string-trim (car as)) tags) #t) (else (any (cdr as))))))
     (else
-     (let all ((ts (remove-equal "" (split-many expr "+"))))
+     ;; Tag names never contain "-", so "a-b" → "a+-b" splits into ("a" "-b").
+     (let all ((ts (remove-equal "" (map string-trim
+                                         (split-many (replace-regexp-in-string "-" "+-" expr) "+")))))
        (cond ((null? ts) #t)
              (else (let* ((t (car ts)) (neg (>= (string-match "^-" t) 0))
                           (name (if neg (substring t 1 (string-length t)) t))
@@ -2479,10 +2614,11 @@
 ;; C-c \ — show every entry whose (inherited) tags match an expression.
 (define-command (org-tags-view) (read-string "Match tags (work+urgent, a|b, -done): " 'org--tags-view-finish))
 (define (org--tags-view-finish expr)
-  (org--render-agenda
-   (org--sort-entries
-    (filter (lambda (e) (and (> (length e) 6) (org--tag-match (string-trim expr) (nth e 6))))
-            (org--all-entries)))))
+  (org--agenda-show
+   (lambda ()
+     (org--sort-entries
+      (filter (lambda (e) (and (> (length e) 6) (org--tag-match (string-trim expr) (nth e 6))))
+              (org--all-entries #t))))))
 
 ;; Custom agenda commands: each is (KEY DESCRIPTION TYPE ARG), TYPE one of
 ;; "agenda", "todo" (ARG = keyword), "tags" (ARG = tag expression). e.g.
@@ -2504,8 +2640,9 @@
         (let ((type (nth c 2)) (arg (if (> (length c) 3) (nth c 3) "")))
           (cond ((equal? type "tags") (org--tags-view-finish arg))
                 ((equal? type "todo")
-                 (org--render-agenda
-                  (org--sort-entries (filter (lambda (e) (equal? (nth e 4) arg)) (org--all-entries)))))
+                 (org--agenda-show
+                  (lambda ()
+                    (org--sort-entries (filter (lambda (e) (equal? (nth e 4) arg)) (org--all-entries))))))
                 (else (org-agenda)))))))
 
 ;; ===========================================================================
@@ -2549,10 +2686,14 @@
                  (consumed (+ m (utf8-length (car c)))))
             (loop (byte-drop s consumed) (max mx (string->number (nth c 1)))))))))
 ;; C-c C-x f — insert a numbered footnote reference and a definition stub at EOF.
+;; The reference goes in FIRST: an edit moves the cursor to its end, so inserting
+;; the definition first would carry the reference to the end of the file too.
+;; Point finishes after the new definition's label, ready to type it (Emacs).
 (define-command (org-footnote-new)
-  (let ((label (string-append "fn:" (number->string (+ 1 (org--max-fn-number))))))
-    (insert-at (point-max) (string-append "\n[" label "] "))
-    (insert (string-append "[" label "]"))
+  (let* ((label (string-append "fn:" (number->string (+ 1 (org--max-fn-number)))))
+         (ref (string-append "[" label "]")))
+    (insert ref)
+    (insert-at (+ (point-max) (utf8-length ref)) (string-append "\n" ref " "))
     (message (string-append "Footnote [" label "] — definition added at end of file"))))
 
 ;; ===========================================================================
@@ -2818,12 +2959,20 @@
          (s (replace-regexp-in-string "#" "\\#" s))
          (s (replace-regexp-in-string "_" "\\_" s)))
     s))
+;; Escape only the text between links: a URL keeps its `_` (hyperref reads
+;; `\_` literally, breaking the link) — only `%` and `#` need escaping there.
 (define (org--inline->latex s)
-  (org--inline-split (org--escape-latex s) org--link->latex org--emphasis->latex))
+  (org--inline-split s org--link->latex (lambda (t) (org--emphasis->latex (org--escape-latex t)))))
+(define (org--latex-url u)
+  (replace-regexp-in-string "#" "\\#" (replace-regexp-in-string "%" "\\%" u)))
 (define (org--link->latex s)
-  (let* ((s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]" "\\href{$1}{$2}" s))
-         (s (replace-regexp-in-string "\\[\\[([^]]+)\\]\\]" "\\url{$1}" s)))
-    s))
+  (let ((c (regexp-captures "^\\[\\[([^]]+)\\]\\[([^]]+)\\]\\]$" s)))
+    (if (null? c)
+        (let ((u (regexp-captures "^\\[\\[([^]]+)\\]\\]$" s)))
+          (if (null? u) (org--escape-latex s)
+              (string-append "\\url{" (org--latex-url (nth u 1)) "}")))
+        (string-append "\\href{" (org--latex-url (nth c 1)) "}{"
+                       (org--emphasis->latex (org--escape-latex (nth c 2))) "}"))))
 (define (org--emphasis->latex s)
   (let* ((s (replace-regexp-in-string "\\*([^*\n]+)\\*" "\\textbf{$1}" s))
          (s (replace-regexp-in-string "/([^/\n]+)/" "\\emph{$1}" s))
@@ -3013,8 +3162,13 @@
                (whole (car c))
                (res (org--run-src (nth c 1) (nth c 3)))
                (out (trim-end (if (string? res) res (join-lines (map car res)))))
-               (pos (+ (org--line-start L) m (utf8-length whole))))
-          (insert-at pos (string-append " {{{results(" out ")}}}"))
+               (pos (+ (org--line-start L) m (utf8-length whole)))
+               ;; A previous run's result right after the call is replaced, not
+               ;; stacked (Org rewrites its {{{results(…)}}} macro in place).
+               (prev (regexp-captures "^[ \t]*\\{\\{\\{results\\(.*?\\)\\}\\}\\}"
+                                      (byte-drop line (+ m (utf8-length whole)))))
+               (old-end (+ pos (if (null? prev) 0 (utf8-length (car prev))))))
+          (replace-region pos old-end (string-append " {{{results(" out ")}}}"))
           (message "Inline src executed")))))
 
 ;; --- list-item editing ------------------------------------------------------
@@ -3035,9 +3189,12 @@
                (n (regexp-captures "^([0-9]+)([.)])$" bullet))
                (newbullet (if (null? n) bullet
                               (string-append (number->string (+ 1 (string->number (nth n 1)))) (nth n 2))))
+               ;; A checkbox item begets an unchecked one (Emacs org-insert-item).
+               (cb (if (>= (string-match "^[ \t]*([-+*]|[0-9]+[.)])[ \t]+\\[[ xX-]\\]" line) 0) "[ ] " ""))
+               (new (string-append indent newbullet " " cb))
                (pos (+ (org--line-start L) (utf8-length line))))
-          (insert-at pos (string-append "\n" indent newbullet " "))
-          (goto-char (+ pos 1 (utf8-length indent) (utf8-length newbullet) 1))
+          (insert-at pos (string-append "\n" new))
+          (goto-char (+ pos 1 (utf8-length new)))
           #t))))
 (define (org-indent-item)
   (let* ((L (buffer-line)) (line (org--line-text L)))
@@ -3053,26 +3210,31 @@
 ;; Activation
 ;; ===========================================================================
 ;; Turn the active buffer into an Org buffer (M-x org-mode, or auto for .org).
-(define-command (org-mode)
+(define (org--activate)
   (set-major-mode "org-mode")
   (buffer-local-set "org-active" "t")
+  ;; Use Org's outline folding (headlines) for this buffer's chevrons rather
+  ;; than the generic indentation folder.
+  (buffer-local-set "fold-style" "org")
   (org--fontify)
+  ;; Fold chevrons walk every heading (another whole-buffer pass); skip on
+  ;; oversized files, same threshold as fontify so neither hangs the engine.
+  (when (org--fontify-ok?) (org--refresh-fold-markers)))
+
+(define-command (org-mode)
+  (org--activate)
   (message "Org mode"))
 
 ;; .org files: activate on open. (set-major-mode installs the org-mode keymap.)
 (define (org--maybe-activate)
   (when (and (ends-with? (org--file-or-name) ".org")
              (not (equal? (buffer-local-get "org-active") "t")))
-    (set-major-mode "org-mode")
-    (buffer-local-set "org-active" "t")
-    ;; Use Org's outline folding (headlines) for this buffer's chevrons rather
-    ;; than the generic indentation folder.
-    (buffer-local-set "fold-style" "org")
-    (org--fontify)
-    ;; Fold chevrons walk every heading (another whole-buffer pass); skip on
-    ;; oversized files, same threshold as fontify so neither hangs the engine.
-    (when (org--fontify-ok?) (org--refresh-fold-markers))))
+    (org--activate)))
 (add-hook "find-file-hook" "org--maybe-activate")
+;; Buffers restored by desktop-save are visited in the background without
+;; find-file-hook, so also activate when one first becomes current (a no-op
+;; for a buffer that is already active).
+(add-hook "buffer-switch-hook" "org--maybe-activate")
 (add-hook "after-change-functions" "org--fontify-schedule")
 
 ;; ===========================================================================
@@ -3135,7 +3297,7 @@
 
 ;; *Org Agenda* buffer.
 (define-list-mode-keys "org-agenda-mode" 'org-agenda-visit)
-(define-key "org-agenda-mode" "g" 'org-agenda)
+(define-key "org-agenda-mode" "g" 'org-agenda-redo)
 
 
 ;; *Org Columns* buffer.

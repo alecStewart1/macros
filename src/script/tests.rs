@@ -11280,6 +11280,191 @@ mod scheme_audit_fixes {
     }
 
     #[test]
+    fn org_keywords_may_hold_hyphens_and_digits() {
+        let e = engine_at("a.org", "/tmp/a.org", "", 0, 0);
+        e.eval(r#"(set! *org-custom-keywords* (list "IN-PROGRESS" "P1"))"#)
+            .unwrap();
+        assert_eq!(
+            v(
+                &e,
+                r#"(org--parse-headline "* IN-PROGRESS [#B] Ship it :t:")"#
+            ),
+            r#"("*" "IN-PROGRESS" "B" "Ship it" "t")"#
+        );
+        assert_eq!(v(&e, r#"(org--leading-keyword "P1 later")"#), r#""P1""#);
+        // An unknown hyphenated word stays part of the title.
+        assert_eq!(
+            v(&e, r#"(nth (org--parse-headline "* NOT-ONE x") 3)"#),
+            r#""NOT-ONE x""#
+        );
+    }
+
+    #[test]
+    fn org_line_edits_keep_point() {
+        // Point on the `l` of "Child" (byte 6): C-c C-t inserts "TODO " before
+        // it, and point follows the letter instead of jumping to the line end.
+        let e = engine_at("a.org", "/tmp/a.org", "** Child two\n", 6, 0);
+        let cmds = e.eval("(org-todo)").unwrap().commands;
+        assert!(
+            matches!(cmds.last(), Some(EditorCommand::GotoChar(11))),
+            "{cmds:?}"
+        );
+        // A planning line inserted below the heading leaves point on it.
+        let e = engine_at("a.org", "/tmp/a.org", "* TODO x\nbody\n", 3, 0);
+        let cmds = e
+            .eval(r#"(org--plan-apply 0 "SCHEDULED" "2026-01-05")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(3))),
+            "{cmds:?}"
+        );
+        // The mapping itself: before / after / at an insertion / multi-line.
+        assert_eq!(
+            v(&e, r#"(org--point-after-edit 2 5 8 "abc" "abcdef")"#),
+            "2"
+        );
+        assert_eq!(
+            v(&e, r#"(org--point-after-edit 9 5 8 "abc" "abcdef")"#),
+            "12"
+        );
+        assert_eq!(v(&e, r#"(org--point-after-edit 5 5 5 "" "xyz")"#), "5");
+        // Row 1, column 2 of a re-aligned table stays at row 1, column 2.
+        assert_eq!(
+            v(
+                &e,
+                r#"(org--point-after-edit 8 0 11 "| a |\n| b |" "| aa |\n| bb |")"#
+            ),
+            "9"
+        );
+    }
+
+    #[test]
+    fn org_footnote_reference_stays_at_point() {
+        let e = engine_at("a.org", "/tmp/a.org", "see\n", 3, 0);
+        let cmds = e.eval("(org-footnote-new)").unwrap().commands;
+        let insert = cmds
+            .iter()
+            .position(|c| matches!(c, EditorCommand::Insert(t) if t == "[fn:1]"));
+        let def = cmds.iter().position(
+            |c| matches!(c, EditorCommand::InsertAt { pos: 10, text } if text == "\n[fn:1] "),
+        );
+        assert!(
+            matches!((insert, def), (Some(i), Some(d)) if i < d),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn org_inline_babel_replaces_previous_result() {
+        let line = "src_scheme{(+ 1 2)} {{{results(old)}}} x\n";
+        let e = engine_at("a.org", "/tmp/a.org", line, 0, 0);
+        let cmds = e.eval("(org-babel-execute-inline)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c,
+                EditorCommand::ReplaceRegion { start: 19, end: 38, text }
+                    if text == " {{{results(3)}}}")),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn org_agenda_scan_and_tag_match() {
+        let text =
+            "* Notes :ref:\n* TODO t\n  DEADLINE: <2026-01-02 Fri> SCHEDULED: <2026-01-01 Thu>\n";
+        let e = engine_at("a.org", "/tmp/a.org", text, 0, 0);
+        // The agenda lists both dates of `t`; a plain note is not an entry.
+        assert_eq!(v(&e, r#"(length (org--scan-file "/tmp/a.org"))"#), "2");
+        assert_eq!(
+            v(
+                &e,
+                r#"(map (lambda (x) (nth x 3)) (org--scan-file "/tmp/a.org"))"#
+            ),
+            r#"("SCHEDULED" "DEADLINE")"#
+        );
+        // The tags view sees every heading once, the tagged note included.
+        assert_eq!(v(&e, r#"(length (org--scan-file "/tmp/a.org" #t))"#), "2");
+        assert_eq!(
+            v(&e, r#"(nth (car (org--scan-file "/tmp/a.org" #t)) 6)"#),
+            r#"("ref")"#
+        );
+        // "-" separates terms like "+" does: work AND NOT done.
+        assert_eq!(
+            v(&e, r#"(if (org--tag-match "work-done" (list "work")) 1 0)"#),
+            "1"
+        );
+        assert_eq!(
+            v(
+                &e,
+                r#"(if (org--tag-match "work-done" (list "work" "done")) 1 0)"#
+            ),
+            "0"
+        );
+        assert_eq!(
+            v(&e, r#"(key-binding "evil-normal:org-agenda-mode" "j")"#),
+            r#""next-line""#
+        );
+    }
+
+    #[test]
+    fn org_archive_and_capture_placement() {
+        // ARCHIVE_TIME goes after the planning line, into an existing drawer.
+        assert_eq!(
+            v(
+                &engine_at("a.org", "/tmp/a.org", "", 0, 0),
+                r#"(org--block-add-property (list "* A" "  SCHEDULED: <x>" "body") ":K: v")"#
+            ),
+            r#"("* A" "  SCHEDULED: <x>" "  :PROPERTIES:" "  :K: v" "  :END:" "body")"#
+        );
+        let e = engine_at("a.org", "/tmp/a.org", "", 0, 0);
+        assert_eq!(
+            v(
+                &e,
+                r#"(org--block-add-property (list "* A" ":PROPERTIES:" ":ID: 1" ":END:" "b") ":K: v")"#
+            ),
+            r#"("* A" ":PROPERTIES:" ":ID: 1" "  :K: v" ":END:" "b")"#
+        );
+        // A capture filed under a level-2 heading becomes its child.
+        assert_eq!(
+            v(&e, r#"(org--as-child-lines "* x\nnote" 2)"#),
+            r#"("*** x" "note")"#
+        );
+        // %T carries the time of day, %t only the date.
+        assert_eq!(
+            v(
+                &e,
+                r#"(if (>= (string-match "^<[0-9-]+ [A-Za-z]+ [0-9]{2}:[0-9]{2}>$" (org--expand-template "%T")) 0) 1 0)"#
+            ),
+            "1"
+        );
+    }
+
+    #[test]
+    fn org_export_skips_metadata() {
+        let e = engine_at("a.org", "/tmp/a.org", "", 0, 0);
+        assert_eq!(
+            v(
+                &e,
+                r#"(org-parse "* H\n  SCHEDULED: <2026-01-01 Thu>\n  :PROPERTIES:\n  :ID: x\n  :END:\nbody\n: out")"#
+            ),
+            r#"(("heading" 1 "" "" "H" "") ("para" "body") ("example" "out"))"#
+        );
+        // LaTeX escapes link text but not the URL's `_`.
+        assert_eq!(
+            v(&e, r#"(org--inline->latex "[[http://x.com/a_b][l_k]]")"#),
+            r#""\\href{http://x.com/a_b}{l\\_k}""#
+        );
+        // M-RET on a checkbox item starts an unchecked one.
+        let e = engine_at("a.org", "/tmp/a.org", "- [X] a\n", 0, 0);
+        let cmds = e.eval("(org-insert-item)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c,
+                EditorCommand::InsertAt { pos: 7, text } if text == "\n- [ ] ")),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
     fn fold_state_follows_edits() {
         let e = engine_at("a.org", "/tmp/a.org", "* A\nbody\n* B\nbody\n", 0, 0);
         assert_eq!(
