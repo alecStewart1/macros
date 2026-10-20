@@ -4398,12 +4398,11 @@ mod magit_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
-        engine
-            .eval(include_str!("../../scheme/folding.scm"))
-            .expect("folding.scm");
-        engine
-            .eval(include_str!("../../scheme/org.scm"))
-            .expect("org.scm");
+        // org.scm and its full declared dep set (core, folding, bookmarks -
+        // which pulls helm/persistence/fundamental), in startup order.
+        for src in crate::runtime::script_with_deps("org") {
+            engine.eval(src).expect("org.scm and its deps");
+        }
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
         // The core helper itself: é is 2 bytes, so the first 5 bytes of
@@ -4451,12 +4450,11 @@ mod magit_tests {
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         // org.scm registers its chevron handler with the folding registry.
-        engine
-            .eval(include_str!("../../scheme/folding.scm"))
-            .expect("folding.scm");
-        engine
-            .eval(include_str!("../../scheme/org.scm"))
-            .expect("org.scm");
+        // org.scm and its full declared dep set (core, folding, bookmarks -
+        // which pulls helm/persistence/fundamental), in startup order.
+        for src in crate::runtime::script_with_deps("org") {
+            engine.eval(src).expect("org.scm and its deps");
+        }
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
 
         // Heading detection + TODO cycle.
@@ -4785,12 +4783,11 @@ mod magit_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
-        engine
-            .eval(include_str!("../../scheme/folding.scm"))
-            .expect("folding.scm");
-        engine
-            .eval(include_str!("../../scheme/org.scm"))
-            .expect("org.scm");
+        // org.scm and its full declared dep set (core, folding, bookmarks -
+        // which pulls helm/persistence/fundamental), in startup order.
+        for src in crate::runtime::script_with_deps("org") {
+            engine.eval(src).expect("org.scm and its deps");
+        }
         engine
             .eval(include_str!("../../scheme/org-roam.scm"))
             .expect("org-roam.scm");
@@ -5000,12 +4997,11 @@ mod magit_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
-        engine
-            .eval(include_str!("../../scheme/folding.scm"))
-            .expect("folding.scm");
-        engine
-            .eval(include_str!("../../scheme/org.scm"))
-            .expect("org.scm");
+        // org.scm and its full declared dep set (core, folding, bookmarks -
+        // which pulls helm/persistence/fundamental), in startup order.
+        for src in crate::runtime::script_with_deps("org") {
+            engine.eval(src).expect("org.scm and its deps");
+        }
         engine.set_snapshot(EditorSnapshot {
             name: "notes.org".into(),
             tick: 3,
@@ -12892,5 +12888,257 @@ mod titlebar_menu_lib {
             }
             other => panic!("expected one SetTitlebarMenu, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod bookmarks_lib {
+    use super::*;
+
+    /// core + helm + persistence + bookmarks.scm (the module's declared deps),
+    /// with the persistence dir pointing at a unique sandbox so the bookmark
+    /// file this test writes never touches the developer's real config.
+    /// Forward slashes: a Windows `C:\Users\…` path is an invalid `\U` escape
+    /// inside a Scheme string literal.
+    fn fresh_dir() -> String {
+        fresh_persistence_dir()
+            .chars()
+            .map(|c| if c as u8 == 92 { '/' } else { c })
+            .collect()
+    }
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(&format!(r#"(define (persistence-dir) "{}")"#, fresh_dir()))
+            .unwrap();
+        load_with_deps(&engine, "bookmarks");
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn reader_parses_strings_numbers_dotted_pairs_and_comments() {
+        let engine = engine();
+        let src = concat!(
+            ";; a comment the reader must skip\n",
+            "(\"work\"\n",
+            "  (filename . \"~/org/Work.org\")\n",
+            "  (position . 123)\n",
+            "  (line . 4)\n",
+            "  (column . 2)\n",
+            "  (front-context-string . \"* MiView\")\n",
+            "  (rear-context-string . \"\"))\n"
+        );
+        engine
+            .eval(&format!("(define got (bm--read-all {:?}))", src))
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(equal? got '(("work"
+                    ("filename" . "~/org/Work.org")
+                    ("position" . 123)
+                    ("line" . 4)
+                    ("column" . 2)
+                    ("front-context-string" . "* MiView")
+                    ("rear-context-string" . ""))))"#
+            ),
+            "#true"
+        );
+    }
+
+    #[test]
+    fn escape_round_trips_quotes_backslashes_and_control_chars() {
+        let engine = engine();
+        engine
+            .eval(r#"(define s (string-append "a\"b\\c" "\n" "x\ty\rd"))"#)
+            .unwrap();
+        // The escaped form is one line with no raw quote/tab/newline…
+        assert_eq!(
+            v(&engine, r#"(string-contains? (bm-escape s) "\n")"#),
+            "#false"
+        );
+        // …and parse(escape(s)) == s.
+        engine
+            .eval(r#"(define rt (car (bm--read-all (string-append "\"" (bm-escape s) "\""))))"#)
+            .unwrap();
+        assert_eq!(v(&engine, "(equal? rt s)"), "#true");
+    }
+
+    #[test]
+    fn store_writes_file_and_load_restores() {
+        let engine = engine();
+        engine
+            .eval(r#"(bookmark-store "work" "~/org/Work.org" 123 4 2 "* MiView" "")"#)
+            .unwrap();
+        engine
+            .eval(r#"(bookmark-store "home" "~/org/Home.org" 0 0 0 "" "")"#)
+            .unwrap();
+        // Newest set wins on a name collision.
+        engine
+            .eval(r#"(bookmark-store "work" "~/org/Work2.org" 5 0 0 "" "")"#)
+            .unwrap();
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "2");
+        let file = v(&engine, "(bookmarks-file)");
+        let file = file.trim_matches('"').to_string();
+        let text = std::fs::read_to_string(&file).expect("bookmark file written");
+        assert!(text.contains(";;;; Macros Bookmark Format Version 1"));
+        assert!(text.contains(r#""~/org/Work2.org""#));
+        assert!(!text.contains("~/org/Home.org\n") || text.contains(r#""~/org/Home.org""#));
+
+        // A fresh load from disk restores everything, with the file's comments
+        // and header skipped.
+        engine.eval("(set! *bookmarks* '())").unwrap();
+        engine.eval("(bm-load)").unwrap();
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "2");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(alist-ref (alist-ref *bookmarks* "work") "position")"#
+            ),
+            "5"
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(alist-ref (alist-ref *bookmarks* "home") "filename")"#
+            ),
+            r#""~/org/Home.org""#
+        );
+    }
+
+    #[test]
+    fn candidates_select_by_exact_string_even_with_a_separator_in_the_name() {
+        let engine = engine();
+        // A name containing the display separator itself must round-trip.
+        engine
+            .eval(r#"(bookmark-store "a — b" "~/org/Work.org" 123 4 2 "* MiView" "")"#)
+            .unwrap();
+        assert_eq!(v(&engine, "(length (bm-candidates))"), "1");
+        // Selection matches the whole candidate string against every
+        // bookmark's rendered line (Emacs-style: no parsing of the display).
+        engine.eval(r#"(bm-jump-selected (car (bm-candidates)))"#).unwrap();
+        // An unknown selection says so instead of jumping.
+        engine.eval(r#"(bm-jump-selected "nope — ~/x.org")"#).unwrap();
+        // Delete removes both the a-list entry and (after the rewrite) the file's.
+        engine.eval(r#"(bm-delete-named! "a — b")"#).unwrap();
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "0");
+        engine.eval("(bm-load)").unwrap();
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "0");
+    }
+
+    #[test]
+    fn rename_keeps_the_entry_fields() {
+        let engine = engine();
+        engine
+            .eval(r#"(bookmark-store "work" "~/org/Work.org" 123 4 2 "* MiView" "")"#)
+            .unwrap();
+        // Drive the extracted rename mutation directly (the command itself
+        // goes through interactive read-string).
+        engine.eval(r#"(bm-rename! "work" "wurk")"#).unwrap();
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "1");
+        // The renamed entry is still ("name" (field . value) …): jumping and
+        // serializing read its fields, so a flattened entry fails here loudly.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(bm-field (alist-ref *bookmarks* "wurk") "filename")"#
+            ),
+            r#""~/org/Work.org""#
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(bm-field (alist-ref *bookmarks* "wurk") "front-context-string")"#
+            ),
+            r#""* MiView""#
+        );
+        // And the file on disk round-trips through a fresh load.
+        engine.eval("(set! *bookmarks* '())").unwrap();
+        engine.eval("(bm-load)").unwrap();
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "1");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(bm-field (alist-ref *bookmarks* "wurk") "position")"#
+            ),
+            "123"
+        );
+    }
+
+    #[test]
+    fn commands_registered_for_mx() {
+        let engine = engine();
+        for c in [
+            "bookmark-set",
+            "bookmark-jump",
+            "helm-bookmarks",
+            "bookmark-delete",
+            "bookmark-rename",
+        ] {
+            assert_eq!(
+                engine
+                    .eval(&format!(
+                        r#"(if (member "{c}" *interactive-commands*) "y" "n")"#
+                    ))
+                    .unwrap()
+                    .value
+                    .unwrap(),
+                "\"y\"",
+                "{c} not registered"
+            );
+        }
+    }
+
+    #[test]
+    fn org_capture_sets_last_stored_bookmark() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(&format!(r#"(define (persistence-dir) "{}")"#, fresh_dir()))
+            .unwrap();
+        load_with_deps(&engine, "org");
+        // Append after two complete lines: the bookmark lands on line 2, byte 4.
+        engine
+            .eval(r#"(org--bookmark-last-stored "~/org/inbox.org" "a\nb\n" "" "* TODO x")"#)
+            .unwrap();
+        let e = v(
+            &engine,
+            r#"(alist-ref *bookmarks* "org-capture-last-stored")"#,
+        );
+        assert!(e.contains("2"), "line field: {e}");
+        assert!(
+            v(
+                &engine,
+                r#"(equal? (alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "position") 4)"#
+            ) == "#true",
+            "position field: {e}"
+        );
+
+        // A file not ending in a newline gets the joining "\n" first, so the
+        // headline lands one line BELOW the newline count of `existing` alone.
+        engine
+            .eval(r#"(org--bookmark-last-stored "~/org/inbox.org" "a" "\n" "* TODO y")"#)
+            .unwrap();
+        let e = v(
+            &engine,
+            r#"(alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "line")"#,
+        );
+        assert_eq!(e, "1", "line with joining newline: {e}");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(equal? (alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "position") 2)"#
+            ),
+            "#true",
+            "position with joining newline"
+        );
     }
 }
