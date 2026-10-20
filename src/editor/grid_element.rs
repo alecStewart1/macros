@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use gpui::{
     App, Bounds, ContentMask, CursorStyle, Element, ElementId, ElementInputHandler, Entity, Font,
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, LayoutId,
-    PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun, Window, fill, font, point,
-    prelude::*, px, relative, size, TextAlign,
+    PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextAlign, TextRun, Window, fill,
+    font, point, prelude::*, px, relative, size,
 };
 
 use crate::color_compat::{rgb, rgba};
@@ -124,16 +124,16 @@ impl Palette {
         if theme.background_of("grid-header").is_none() {
             header_bg.alpha = 0.0;
         }
-        let selection = theme.color("region", rgba(0x3a5fcd55).into());
-        let cursor = theme.color("cursor", rgb(0x528bff).into());
+        let selection = theme.color("region", rgba(0x3a5fcd55));
+        let cursor = theme.color("cursor", rgb(0x528bff));
         let header_active = Hsla { alpha: 0.07, ..fg };
         let refs: Vec<Hsla> = [0x4f8bf5, 0xe0533c, 0x9b59d0, 0x2fa36b, 0xd4882a, 0xd14b9b]
             .iter()
             .enumerate()
-            .map(|(i, &fallback)| theme.color(&format!("plot-series-{i}"), rgb(fallback).into()))
+            .map(|(i, &fallback)| theme.color(&format!("plot-series-{i}"), rgb(fallback)))
             .collect();
-        let trace = theme.color("warning", rgb(0xe5c07b).into());
-        let bar_thumb = theme.color("scroll-bar", rgba(0x888888aa).into());
+        let trace = theme.color("warning", rgb(0xe5c07b));
+        let bar_thumb = theme.color("scroll-bar", rgba(0x888888aa));
         let brighter = |by: f32| Hsla {
             alpha: (bar_thumb.alpha + by).min(1.0),
             ..bar_thumb
@@ -152,8 +152,8 @@ impl Palette {
             selection,
             cursor,
             block: Hsla { alpha: 0.45, ..fg },
-            warn: theme.color("warning", rgb(0xe5c07b).into()),
-            bar_track: theme.color("scroll-bar-track", rgba(0x88888822).into()),
+            warn: theme.color("warning", rgb(0xe5c07b)),
+            bar_track: theme.color("scroll-bar-track", rgba(0x88888822)),
             bar_thumb,
             bar_hover: theme.color("scroll-bar-hover", brighter(0.15)),
             bar_active: theme.color("scroll-bar-active", brighter(0.3)),
@@ -398,7 +398,15 @@ impl Element for GridElement {
                 window.paint_quad(quad);
             }
             for (line, origin) in popup.labels {
-                line.paint(origin, popup.hit.row_height, TextAlign::Left, None, window, cx).ok();
+                line.paint(
+                    origin,
+                    popup.hit.row_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .ok();
             }
         }
         for (hitbox, style) in &p.hitboxes {
@@ -1750,7 +1758,9 @@ fn push_border(out: &mut Vec<PaintQuad>, x: f32, y: f32, w: f32, h: f32, t: f32,
 
 fn paint_text(t: Text, window: &mut Window, cx: &mut App) {
     window.with_content_mask(Some(ContentMask { bounds: t.clip }), |window| {
-        t.line.paint(t.origin, t.line_height, TextAlign::Left, None, window, cx).ok();
+        t.line
+            .paint(t.origin, t.line_height, TextAlign::Left, None, window, cx)
+            .ok();
     });
 }
 

@@ -12,10 +12,10 @@ use gpui::{
 };
 use notify_debouncer_mini::notify::RecommendedWatcher;
 // `new_debouncer` is skipped in test builds (see the debouncer creation in `new`).
-#[cfg(not(test))]
-use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 #[cfg(test)]
 use notify_debouncer_mini::Debouncer;
+#[cfg(not(test))]
+use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use unicode_segmentation::UnicodeSegmentation;

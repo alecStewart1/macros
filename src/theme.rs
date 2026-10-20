@@ -77,11 +77,11 @@ impl Theme {
     }
 
     pub fn background(&self) -> Hsla {
-        self.color("background", rgb(0x1e1e1e).into())
+        self.color("background", rgb(0x1e1e1e))
     }
 
     pub fn foreground(&self) -> Hsla {
-        self.color("foreground", rgb(0xd4d4d4).into())
+        self.color("foreground", rgb(0xd4d4d4))
     }
 
     /// Title-bar background. Defaults to the window background so the custom
@@ -161,8 +161,8 @@ impl Theme {
 pub fn parse_color(s: &str) -> Option<Hsla> {
     let hex = s.trim().trim_start_matches('#');
     match hex.len() {
-        6 => u32::from_str_radix(hex, 16).ok().map(|v| rgb(v).into()),
-        8 => u32::from_str_radix(hex, 16).ok().map(|v| rgba(v).into()),
+        6 => u32::from_str_radix(hex, 16).ok().map(|v| rgb(v)),
+        8 => u32::from_str_radix(hex, 16).ok().map(|v| rgba(v)),
         _ => None,
     }
 }

@@ -72,10 +72,10 @@ struct DiagnosticColors {
 
 impl DiagnosticColors {
     fn resolve(theme: &Theme) -> Self {
-        let info = theme.color("diagnostic-info", rgb(0x3794ff).into());
+        let info = theme.color("diagnostic-info", rgb(0x3794ff));
         Self {
-            error: theme.color("diagnostic-error", rgb(0xf14c4c).into()),
-            warning: theme.color("diagnostic-warning", rgb(0xcca700).into()),
+            error: theme.color("diagnostic-error", rgb(0xf14c4c)),
+            warning: theme.color("diagnostic-warning", rgb(0xcca700)),
             info,
             hint: theme.color("diagnostic-hint", info),
         }
@@ -461,8 +461,8 @@ struct FrameColors {
 impl FrameColors {
     /// `text` is the frame's foreground, the line numbers' last fallback.
     fn resolve(theme: &Theme, text: Hsla) -> Self {
-        let cursor = theme.color("cursor", rgb(0x528bff).into());
-        let region = theme.color("region", rgba(0x3a5fcd55).into());
+        let cursor = theme.color("cursor", rgb(0x528bff));
+        let region = theme.color("region", rgba(0x3a5fcd55));
         // Themes can set the secondary colors explicitly; otherwise derive
         // them from the primary region/cursor by knocking the alpha down.
         let dimmed = |mut c: Hsla, by: f32| {
@@ -474,13 +474,13 @@ impl FrameColors {
             region,
             secondary_region: theme.color("secondary-region", dimmed(region, 0.6)),
             secondary_cursor: theme.color("secondary-cursor", dimmed(cursor, 0.7)),
-            search: theme.color("search", rgba(0xffc83d66).into()),
-            paren: theme.color("show-paren", rgba(0x5fafef66).into()),
-            hl_line: theme.color("hl-line", rgba(0xffffff10).into()),
+            search: theme.color("search", rgba(0xffc83d66)),
+            paren: theme.color("show-paren", rgba(0x5fafef66)),
+            hl_line: theme.color("hl-line", rgba(0xffffff10)),
             line_number: theme.color("line-number", theme.color("dim", text)),
-            git_added: theme.color("magit-gutter-added", rgb(0x6cae3e).into()),
-            git_modified: theme.color("magit-gutter-modified", rgb(0xc7a23a).into()),
-            git_removed: theme.color("magit-gutter-removed", rgb(0xc1574b).into()),
+            git_added: theme.color("magit-gutter-added", rgb(0x6cae3e)),
+            git_modified: theme.color("magit-gutter-modified", rgb(0xc7a23a)),
+            git_removed: theme.color("magit-gutter-removed", rgb(0xc1574b)),
         }
     }
 }
@@ -1635,7 +1635,7 @@ impl Element for EditorElement {
                 let sb_w = SCROLLBAR_WIDTH;
                 let x1 = bounds.right();
                 let x0 = x1 - sb_w;
-                let track_color = theme.color("scroll-bar-track", rgba(0x88888822).into());
+                let track_color = theme.color("scroll-bar-track", rgba(0x88888822));
                 scrollbar.push(fill(
                     Bounds::from_corners(
                         point(x0, bounds.top()),
@@ -1649,7 +1649,7 @@ impl Element for EditorElement {
                 let max_scroll = (content_h - viewport_h).max(1.0);
                 let t = (scroll / max_scroll).clamp(0.0, 1.0);
                 let thumb_top = bounds.top() + px(t * (viewport_h - thumb_h));
-                let thumb_color = theme.color("scroll-bar", rgba(0x888888aa).into());
+                let thumb_color = theme.color("scroll-bar", rgba(0x888888aa));
                 scrollbar.push(fill(
                     Bounds::from_corners(point(x0, thumb_top), point(x1, thumb_top + px(thumb_h))),
                     thumb_color,
@@ -1746,7 +1746,9 @@ impl Element for EditorElement {
             }
             // Line-number gutter labels.
             for (label, origin) in prepaint.gutter.drain(..) {
-                label.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
+                label
+                    .paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
             for line in &prepaint.lines {
                 let origin = point(
@@ -1759,7 +1761,9 @@ impl Element for EditorElement {
             }
             // Virtual suffix text (inlay/blame), after the line content.
             for (label, origin) in prepaint.virtual_text.drain(..) {
-                label.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
+                label
+                    .paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
             for quad in prepaint.diagnostics.drain(..) {
                 window.paint_quad(quad);
@@ -1775,7 +1779,14 @@ impl Element for EditorElement {
             // File-tree icons (monochrome SVGs tinted by the line color).
             for (icon_bounds, path, color) in prepaint.icons.drain(..) {
                 window
-                    .paint_svg(icon_bounds, path, None, TransformationMatrix::unit(), color, cx)
+                    .paint_svg(
+                        icon_bounds,
+                        path,
+                        None,
+                        TransformationMatrix::unit(),
+                        color,
+                        cx,
+                    )
                     .ok();
             }
             // Fold chevrons in the gutter (monochrome SVGs, tinted like numbers).
@@ -1812,7 +1823,8 @@ impl Element for EditorElement {
                     window.paint_quad(quad);
                 }
                 for (line, origin) in popup.labels {
-                    line.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
+                    line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                        .ok();
                 }
             }
             // Secondary cursors (multiple-cursors), drawn whenever focused.
@@ -1824,7 +1836,9 @@ impl Element for EditorElement {
             // avy hints sit on top of everything (text, cursor, popup).
             for (bg, label, origin) in prepaint.avy.drain(..) {
                 window.paint_quad(bg);
-                label.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
+                label
+                    .paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
         });
 

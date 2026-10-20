@@ -114,17 +114,17 @@ impl Element for TerminalElement {
         // foreground/background.
         let default_fg = theme.color("terminal-foreground", theme.foreground());
         let default_bg = theme.color("terminal-background", theme.background());
-        let cursor_color = theme.color("cursor", rgb(0x528bff).into());
+        let cursor_color = theme.color("cursor", rgb(0x528bff));
         let selection_color = theme.color(
             "terminal-selection",
-            theme.color("region", rgba(0x3a5fcd55).into()),
+            theme.color("region", rgba(0x3a5fcd55)),
         );
         let dfg = hsla_to_rgb_u32(default_fg);
         let dbg = hsla_to_rgb_u32(default_bg);
         // The 16 ANSI system colors: `terminal-color-0`…`15` faces, else defaults.
         let ansi: [u32; 16] = std::array::from_fn(|i| {
             let fallback = crate::terminal::DEFAULT_ANSI16[i];
-            hsla_to_rgb_u32(theme.color(&format!("terminal-color-{i}"), rgb(fallback).into()))
+            hsla_to_rgb_u32(theme.color(&format!("terminal-color-{i}"), rgb(fallback)))
         });
 
         let settings = cx.global::<crate::settings::Settings>();
@@ -365,7 +365,8 @@ impl Element for TerminalElement {
                 window.paint_quad(cursor);
             }
             for (line, origin) in prepaint.rows.drain(..) {
-                line.paint(origin, line_height, TextAlign::Left, None, window, cx).ok();
+                line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
         });
         // Report bounds so click-to-focus routes to this pane like any other.
