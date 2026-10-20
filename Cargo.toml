@@ -92,6 +92,9 @@ tree-sitter-sequel = "0.3.11"
 # Elixir: the official grammar crate, publishing `LANGUAGE: LanguageFn` and
 # `HIGHLIGHTS_QUERY` on tree-sitter 0.26+.
 tree-sitter-elixir = "0.3.5"
+# PowerShell: Airbus CERT's grammar (the one nvim-treesitter and Helix use),
+# publishing `LANGUAGE: LanguageFn` and `HIGHLIGHTS_QUERY` on tree-sitter 0.26+.
+tree-sitter-powershell = "0.26.4"
 # LaTeX and Typst grammars. No upstream crate exposes the modern `LanguageFn`
 # API against tree-sitter 0.26+, so we use the `codebook-*` forks (from the
 # Codebook spellchecker), which publish a `LANGUAGE: LanguageFn` const built on

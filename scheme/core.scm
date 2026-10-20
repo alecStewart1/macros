@@ -192,6 +192,7 @@
 (define *comment-strings*
   (list (cons "python" "# ") (cons "ruby" "# ") (cons "bash" "# ") (cons "yaml" "# ")
         (cons "toml" "# ") (cons "r" "# ") (cons "elixir" "# ") (cons "makefile" "# ")
+        (cons "powershell" "# ")
         (cons "lua" "-- ") (cons "sql" "-- ") (cons "haskell" "-- ")
         (cons "scheme" ";; ") (cons "racket" ";; ") (cons "clojure" ";; ") (cons "steel" ";; ")
         (cons "latex" "% ") (cons "erlang" "% ") (cons "typst" "// ")

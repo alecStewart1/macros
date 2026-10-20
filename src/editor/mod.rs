@@ -5674,6 +5674,10 @@ mod tests {
         assert_eq!(language_for_path(Path::new("query.sql")), Some("sql"));
         assert_eq!(language_for_path(Path::new("app.ex")), Some("elixir"));
         assert_eq!(language_for_path(Path::new("mix.exs")), Some("elixir"));
+        assert_eq!(
+            language_for_path(Path::new("build.ps1")),
+            Some("powershell")
+        );
         assert_eq!(language_for_path(Path::new("notes.txt")), None);
         assert_eq!(language_for_path(Path::new("Makefile")), None);
     }
