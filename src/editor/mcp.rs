@@ -969,3 +969,353 @@ fn grid_text(g: &super::grid::GridDoc, lines: Option<(usize, usize)>, faces: boo
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+
+    use gpui::{Entity, TestAppContext};
+
+    use super::*;
+
+    fn setup(cx: &mut TestAppContext) -> Entity<Editor> {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(crate::settings::Settings::default());
+        });
+        cx.new(Editor::new)
+    }
+
+    /// Make a new buffer active, keeping the previous one open.
+    fn open_active(e: &mut Editor, name: &str, path: Option<PathBuf>, text: &str) {
+        let current = e.snapshot_active();
+        e.inactive.push(current);
+        e.install_active(make_document(name.into(), path, text));
+    }
+
+    /// Answer `make`'s request on the foreground and return the reply.
+    fn ask<T>(
+        e: &mut Editor,
+        cx: &mut Context<Editor>,
+        make: impl FnOnce(Sender<T>) -> McpRequest,
+    ) -> T {
+        let (tx, rx) = channel();
+        e.on_mcp_request(make(tx), cx);
+        rx.recv().expect("a reply")
+    }
+
+    fn state(buffer: &str, text_hash: u64) -> KeyState {
+        KeyState {
+            buffer: buffer.into(),
+            modes: "fundamental-mode".into(),
+            state: "emacs".into(),
+            point: 4,
+            line: 1,
+            column: 2,
+            current_line: "ab\tc".into(),
+            text_hash,
+            pending: String::new(),
+            minibuffer: None,
+            helm: None,
+            echo_area: String::new(),
+            echo_count: 0,
+        }
+    }
+
+    #[gpui::test]
+    fn buffer_text_describes_the_active_buffer(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            let path = PathBuf::from("/nonexistent/notes.txt");
+            open_active(e, "notes.txt", Some(path.clone()), "one\ntwo\nthree\n");
+            e.goto(5, cx);
+            let modes = e.active.modes.names().join(" ");
+            let out = e.mcp_buffer_text(None, None, false).unwrap();
+            assert_eq!(
+                out,
+                format!(
+                    "buffer: notes.txt\nmode: {modes}\nfile: {}\n\
+                     lines: 4  bytes: 14  modified: false\n\
+                     point: byte 5 (line 1, column 1, 0-based)\n\
+                     ---\none\ntwo\nthree\n",
+                    path.display()
+                )
+            );
+            // Naming the active buffer is the same as naming none.
+            assert_eq!(e.mcp_buffer_text(Some("notes.txt"), None, false), Ok(out));
+        });
+    }
+
+    #[gpui::test]
+    fn buffer_text_line_ranges_clamp(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, _| {
+            open_active(e, "l.txt", None, "a\nb\nc\nd\n");
+            let body = |e: &Editor, lines| {
+                let out = e.mcp_buffer_text(None, Some(lines), false).unwrap();
+                let (head, text) = out.split_once("---\n").unwrap();
+                let shown = head.lines().find(|l| l.starts_with("showing")).unwrap();
+                (shown.to_string(), text.to_string())
+            };
+            assert_eq!(
+                body(e, (1, 3)),
+                ("showing lines 1..3 (bytes 2..6)".into(), "b\nc\n".into())
+            );
+            // Past the end: clamped to the line count (a trailing newline
+            // makes a fifth, empty line).
+            assert_eq!(
+                body(e, (3, 99)),
+                ("showing lines 3..5 (bytes 6..8)".into(), "d\n".into())
+            );
+            assert_eq!(
+                body(e, (40, 50)),
+                ("showing lines 5..5 (bytes 8..8)".into(), String::new())
+            );
+            // An inverted range is empty, not a panic.
+            assert_eq!(
+                body(e, (3, 1)),
+                ("showing lines 3..3 (bytes 6..6)".into(), String::new())
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn buffer_text_lists_faces_in_the_range(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, _| {
+            open_active(e, "f.txt", None, "red\ngreen\nblue\n");
+            e.active.overlays.faces = vec![
+                (0..3, "error".into()),
+                (4..9, "success".into()),
+                (10..14, "link".into()),
+            ];
+            let out = e.mcp_buffer_text(None, Some((1, 2)), true).unwrap();
+            let faces = out
+                .split_once("--- faces (start end face, absolute byte offsets)\n")
+                .unwrap()
+                .1;
+            assert_eq!(faces, "4 9 success\n");
+            assert!(
+                !e.mcp_buffer_text(None, None, false)
+                    .unwrap()
+                    .contains("--- faces")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn buffer_text_reads_other_buffers_by_name(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "first.txt", None, "first\n");
+            e.active.modified = true;
+            open_active(e, "second.txt", None, "second\n");
+            let out = e.mcp_buffer_text(Some("first.txt"), None, false).unwrap();
+            assert!(out.starts_with("buffer: first.txt\n"), "{out}");
+            assert!(out.contains("file: (none)\n"), "{out}");
+            assert!(out.contains("modified: true\n"), "{out}");
+            // Point belongs to the active buffer only.
+            assert!(!out.contains("point:"), "{out}");
+            assert!(out.ends_with("---\nfirst\n"), "{out}");
+            assert_eq!(
+                e.mcp_buffer_text(Some("nope"), None, false),
+                Err("no buffer named \"nope\"".into())
+            );
+            // The request carries the same answer back.
+            let reply = ask(e, cx, |reply| McpRequest::BufferText {
+                name: Some("second.txt".into()),
+                lines: None,
+                faces: false,
+                reply,
+            });
+            assert!(reply.unwrap().ends_with("---\nsecond\n"));
+        });
+    }
+
+    #[gpui::test]
+    fn list_buffers_marks_the_current_one(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "a.txt", Some(PathBuf::from("/nonexistent/a.txt")), "");
+            open_active(e, "b.txt", None, "");
+            let list = ask(e, cx, McpRequest::ListBuffers).unwrap();
+            let lines: Vec<&str> = list.lines().collect();
+            assert!(lines[0].starts_with("* b.txt  ["), "{list}");
+            assert!(!lines[0].contains("/nonexistent"), "{list}");
+            let a = lines
+                .iter()
+                .find(|l| l.contains("a.txt"))
+                .unwrap_or_else(|| panic!("{list}"));
+            assert!(a.starts_with("  a.txt  ["), "{list}");
+            assert!(a.ends_with("]  /nonexistent/a.txt"), "{list}");
+            assert_eq!(lines.len(), 1 + e.inactive.len());
+        });
+    }
+
+    #[gpui::test]
+    fn apply_returns_what_the_batch_echoed(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            e.messages.clear();
+            e.echo("before", cx);
+            let echoed = ask(e, cx, |reply| {
+                McpRequest::Apply(
+                    vec![
+                        EditorCommand::Message("one".into()),
+                        EditorCommand::Message("two".into()),
+                    ],
+                    reply,
+                )
+            });
+            assert_eq!(echoed, ["one", "two"]);
+            // The log keeps everything, in order.
+            assert_eq!(e.messages.join("|"), "before|one|two");
+            // An empty batch echoes nothing.
+            let echoed = ask(e, cx, |reply| McpRequest::Apply(vec![], reply));
+            assert!(echoed.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn messages_returns_the_newest(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            e.messages.clear();
+            assert_eq!(
+                ask(e, cx, |r| McpRequest::Messages(5, r)),
+                Ok("(no messages)".into())
+            );
+            for m in ["a", "b", "c"] {
+                e.echo(m, cx);
+            }
+            assert_eq!(
+                ask(e, cx, |r| McpRequest::Messages(2, r)),
+                Ok("b\nc".into())
+            );
+            assert_eq!(
+                ask(e, cx, |r| McpRequest::Messages(10, r)),
+                Ok("a\nb\nc".into())
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn small_requests(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            ask(e, cx, McpRequest::PublishPoint);
+            // Keystrokes go through the window, never through here.
+            let ks = Keystroke::parse("a").unwrap();
+            let r = ask(e, cx, |reply| McpRequest::PressKey(ks, reply));
+            assert!(r.unwrap_err().contains("internal"));
+            e.on_mcp_request(McpRequest::Log("tools/call eval".into()), cx);
+            let last = e.mcp_log.last().unwrap();
+            assert!(last.ends_with(" tools/call eval"), "{last}");
+            let s = ask(e, cx, McpRequest::KeyState);
+            assert_eq!(s, e.key_state());
+        });
+    }
+
+    #[gpui::test]
+    fn key_state_reports_point_and_line(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "k.txt", None, "first\nsecond line\n");
+            e.goto(9, cx);
+            let s = e.key_state();
+            assert_eq!(s.state(), "emacs");
+            assert_eq!(s.position(), (9, 1, 3));
+            assert_eq!(s.current_line(), "second line");
+            assert_eq!(s.pending(), "");
+            assert_eq!(s.prompt(), None);
+            // Point at the very end (the empty last line) is still valid.
+            e.goto(18, cx);
+            let end = e.key_state();
+            assert_eq!(end.position(), (18, 2, 0));
+            assert_eq!(end.current_line(), "");
+            // The hash moves with the text.
+            let point = e.point();
+            e.replace_whole_buffer("first\nsecond line!\n", point, cx);
+            assert_ne!(e.key_state().text_hash, end.text_hash);
+            e.evil = EvilState::Visual;
+            assert_eq!(e.key_state().state(), "evil visual");
+            e.modal_helix = true;
+            assert_eq!(e.key_state().state(), "helix visual");
+        });
+    }
+
+    #[test]
+    fn key_names_use_emacs_notation() {
+        let names: Vec<String> =
+            parse_keys("C-x M-f s-v C-M-a RET SPC TAB ESC DEL <left> <f12> A a")
+                .unwrap()
+                .iter()
+                .map(key_name)
+                .collect();
+        assert_eq!(
+            names,
+            [
+                "C-x", "M-f", "s-v", "C-M-a", "RET", "SPC", "TAB", "ESC", "DEL", "<left>", "<f12>",
+                "A", "a"
+            ]
+        );
+        assert_eq!(key_name(&Keystroke::parse("shift-tab").unwrap()), "S-TAB");
+        assert_eq!(
+            key_name(&Keystroke::parse("shift-left").unwrap()),
+            "S-<left>"
+        );
+        assert!(is_function_key("f1") && is_function_key("f24"));
+        assert!(!is_function_key("f0") && !is_function_key("f25") && !is_function_key("fx"));
+        assert!(parse_keys("<f25>").is_err());
+        assert!(parse_keys("ctrl-nope").is_err());
+    }
+
+    #[test]
+    fn key_report_says_what_changed() {
+        let keys = parse_keys("C-x b").unwrap();
+        let before = state("a.txt", 1);
+        let mut after = state("a.txt", 2);
+        after.echo_area = "Saved".into();
+        assert_eq!(
+            key_report(&keys, &before, &after, "Saved\nDone"),
+            "pressed: C-x b (2 key(s))\n\
+             buffer: a.txt  [fundamental-mode]\n\
+             state: emacs\n\
+             point: byte 4 (line 1, column 2, 0-based)\n\
+             line: \"ab\\tc\"\n\
+             text changed: yes\n\
+             echo area: Saved\n\
+             messages:\n  Saved\n  Done"
+        );
+        let same = key_report(&keys, &before, &state("a.txt", 1), "");
+        assert!(same.ends_with("text changed: no"), "{same}");
+
+        let mut other = state("b.txt", 9);
+        other.pending = "C-x".into();
+        other.minibuffer = Some("Find file: ~/".into());
+        other.helm = Some("M-x ".into());
+        let report = key_report(&keys, &before, &other, "");
+        assert!(report.contains("buffer: b.txt (was a.txt)  ["), "{report}");
+        assert!(
+            report.contains("text changed: (different buffer)\n"),
+            "{report}"
+        );
+        assert!(report.contains("pending prefix: C-x\n"), "{report}");
+        assert!(report.contains("minibuffer: Find file: ~/\n"), "{report}");
+        assert!(report.ends_with("helm: M-x"), "{report}");
+    }
+
+    #[gpui::test]
+    fn server_info_explains_how_to_start_it(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            e.mcp_log.push("12:00:00 server stopped".into());
+            e.show_mcp_server_info(cx);
+            assert_eq!(e.active.name, "*mcp-server*");
+            let text = e.active.buffer.full_text();
+            assert!(text.contains("Status: off (the default)"), "{text}");
+            assert!(text.contains("(set-option \"mcp-server\" #t)"), "{text}");
+            assert!(text.ends_with("Log:\n12:00:00 server stopped\n"), "{text}");
+        });
+    }
+}
