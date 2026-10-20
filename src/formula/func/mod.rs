@@ -392,3 +392,202 @@ impl<T: IntoValue> IntoValue for Result<T, ErrorKind> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::testing::Mock;
+    use super::*;
+
+    fn cell(r: usize, c: usize) -> Arg {
+        Arg::Range(RangeRef {
+            sheet: None,
+            r0: r,
+            c0: c,
+            r1: r,
+            c1: c,
+        })
+    }
+
+    #[test]
+    fn lookup_is_case_insensitive_and_skips_special_forms() {
+        let sum = lookup("SUM").unwrap();
+        assert!(std::ptr::eq(sum, lookup("sum").unwrap()));
+        assert!(std::ptr::eq(sum, lookup("Sum").unwrap()));
+        assert!(lookup("NO.SUCH.FUNCTION").is_none());
+        assert!(lookup("if").is_none());
+        assert_eq!(special("if"), Some((2, 3)));
+        assert_eq!(special("Choose"), Some((2, usize::MAX)));
+        assert_eq!(special("SUM"), None);
+        assert_eq!(signature("iferror"), Some("value, value_if_error"));
+        assert_eq!(signature("round"), Some(lookup("ROUND").unwrap().sig));
+        assert_eq!(signature("NOPE"), None);
+    }
+
+    #[test]
+    fn parser_checks_arity_against_the_registry() {
+        use crate::formula::parse::{arity, parse};
+        assert_eq!(arity("round"), Some((2, 2)));
+        assert_eq!(arity("IF"), Some((2, 3)));
+        assert_eq!(arity("MYFN"), None);
+        for (src, msg) in [
+            ("=ROUND(1)", "ROUND takes 2 arguments, not 1"),
+            ("=NOW(1)", "NOW takes 0 arguments, not 1"),
+            ("=LEFT()", "LEFT takes 1 to 2 arguments, not 0"),
+            ("=SUM()", "SUM takes at least 1 argument, not 0"),
+            ("=IF(1)", "IF takes 2 to 3 arguments, not 1"),
+        ] {
+            let err = format!("{:?}", parse(src).expect_err(src));
+            assert!(err.contains(msg), "{src}: {err}");
+        }
+        // Unknown names parse (a Scheme function may supply them later).
+        assert!(parse("=MYFN(1, 2, 3)").is_ok());
+        assert!(parse("=ROUND(1, )").is_ok());
+    }
+
+    #[test]
+    fn scalar_reads_one_value_from_any_argument() {
+        let mut m = Mock::grid(&[&["5"], &["'x"]]);
+        assert_eq!(scalar(&Arg::Omitted, &mut m), Value::Empty);
+        assert_eq!(scalar(&cell(0, 0), &mut m), Value::Number(5.0));
+        assert_eq!(scalar(&cell(7, 7), &mut m), Value::Empty);
+        let arr = Arg::Array(Array {
+            rows: 1,
+            cols: 2,
+            data: vec![Value::text("first"), Value::Number(2.0)],
+        });
+        assert_eq!(scalar(&arr, &mut m), Value::text("first"));
+        let empty = Arg::Array(Array {
+            rows: 0,
+            cols: 0,
+            data: vec![],
+        });
+        assert_eq!(scalar(&empty, &mut m), Value::Empty);
+
+        assert_eq!(num(&cell(0, 0), &mut m), Ok(5.0));
+        assert_eq!(num(&cell(1, 0), &mut m), Err(ErrorKind::Value));
+        assert_eq!(num(&Arg::Value(Value::text(" 12 ")), &mut m), Ok(12.0));
+        assert_eq!(
+            text(&Arg::Value(Value::Number(1.5)), &mut m).as_deref(),
+            Ok("1.5")
+        );
+        assert_eq!(
+            text(&Arg::Value(Value::Bool(false)), &mut m).as_deref(),
+            Ok("FALSE")
+        );
+        assert_eq!(text(&Arg::Omitted, &mut m).as_deref(), Ok(""));
+        assert_eq!(
+            text(&Arg::Value(Value::Error(ErrorKind::NA)), &mut m),
+            Err(ErrorKind::NA)
+        );
+    }
+
+    #[test]
+    fn numbers_coerces_direct_values_and_skips_others_in_ranges() {
+        // A1 TRUE, A2 "7" typed as text, A3 4.
+        let mut m = Mock::grid(&[&["TRUE"], &["'7"], &["4"]]);
+        let range = Arg::Range(RangeRef {
+            sheet: None,
+            r0: 0,
+            c0: 0,
+            r1: 2,
+            c1: 0,
+        });
+        assert_eq!(
+            numbers(
+                &[
+                    Arg::Value(Value::Bool(true)),
+                    Arg::Value(Value::text("7")),
+                    range.clone()
+                ],
+                &mut m
+            ),
+            Ok(vec![1.0, 7.0, 4.0])
+        );
+        assert_eq!(
+            numbers(&[Arg::Value(Value::text("x")), range.clone()], &mut m),
+            Err(ErrorKind::Value)
+        );
+        m.put(None, 3, 0, "#N/A");
+        let whole = Arg::Range(RangeRef {
+            sheet: None,
+            r0: 0,
+            c0: 0,
+            r1: usize::MAX,
+            c1: 0,
+        });
+        assert_eq!(numbers(&[whole], &mut m), Err(ErrorKind::NA));
+        // Date text given directly follows the workbook's date system.
+        let date = [Arg::Value(Value::text("2024-01-01"))];
+        assert_eq!(numbers(&date, &mut m), Ok(vec![45292.0]));
+        m.d1904 = true;
+        assert_eq!(numbers(&date, &mut m), Ok(vec![45292.0 - 1462.0]));
+    }
+
+    #[test]
+    fn into_value_maps_results_to_cells() {
+        assert_eq!(2.5.into_value(), Value::Number(2.5));
+        assert_eq!(f64::NAN.into_value(), Value::Error(ErrorKind::Num));
+        assert_eq!(f64::INFINITY.into_value(), Value::Error(ErrorKind::Num));
+        assert_eq!(true.into_value(), Value::Bool(true));
+        assert_eq!("hi".to_string().into_value(), Value::text("hi"));
+        let max = "é".repeat(MAX_TEXT_LEN);
+        assert_eq!(max.clone().into_value(), Value::text(&max));
+        let long = max + "x";
+        assert_eq!(long.clone().into_value(), Value::Error(ErrorKind::Value));
+        assert_eq!(
+            Arc::<str>::from(long).into_value(),
+            Value::Error(ErrorKind::Value)
+        );
+        let err: Result<f64, ErrorKind> = Err(ErrorKind::Div0);
+        assert_eq!(err.into_value(), Value::Error(ErrorKind::Div0));
+        let ok: Result<String, ErrorKind> = Ok("x".into());
+        assert_eq!(ok.into_value(), Value::text("x"));
+    }
+
+    #[test]
+    fn range_ref_dimensions_saturate_on_open_ends() {
+        let r = RangeRef {
+            sheet: None,
+            r0: 2,
+            c0: 1,
+            r1: 4,
+            c1: 1,
+        };
+        assert_eq!((r.rows(), r.cols(), r.is_cell()), (3, 1, false));
+        let col = RangeRef {
+            r0: 0,
+            r1: usize::MAX,
+            ..r.clone()
+        };
+        assert_eq!(col.rows(), usize::MAX);
+        let one = RangeRef { r1: 2, ..r };
+        assert!(one.is_cell());
+    }
+
+    #[test]
+    fn ctx_defaults_clamp_and_trim_to_the_used_area() {
+        let m = Mock::grid(&[&["1", "2"], &["3", "4"]]);
+        let whole_col = RangeRef {
+            sheet: None,
+            r0: 0,
+            c0: 1,
+            r1: usize::MAX,
+            c1: 1,
+        };
+        assert_eq!(m.clamp(&whole_col).map(|r| r.r1), Some(1));
+        let explicit = RangeRef {
+            r1: 50,
+            ..whole_col.clone()
+        };
+        assert_eq!(m.clamp(&explicit).map(|r| r.r1), Some(50));
+        assert_eq!(m.data_part(&explicit).map(|r| r.r1), Some(1));
+        let below = RangeRef { r0: 5, ..explicit };
+        assert_eq!(m.data_part(&below), None);
+        let other = RangeRef {
+            sheet: Some("Missing".into()),
+            ..whole_col
+        };
+        assert_eq!(m.clamp(&other), None);
+        assert_eq!(m.data_part(&other), None);
+    }
+}

@@ -1972,3 +1972,668 @@ impl Editor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::{Entity, TestAppContext};
+
+    use super::*;
+    use crate::lsp::{LanguageServer, Position, TextEdit, WorkspaceEdit};
+
+    /// What a [`FakeServer`] was sent.
+    #[derive(Default)]
+    struct Sent {
+        requests: Vec<(String, Value)>,
+        responses: Vec<(Value, Value)>,
+        changes: Vec<(String, String)>,
+        saves: Vec<String>,
+    }
+
+    /// A language server that records what it's sent and numbers its
+    /// requests from 1.
+    struct FakeServer {
+        sent: Rc<RefCell<Sent>>,
+        next_id: i64,
+    }
+
+    impl LanguageServer for FakeServer {
+        fn did_open(&mut self, _uri: &str, _language_id: &str, _version: i32, _text: &str) {}
+
+        fn did_change(&mut self, uri: &str, _version: i32, text: &str) {
+            self.sent
+                .borrow_mut()
+                .changes
+                .push((uri.to_string(), text.to_string()));
+        }
+
+        fn completion(&mut self, _uri: &str, _line: usize, _character: usize) -> i64 {
+            0
+        }
+
+        fn request(&mut self, method: &str, params: Value) -> Option<i64> {
+            self.next_id += 1;
+            self.sent
+                .borrow_mut()
+                .requests
+                .push((method.to_string(), params));
+            Some(self.next_id)
+        }
+
+        fn respond(&mut self, id: Value, result: Value) {
+            self.sent.borrow_mut().responses.push((id, result));
+        }
+
+        fn did_close(&mut self, _uri: &str) {}
+
+        fn did_save(&mut self, uri: &str, _text: Option<&str>) {
+            self.sent.borrow_mut().saves.push(uri.to_string());
+        }
+    }
+
+    fn setup(cx: &mut TestAppContext) -> Entity<Editor> {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let editor = cx.new(Editor::new);
+        editor.update(cx, |e, _| {
+            e.extensions.insert("rs".into(), "rust".into());
+        });
+        editor
+    }
+
+    /// A ready `rust` server with `open` already opened.
+    fn install_server(
+        e: &mut Editor,
+        open: &[String],
+        caps: lsp::ServerCapabilities,
+    ) -> Rc<RefCell<Sent>> {
+        let sent = Rc::new(RefCell::new(Sent::default()));
+        e.servers.insert(
+            "rust".into(),
+            LspServer {
+                client: Box::new(FakeServer {
+                    sent: sent.clone(),
+                    next_id: 0,
+                }),
+                ready: true,
+                caps,
+                exited: false,
+                open: open.iter().cloned().collect(),
+                versions: HashMap::new(),
+                pending_completion: None,
+                pending: HashMap::new(),
+                semantic_state: HashMap::new(),
+                _task: Task::ready(()),
+            },
+        );
+        sent
+    }
+
+    /// Make `doc` the active buffer, keeping the previous one open.
+    fn open_active(e: &mut Editor, name: &str, path: Option<PathBuf>, text: &str) {
+        let current = e.snapshot_active();
+        e.inactive.push(current);
+        e.install_active(make_document(name.into(), path, text));
+    }
+
+    /// A fresh, empty directory for one test's files (canonical, so URIs
+    /// built from it match the buffers' own).
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("macros-lsp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    fn edit(sl: usize, sc: usize, el: usize, ec: usize, text: &str) -> TextEdit {
+        TextEdit {
+            start: Position::new(sl, sc),
+            end: Position::new(el, ec),
+            new_text: text.into(),
+        }
+    }
+
+    fn status(e: &Editor) -> String {
+        e.status.to_string()
+    }
+
+    fn active_target(e: &Editor) -> RequestTarget {
+        RequestTarget {
+            uri: document_uri(&e.active),
+            tick: e.active.buffer.tick(),
+        }
+    }
+
+    #[test]
+    fn basename_and_builtin_server_names() {
+        assert_eq!(basename("/a/b/c.rs"), "c.rs");
+        assert_eq!(basename("c.rs"), "c.rs");
+        assert_eq!(basename("/a/b/"), "");
+        assert!(is_builtin_lsp("builtin"));
+        assert!(is_builtin_lsp("builtin:macros"));
+        assert!(!is_builtin_lsp("builtins"));
+        assert!(!is_builtin_lsp("rust-analyzer"));
+    }
+
+    #[gpui::test]
+    fn workspace_edit_spans_active_open_unopened_and_new_files(cx: &mut TestAppContext) {
+        let dir = temp_dir("multi");
+        let active = dir.join("active.rs");
+        let open = dir.join("open.rs");
+        let closed = dir.join("closed.rs");
+        let new = dir.join("new.rs");
+        std::fs::write(&active, "aaa bbb ccc\n").unwrap();
+        std::fs::write(&open, "fn old() {}\n").unwrap();
+        std::fs::write(&closed, "one\ntwo\n").unwrap();
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "open.rs", Some(open.clone()), "fn old() {}\n");
+            open_active(e, "active.rs", Some(active.clone()), "aaa bbb ccc\n");
+            let edit = WorkspaceEdit {
+                changes: vec![
+                    (
+                        lsp::path_to_uri(&active),
+                        // Out of order, and lengths change: each position is
+                        // in the original text, so they mustn't shift.
+                        vec![edit(0, 8, 0, 11, "zzzzz"), edit(0, 0, 0, 3, "x")],
+                    ),
+                    (lsp::path_to_uri(&open), vec![edit(0, 3, 0, 6, "renamed")]),
+                    (
+                        lsp::path_to_uri(&closed),
+                        vec![edit(1, 0, 1, 3, "TWO"), edit(0, 0, 0, 0, "zero\n")],
+                    ),
+                    (lsp::path_to_uri(&new), vec![edit(0, 0, 0, 0, "fresh\n")]),
+                ],
+            };
+            let failed = e.apply_workspace_edit(edit, cx);
+            assert!(failed.is_empty(), "{failed:?}");
+            assert_eq!(e.active.buffer.full_text(), "x bbb zzzzz\n");
+            // The active buffer is edited in place, not written.
+            assert_eq!(std::fs::read_to_string(&active).unwrap(), "aaa bbb ccc\n");
+            // An open, inactive buffer is edited and saved.
+            let idx = e.inactive.iter().position(|d| d.name == "open.rs").unwrap();
+            assert_eq!(e.inactive[idx].buffer.full_text(), "fn renamed() {}\n");
+            assert!(!e.inactive[idx].modified);
+            assert_eq!(std::fs::read_to_string(&open).unwrap(), "fn renamed() {}\n");
+            // Files that aren't open are edited on disk; a missing one is
+            // created.
+            assert_eq!(
+                std::fs::read_to_string(&closed).unwrap(),
+                "zero\none\nTWO\n"
+            );
+            assert_eq!(std::fs::read_to_string(&new).unwrap(), "fresh\n");
+            assert_eq!(status(e), "Applied 6 edit(s) across 4 file(s)");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui::test]
+    fn workspace_edit_positions_are_utf16(cx: &mut TestAppContext) {
+        let dir = temp_dir("utf16");
+        let path = dir.join("u.rs");
+        let text = "let s = \"é😀x\";\nlet t = 1;\n";
+        std::fs::write(&path, text).unwrap();
+        let closed = dir.join("closed.rs");
+        std::fs::write(&closed, "// 😀😀 end\n").unwrap();
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "u.rs", Some(path.clone()), text);
+            // `let s = "` is 9 units, é one, 😀 two: `x` is at 12.
+            let edit = WorkspaceEdit {
+                changes: vec![
+                    (lsp::path_to_uri(&path), vec![edit(0, 12, 0, 13, "y")]),
+                    // `// ` 3 + two 😀 at 2 units each: ` end` starts at 7.
+                    (lsp::path_to_uri(&closed), vec![edit(0, 7, 0, 11, "!")]),
+                ],
+            };
+            assert!(e.apply_workspace_edit(edit, cx).is_empty());
+            assert_eq!(
+                e.active.buffer.full_text(),
+                "let s = \"é😀y\";\nlet t = 1;\n"
+            );
+            assert_eq!(std::fs::read_to_string(&closed).unwrap(), "// 😀😀!\n");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui::test]
+    fn workspace_edit_reports_files_it_cannot_read(cx: &mut TestAppContext) {
+        let dir = temp_dir("fail");
+        // A directory reads as an error other than "not found": it must be
+        // reported, never overwritten as if empty.
+        let not_a_file = dir.join("sub");
+        std::fs::create_dir_all(&not_a_file).unwrap();
+        let ok = dir.join("ok.rs");
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            let edit = WorkspaceEdit {
+                changes: vec![
+                    (lsp::path_to_uri(&not_a_file), vec![edit(0, 0, 0, 0, "x")]),
+                    (lsp::path_to_uri(&ok), vec![edit(0, 0, 0, 0, "ok\n")]),
+                ],
+            };
+            let failed = e.apply_workspace_edit(edit, cx);
+            assert_eq!(failed.len(), 1, "{failed:?}");
+            assert!(failed[0].contains("sub"), "{failed:?}");
+            assert!(not_a_file.is_dir());
+            assert_eq!(std::fs::read_to_string(&ok).unwrap(), "ok\n");
+            let msg = status(e);
+            assert!(
+                msg.starts_with("Applied 2 edit(s) across 1 file(s); 1 file(s) failed: "),
+                "{msg}"
+            );
+
+            e.apply_workspace_edit(WorkspaceEdit { changes: vec![] }, cx);
+            assert_eq!(status(e), "Nothing to change");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui::test]
+    fn server_apply_edit_requests_are_answered(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "x.rs", Some(PathBuf::from("/nonexistent/x.rs")), "a\n");
+            let sent = install_server(e, &[], Default::default());
+            let uri = document_uri(&e.active);
+            e.on_lsp_message(
+                "rust".into(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "workspace/applyEdit",
+                    "params": { "edit": { "changes": { uri: [
+                        { "range": { "start": { "line": 0, "character": 0 },
+                                     "end": { "line": 0, "character": 1 } },
+                          "newText": "b" }
+                    ] } } }
+                }),
+                cx,
+            );
+            assert_eq!(e.active.buffer.full_text(), "b\n");
+            assert_eq!(
+                sent.borrow().responses,
+                [(json!(7), json!({ "applied": true }))]
+            );
+            // Unknown server requests get the default reply, not an edit.
+            e.on_lsp_message(
+                "rust".into(),
+                json!({ "jsonrpc": "2.0", "id": 8, "method": "workspace/configuration",
+                        "params": { "items": [{}, {}] } }),
+                cx,
+            );
+            assert_eq!(sent.borrow().responses.len(), 2);
+            assert_eq!(sent.borrow().responses[1].0, json!(8));
+        });
+    }
+
+    #[gpui::test]
+    fn format_responses_apply_to_their_own_document(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "a.rs", None, "fn  a(){}\n");
+            let a = active_target(e);
+            let format = PendingRequest::Format { save: None };
+            let result = json!([{ "range": { "start": { "line": 0, "character": 2 },
+                                             "end": { "line": 0, "character": 4 } },
+                                  "newText": " " }]);
+            e.handle_lsp_response("rust", format.clone(), a.clone(), &result, cx);
+            assert_eq!(e.active.buffer.full_text(), "fn a(){}\n");
+            assert_eq!(status(e), "Formatted buffer");
+
+            // Nothing to change.
+            let a = active_target(e);
+            e.handle_lsp_response("rust", format.clone(), a, &json!([]), cx);
+            assert_eq!(status(e), "No formatting changes");
+
+            // Edited since the request: discarded.
+            let stale = active_target(e);
+            let point = e.point();
+            e.replace_whole_buffer("fn  a(){} // edited\n", point, cx);
+            e.handle_lsp_response("rust", format.clone(), stale, &result, cx);
+            assert_eq!(e.active.buffer.full_text(), "fn  a(){} // edited\n");
+            assert_eq!(
+                status(e),
+                "Buffer changed while formatting; edits discarded"
+            );
+
+            // A document no longer active is still formatted, in place.
+            let a = active_target(e);
+            open_active(e, "b.rs", None, "other\n");
+            e.handle_lsp_response("rust", format.clone(), a, &result, cx);
+            let idx = e.inactive.iter().position(|d| d.name == "a.rs").unwrap();
+            assert_eq!(e.inactive[idx].buffer.full_text(), "fn a(){} // edited\n");
+            assert_eq!(e.active.buffer.full_text(), "other\n");
+
+            // A killed document: nothing happens.
+            let gone = RequestTarget {
+                uri: "untitled:gone.rs".into(),
+                tick: 0,
+            };
+            e.handle_lsp_response("rust", format, gone, &result, cx);
+            assert_eq!(e.active.buffer.full_text(), "other\n");
+        });
+    }
+
+    #[gpui::test]
+    fn format_on_save_responses_after_a_timeout_are_ignored(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "a.rs", None, "x  = 1\n");
+            let target = active_target(e);
+            let result = json!([{ "range": { "start": { "line": 0, "character": 1 },
+                                             "end": { "line": 0, "character": 3 } },
+                                  "newText": " " }]);
+            // No `formatting_for_save` entry: the save already went ahead.
+            e.handle_lsp_response(
+                "rust",
+                PendingRequest::Format { save: Some(3) },
+                target,
+                &result,
+                cx,
+            );
+            assert_eq!(e.active.buffer.full_text(), "x  = 1\n");
+        });
+    }
+
+    #[gpui::test]
+    fn apply_format_edits_replaces_the_active_buffer(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            open_active(e, "a.rs", None, "b\na\n");
+            e.apply_format_edits(vec![edit(1, 0, 1, 1, "B"), edit(0, 0, 0, 1, "A")], cx);
+            assert_eq!(e.active.buffer.full_text(), "A\nB\n");
+            assert_eq!(status(e), "Formatted buffer");
+            e.apply_format_edits(vec![], cx);
+            assert_eq!(status(e), "No formatting changes");
+        });
+    }
+
+    #[gpui::test]
+    fn rename_responses_need_unchanged_text(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            let dir = temp_dir("rename");
+            let path = dir.join("r.rs");
+            open_active(e, "r.rs", Some(path.clone()), "let foo = foo;\n");
+            let uri = lsp::path_to_uri(&path);
+            let result = json!({ "changes": { uri.clone(): [
+                { "range": { "start": { "line": 0, "character": 4 },
+                             "end": { "line": 0, "character": 7 } }, "newText": "bar" },
+                { "range": { "start": { "line": 0, "character": 10 },
+                             "end": { "line": 0, "character": 13 } }, "newText": "bar" }
+            ] } });
+            let stale = active_target(e);
+            let point = e.point();
+            e.replace_whole_buffer("let foo = foo; \n", point, cx);
+            e.handle_lsp_response("rust", PendingRequest::Rename, stale, &result, cx);
+            assert_eq!(status(e), "Buffer changed during rename; not applied");
+            assert_eq!(e.active.buffer.full_text(), "let foo = foo; \n");
+
+            let fresh = active_target(e);
+            e.handle_lsp_response("rust", PendingRequest::Rename, fresh, &result, cx);
+            assert_eq!(e.active.buffer.full_text(), "let bar = bar; \n");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[gpui::test]
+    fn simple_responses_echo_their_result(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            let t = active_target(e);
+            for (kind, result, want) in [
+                (
+                    PendingRequest::Hover,
+                    json!(null),
+                    "No documentation at point",
+                ),
+                (
+                    PendingRequest::SignatureHelp,
+                    json!(null),
+                    "No signature help",
+                ),
+                (
+                    PendingRequest::SignatureHelp,
+                    json!({ "signatures": [{ "label": "fn f(x: i32)" }] }),
+                    "fn f(x: i32)",
+                ),
+                (
+                    PendingRequest::CodeAction,
+                    json!([]),
+                    "No code actions available",
+                ),
+                (
+                    PendingRequest::CallHierarchyCalls(CallDirection::Incoming),
+                    json!([]),
+                    "No calls found",
+                ),
+            ] {
+                e.handle_lsp_response("rust", kind.clone(), t.clone(), &result, cx);
+                assert!(status(e).contains(want), "{kind:?}: {}", status(e));
+            }
+            // Code actions computed for older text are dropped.
+            let stale = RequestTarget {
+                tick: t.tick + 1,
+                ..t
+            };
+            e.handle_lsp_response(
+                "rust",
+                PendingRequest::CodeAction,
+                stale,
+                &json!([{ "title": "Fix" }]),
+                cx,
+            );
+            assert_eq!(status(e), "Buffer changed; code action not applied");
+        });
+    }
+
+    #[gpui::test]
+    fn script_responses_reach_the_callback_only_in_their_buffer(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            e.run_script_blocking(
+                "(define got \"none\") (define (lsp-test-cb json) (set! got json))",
+                cx,
+            );
+            let other = RequestTarget {
+                uri: "untitled:elsewhere".into(),
+                tick: 0,
+            };
+            let kind = PendingRequest::Script("lsp-test-cb".into());
+            e.handle_lsp_response("rust", kind.clone(), other, &json!({"a": 1}), cx);
+            let t = active_target(e);
+            e.handle_lsp_response("rust", kind, t, &json!({"b": 2}), cx);
+        });
+        cx.run_until_parked();
+        let got = ed.read_with(cx, |e, _| e.script.eval("got").unwrap().value);
+        assert_eq!(got.as_deref(), Some("\"{\\\"b\\\":2}\""));
+    }
+
+    #[gpui::test]
+    fn code_actions_apply_edits_run_commands_or_resolve(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            let path = PathBuf::from("/nonexistent/c.rs");
+            open_active(e, "c.rs", Some(path.clone()), "let x = 1;\n");
+            let uri = lsp::path_to_uri(&path);
+            let caps = lsp::ServerCapabilities {
+                code_action_resolve: true,
+                ..Default::default()
+            };
+            let sent = install_server(e, std::slice::from_ref(&uri), caps);
+
+            // An edit-only action applies right away.
+            e.apply_code_action(
+                lsp::CodeAction {
+                    title: "Rename".into(),
+                    edit: Some(WorkspaceEdit {
+                        changes: vec![(uri.clone(), vec![edit(0, 4, 0, 5, "y")])],
+                    }),
+                    command: None,
+                    resolve: None,
+                },
+                cx,
+            );
+            assert_eq!(e.active.buffer.full_text(), "let y = 1;\n");
+
+            // Neither edit nor command.
+            e.apply_code_action(
+                lsp::CodeAction {
+                    title: "Nothing".into(),
+                    edit: None,
+                    command: None,
+                    resolve: None,
+                },
+                cx,
+            );
+            assert_eq!(status(e), "Code action had no edit");
+
+            // A command runs on the server.
+            e.apply_code_action(
+                lsp::CodeAction {
+                    title: "Run".into(),
+                    edit: None,
+                    command: Some(("rust.run".into(), json!([1]))),
+                    resolve: None,
+                },
+                cx,
+            );
+            assert_eq!(status(e), "Ran code action");
+            assert_eq!(
+                sent.borrow().requests.last().unwrap(),
+                &(
+                    "workspace/executeCommand".to_string(),
+                    json!({ "command": "rust.run", "arguments": [1] })
+                )
+            );
+
+            // An edit-less literal resolves first; the reply is applied once.
+            let raw = json!({ "title": "Lazy", "data": 42 });
+            e.apply_code_action(
+                lsp::CodeAction {
+                    title: "Lazy".into(),
+                    edit: None,
+                    command: None,
+                    resolve: Some(raw.clone()),
+                },
+                cx,
+            );
+            let (method, params) = sent.borrow().requests.last().unwrap().clone();
+            assert_eq!((method.as_str(), params), ("codeAction/resolve", raw));
+            let id = sent.borrow().requests.len() as i64;
+            e.on_lsp_message(
+                "rust".into(),
+                json!({ "jsonrpc": "2.0", "id": id, "result": {
+                    "title": "Lazy",
+                    "edit": { "changes": { uri.clone(): [
+                        { "range": { "start": { "line": 0, "character": 8 },
+                                     "end": { "line": 0, "character": 9 } },
+                          "newText": "2" } ] } }
+                } }),
+                cx,
+            );
+            assert_eq!(e.active.buffer.full_text(), "let y = 2;\n");
+            // Not re-resolved.
+            assert_eq!(sent.borrow().requests.len() as i64, id);
+            assert!(e.servers["rust"].pending.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn diagnostics_are_kept_per_uri_from_the_current_server(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            let path = PathBuf::from("/nonexistent/d.rs");
+            open_active(e, "d.rs", Some(path.clone()), "x\n");
+            let uri = lsp::path_to_uri(&path);
+            let publish = |uri: &str, message: &str| {
+                json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                        "params": { "uri": uri, "diagnostics": [
+                            { "range": { "start": { "line": 0, "character": 0 },
+                                         "end": { "line": 0, "character": 1 } },
+                              "severity": 2, "message": message } ] } })
+            };
+            e.on_lsp_message("rust".into(), publish(&uri, "from rust"), cx);
+            assert_eq!(e.diagnostics[&uri][0].message, "from rust");
+            // Another language's server can't overwrite the active buffer's…
+            e.on_lsp_message("scheme".into(), publish(&uri, "stale"), cx);
+            assert_eq!(e.diagnostics[&uri][0].message, "from rust");
+            // …but may publish for another document.
+            let other = lsp::path_to_uri(Path::new("/nonexistent/o.scm"));
+            e.on_lsp_message("scheme".into(), publish(&other, "other"), cx);
+            assert_eq!(e.diagnostics[&other][0].message, "other");
+            // An empty publish clears.
+            e.on_lsp_message(
+                "rust".into(),
+                json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                        "params": { "uri": uri, "diagnostics": [] } }),
+                cx,
+            );
+            assert!(e.diagnostics[&uri].is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn progress_shows_the_newest_running_task(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            let progress = |token: &str, value: Value| {
+                json!({ "jsonrpc": "2.0", "method": "$/progress",
+                        "params": { "token": token, "value": value } })
+            };
+            let slot = |e: &Editor| {
+                e.mode_line_slots
+                    .get("lsp-progress")
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            e.on_lsp_message(
+                "rust".into(),
+                progress("a", json!({ "kind": "begin", "title": "Indexing" })),
+                cx,
+            );
+            assert_eq!(slot(e), "rust: Indexing");
+            e.on_lsp_message(
+                "rust".into(),
+                progress("b", json!({ "kind": "begin", "title": "Checking" })),
+                cx,
+            );
+            assert_eq!(slot(e), "rust: Checking");
+            e.on_lsp_message(
+                "rust".into(),
+                progress(
+                    "a",
+                    json!({ "kind": "report", "message": "3/10", "percentage": 30 }),
+                ),
+                cx,
+            );
+            // A report updates its own task; the newest is still shown.
+            assert_eq!(slot(e), "rust: Checking");
+            e.on_lsp_message("rust".into(), progress("b", json!({ "kind": "end" })), cx);
+            assert_eq!(slot(e), "rust: Indexing 3/10 30%");
+            // An unknown kind changes nothing.
+            e.on_lsp_message("rust".into(), progress("a", json!({ "kind": "weird" })), cx);
+            assert_eq!(slot(e), "rust: Indexing 3/10 30%");
+            e.on_lsp_message("rust".into(), progress("a", json!({ "kind": "end" })), cx);
+            assert_eq!(slot(e), "");
+        });
+    }
+
+    #[gpui::test]
+    fn server_stderr_goes_to_the_log(cx: &mut TestAppContext) {
+        let ed = setup(cx);
+        ed.update(cx, |e, cx| {
+            e.on_lsp_message(
+                "rust".into(),
+                json!({ "jsonrpc": "2.0", "method": "$/stderr", "params": { "line": "boom" } }),
+                cx,
+            );
+            assert_eq!(e.lsp_log.last().map(String::as_str), Some("[rust] boom"));
+        });
+    }
+}

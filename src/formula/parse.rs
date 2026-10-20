@@ -594,7 +594,11 @@ impl Parser {
             };
             return Err(self.err(format!(
                 "{name} takes {want} argument{}, not {}",
-                if want == "1" { "" } else { "s" },
+                if min == 1 && (max == 1 || max == usize::MAX) {
+                    ""
+                } else {
+                    "s"
+                },
                 args.len()
             )));
         }
