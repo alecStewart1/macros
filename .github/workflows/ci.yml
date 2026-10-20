@@ -53,11 +53,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      # rustfmt's default newline style keeps whatever a file already uses, so
-      # a file committed with CRLF passes the step above while its diff shows
-      # every line changed. Check the committed content (`i/`), not the
-      # checkout, so a runner's autocrlf setting can't hide or cause a failure.
-      # Binary files report `i/-text` and are skipped.
+      # rustfmt.toml makes the step above fail on CRLF in .rs files, and
+      # .gitattributes converts CRLF to LF when a file is staged. This catches
+      # the rest: non-Rust files committed by something that skips that
+      # conversion (GitHub's web editor, some GUI clients) or under a changed
+      # .gitattributes. Check the committed content (`i/`), not the checkout,
+      # so a runner's autocrlf setting can't hide or cause a failure. Binary
+      # files report `i/-text` and are skipped.
       - name: Check line endings (LF only)
         run: |
           bad=$(git ls-files --eol | grep -E '^i/(crlf|mixed)' || true)
