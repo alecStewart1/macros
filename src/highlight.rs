@@ -113,7 +113,8 @@ pub fn face_name(face: Face) -> &'static str {
 /// [`injection_lang_id`], [`language_for_extension`],
 /// [`language_for_filename`]) derive from this table,
 /// so adding a language is a single entry here (plus its grammar crate in
-/// Cargo.toml).
+/// Cargo.toml, and its extensions in assets/file-types.txt so the OS offers
+/// Macros under "Open With" — a test fails until they're listed).
 struct LangSpec {
     id: &'static str,
     language: LanguageFn,

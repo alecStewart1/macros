@@ -5,7 +5,7 @@ description: Open CSV and TSV files as a spreadsheet grid, flip between the grid
 
 # Grid: CSV & spreadsheets
 
-Open a `.csv`, `.tsv`, `.tab`, `.psv`, or `.xlsx` file — with <kbd>C-x C-f</kbd> or by dragging it onto a window — and it opens as a **grid**: a spreadsheet with lettered columns, numbered rows, a formula bar, and Excel's default 64 × 20 px cells. The same file is one keystroke away from its raw text.
+Open a `.csv`, `.tsv`, `.tab`, `.psv`, or `.xlsx` file — with <kbd>C-x C-f</kbd>, by dragging it onto a window, or with **Open With** from your file manager (see [Opening files](/docs/getting-started#opening-files)) — and it opens as a **grid**: a spreadsheet with lettered columns, numbered rows, a formula bar, and Excel's default 64 × 20 px cells. The same file is one keystroke away from its raw text.
 
 ![A CSV of sales orders open as a grid: auto-fitted columns, prices formatted as currency, discounts as percentages, pending and late statuses colored, and a selected range with its count, sum, average, min and max in the mode line.](/screenshots/grid-overview.png)
 
