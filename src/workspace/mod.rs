@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use gpui::{App, Context, Entity, SharedString, Window, div, prelude::*, px, relative};
 
-use crate::color_compat::Opacity;
 use crate::editor::{Editor, TitlebarDropdownView};
 use crate::theme::Theme;
+use gpui::ColorExt;
 
 mod chrome;
 mod quit;

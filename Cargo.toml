@@ -10,8 +10,8 @@ license = "MIT"
 [dependencies]
 # GPUI – Community Edition: core crate (aliased as `gpui` so imports don't
 # change). 0.2.2 has NO platform backends — those live in gpui-ce-platform
-# (gpui_platform), added below. Spike: evaluating as the replacement for the
-# vendored upstream 0.2.2 — see vendor/gpui/PATCHES.md for the fixes we carry.
+# (gpui_platform), added below. This replaces the previously vendored upstream
+# gpui 0.2.2 (whose local fixes are documented in the swap commit message).
 gpui = { version = "0.2.2", package = "gpui-ce" }
 # Platform backends for gpui-ce: windowing/text per OS. `font-kit` is REQUIRED
 # on macOS — without it the text system is a placeholder that lays out but
@@ -270,6 +270,8 @@ csv-core = "0.1"
 
 # block 0.1.6 (abandoned upstream) with its uninhabited-static future-
 # incompatibility fixed — see vendor/block/PATCHES.md.
-# NOTE (spike): the `gpui` path patch is dropped while evaluating gpui-ce.
+# gpui_ce_macos carries the Metal glyph contrast/gamma correction that
+# gpui-ce dropped — see vendor/gpui_ce_macos/PATCHES.md.
 [patch.crates-io]
 block = { path = "vendor/block" }
+gpui-ce-macos = { path = "vendor/gpui_ce_macos", package = "gpui_ce_macos" }

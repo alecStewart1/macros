@@ -425,9 +425,18 @@ fn main() {
 
         // Open-file events: queued until the first window's startup drains
         // them; afterwards, opened in the frontmost window (or a new one).
+        // gpui-ce's `AsyncApp::update` panics once the app is released, and
+        // offers no fallible variant or liveness check — so the update is
+        // routed through this anchor's weak handle instead: its `upgrade()`
+        // fails first (returning Err) when the app is gone, which keeps an
+        // open-files event arriving during shutdown from panicking.
+        struct OpenFilesAnchor;
+        let open_files_anchor = cx.new(|_| OpenFilesAnchor).downgrade();
         cx.spawn(async move |cx| {
             while let Some(paths) = open_rx.next().await {
-                cx.update(|cx| open_paths(launch::queue(paths), cx));
+                open_files_anchor
+                    .update(cx, |_, cx| open_paths(launch::queue(paths), cx))
+                    .ok();
             }
         })
         .detach();

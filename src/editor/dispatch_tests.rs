@@ -16,8 +16,6 @@ fn setup<'a>(
 ) -> (Entity<Editor>, &'a mut VisualTestContext) {
     test_context(cx);
     cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
         cx.bind_keys(super::key_bindings());
     });
     let (editor, vcx) = cx.add_window_view(|_, cx| Editor::new(cx));
