@@ -18,7 +18,16 @@
 ;;     (line . 4) (column . 2)   ; what we actually jump by (survives edits
 ;;                               ; above the bookmark better than a raw byte)
 ;;     (front-context-string . "…after point…")
-;;     (rear-context-string . "…before point…")))
+;;     (rear-context-string . "…before point…")
+;;     (annotation . "free text"))) ; optional, shown in the Helm picker
+;;
+;; Like bookmark.el, a bookmark may carry an ANNOTATION (free-form text) —
+;; shown dimmed next to the candidate in C-x r l / C-x r b. Edit it with
+;; M-x `bookmark-edit-annotation`; `bookmark-annotation` /
+;; `bookmark-set-annotation!` read and write it programmatically. Hooks
+;; (`add-hook` / M-x describe): `bookmark-save-hook` (after every rewrite,
+;; since saving is automatic), `bookmark-load-hook` (after the file loads at
+;; startup), `bookmark-after-jump-hook` (after a jump's point has landed).
 ;;
 ;; A reader/writer for that sexp format lives here (bm--parse*); there is no
 ;; `read` primitive in the engine yet, so it's a ~60-line Scheme reader.
@@ -151,6 +160,9 @@
     (bm-field-str "column"                (bm-field (cdr e) "column")) "\n"
     (bm-field-str "front-context-string"  (bm-field (cdr e) "front-context-string")) "\n"
     (bm-field-str "rear-context-string"   (bm-field (cdr e) "rear-context-string"))
+    ;; The annotation is optional: a bookmark without one gets no field line.
+    (let ((ann (bm-field (cdr e) "annotation")))
+      (if (string? ann) (string-append "\n" (bm-field-str "annotation" ann)) ""))
     ")"))
 
 (define (bm--serialize)
@@ -175,27 +187,66 @@
           (set! *bookmarks*
                 (filter (lambda (e) (and (pair? e) (string? (car e))
                                          (string? (bm-field (cdr e) "filename"))))
-                        (car tops))))))))
+                        (car tops))))))
+    ;; `bookmark-load-hook` fires on every load — startup and the reload an
+    ;; M-x bookmark-revert-style caller does — whether or not the file existed.
+    (run-hook "bookmark-load-hook")))
 
 ;; Rewrite the file. Cheap (a few dozen short lines), so callers just do it.
+;; `bookmark-save-hook` fires after every rewrite — there is no separate save
+;; step, so this is the hook's only trigger (Emacs fires it on an explicit
+;; save; ours happens automatically on every mutation).
 (define (bm-save)
-  (write-file (bookmarks-file) (bm--serialize)))
+  (write-file (bookmarks-file) (bm--serialize))
+  (run-hook "bookmark-save-hook"))
 
 ;; Record bookmark NAME for PATH at byte offset POS (line LINE, column COL),
 ;; replacing any existing entry of the same name, and save. FRONT/REAR are the
 ;; text around the position — display context, and a way to spot a stale
 ;; bookmark. The primitive under bookmark-set-named and org-capture's
-;; `org-capture-last-stored` tracking; an agent can call it directly.
+;; `org-capture-last-stored` tracking; an agent can call it directly. A
+;; position-independent ANNOTATION (set with bookmark-set-annotation!) survives
+;; the re-set: it describes the target, not the point.
 (define (bookmark-store name path pos line col front rear)
-  (set! *bookmarks*
-        (alist-set *bookmarks* name
-          (list (cons "filename" path)
-                (cons "position" pos)
-                (cons "line" line)
-                (cons "column" col)
-                (cons "front-context-string" front)
-                (cons "rear-context-string" rear))))
-  (bm-save))
+  (let ((existing (alist-ref *bookmarks* name))
+        (fields (list (cons "filename" path)
+                      (cons "position" pos)
+                      (cons "line" line)
+                      (cons "column" col)
+                      (cons "front-context-string" front)
+                      (cons "rear-context-string" rear))))
+    (set! *bookmarks*
+          (alist-set *bookmarks* name
+            (let ((ann (and existing (bm-field existing "annotation"))))
+              ;; Annotation goes at the FRONT, matching bm--fields-with — the
+              ;; parser is key-based, but the two writers keep one shape.
+              (if (string? ann)
+                  (cons (cons "annotation" ann) fields)
+                  fields))))
+    (bm-save)))
+
+;; The annotation of bookmark NAME (a string), or #f when it has none.
+(define (bookmark-annotation name)
+  (let ((e (alist-ref *bookmarks* name)))
+    (and e (bm-field e "annotation"))))
+
+;; The FIELDS list `e` with field `k` (a string) replaced or added at the front.
+(define (bm--fields-with e k v)
+  (cons (cons k v)
+        (filter (lambda (p) (not (and (pair? p) (equal? (car p) k)))) e)))
+
+;; Set the annotation of bookmark NAME to TEXT (saved immediately); TEXT ""
+;; clears it. No-op when there is no such bookmark or TEXT isn't a string.
+(define (bookmark-set-annotation! name text)
+  (let ((e (alist-ref *bookmarks* name)))
+    (when (and e (string? text))
+      (set! *bookmarks*
+            (alist-set *bookmarks* name
+              (if (equal? text "")
+                  (filter (lambda (p) (not (and (pair? p)
+                                                (equal? (car p) "annotation")))) e)
+                  (bm--fields-with e "annotation" text))))
+      (bm-save))))
 
 (define (bm-delete-named! name)
   (set! *bookmarks* (alist-remove *bookmarks* name))
@@ -232,11 +283,36 @@
 ;; jump (C-x r b)
 
 ;; Jump to bookmark entry `e`: open its file if needed, then land on the
-;; remembered line/column once the buffer is current.
+;; remembered line/column once the buffer is current, and fire
+;; `bookmark-after-jump-hook` once point has landed (the goto parks —
+;; goto-when-visiting — until the file is loaded, so the hook must wait for
+;; that, not fire straight after the call).
+;; *bm-jumps-owed*: how many jumps are still owed a hook fire. Core's
+;; *visit-pending* is a single slot — a jump issued while another is pending
+;; overwrites it — so landing is indistinguishable between the outstanding
+;; jumps; when the pending visit lands, every owed jump fires (Emacs fires
+;; after each jump; the clobbered ones' targets were superseded anyway).
+(define *bm-jumps-owed* 0)
+
+;; Poll until the pending visit has landed (core's *visit-pending* clears in
+;; the same step that moves point), then fire the hook once per owed jump.
+(define (bm--after-jump-step)
+  (if *visit-pending*
+      (run-with-timer 20 'bm--after-jump-step)
+      (when (> *bm-jumps-owed* 0)
+        (let ((n *bm-jumps-owed*))
+          (set! *bm-jumps-owed* 0)
+          (let loop ((i 0))
+            (when (< i n)
+              (run-hook "bookmark-after-jump-hook")
+              (loop (+ i 1))))))))
+
 (define (bm-jump-entry e)
   (let ((path (bm-field e "filename")))
     (open-file path)
-    (goto-when-visiting "" path (or (bm-field e "line") 0) (or (bm-field e "column") 0))))
+    (set! *bm-jumps-owed* (+ *bm-jumps-owed* 1))
+    (goto-when-visiting "" path (or (bm-field e "line") 0) (or (bm-field e "column") 0))
+    (bm--after-jump-step)))
 
 ;; Jump to the bookmark NAME: open its file (if not already visiting it) and
 ;; land on the remembered line/column. Message when there is no such bookmark.
@@ -253,8 +329,17 @@
 (define (bm-candidate e)
   (string-append (car e) " — " (or (bm-field (cdr e) "filename") "")))
 
+;; Candidates for the Helm sources: a bare string normally, or a
+;; `(candidate annotation)` pair (Helm marginalia) for a bookmark with an
+;; annotation — the annotation renders dimmed to the right of the row, and
+;; only the candidate string is matched on and passed to the action.
 (define (bm-candidates)
-  (map bm-candidate *bookmarks*))
+  (map (lambda (e)
+         (let ((ann (bm-field (cdr e) "annotation")))
+           (if (and (string? ann) (not (equal? ann "")))
+               (list (bm-candidate e) ann)
+               (bm-candidate e))))
+       *bookmarks*))
 
 (define (bm-jump-selected sel)
   (let loop ((ls *bookmarks*))
@@ -289,6 +374,19 @@
         (set! *bookmarks* (alist-set *bookmarks* new e))
         (bm-save)
         (message (string-append "Renamed bookmark: " old " → " new))))))
+
+;; Edit the annotation of the bookmark NAME: a minibuffer prompt prefilled
+;; with the current annotation; empty input clears it. Single-line, unlike
+;; Emacs's full editing buffer — the text lives in the file and the Helm
+;; picker either way.
+(define (bm-annotation-prompt name)
+  (read-string (string-append "Annotation for " name ": ")
+    (lambda (text) (bookmark-set-annotation! name (string-trim text)))
+    (or (bookmark-annotation name) "")))
+
+;; M-x bookmark-edit-annotation — pick a bookmark, then an annotation for it.
+(define-command (bookmark-edit-annotation)
+  (completing-read "Edit annotation: " (map car *bookmarks*) 'bm-annotation-prompt))
 
 ;; M-x bookmark-rename — pick a bookmark, then a new name for it (no-op when
 ;; the name is unchanged or empty).

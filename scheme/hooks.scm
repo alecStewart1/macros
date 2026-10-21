@@ -30,3 +30,13 @@
     ((symbol? proc) (raw-remove-hook hook (symbol->string proc)))
     (else
      (message "remove-hook: can't remove an anonymous procedure; add it by name or 'symbol"))))
+
+;; (run-hooks h1 h2 …) — run each hook in order, like Emacs `run-hooks`.
+;; Each argument is a hook name (a 'symbol or "string"); every function
+;; registered on it fires with no arguments. A trigger that needs to fire
+;; several hooks (a save-like path, say) uses this instead of repeating
+;; `run-hook`; `run-hook-with-args` and `run-hook-wrapped` are NOT provided —
+;; hooks here fire asynchronously by name (no return values reach the caller),
+;; which neither variant fits; add the args one when a Scheme caller exists.
+(define (run-hooks . hooks)
+  (for-each (lambda (h) (run-hook (hook->name h))) hooks))

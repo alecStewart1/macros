@@ -91,8 +91,11 @@ Named positions in files that survive a restart (Emacs `bookmark.el`):
 | <kbd>C-x r b</kbd> | `bookmark-jump` — pick a bookmark in Helm and jump to it |
 | <kbd>C-x r l</kbd> | `helm-bookmarks` — browse all bookmarks |
 | <kbd>M-x</kbd> `bookmark-delete` / `bookmark-rename` | upkeep |
+| <kbd>M-x</kbd> `bookmark-edit-annotation` | annotate a bookmark (shown in the Helm picker) |
 
 Bookmarks are stored as an s-expression file at `~/.config/macros/bookmarks` (see [configuration](/docs/configuration#what-persists)), rewritten on every change. `org-capture` maintains an `org-capture-last-stored` bookmark on the headline it just inserted.
+
+Like `bookmark.el`, a bookmark can carry a free-text annotation — `bookmark-edit-annotation` prompts for it (the current text is prefilled; empty input clears it), and annotated bookmarks show it dimmed next to their line in <kbd>C-x r b</kbd> / <kbd>C-x r l</kbd>. Programs can use `bookmark-annotation` / `bookmark-set-annotation!` directly. Hooks (`add-hook`): `bookmark-save-hook` fires after every rewrite of the file, `bookmark-load-hook` after the file loads at startup, and `bookmark-after-jump-hook` once a jump's point has landed.
 
 Feature-specific prefixes live in their own pages: <kbd>C-c C-l …</kbd> for [LSP](/docs/lsp), <kbd>C-c p …</kbd> for [projects](/docs/projects), and <kbd>C-h …</kbd> for [help](/docs/getting-help). Modal editing is available too, but off by default — in either a Vim-style ([evil](/docs/modal-editing)) or selection-first ([helix](/docs/helix)) flavor.
 
