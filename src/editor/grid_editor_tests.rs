@@ -13,10 +13,7 @@ use super::*;
 
 /// A grid on a fresh temp file under `mode`: "emacs", "evil" or "helix".
 fn setup(cx: &mut TestAppContext, csv: &str, mode: &str) -> (Entity<Editor>, PathBuf) {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-    });
+    test_context(cx);
     // A counter as well as the clock, so parallel tests never share a file.
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(

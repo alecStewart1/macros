@@ -8,11 +8,19 @@ authors = ["Kyle Gwinnup"]
 license = "MIT"
 
 [dependencies]
-# Zed's GPU-accelerated UI framework. Pinned to the published crates.io release:
-# git `main` split the platform into `gpui_macos`, whose glyph rasterization
-# renders nothing in our build (all text invisible while quads render). 0.2.2 is
-# the self-contained, text-working version.
-gpui = "0.2.2"
+# GPUI – Community Edition: core crate (aliased as `gpui` so imports don't
+# change). 0.2.2 has NO platform backends — those live in gpui-ce-platform
+# (gpui_platform), added below. This replaces the previously vendored upstream
+# gpui 0.2.2 (whose local fixes are documented in the swap commit message).
+gpui = { version = "0.2.2", package = "gpui-ce" }
+# Platform backends for gpui-ce: windowing/text per OS. `font-kit` is REQUIRED
+# on macOS — without it the text system is a placeholder that lays out but
+# renders no glyphs. wayland/x11 cover Linux (and FreeBSD); Windows needs none.
+gpui-platform = { version = "0.1.0", package = "gpui_ce_platform", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
 # Steel: an embeddable Scheme, used here as the extension ("elisp") language.
 # The crate is published as `steel-core` but its library is named `steel`.
 steel = { package = "steel-core", version = "0.8.2" }
@@ -249,7 +257,10 @@ cc = "1"
 
 # Headless gpui (TestAppContext) for end-to-end editor tests.
 [dev-dependencies]
-gpui = { version = "0.2.2", features = ["test-support"] }
+gpui = { version = "0.2.2", package = "gpui-ce", features = ["test-support"] }
+gpui-platform = { version = "0.1.0", package = "gpui_ce_platform", features = [
+    "test-support",
+] }
 # Reference CSV reader for the grid parser's tests: generated inputs go through
 # both and the field values are compared. Not a runtime dependency — the grid
 # parser needs each field's and each record's exact source byte range (for
@@ -257,10 +268,10 @@ gpui = { version = "0.2.2", features = ["test-support"] }
 # output-buffer API doesn't expose, and csv-core silently skips blank lines.
 csv-core = "0.1"
 
-# gpui 0.2.2, vendored with two macOS text-rendering fixes that make glyphs
-# crisp on 1x (non-Retina) displays — see vendor/gpui/PATCHES.md.
-[patch.crates-io]
-gpui = { path = "vendor/gpui" }
 # block 0.1.6 (abandoned upstream) with its uninhabited-static future-
 # incompatibility fixed — see vendor/block/PATCHES.md.
+# gpui_ce_macos carries the Metal glyph contrast/gamma correction that
+# gpui-ce dropped — see vendor/gpui_ce_macos/PATCHES.md.
+[patch.crates-io]
 block = { path = "vendor/block" }
+gpui-ce-macos = { path = "vendor/gpui_ce_macos", package = "gpui_ce_macos" }

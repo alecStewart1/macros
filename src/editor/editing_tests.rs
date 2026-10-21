@@ -15,9 +15,8 @@ fn setup<'a>(
     cx: &'a mut TestAppContext,
     text: &str,
 ) -> (Entity<Editor>, &'a mut VisualTestContext) {
+    test_context(cx);
     cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
         cx.bind_keys(super::key_bindings());
     });
     let (editor, vcx) = cx.add_window_view(|_, cx| Editor::new(cx));
@@ -31,7 +30,7 @@ fn setup<'a>(
         e.install_active(make_document("test.txt".into(), None, text));
     });
     let focus = editor.read_with(vcx, |e, _| e.focus_handle.clone());
-    vcx.update(|window, _| window.focus(&focus));
+    vcx.update(|window, cx| window.focus(&focus, cx));
     settle(&editor, vcx);
     (editor, vcx)
 }

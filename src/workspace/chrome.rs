@@ -40,7 +40,7 @@ pub(super) fn caption_buttons(window: &Window, fg: gpui::Hsla) -> impl IntoEleme
             .child(glyph)
     };
     let hover = fg.opacity(0.12);
-    let close_red: gpui::Hsla = gpui::rgb(0xc42b1c).into();
+    let close_red: gpui::Hsla = crate::color_compat::rgb(0xc42b1c);
     div()
         .occlude()
         .absolute()
@@ -134,7 +134,7 @@ pub(super) fn linux_caption_buttons(
         button(
             "caption-close",
             "icons/x.svg",
-            gpui::rgb(0xc42b1c).into(),
+            crate::color_compat::rgb(0xc42b1c),
             gpui::white(),
         )
         .on_click(cx.listener(|this, _, window, cx| {
@@ -216,6 +216,7 @@ pub(super) fn client_frame(
                 blur_radius: RESIZE_BORDER / 2.,
                 spread_radius: px(0.),
                 offset: gpui::point(px(0.), px(0.)),
+                inset: false,
             }])
         })
         // Moves over the content needn't repaint the border cursor below.

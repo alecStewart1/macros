@@ -6,8 +6,10 @@ use gpui::{
     Entity, Font, FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, LayoutId, PaintQuad, Pixels, Point, RenderImage, ShapedLine, SharedString,
     Style, TextAlign, TextRun, TransformationMatrix, UnderlineStyle, Window, WrappedLine, fill,
-    font, point, prelude::*, px, relative, rgb, rgba, size,
+    font, point, prelude::*, px, relative, size,
 };
+
+use crate::color_compat::{rgb, rgba};
 
 use crate::editor::{CompletionView, Editor};
 use crate::highlight::{HlSpan, face_name};
@@ -43,6 +45,7 @@ fn plain_run(len: usize, font: Font, color: Hsla) -> TextRun {
         background_color: None,
         underline: None,
         strikethrough: None,
+        letter_spacing: None,
     }
 }
 
@@ -69,10 +72,10 @@ struct DiagnosticColors {
 
 impl DiagnosticColors {
     fn resolve(theme: &Theme) -> Self {
-        let info = theme.color("diagnostic-info", rgb(0x3794ff).into());
+        let info = theme.color("diagnostic-info", rgb(0x3794ff));
         Self {
-            error: theme.color("diagnostic-error", rgb(0xf14c4c).into()),
-            warning: theme.color("diagnostic-warning", rgb(0xcca700).into()),
+            error: theme.color("diagnostic-error", rgb(0xf14c4c)),
+            warning: theme.color("diagnostic-warning", rgb(0xcca700)),
             info,
             hint: theme.color("diagnostic-hint", info),
         }
@@ -458,12 +461,12 @@ struct FrameColors {
 impl FrameColors {
     /// `text` is the frame's foreground, the line numbers' last fallback.
     fn resolve(theme: &Theme, text: Hsla) -> Self {
-        let cursor = theme.color("cursor", rgb(0x528bff).into());
-        let region = theme.color("region", rgba(0x3a5fcd55).into());
+        let cursor = theme.color("cursor", rgb(0x528bff));
+        let region = theme.color("region", rgba(0x3a5fcd55));
         // Themes can set the secondary colors explicitly; otherwise derive
         // them from the primary region/cursor by knocking the alpha down.
         let dimmed = |mut c: Hsla, by: f32| {
-            c.a *= by;
+            c.alpha *= by;
             c
         };
         FrameColors {
@@ -471,13 +474,13 @@ impl FrameColors {
             region,
             secondary_region: theme.color("secondary-region", dimmed(region, 0.6)),
             secondary_cursor: theme.color("secondary-cursor", dimmed(cursor, 0.7)),
-            search: theme.color("search", rgba(0xffc83d66).into()),
-            paren: theme.color("show-paren", rgba(0x5fafef66).into()),
-            hl_line: theme.color("hl-line", rgba(0xffffff10).into()),
+            search: theme.color("search", rgba(0xffc83d66)),
+            paren: theme.color("show-paren", rgba(0x5fafef66)),
+            hl_line: theme.color("hl-line", rgba(0xffffff10)),
             line_number: theme.color("line-number", theme.color("dim", text)),
-            git_added: theme.color("magit-gutter-added", rgb(0x6cae3e).into()),
-            git_modified: theme.color("magit-gutter-modified", rgb(0xc7a23a).into()),
-            git_removed: theme.color("magit-gutter-removed", rgb(0xc1574b).into()),
+            git_added: theme.color("magit-gutter-added", rgb(0x6cae3e)),
+            git_modified: theme.color("magit-gutter-modified", rgb(0xc7a23a)),
+            git_removed: theme.color("magit-gutter-removed", rgb(0xc1574b)),
         }
     }
 }
@@ -1054,7 +1057,7 @@ fn layout_cursor(
         };
         // Translucent so the character under the block stays readable.
         let mut color = cfg.color;
-        color.a *= BLOCK_CURSOR_ALPHA;
+        color.alpha *= BLOCK_CURSOR_ALPHA;
         (width, color)
     } else {
         (cfg.width, cfg.color)
@@ -1371,7 +1374,7 @@ impl Element for EditorElement {
                 // then to a faded foreground so the suggestion reads as
                 // tentative even on a theme that defines neither.
                 let mut faded = text_color;
-                faded.a *= 0.55;
+                faded.alpha *= 0.55;
                 let color = theme.color("ghost", theme.color("dim", faded));
                 (first, parts.collect::<Vec<_>>(), color)
             }
@@ -1632,7 +1635,7 @@ impl Element for EditorElement {
                 let sb_w = SCROLLBAR_WIDTH;
                 let x1 = bounds.right();
                 let x0 = x1 - sb_w;
-                let track_color = theme.color("scroll-bar-track", rgba(0x88888822).into());
+                let track_color = theme.color("scroll-bar-track", rgba(0x88888822));
                 scrollbar.push(fill(
                     Bounds::from_corners(
                         point(x0, bounds.top()),
@@ -1646,7 +1649,7 @@ impl Element for EditorElement {
                 let max_scroll = (content_h - viewport_h).max(1.0);
                 let t = (scroll / max_scroll).clamp(0.0, 1.0);
                 let thumb_top = bounds.top() + px(t * (viewport_h - thumb_h));
-                let thumb_color = theme.color("scroll-bar", rgba(0x888888aa).into());
+                let thumb_color = theme.color("scroll-bar", rgba(0x888888aa));
                 scrollbar.push(fill(
                     Bounds::from_corners(point(x0, thumb_top), point(x1, thumb_top + px(thumb_h))),
                     thumb_color,
@@ -1743,7 +1746,9 @@ impl Element for EditorElement {
             }
             // Line-number gutter labels.
             for (label, origin) in prepaint.gutter.drain(..) {
-                label.paint(origin, line_height, window, cx).ok();
+                label
+                    .paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
             for line in &prepaint.lines {
                 let origin = point(
@@ -1756,7 +1761,9 @@ impl Element for EditorElement {
             }
             // Virtual suffix text (inlay/blame), after the line content.
             for (label, origin) in prepaint.virtual_text.drain(..) {
-                label.paint(origin, line_height, window, cx).ok();
+                label
+                    .paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
             for quad in prepaint.diagnostics.drain(..) {
                 window.paint_quad(quad);
@@ -1772,7 +1779,14 @@ impl Element for EditorElement {
             // File-tree icons (monochrome SVGs tinted by the line color).
             for (icon_bounds, path, color) in prepaint.icons.drain(..) {
                 window
-                    .paint_svg(icon_bounds, path, TransformationMatrix::unit(), color, cx)
+                    .paint_svg(
+                        icon_bounds,
+                        path,
+                        None,
+                        TransformationMatrix::unit(),
+                        color,
+                        cx,
+                    )
                     .ok();
             }
             // Fold chevrons in the gutter (monochrome SVGs, tinted like numbers).
@@ -1781,6 +1795,7 @@ impl Element for EditorElement {
                     .paint_svg(
                         chevron_bounds,
                         path,
+                        None,
                         TransformationMatrix::unit(),
                         color,
                         cx,
@@ -1795,7 +1810,7 @@ impl Element for EditorElement {
             // in the rows reserved below their line.
             for (img_bounds, data) in prepaint.images.drain(..) {
                 window
-                    .paint_image(img_bounds, Corners::default(), data, 0, false)
+                    .paint_image(img_bounds, img_bounds, Corners::default(), data, 0, false)
                     .ok();
             }
             if focus_handle.is_focused(window)
@@ -1808,7 +1823,8 @@ impl Element for EditorElement {
                     window.paint_quad(quad);
                 }
                 for (line, origin) in popup.labels {
-                    line.paint(origin, line_height, window, cx).ok();
+                    line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                        .ok();
                 }
             }
             // Secondary cursors (multiple-cursors), drawn whenever focused.
@@ -1820,7 +1836,9 @@ impl Element for EditorElement {
             // avy hints sit on top of everything (text, cursor, popup).
             for (bg, label, origin) in prepaint.avy.drain(..) {
                 window.paint_quad(bg);
-                label.paint(origin, line_height, window, cx).ok();
+                label
+                    .paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
         });
 
@@ -2118,10 +2136,10 @@ mod tests {
     #[test]
     fn overlay_face_overrides_subrange() {
         let mut theme = Theme::default();
-        let red: Hsla = rgb(0xff0000).into();
+        let red: Hsla = rgb(0xff0000);
         theme.set("hl", red);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // Line [0,10), no syntax spans, one overlay [2,5) with face "hl".
         let overlays = vec![(2usize..5usize, SharedString::from("hl"))];
         let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
@@ -2137,9 +2155,9 @@ mod tests {
     #[test]
     fn overlay_outside_line_is_skipped() {
         let mut theme = Theme::default();
-        theme.set("hl", rgb(0xff0000).into());
+        theme.set("hl", rgb(0xff0000));
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // Line [10,20) with its text; overlays wholly before and after it
         // must be skipped, not snapped (snapping one underflowed).
         let overlays = vec![
@@ -2163,13 +2181,13 @@ mod tests {
 
     #[test]
     fn background_face_layers_under_foreground_face() {
-        let red: Hsla = rgb(0xff0000).into();
-        let blue: Hsla = rgb(0x0000ff).into();
+        let red: Hsla = rgb(0xff0000);
+        let blue: Hsla = rgb(0x0000ff);
         let mut theme = Theme::default();
         theme.set("heat-7", red);
         theme.set_background("heat-2-bg", blue);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // Text-plot half-block: a fg face over [0,6), a bg-only face over
         // [3,6) — the overlap keeps red text AND gets the blue background.
         let overlays = vec![
@@ -2197,10 +2215,10 @@ mod tests {
     #[test]
     fn face_font_switches_the_run_family() {
         let mut theme = Theme::default();
-        theme.set("plot-series-0", rgb(0x87c3ff).into());
+        theme.set("plot-series-0", rgb(0x87c3ff));
         theme.set_font("plot-series-0", "Macros Plot");
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         let overlays = vec![(3usize..9usize, SharedString::from("plot-series-0"))];
         let runs = line_runs(&[], &overlays, 0..12, &font, default, false, &theme, None);
         let families: Vec<&str> = runs.iter().map(|r| r.font.family.as_ref()).collect();
@@ -2210,10 +2228,10 @@ mod tests {
     #[test]
     fn overlay_face_underlines_when_set() {
         let mut theme = Theme::default();
-        theme.set("link", rgb(0x4ea1f3).into());
+        theme.set("link", rgb(0x4ea1f3));
         theme.set_underline("link", true);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // One overlay [2,5) with an underlined face; the rest of the line is not.
         let overlays = vec![(2usize..5usize, SharedString::from("link"))];
         let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
@@ -2227,12 +2245,12 @@ mod tests {
 
     #[test]
     fn wavy_face_colors_only_the_squiggle_not_the_text() {
-        let red: Hsla = rgb(0xff0000).into();
+        let red: Hsla = rgb(0xff0000);
         let mut theme = Theme::default();
         theme.set("spell-error", red);
         theme.set_wavy("spell-error", true);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         let overlays = vec![(2usize..5usize, SharedString::from("spell-error"))];
         let runs = line_runs(&[], &overlays, 0..10, &font, default, false, &theme, None);
         let ul = runs[1].underline.as_ref().expect("wavy implies underline");
@@ -2250,7 +2268,7 @@ mod tests {
     fn no_overlays_tiles_whole_line() {
         let theme = Theme::default();
         let font = font("Lilex");
-        let default: Hsla = rgb(0x111111).into();
+        let default: Hsla = rgb(0x111111);
         let runs = line_runs(&[], &[], 0..7, &font, default, false, &theme, None);
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 7);
     }
@@ -2278,8 +2296,8 @@ mod tests {
     #[test]
     fn inject_ghost_run_splits_covering_run() {
         let font = font("Lilex");
-        let c: Hsla = rgb(0x111111).into();
-        let g: Hsla = rgb(0x888888).into();
+        let c: Hsla = rgb(0x111111);
+        let g: Hsla = rgb(0x888888);
         let ghost = plain_run(3, font.clone(), g);
         // Mid-run: [6] at index 4 → [4, 3(ghost), 2].
         let runs = inject_ghost_run(vec![plain_run(6, font.clone(), c)], 4, ghost.clone());
@@ -2313,7 +2331,7 @@ mod tests {
         let mut theme = Theme::default();
         theme.set_bold("feeds-unread", true); // NO color entry on purpose
         let font = font("Lilex");
-        let default: Hsla = rgb(0x222222).into();
+        let default: Hsla = rgb(0x222222);
         // Whole-line-face path: caller resolves the face to `default` (fallback
         // — the face has no color) and passes its bold flag as the base.
         let runs = line_runs(
@@ -2339,10 +2357,10 @@ mod tests {
     #[test]
     fn overlay_face_edges_snap_to_char_boundaries() {
         let mut theme = Theme::default();
-        let red: Hsla = rgb(0xff0000).into();
+        let red: Hsla = rgb(0xff0000);
         theme.set("hl", red);
         let font = font("Lilex");
-        let default: Hsla = rgb(0x000000).into();
+        let default: Hsla = rgb(0x000000);
         // "aé b": "é" is bytes 1..3; the face [2,4) starts inside it.
         let text = "aé b";
         let overlays = vec![(2usize..4usize, SharedString::from("hl"))];
@@ -2418,7 +2436,7 @@ mod tests {
         assert_eq!(remove_holes("abcdef", &[(1, 2), (4, 5)]), "acdf");
 
         let font = font("Lilex");
-        let c: Hsla = rgb(0).into();
+        let c: Hsla = rgb(0);
         // One run of len 9 ("*** Title"), collapse [0,2) -> run shrinks to 7.
         let runs = punch_runs(vec![plain_run(9, font.clone(), c)], &[(0, 2)]);
         assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![7]);

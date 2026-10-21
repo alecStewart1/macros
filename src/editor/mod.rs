@@ -1399,18 +1399,8 @@ impl Editor {
         // `reconcile_watches`; if the platform watcher won't start we keep `None`
         // and the auto-revert / live-refresh features simply no-op.
         let (fs_tx, mut fs_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
-        let fs_debouncer = new_debouncer(
-            Duration::from_millis(400),
-            move |res: DebounceEventResult| {
-                if let Ok(events) = res {
-                    let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
-                    if !paths.is_empty() {
-                        let _ = fs_tx.unbounded_send(paths);
-                    }
-                }
-            },
-        )
-        .ok();
+        let fs_debouncer = new_fs_debouncer(fs_tx);
+        let fs_watcher_started = fs_debouncer.is_some();
 
         let mut editor = Self {
             active: Document {
@@ -1586,17 +1576,21 @@ impl Editor {
         }));
         // Drain debounced filesystem-change batches onto the foreground: revert
         // unmodified buffers whose file changed, and fire `directory-changed-hook`
-        // for watched dirs (dired-sidebar / dired refresh).
-        editor.fs.task = Some(cx.spawn(async move |this, cx| {
-            while let Some(paths) = fs_rx.next().await {
-                if this
-                    .update(cx, |editor, cx| editor.on_fs_events(paths, cx))
-                    .is_err()
-                {
-                    break; // editor dropped
+        // for watched dirs (dired-sidebar / dired refresh). Only spawned when the
+        // watcher actually started — with no watcher the channel is already
+        // closed, and a drain task would be dead weight.
+        if fs_watcher_started {
+            editor.fs.task = Some(cx.spawn(async move |this, cx| {
+                while let Some(paths) = fs_rx.next().await {
+                    if this
+                        .update(cx, |editor, cx| editor.on_fs_events(paths, cx))
+                        .is_err()
+                    {
+                        break; // editor dropped
+                    }
                 }
-            }
-        }));
+            }));
+        }
         // Drain ANVIL REPL results from its engine thread onto the foreground.
         editor.anvil_task = Some(cx.spawn(async move |this, cx| {
             while let Some(outcome) = anvil_outcomes.next().await {
@@ -4952,6 +4946,71 @@ fn scheme_mode_stack(macros: bool) -> ModeStack {
     } else {
         Mode::new("steel").with_language("scheme")
     })
+}
+
+/// Create the filesystem watcher, or `None` if it can't start (auto-revert /
+/// live-refresh then no-op). In test builds the watcher is off BY DEFAULT —
+/// its thread fires real (nondeterministic) events and dropping/sending from
+/// that thread would wake the drain task on a foreign thread — but the real
+/// `new_debouncer` path is still compiled in and reachable: a test that wants
+/// to exercise watcher setup / `reconcile_watches` / the debouncer callback
+/// clears the suppression with [`set_fs_watcher_suppressed`] (gpui-ce's
+/// foreign-thread assert is already disabled by `test_context`'s
+/// `allow_parking`). Previously the whole thing was `#[cfg(test)]`'d out,
+/// which made those paths untestable.
+fn new_fs_debouncer(
+    fs_tx: futures::channel::mpsc::UnboundedSender<Vec<PathBuf>>,
+) -> Option<Debouncer<RecommendedWatcher>> {
+    #[cfg(test)]
+    if FS_WATCHER_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst) {
+        drop(fs_tx); // closes the channel; the drain task just ends
+        return None;
+    }
+    new_debouncer(
+        Duration::from_millis(400),
+        move |res: DebounceEventResult| {
+            if let Ok(events) = res {
+                let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
+                if !paths.is_empty() {
+                    let _ = fs_tx.unbounded_send(paths);
+                }
+            }
+        },
+    )
+    .ok()
+}
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(test)]
+static FS_WATCHER_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+
+/// Opt tests into (or out of) the real filesystem watcher: `Editor::new` calls
+/// [`new_fs_debouncer`], which consults this flag. `test_context` suppresses
+/// it; a watcher test clears the flag before creating its editor and can
+/// restore it afterwards. NOTE: process-global — while the flag is cleared,
+/// every editor created by concurrently running tests gets a live watcher.
+#[cfg(test)]
+pub(crate) fn set_fs_watcher_suppressed(suppressed: bool) {
+    FS_WATCHER_SUPPRESSED.store(suppressed, Ordering::SeqCst);
+}
+
+/// Shared test-context bootstrap for every `#[gpui::test]` setup helper:
+/// allows foreign-thread wakes (the Scheme engine thread sends outcomes from
+/// its own thread; gpui-ce's test scheduler asserts on that unless parking is
+/// allowed) and installs default globals. Also suppresses the real filesystem
+/// watcher — real events are nondeterministic, and tests that want them opt
+/// back in via `set_fs_watcher_suppressed(false)`. Call this before creating
+/// the test editor.
+#[cfg(test)]
+pub(crate) fn test_context(cx: &mut gpui::TestAppContext) {
+    cx.background_executor.allow_parking();
+    set_fs_watcher_suppressed(true);
+    cx.update(|cx| {
+        cx.set_global(crate::theme::Theme::default());
+        cx.set_global(crate::settings::Settings::default());
+    });
 }
 
 /// Build a fresh document for `contents`, choosing modes/highlighter by file type.

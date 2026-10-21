@@ -979,10 +979,7 @@ mod tests {
     use super::*;
 
     fn setup(cx: &mut TestAppContext) -> Entity<Editor> {
-        cx.update(|cx| {
-            cx.set_global(crate::theme::Theme::default());
-            cx.set_global(crate::settings::Settings::default());
-        });
+        crate::editor::test_context(cx);
         cx.new(Editor::new)
     }
 

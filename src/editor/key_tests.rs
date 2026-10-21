@@ -23,11 +23,8 @@ fn setup<'a>(
     style: Style,
     text: &str,
 ) -> (Entity<Editor>, &'a mut VisualTestContext) {
-    cx.update(|cx| {
-        cx.set_global(crate::theme::Theme::default());
-        cx.set_global(crate::settings::Settings::default());
-        cx.bind_keys(super::key_bindings());
-    });
+    test_context(cx);
+    cx.update(|cx| cx.bind_keys(super::key_bindings()));
     let (editor, vcx) = cx.add_window_view(|_, cx| Editor::new(cx));
     editor.update(vcx, |e, cx| {
         for src in crate::runtime::startup_scripts() {
@@ -47,7 +44,7 @@ fn setup<'a>(
         }
     });
     let focus = editor.read_with(vcx, |e, _| e.focus_handle.clone());
-    vcx.update(|window, _| window.focus(&focus));
+    vcx.update(|window, cx| window.focus(&focus, cx));
     settle(&editor, vcx);
     (editor, vcx)
 }

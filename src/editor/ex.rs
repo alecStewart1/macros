@@ -1670,10 +1670,7 @@ mod tests {
 
     #[gpui::test]
     fn sort_keeps_crlf_line_breaks(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            cx.set_global(crate::theme::Theme::default());
-            cx.set_global(crate::settings::Settings::default());
-        });
+        test_context(cx);
         let editor = cx.new(Editor::new);
         editor.update(cx, |e, cx| {
             e.switch_to_doc(make_document("t".into(), None, "c\r\nb\r\na\r\n"));

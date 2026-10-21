@@ -114,17 +114,17 @@ impl Element for TerminalElement {
         // foreground/background.
         let default_fg = theme.color("terminal-foreground", theme.foreground());
         let default_bg = theme.color("terminal-background", theme.background());
-        let cursor_color = theme.color("cursor", rgb(0x528bff).into());
+        let cursor_color = theme.color("cursor", rgb(0x528bff));
         let selection_color = theme.color(
             "terminal-selection",
-            theme.color("region", rgba(0x3a5fcd55).into()),
+            theme.color("region", rgba(0x3a5fcd55)),
         );
         let dfg = hsla_to_rgb_u32(default_fg);
         let dbg = hsla_to_rgb_u32(default_bg);
         // The 16 ANSI system colors: `terminal-color-0`…`15` faces, else defaults.
         let ansi: [u32; 16] = std::array::from_fn(|i| {
             let fallback = crate::terminal::DEFAULT_ANSI16[i];
-            hsla_to_rgb_u32(theme.color(&format!("terminal-color-{i}"), rgb(fallback).into()))
+            hsla_to_rgb_u32(theme.color(&format!("terminal-color-{i}"), rgb(fallback)))
         });
 
         let settings = cx.global::<crate::settings::Settings>();
@@ -248,6 +248,7 @@ impl Element for TerminalElement {
                             wavy: false,
                         }),
                         strikethrough: None,
+                        letter_spacing: None,
                     });
                     if wide {
                         let shaped = window.text_system().shape_line(
@@ -294,7 +295,7 @@ impl Element for TerminalElement {
                 };
                 // A block cursor is translucent so the glyph under it stays legible.
                 if cur.block {
-                    color.a *= BLOCK_CURSOR_ALPHA;
+                    color.alpha *= BLOCK_CURSOR_ALPHA;
                 }
                 cursor = Some(fill(Bounds::new(point(x, y), size(w, line_height)), color));
             }
@@ -364,7 +365,8 @@ impl Element for TerminalElement {
                 window.paint_quad(cursor);
             }
             for (line, origin) in prepaint.rows.drain(..) {
-                line.paint(origin, line_height, window, cx).ok();
+                line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .ok();
             }
         });
         // Report bounds so click-to-focus routes to this pane like any other.
@@ -377,9 +379,9 @@ impl Element for TerminalElement {
 
 /// Pack a [`Hsla`] into a `0xRRGGBB` value for the terminal color resolver.
 fn hsla_to_rgb_u32(color: Hsla) -> u32 {
-    let rgba = gpui::Rgba::from(color);
+    let rgba = gpui::hsla_to_rgba(color);
     let to_u8 = |v: f32| (v.clamp(0., 1.) * 255.0).round() as u32;
-    (to_u8(rgba.r) << 16) | (to_u8(rgba.g) << 8) | to_u8(rgba.b)
+    (to_u8(rgba.color.red) << 16) | (to_u8(rgba.color.green) << 8) | to_u8(rgba.color.blue)
 }
 
 #[cfg(test)]
