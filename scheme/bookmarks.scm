@@ -291,21 +291,29 @@
 ;; *visit-pending* is a single slot — a jump issued while another is pending
 ;; overwrites it — so landing is indistinguishable between the outstanding
 ;; jumps; when the pending visit lands, every owed jump fires (Emacs fires
-;; after each jump; the clobbered ones' targets were superseded anyway).
+;; after each jump; the clobbered ones' targets were superseded anyway). A
+;; TIMED-OUT visit (the file never became current — core flags it in
+;; *visit-result*) pays nothing: the hook must not fire on a failed jump.
 (define *bm-jumps-owed* 0)
 
 ;; Poll until the pending visit has landed (core's *visit-pending* clears in
-;; the same step that moves point), then fire the hook once per owed jump.
+;; the same step that moves point, and *visit-result* says 'landed), then fire
+;; the hook once per owed jump. A timeout gives up instead: no hook, and any
+;; owed jumps are dropped with a message.
 (define (bm--after-jump-step)
-  (if *visit-pending*
-      (run-with-timer 20 'bm--after-jump-step)
-      (when (> *bm-jumps-owed* 0)
-        (let ((n *bm-jumps-owed*))
-          (set! *bm-jumps-owed* 0)
-          (let loop ((i 0))
-            (when (< i n)
-              (run-hook "bookmark-after-jump-hook")
-              (loop (+ i 1))))))))
+  (cond (*visit-pending* (run-with-timer 20 'bm--after-jump-step))
+        ((equal? *visit-result* 'landed)
+         (when (> *bm-jumps-owed* 0)
+           (let ((n *bm-jumps-owed*))
+             (set! *bm-jumps-owed* 0)
+             (let loop ((i 0))
+               (when (< i n)
+                 (run-hook "bookmark-after-jump-hook")
+                 (loop (+ i 1)))))))
+        (else
+         (when (> *bm-jumps-owed* 0)
+           (set! *bm-jumps-owed* 0)
+           (message "Bookmark jump failed: the file never opened")))))
 
 (define (bm-jump-entry e)
   (let ((path (bm-field e "filename")))
@@ -364,16 +372,20 @@
 (define (bm-delete-selected name) (bm-delete-named! name))
 
 ;; Rename the bookmark OLD to NEW (saving), keeping its fields. No-op when
-;; there is no such bookmark or NEW is empty/same.
+;; there is no such bookmark or NEW is empty/same; refuses with a message when
+;; NEW is already taken (renaming over it would silently delete that entry).
+;; Exactly one rewrite, so bookmark-save-hook fires once.
 (define (bm-rename! old new)
   (when (and (not (equal? new "")) (not (equal? new old)))
     (let ((e (alist-ref *bookmarks* old)))
-      (when e
-        ;; e is the FIELDS list (alist-ref returns the entry's cdr); re-key it.
-        (bm-delete-named! old)
-        (set! *bookmarks* (alist-set *bookmarks* new e))
-        (bm-save)
-        (message (string-append "Renamed bookmark: " old " → " new))))))
+      (cond ((not e))
+            ((alist-ref *bookmarks* new)
+             (message (string-append "Bookmark name already in use: " new)))
+            (else
+             ;; e is the FIELDS list (alist-ref returns the entry's cdr); re-key it.
+             (set! *bookmarks* (alist-set (alist-remove *bookmarks* old) new e))
+             (bm-save)
+             (message (string-append "Renamed bookmark: " old " → " new)))))))
 
 ;; Edit the annotation of the bookmark NAME: a minibuffer prompt prefilled
 ;; with the current annotation; empty input clears it. Single-line, unlike

@@ -12927,23 +12927,8 @@ mod titlebar_menu_lib {
 mod bookmarks_lib {
     use super::*;
 
-    /// core + helm + persistence + bookmarks.scm (the module's declared deps),
-    /// with the persistence dir pointing at a unique sandbox so the bookmark
-    /// file this test writes never touches the developer's real config.
-    /// Forward slashes: a Windows `C:\Users\…` path is an invalid `\U` escape
-    /// inside a Scheme string literal.
-    fn fresh_dir() -> String {
-        fresh_persistence_dir()
-            .chars()
-            .map(|c| if c as u8 == 92 { '/' } else { c })
-            .collect()
-    }
-
     fn engine() -> ScriptEngine {
         let (engine, _rx) = ScriptEngine::new();
-        engine
-            .eval(&format!(r#"(define (persistence-dir) "{}")"#, fresh_dir()))
-            .unwrap();
         load_with_deps(&engine, "bookmarks");
         engine
     }
@@ -13024,7 +13009,7 @@ mod bookmarks_lib {
         let text = std::fs::read_to_string(&file).expect("bookmark file written");
         assert!(text.contains(";;;; Macros Bookmark Format Version 1"));
         assert!(text.contains(r#""~/org/Work2.org""#));
-        assert!(!text.contains("~/org/Home.org\n") || text.contains(r#""~/org/Home.org""#));
+        assert!(text.contains(r#""~/org/Home.org""#));
 
         // A fresh load from disk restores everything, with the file's comments
         // and header skipped.
@@ -13056,14 +13041,29 @@ mod bookmarks_lib {
             .unwrap();
         assert_eq!(v(&engine, "(length (bm-candidates))"), "1");
         // Selection matches the whole candidate string against every
-        // bookmark's rendered line (Emacs-style: no parsing of the display).
-        engine
+        // bookmark's rendered line (Emacs-style: no parsing of the display);
+        // a jump actually queues the file open.
+        let out = engine
             .eval(r#"(bm-jump-selected (car (bm-candidates)))"#)
             .unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::OpenFile(p) if p == "~/org/Work.org")),
+            "no open queued for the known selection: {:?}",
+            out.commands
+        );
         // An unknown selection says so instead of jumping.
-        engine
+        let out = engine
             .eval(r#"(bm-jump-selected "nope — ~/x.org")"#)
             .unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::Message(m) if m.contains("No such bookmark"))),
+            "no message for the unknown selection: {:?}",
+            out.commands
+        );
         // Delete removes both the a-list entry and (after the rewrite) the file's.
         engine.eval(r#"(bm-delete-named! "a — b")"#).unwrap();
         assert_eq!(v(&engine, "(length *bookmarks*)"), "0");
@@ -13097,10 +13097,24 @@ mod bookmarks_lib {
             ),
             r#""* MiView""#
         );
-        // And the file on disk round-trips through a fresh load.
+        // Renaming onto an existing name is refused (it would delete that
+        // entry) — and silently at that; the fields are untouched.
+        engine
+            .eval(r#"(bookmark-store "other" "~/org/Other.org" 1 0 0 "" "")"#)
+            .unwrap();
+        engine.eval(r#"(bm-rename! "wurk" "other")"#).unwrap();
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "2");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(bm-field (alist-ref *bookmarks* "wurk") "filename")"#
+            ),
+            r#""~/org/Work.org""#
+        );
+        // …and the file on disk round-trips through a fresh load.
         engine.eval("(set! *bookmarks* '())").unwrap();
         engine.eval("(bm-load)").unwrap();
-        assert_eq!(v(&engine, "(length *bookmarks*)"), "1");
+        assert_eq!(v(&engine, "(length *bookmarks*)"), "2");
         assert_eq!(
             v(
                 &engine,
@@ -13137,9 +13151,6 @@ mod bookmarks_lib {
     #[test]
     fn org_capture_sets_last_stored_bookmark() {
         let (engine, _rx) = ScriptEngine::new();
-        engine
-            .eval(&format!(r#"(define (persistence-dir) "{}")"#, fresh_dir()))
-            .unwrap();
         load_with_deps(&engine, "org");
         // Append after two complete lines: the bookmark lands on line 2, byte 4.
         engine
@@ -13176,6 +13187,101 @@ mod bookmarks_lib {
             "#true",
             "position with joining newline"
         );
+    }
+
+    #[test]
+    fn org_capture_under_headline_lands_on_the_inserted_item() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "org");
+        // The target path must pass org--resolve-path's POSIX "^[/~]" absolute
+        // test, and the file primitives must be able to write it:
+        //  - POSIX: an absolute /tmp dir (a runner's filesystem root isn't
+        //    writable),
+        //  - Windows: file primitives resolve a leading "/" against the CURRENT
+        //    DRIVE (and reject "/C:/…"-style paths), so use a unique drive-root
+        //    scratch dir; "/x" and "C:/x" land in the same place.
+        // Both dirs are removed at the end.
+        let (path, cleanup);
+        #[cfg(not(windows))]
+        {
+            let dir = format!("/tmp/macros-capture-{}", std::process::id());
+            path = format!("{dir}/capture.org");
+            cleanup = dir;
+        }
+        #[cfg(windows)]
+        {
+            let root = format!("macros-capture-{}", std::process::id());
+            path = format!("/{root}/capture.org");
+            cleanup = {
+                // "/x" resolves against the current drive; recover its letter from
+                // the cwd ("C:\…") so the scratch dir can be removed afterwards.
+                let cwd = std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                let drive: String = cwd
+                    .chars()
+                    .take_while(|c| *c != '/' && *c != '\\')
+                    .collect();
+                format!("{drive}/{}", root)
+            };
+        }
+        engine
+            .eval(&format!(r#"(write-file "{path}" "** Inbox\n* Other\n")"#))
+            .unwrap();
+        // A "file+headline" capture files the text as a child of the headline,
+        // AFTER its subtree end — the bookmark must land on the inserted item,
+        // not on the parent headline.
+        engine
+            .eval(&format!(
+                r#"(org--capture-commit (list "t" "T" (list "file+headline" "{path}" "Inbox")) "* TODO x")"#
+            ))
+            .unwrap();
+        // "** Inbox" (line 0) has no body, so the item is inserted at line 1:
+        // position = bytes of the one preceding line + its newline.
+        let e = v(
+            &engine,
+            r#"(alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "line")"#,
+        );
+        assert_eq!(e, "1", "headline-capture line: {e}");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(equal? (alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "position") 9)"#
+            ),
+            "#true",
+            "headline-capture position"
+        );
+        let text = engine
+            .eval(&format!(r#"(read-file "{path}")"#))
+            .unwrap()
+            .value
+            .unwrap();
+        assert!(
+            text.contains("*** TODO x"),
+            "item not filed as a child: {text}"
+        );
+
+        // A second capture under the same headline lands below the first item.
+        engine
+            .eval(&format!(
+                r#"(org--capture-commit (list "t" "T" (list "file+headline" "{path}" "Inbox")) "* TODO y")"#
+            ))
+            .unwrap();
+        let e = v(
+            &engine,
+            r#"(alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "line")"#,
+        );
+        assert_eq!(e, "2", "second capture line: {e}");
+        assert_eq!(
+            v(
+                &engine,
+                r#"(equal? (alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "position") 20)"#
+            ),
+            "#true",
+            "second capture position"
+        );
+        let _ = std::fs::remove_dir_all(&cleanup);
     }
 
     #[test]
@@ -13266,10 +13372,18 @@ mod bookmarks_lib {
             ),
             "#true"
         );
-        // Selection still matches the displayed line, annotation or not.
-        engine
+        // Selection still matches the displayed line, annotation or not — and
+        // a jump actually queues the file open.
+        let out = engine
             .eval(r#"(bm-jump-selected "noted — ~/org/N.org")"#)
             .unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::OpenFile(p) if p == "~/org/N.org")),
+            "no open queued for the annotated selection: {:?}",
+            out.commands
+        );
     }
 
     #[test]
@@ -13309,9 +13423,11 @@ mod bookmarks_lib {
             "fired before landing: {:?}",
             out.commands
         );
-        // Once the visit has landed (the goto step clears *visit-pending*),
-        // the poller fires the hook exactly once.
-        engine.eval("(set! *visit-pending* #f)").unwrap();
+        // Once the visit has landed (the goto step clears *visit-pending* and
+        // flags *visit-result* 'landed), the poller fires the hook exactly once.
+        engine
+            .eval("(set! *visit-pending* #f) (set! *visit-result* 'landed)")
+            .unwrap();
         let out = engine.eval("(bm--after-jump-step)").unwrap();
         assert_eq!(
             out.commands
@@ -13340,7 +13456,9 @@ mod bookmarks_lib {
         // again here — the landing the harness simulates.)
         engine.eval(r#"(bm-jump "work")"#).unwrap();
         engine.eval(r#"(bm-jump "work")"#).unwrap();
-        engine.eval("(set! *visit-pending* #f)").unwrap();
+        engine
+            .eval("(set! *visit-pending* #f) (set! *visit-result* 'landed)")
+            .unwrap();
         let out = engine.eval("(bm--after-jump-step)").unwrap();
         assert_eq!(
             out.commands
@@ -13353,7 +13471,24 @@ mod bookmarks_lib {
             "consecutive jumps should each fire: {:?}",
             out.commands
         );
-        engine.eval("(set! *visit-pending* #f)").unwrap();
+        // A jump whose visit TIMED OUT (the file never became current) pays
+        // nothing: the hook must not fire on a failed jump.
+        engine.eval(r#"(bm-jump "work")"#).unwrap();
+        engine
+            .eval("(set! *visit-pending* #f) (set! *visit-result* 'timed-out)")
+            .unwrap();
+        let out = engine.eval("(bm--after-jump-step)").unwrap();
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunHook(_))),
+            "hook fired on a timed-out jump: {:?}",
+            out.commands
+        );
+        assert_eq!(v(&engine, "*bm-jumps-owed*"), "0", "owed not drained");
+        engine
+            .eval("(set! *visit-pending* #f) (set! *visit-result* 'landed)")
+            .unwrap();
         let out = engine.eval("(bm--after-jump-step)").unwrap();
         assert!(
             !out.commands
