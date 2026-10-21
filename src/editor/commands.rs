@@ -1302,6 +1302,9 @@ impl Editor {
                     list.retain(|f| f != &function);
                 }
             }
+            RunHook(hook) => {
+                self.run_hook(&hook);
+            }
             EvalExpression => {
                 self.open_minibuffer("Eval: ", MinibufferPurpose::EvalExpression, "", cx);
             }

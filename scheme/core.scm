@@ -833,6 +833,11 @@
 ;; an older one, and it gives up after ~2s.
 (define *visit-pending* #f)
 
+;; How the last pending visit ended, for callers that must tell a landing apart
+;; from a timeout (both clear *visit-pending*): 'pending while one is armed,
+;; 'landed once point moved, 'timed-out when the ~2s gave up.
+(define *visit-result* 'idle)
+
 ;; --- small shared helpers -----------------------------------------------------
 ;; Drop one trailing "/" (list-directory marks dirs with one; the editor reports
 ;; changed directories without one — normalize before comparing or keying).
@@ -914,6 +919,7 @@
 ;; the buffer visiting `path`; either may be "") is current.
 (define (goto-when-visiting bufname path line0 col)
   (set! *visit-pending* (list bufname path line0 col 0))
+  (set! *visit-result* 'pending)
   (run-with-timer 0 'visit-location-step))
 
 (define (visit-location-step)
@@ -925,6 +931,7 @@
         (cond
           (here?
            (set! *visit-pending* #f)
+           (set! *visit-result* 'landed)
            (let ((ls (position->byte (list-ref v 2) 0)))
              (goto-char (min (+ ls (list-ref v 3)) (line-end-pos ls)))
              (recenter)))
@@ -932,7 +939,8 @@
            (set! *visit-pending* (list (list-ref v 0) (list-ref v 1) (list-ref v 2)
                                        (list-ref v 3) (+ (list-ref v 4) 1)))
            (run-with-timer 20 'visit-location-step))
-          (else (set! *visit-pending* #f)))))))
+          (else (set! *visit-pending* #f)
+                (set! *visit-result* 'timed-out)))))))
 
 ;; Open `path` in the selected window and land on 0-based `line0` once loaded.
 (define (find-file-goto-line path line0)

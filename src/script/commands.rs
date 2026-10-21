@@ -638,6 +638,10 @@ pub enum EditorCommand {
     AddHook(String, String),
     /// Remove a previously added mode hook.
     RemoveHook(String, String),
+    /// Run every function registered on a named hook from Scheme:
+    /// `(run-hook "bookmark-save-hook")` — for hooks whose trigger lives in
+    /// Scheme (the editor runs its own lifecycle hooks itself).
+    RunHook(String),
     /// Register a Scheme completion-at-point function (tried by `M-x
     /// completion-at-point` before LSP): `(add-completion-at-point-function "f")`.
     AddCapf(String),

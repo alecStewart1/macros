@@ -150,6 +150,7 @@ Some state persists across restarts automatically, no configuration required:
 | File in `~/.config/macros/` | Holds | Written |
 |---|---|---|
 | `saveplace`, `recentf` | cursor positions, recent files | when you save a file |
+| `bookmarks` | named positions (Emacs `bookmark.el`) | when a bookmark is set or removed |
 | `savehist`, `desktop` | histories and kill ring, buffers and windows | on quit, and every 5 minutes |
 | `projects`, `perspectives` | recent projects, perspectives | when a project is opened or changed |
 | `dap-breakpoints` | breakpoints | when breakpoints change |
