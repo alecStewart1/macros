@@ -78,6 +78,9 @@ mod panes;
 mod process;
 mod registers;
 mod session;
+mod special_select;
+#[cfg(test)]
+mod special_select_tests;
 mod structural;
 mod terminal;
 mod undo;
@@ -465,6 +468,25 @@ struct AutoscrollState {
     pos: Point<Pixels>,
 }
 
+/// A press in a special buffer that has a `mouse-1` binding. As in Emacs
+/// (`mouse-1-click-follows-link`), the binding runs on the release only when
+/// the pointer stayed within [`CLICK_SLOP`] of `origin`; a press that moves
+/// further is a drag and selects text instead.
+struct SpecialClick {
+    origin: Point<Pixels>,
+    expr: String,
+}
+
+/// How far (in pixels, either axis) the pointer may move between press and
+/// release and still count as a click rather than a drag.
+const CLICK_SLOP: f32 = 4.0;
+
+/// Whether the pointer moved far enough from `origin` to make a press a drag.
+fn past_click_slop(origin: Point<Pixels>, now: Point<Pixels>) -> bool {
+    (f32::from(now.x) - f32::from(origin.x)).abs() > CLICK_SLOP
+        || (f32::from(now.y) - f32::from(origin.y)).abs() > CLICK_SLOP
+}
+
 /// Cursor blink state, mutated as a unit by the blink timer chain.
 struct BlinkState {
     /// Whether the cursor is currently shown. Always true when `cursor-blink`
@@ -529,6 +551,12 @@ pub struct Editor {
     pub status: SharedString,
 
     is_selecting: bool,
+    /// A press in a special buffer whose `mouse-1` binding waits for the
+    /// release — see [`SpecialClick`].
+    special_click: Option<SpecialClick>,
+    /// The special buffer holding a keyboard selection (evil/helix `v`), if
+    /// any — see `special_select.rs`.
+    special_select: Option<String>,
     /// Drag-select autoscroll state — see [`AutoscrollState`].
     autoscroll: AutoscrollState,
     /// Scrollback of echo-area messages (Emacs `*Messages*`), capped. Every
@@ -1419,6 +1447,8 @@ impl Editor {
             keymap: Keymap::default(),
             status: "Macros ready".into(),
             is_selecting: false,
+            special_click: None,
+            special_select: None,
             messages: BoundedRing::new(MESSAGES_CAP),
             echo_count: 0,
             mcp: None,
