@@ -119,3 +119,91 @@
           ((hash-try-get (abbrev--get-table (car parents)) abbrev))
           (else (loop (cdr parents))))))
 
+;; --- expansion ---------------------------------------------------------------
+(define (abbrev--word-char? s) (>= (string-match "[A-Za-z0-9_]" s) 0))
+
+;; (start . word) for the identifier ending at point, or #f.
+(define (abbrev--word-before)
+  (let loop ((i (point)))
+    (if (and (> i 0) (abbrev--word-char? (buffer-substring (- i 1) i)))
+        (loop (- i 1))
+        (if (< i (point)) (cons i (buffer-substring i (point))) #f))))
+
+;; Case rule (Emacs default; skipped when :case-fixed is set):
+;;   typed all-caps -> expansion all-caps     TEH -> THE
+;;   Capitalized    -> Capitalized expansion  Teh -> The
+;;   otherwise      -> expansion as defined
+;; ASCII letters only: non-ASCII abbrevs (`café`) get the literal expansion.
+(define (abbrev--apply-case word expansion entry)
+  (if (cdr (assoc 'case-fixed entry))
+      expansion
+      (let ((all-upper? (abbrev--all-upper? word))
+            (first-upper? (let ((cs (filter abbrev--alpha? (string->list word))))
+                            (and (> (length cs) 0) (abbrev--upper? (car cs))))))
+        (cond (all-upper? (string-upcase expansion))
+              (first-upper?
+               (string-append (string-upcase (substring expansion 0 1))
+                              (substring expansion 1 (string-length expansion))))
+              (else expansion)))))
+
+;; NOTE: steel-core 0.8.x has NO every? / char-upper-case? — hand-rolled here
+;; (verified against the steel-core primitive surface).
+(define (abbrev--alpha? c) (or (abbrev--upper? c) (char<=? #\a c #\z)))
+(define (abbrev--upper? c) (char<=? #\A c #\Z))
+(define (abbrev--all-upper? word)
+  (let ((cs (filter abbrev--alpha? (string->list word))))
+    (and (> (length cs) 0)
+         (let loop ((cs cs))
+           (cond ((null? cs) #t)
+                 ((abbrev--upper? (car cs)) (loop (cdr cs)))
+                 (else #f))))))
+
+;; HOOK and :enable-function accept a procedure or a 'symbol name (the same
+;; convention as hooks.scm). Called with one argument.
+(define (abbrev--call-pred f arg)
+  (cond ((procedure? f) (f arg))
+        ((symbol? f) (eval-string (string-append "(" (symbol->string f)
+                                                 " \"" arg "\")")))
+        (else #f)))
+
+;; v0 stub — replaced by the real predicate in Task 4.
+(define (abbrev--ts-context-ok entry start end) #t)
+
+;; Shared expansion core: replace the word (START . END) with EXP, then run
+;; HOOK. Queued edits apply in order (yasnippet.scm): delete the abbrev, then
+;; insert the expansion at its start. Used by expand-abbrev and the
+;; insert-exit wrappers.
+(define (abbrev--expand-at start end exp hook)
+  (delete-region start end)
+  (goto-char start)
+  (insert exp)
+  (when hook (abbrev--call-pred hook exp)))
+
+;; expand-abbrev — replace the word before point with its expansion (local
+;; table first, then global). :enable-function runs first, then :ts-context;
+;; the HOOK runs after a successful expansion. Primary cursor only.
+(define (expand-abbrev)
+  (let ((wb (abbrev--word-before)))
+    (if (not wb)
+        (message "No word before point")
+        (let ((entry (abbrev-symbol (cdr wb))))
+          (cond
+            ((not entry)
+             (message (string-append "No abbrev: " (cdr wb))))
+            ((let ((pred (cdr (assoc 'enable-function entry))))
+               (and pred (not (abbrev--call-pred pred (cdr wb)))))
+             #f)  ; predicate declined — stay silent, like Emacs
+            ((not (abbrev--ts-context-ok entry (car wb) (point)))
+             #f)  ; wrong syntax context — silent
+            (else
+             (let ((exp (abbrev--apply-case (cdr wb)
+                                            (cdr (assoc 'expansion entry))
+                                            entry)))
+               (abbrev--expand-at (car wb) (point) exp
+                                  (cdr (assoc 'hook entry)))
+               (message (string-append "Expanded: " (cdr wb))))))))))
+
+(register-command 'expand-abbrev)
+(define-key "fundamental" "ctrl-x '" 'expand-abbrev)
+
+
