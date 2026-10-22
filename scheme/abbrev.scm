@@ -1,7 +1,8 @@
 ;; requires: core completion hooks
 
 ;; abbrev — Emacs-style abbreviations, the Macros port of `abbrev`.
-;; An abbrev is a short word that expands to something longer via an explicit
+;; See web/content/docs/abbrev.md for the user-facing docs (including the
+;; snippet-clash guidance). An abbrev is a short word that expands to something longer via an explicit
 ;; command (`expand-abbrev`, bound to C-x ' by default — rebind freely; if the
 ;; binding clashes with yasnippet, that binding choice is yours).
 ;;
