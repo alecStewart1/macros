@@ -360,5 +360,59 @@
 
 (register-command 'abbrev-mode)
 
+;; --- expand-on-insert-exit ---------------------------------------------------
+;; The `evil-want-abbrev-expand-on-insert-exit` analog: while enabled, leaving
+;; insert mode (escape) expands the abbrev before point — silently. Mechanism:
+;; `escape` in the evil/helix INSERT keymaps is rebound to a wrapper here
+;; (never editing evil.scm/helix.scm); the state-exit command is invoked by
+;; 'symbol name through eval-string, so this stays load-order safe no matter
+;; where evil.scm/helix.scm land in the startup graph.
+
+(define *abbrev-expand-on-insert-exit* #f)
+
+(define (set-abbrev-expand-on-insert-exit v)
+  (set! *abbrev-expand-on-insert-exit* v)
+  (if v
+      (begin
+        (bind-key "evil-insert" "escape" 'abbrev--evil-insert-exit)
+        (bind-key "helix-insert" "escape" 'abbrev--helix-insert-exit))
+      (begin
+        (bind-key "evil-insert" "escape" 'evil-normal-state)
+        (bind-key "helix-insert" "escape" 'helix-normal-state))))
+
+;; Expansion core shared with expand-abbrev: full predicate chain (case rules,
+;; :enable-function, :ts-context) + hook, but SILENT — escape should not nag.
+;; #t when an expansion happened.
+(define (abbrev--maybe-expand-word)
+  (let ((wb (abbrev--word-before)))
+    (if (not wb)
+        #f
+        (let ((entry (abbrev-symbol (cdr wb))))
+          (cond ((not entry) #f)
+                ((let ((pred (cdr (assoc 'enable-function entry))))
+                   (and pred (not (abbrev--call-pred pred (cdr wb)))))
+                 #f)
+                ((not (abbrev--ts-context-ok entry (car wb) (point)))
+                 #f)
+                (else
+                 (abbrev--expand-at
+                  (car wb) (point)
+                  (abbrev--apply-case (cdr wb)
+                                      (cdr (assoc 'expansion entry))
+                                      entry)
+                  (cdr (assoc 'hook entry)))
+                 #t))))))
+
+;; Shared insert-exit body: expand, then fall through to the state's own exit
+;; command (by name — see the load-order note above).
+(define (abbrev--insert-exit-common exit-name)
+  (when *abbrev-expand-on-insert-exit*
+    (abbrev--maybe-expand-word))
+  (eval-string (string-append "(" exit-name ")")))
+
+(define (abbrev--evil-insert-exit) (abbrev--insert-exit-common "evil-normal-state"))
+(define (abbrev--helix-insert-exit) (abbrev--insert-exit-common "helix-normal-state"))
+
+
 
 
