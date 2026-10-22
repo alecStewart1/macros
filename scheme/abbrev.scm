@@ -22,6 +22,7 @@
 ;; `:case-fixed` expansions insert exactly as defined. Anonymous procedures as
 ;; hooks/predicates don't persist to the abbrev file — use 'symbol names.
 
+
 ;; table-name -> hash of abbrev -> property alist
 (define *abbrev-tables* (hash))
 
@@ -139,8 +140,15 @@
 
 (define (abbrev--plist-get plist key)
   (cond ((null? plist) #f)
-        ((eq? (car plist) key) (cadr plist))
+        ((eq? (car plist) key) (abbrev--unquote (cadr plist)))
         (else (abbrev--plist-get (cddr plist) key))))
+
+;; Inside a quoted plist, '(:enable-function 'pred) stores (quote pred), not
+;; pred — peel one quote level so prop values come out usable.
+(define (abbrev--unquote x)
+  (if (and (pair? x) (eq? (car x) 'quote))
+      (cadr x)
+      x))
 
 ;; (define-abbrev-table SYMBOL DEFINITIONS &optional DOCSTRING &rest PROPS)
 ;; Emacs signature. SYMBOL is the quoted table name; DEFINITIONS is a list of
@@ -153,7 +161,18 @@
 ;;   (define-abbrev-table 'rust-mode-abbrev-table '()
 ;;     nil '(:parents '(prog-mode-abbrev-table)))
 (define (define-abbrev-table symbol definitions . rest)
-  (let* ((props (if (null? rest) '() (car (last rest))))
+  (let* ((props (let scan ((xs rest))
+                  ;; The PROPS plist is the last trailing list argument that
+                  ;; starts with a keyword; skip a docstring/#f before it.
+                  ;; (steel-core's `last` misbehaves on this shape, so walk
+                  ;; manually.)
+                  (cond ((null? xs) '())
+                        ((null? (cdr xs))
+                         (if (and (pair? (car xs))
+                                  (not (string? (car (car xs)))))
+                             (car xs)
+                             '()))
+                        (else (scan (cdr xs))))))
          (parents (abbrev--plist-get props ':parents))
          (tname (symbol->string symbol))
          (t (abbrev--get-table tname)))
@@ -171,7 +190,15 @@
 ;; :parents — list of table names tried after the local table, before global.
 (define *abbrev-table-parents* (hash))   ; table-name -> list of parent names
 (define (abbrev--put-parents tname parents)
-  (set! *abbrev-table-parents* (hash-insert *abbrev-table-parents* tname parents)))
+  (set! *abbrev-table-parents*
+        (hash-insert *abbrev-table-parents* tname
+                     ;; Accept both '(:parents (a b)) and '(:parents '(a b)):
+                     ;; the inner quote leaves (quote a) elements behind.
+                     ;; Names normalize to strings (table keys are strings).
+                     (map (lambda (p)
+                            (let ((u (abbrev--unquote p)))
+                              (if (symbol? u) (symbol->string u) u)))
+                          parents))))
 
 ;; (abbrev-table-p SYMBOL) — #t when SYMBOL names an existing abbrev table.
 (define (abbrev-table-p symbol)
@@ -204,18 +231,31 @@
 
 ;; (abbrev-symbol abbrev [local-table]) — the property alist for ABBREV.
 ;; Resolution order: local (mode) table → :parents (in list order, via
-;; *abbrev-table-parents*) → global. #f when none has it.
+;; *abbrev-table-parents*) → global. #f when none has it. LOCAL-TABLE may be
+;; given as the bare mode symbol ('rust-mode) or the full table name
+;; ('rust-mode-abbrev-table); when omitted, the current buffer's major mode
+;; table is used.
 (define (abbrev-symbol abbrev . local)
-  (let* ((local-name (if (null? local)
-                         (string-append (major-mode) "-abbrev-table")
-                         (symbol->string (car local))))
+  (let* ((given (if (null? local)
+                    (major-mode)
+                    (symbol->string (car local))))
+         (local-name (if (and (>= (string-length given) 13)
+                              (string=? (substring given
+                                                    (- (string-length given) 13)
+                                                    (string-length given))
+                                        "-abbrev-table"))
+                         given
+                         (string-append given "-abbrev-table")))
          (hit (or (hash-try-get (abbrev--get-table local-name) abbrev)
                   (abbrev--lookup-parents local-name abbrev))))
     (if hit hit (hash-try-get (abbrev--get-table "global-abbrev-table") abbrev))))
 
 (define (abbrev--lookup-parents tname abbrev)
   (let loop ((parents (hash-try-get *abbrev-table-parents* tname)))
-    (cond ((null? parents) #f)
+    ;; hash-try-get yields #f when the table declares no parents — stop there
+    ;; (Steel's null? does not accept #f).
+    (cond ((not parents) #f)
+          ((null? parents) #f)
           ((hash-try-get (abbrev--get-table (car parents)) abbrev))
           (else (loop (cdr parents))))))
 
@@ -413,6 +453,134 @@
 (define (abbrev--evil-insert-exit) (abbrev--insert-exit-common "evil-normal-state"))
 (define (abbrev--helix-insert-exit) (abbrev--insert-exit-common "helix-normal-state"))
 
+;; --- persistence -------------------------------------------------------------
+;; The abbrev file is Scheme data: exactly the (define-abbrev …) forms that
+;; rebuild the tables — so `read-abbrev-file` is just `load`, and any string
+;; (tabs, newlines, quotes) round-trips through the escaped literal. The file
+;; is a BACKUP; the in-memory tables are the source of truth, and re-reading
+;; replaces entries (hash-insert semantics), never duplicates.
+;;
+;; Round-trips: expansions, 'symbol hooks, prop plists, :parents (emitted as a
+;; define-abbrev-table form). Does NOT round-trip: anonymous procedures (a
+;; lambda hook/predicate) — the entry is skipped with a ;; comment naming the
+;; abbrev; keep those definitions in init.scm.
 
+(define *abbrev-file-name* "")   ; default set at the bottom of this section
+(define *save-abbrevs* 'silent)  ; 'silent — auto-save on exit, no messages
 
+;; Scheme string literal escaping for the serialized forms: backslash first,
+;; then quote, control chars (mirrors session.scm's session-escape idiom).
+(define (abbrev--escape s)
+  (string-replace
+   (string-replace
+    (string-replace
+     (string-replace s "\\" "\\\\")
+     "\"" "\\\"")
+    "\n" "\\n")
+   "\t" "\\t"))
 
+;; Prop fragments: " :key value" pieces; only truthy props are emitted.
+;; Anonymous procedures are not serializable — the whole entry is skipped.
+(define (abbrev--prop-frag key val)
+  (cond ((eq? val #t) (string-append " :" (symbol->string key) " #t"))
+        ((symbol? val) (string-append " :" (symbol->string key) " '"
+                                      (symbol->string val)))
+        ((string? val) (string-append " :" (symbol->string key) " \""
+                                      (abbrev--escape val) "\""))
+        (else "")))
+
+;; One (define-abbrev …) form for an entry, or #f when it can't round-trip.
+(define (abbrev--entry-form tname name entry)
+  (let ((exp (cdr (assoc 'expansion entry)))
+        (hook (cdr (assoc 'hook entry)))
+        (enable (cdr (assoc 'enable-function entry))))
+    (if (or (and hook (procedure? hook))
+            (and enable (procedure? enable)))
+        #f  ; anonymous procedure — caller leaves a ;; comment
+        (let* ((props (string-append
+                       (if enable (abbrev--prop-frag 'enable-function enable) "")
+                       (if (cdr (assoc 'case-fixed entry))
+                           (abbrev--prop-frag 'case-fixed #t)
+                           "")
+                       (let ((ts (cdr (assoc 'ts-context entry))))
+                         (if ts (abbrev--prop-frag 'ts-context ts) ""))))
+               (props-arg (if (> (string-length props) 0)
+                              (string-append " '(" props ")")
+                              ""))
+               (hook-arg (cond ((not hook) "#f")
+                               ((symbol? hook)
+                                (string-append "'" (symbol->string hook)))
+                               (else "#f"))))
+          (string-append "(define-abbrev '" tname
+                         " \"" (abbrev--escape name) "\""
+                         " \"" (abbrev--escape exp) "\""
+                         " " hook-arg props-arg ")")))))
+
+;; (define-abbrev-table 'name '() #f '(:parents '(…))) for :parents declarations.
+(define (abbrev--parents-forms)
+  (let loop ((ts (hash->list *abbrev-table-parents*)) (out '()))
+    (if (null? ts)
+        (apply string-append (reverse out))
+        (let* ((tname (car (car ts)))
+               (parents (cdr (car ts)))
+               (names (apply string-append
+                             (map (lambda (p)
+                                    (string-append " '" p))
+                                  parents))))
+          (loop (cdr ts)
+                (cons (string-append "(define-abbrev-table '"
+                                     tname " '() #f '(:parents '(" names
+                                     ")))\n")
+                      out))))))
+
+;; The whole abbrev file: parents declarations, then one form per entry.
+;; Entries with anonymous hooks/predicates become ;; comments (see above).
+(define (abbrev--serialize)
+  (let loop ((ts (hash->list *abbrev-tables*)) (out '()))
+    (if (null? ts)
+        (string-append (abbrev--parents-forms)
+                       (apply string-append (reverse out)))
+        (let* ((tname (car (car ts)))
+               (entries (hash->list (cdr (car ts))))
+               (forms (let inner ((es entries) (acc '()))
+                        (if (null? es)
+                            (reverse acc)
+                            (let ((name (car (car es)))
+                                  (entry (cdr (car es))))
+                              (let ((form (abbrev--entry-form tname name entry)))
+                                (inner (cdr es)
+                                       (cons (if form
+                                                 (string-append form "\n")
+                                                 (string-append ";; not saved (anonymous procedure): "
+                                                                tname " " name "\n"))
+                                             acc))))))))
+          (loop (cdr ts) (append forms out))))))
+
+;; Silent internal saver — never messages (the 'silent contract). No file is
+;; written when *save-abbrevs* is #f or no abbrevs exist.
+(define (abbrev--save)
+  (when *save-abbrevs*
+    (let ((s (abbrev--serialize)))
+      (when (> (string-length s) 0)
+        (write-file *abbrev-file-name* s)))))
+
+;; User-facing explicit commands.
+(define (write-abbrev-file . file)
+  (write-file (if (null? file) *abbrev-file-name* (car file))
+              (abbrev--serialize)))
+
+;; (read-abbrev-file [path]) — the file is Scheme data, so reading is loading.
+(define (read-abbrev-file . file)
+  (load (if (null? file) *abbrev-file-name* (car file))))
+
+(define (set-abbrev-file-name path) (set! *abbrev-file-name* path))
+(define (set-save-abbrevs val) (set! *save-abbrevs* val))
+
+(add-hook "kill-emacs-hook" "abbrev--save")
+
+;; Default location; init.scm can override.
+(set! *abbrev-file-name*
+      (string-append (getenv "HOME") "/.config/macros/abbrevs.scm"))
+
+(register-command 'write-abbrev-file)
+(register-command 'read-abbrev-file)
