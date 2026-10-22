@@ -186,6 +186,13 @@
       (cadr x)
       x))
 
+;; #t when KEY occurs in PLIST (even with a false value) — unlike
+;; abbrev--plist-get, which cannot distinguish (:system #f) from absence.
+(define (abbrev--plist-has? key plist)
+  (cond ((null? plist) #f)
+        ((eq? (car plist) key) #t)
+        (else (abbrev--plist-has? key (cddr plist)))))
+
 ;; (define-abbrev-table SYMBOL DEFINITIONS &optional DOCSTRING &rest PROPS)
 ;; Emacs signature. SYMBOL is the quoted table name; DEFINITIONS is a list of
 ;; (NAME EXPANSION [HOOK [PROPS]]) lists. PROPS: (:parents '(other-table …)).
@@ -224,7 +231,10 @@
          (apply define-abbrev
                 symbol (car d) (cadr d)
                 (append (if (> (length d) 2) (list (list-ref d 2)) '(#f))
-                        (list (if (abbrev--plist-get dprops ':system)
+                        ;; Default to :system #t only when the definition
+                        ;; doesn't name its own :system (a bare (:system #f)
+                        ;; means the user wants a savable abbrev here).
+                        (list (if (abbrev--plist-has? ':system dprops)
                                   dprops
                                   (append dprops '(:system #t))))))))
      definitions)))
@@ -278,7 +288,12 @@
                 existing
                 (cdr (assoc 'expansion existing))
                 (not (cdr (assoc 'system existing))))
-           name)   ; skipped — the user's abbrev wins
+           ;; Skipped — the user's abbrev wins. Say so: a silent no-op here
+           ;; would look like the system abbrev "didn't take".
+           (message (string-append "abbrev: system definition of \"" name
+                                   "\" in " tname
+                                   " skipped — a user abbrev already defines it"))
+           name)
           (else
            (abbrev--put-table tname (hash-insert t name entry))
            (abbrev--ts-update-hooks)
@@ -525,9 +540,13 @@
 ;; --- persistence -------------------------------------------------------------
 ;; The abbrev file is Scheme data: exactly the (define-abbrev …) forms that
 ;; rebuild the tables — so `read-abbrev-file` is just `load`, and any string
-;; (tabs, newlines, quotes) round-trips through the escaped literal. The file
-;; is a BACKUP; the in-memory tables are the source of truth, and re-reading
-;; replaces entries (hash-insert semantics), never duplicates.
+;; (quotes, newlines, tabs, any control char) round-trips through the escaped
+;; literal. The file is a BACKUP; the in-memory tables are the source of truth,
+;; and re-reading replaces entries (hash-insert semantics), never duplicates.
+;; It is written only when at least one savable abbrev exists — an all-system
+;; or all-anonymous table serializes to just ;; comments, and that is not a
+;; save. Skipped system redefinitions (a user abbrev winning) announce
+;; themselves in the echo area rather than failing silently.
 ;;
 ;; Round-trips: expansions, 'symbol hooks, prop plists, :parents (emitted as a
 ;; define-abbrev-table form). Does NOT round-trip: anonymous procedures (a
@@ -537,16 +556,25 @@
 (define *abbrev-file-name* "")   ; default set at the bottom of this section
 (define *save-abbrevs* 'silent)  ; 'silent — auto-save on exit, no messages
 
-;; Scheme string literal escaping for the serialized forms: backslash first,
-;; then quote, control chars (mirrors session.scm's session-escape idiom).
+;; Scheme string literal escaping for the serialized forms: backslash and
+;; quote, then ANY control char (<32 — \n, \t, \r, …) uniformly as a \u{hex};
+;; escape (steel's lexer reads \u{…} in string literals — verified in
+;; steel-parser's read_string_escape), so every control character round-trips.
 (define (abbrev--escape s)
-  (string-replace
-   (string-replace
-    (string-replace
-     (string-replace s "\\" "\\\\")
-     "\"" "\\\"")
-    "\n" "\\n")
-   "\t" "\\t"))
+  (let ((unquoted (string-replace
+                   (string-replace s "\\" "\\\\")
+                   "\"" "\\\"")))
+    (let loop ((cs (string->list unquoted)) (out (list)))
+      (cond ((null? cs) (list->string (reverse out)))
+            ((< (char->integer (car cs)) 32)
+             (loop (cdr cs)
+                   (append (reverse (string->list
+                                     (string-append "\\u{"
+                                                    (number->string
+                                                     (char->integer (car cs)) 16)
+                                                    "};")))
+                           out)))
+            (else (loop (cdr cs) (cons (car cs) out)))))))
 
 ;; Prop fragments: " :key value" pieces; only truthy props are emitted.
 ;; Anonymous procedures are not serializable — the whole entry is skipped.
@@ -633,11 +661,13 @@
           (loop (cdr ts) (append forms out))))))
 
 ;; Silent internal saver — never messages (the 'silent contract). No file is
-;; written when *save-abbrevs* is #f or no abbrevs exist.
+;; written when *save-abbrevs* is #f or nothing savable exists: a serialization
+;; of only ;; comments (all-system / all-anonymous tables) is not a save.
 (define (abbrev--save)
   (when *save-abbrevs*
     (let ((s (abbrev--serialize)))
-      (when (> (string-length s) 0)
+      (when (and (> (string-length s) 0)
+                 (string-contains? s "(define-abbrev"))
         (write-file *abbrev-file-name* s)))))
 
 ;; User-facing explicit commands.

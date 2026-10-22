@@ -13564,7 +13564,10 @@ mod abbrev_lib {
         );
         // Plain user abbrev: not system, so it round-trips to the abbrev file.
         assert_eq!(
-            v(&engine, r#"(abbrev--entry-form "global-abbrev-table" "teh" (abbrev-symbol "teh" 'global-abbrev-table))"#),
+            v(
+                &engine,
+                r#"(abbrev--entry-form "global-abbrev-table" "teh" (abbrev-symbol "teh" 'global-abbrev-table))"#
+            ),
             "\"(define-abbrev 'global-abbrev-table \\\"teh\\\" \\\"the\\\" #f)\""
         );
     }
@@ -13581,7 +13584,10 @@ mod abbrev_lib {
             .eval(r#"(define-abbrev 'global-abbrev-table "x" "system-expansion" #f '(:system #t))"#)
             .unwrap();
         assert_eq!(
-            v(&engine, r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#),
+            v(
+                &engine,
+                r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#
+            ),
             "\"user-expansion\""
         );
         // :system 'force overrides the user's abbrev.
@@ -13589,12 +13595,18 @@ mod abbrev_lib {
             .eval(r#"(define-abbrev 'global-abbrev-table "x" "forced" #f '(:system 'force))"#)
             .unwrap();
         assert_eq!(
-            v(&engine, r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#),
+            v(
+                &engine,
+                r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#
+            ),
             "\"forced\""
         );
         // 'force is stored as #t (the force value itself is not kept).
         assert_eq!(
-            v(&engine, r#"(cdr (assoc 'system (abbrev-symbol "x" 'global-abbrev-table)))"#),
+            v(
+                &engine,
+                r#"(cdr (assoc 'system (abbrev-symbol "x" 'global-abbrev-table)))"#
+            ),
             "#true"
         );
     }
@@ -13609,8 +13621,14 @@ mod abbrev_lib {
             .eval(r#"(define-abbrev 'global-abbrev-table "usr" "u")"#)
             .unwrap();
         let file = v(&engine, r#"(abbrev--serialize)"#);
-        assert!(file.contains(r#"(define-abbrev 'global-abbrev-table \"usr\""#), "{file}");
-        assert!(!file.contains(r#"\"sys\""#), "system abbrev leaked into file: {file}");
+        assert!(
+            file.contains(r#"(define-abbrev 'global-abbrev-table \"usr\""#),
+            "{file}"
+        );
+        assert!(
+            !file.contains(r#"\"sys\""#),
+            "system abbrev leaked into file: {file}"
+        );
         assert!(file.contains(";; system abbrev (not saved):"), "{file}");
     }
 
@@ -13621,7 +13639,10 @@ mod abbrev_lib {
             .eval(r#"(define-abbrev-table 'rust-mode-abbrev-table '(("fnr" "fn rec"))) "#)
             .unwrap();
         assert_eq!(
-            v(&engine, r#"(cdr (assoc 'system (abbrev-symbol "fnr" 'rust-mode-abbrev-table)))"#),
+            v(
+                &engine,
+                r#"(cdr (assoc 'system (abbrev-symbol "fnr" 'rust-mode-abbrev-table)))"#
+            ),
             "#true"
         );
         // …and a definition naming its own :system keeps that value.
@@ -13632,7 +13653,10 @@ mod abbrev_lib {
             )
             .unwrap();
         assert_eq!(
-            v(&engine, r#"(cdr (assoc 'system (abbrev-symbol "gom" 'go-mode-abbrev-table)))"#),
+            v(
+                &engine,
+                r#"(cdr (assoc 'system (abbrev-symbol "gom" 'go-mode-abbrev-table)))"#
+            ),
             "#false"
         );
     }
@@ -13651,8 +13675,10 @@ mod abbrev_hook_injection {
         // A hook named by 'symbol receives the expansion via a string-built
         // eval-string; a quote in the expansion must stay DATA, not code.
         engine
-            .eval(r#"(define hook-got #f)
-                     (define (abbrev-test-hook s) (set! hook-got s))"#)
+            .eval(
+                r#"(define hook-got #f)
+                     (define (abbrev-test-hook s) (set! hook-got s))"#,
+            )
             .unwrap();
         engine
             .eval(r#"(define-abbrev 'global-abbrev-table "z" "\") (evil-delete-buffer) (\"" abbrev-test-hook)"#)
@@ -13665,5 +13691,91 @@ mod abbrev_hook_injection {
                 .unwrap(),
             r#""\") (evil-delete-buffer) (\"""#
         );
+    }
+}
+
+#[cfg(test)]
+mod abbrev_review_fixes {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "abbrev");
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn escape_round_trips_carriage_return_and_other_control_chars() {
+        let engine = engine();
+        // \r and friends all become \u{hex}; escapes (steel's lexer reads
+        // them), so the serialization can never contain a raw control byte.
+        assert_eq!(v(&engine, r#"(abbrev--escape "a\rb")"#), r#""a\\u{d};b""#);
+        assert_eq!(v(&engine, r#"(abbrev--escape "x\tyz")"#), r#""x\\u{9};yz""#);
+    }
+
+    #[test]
+    fn skipped_system_redefinition_messages() {
+        let engine = engine();
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "m" "user")"#)
+            .unwrap();
+        let out = engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "m" "system" #f '(:system #t))"#)
+            .unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::Message(m) if m.contains("skipped"))),
+            "expected a skip message: {:?}",
+            out.commands
+        );
+        // …and the user's abbrev still wins.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(cdr (assoc 'expansion (abbrev-symbol "m" 'global-abbrev-table)))"#
+            ),
+            "\"user\""
+        );
+    }
+
+    #[test]
+    fn save_writes_nothing_when_only_comments_would_be_serialized() {
+        let engine = engine();
+        let dir = std::env::temp_dir().join(format!("abbrev-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("abbrevs.scm");
+        engine
+            .eval(&format!(r#"(set-abbrev-file-name {:?})"#, file))
+            .unwrap();
+        // Only a system abbrev → serialization is just a ;; comment → no save.
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "sys" "s" #f '(:system #t))"#)
+            .unwrap();
+        engine.eval(r#"(abbrev--save)"#).unwrap();
+        assert!(
+            !file.exists(),
+            "comment-only serialization must not be written"
+        );
+        // A user abbrev flips it to a real save.
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "usr" "u")"#)
+            .unwrap();
+        engine.eval(r#"(abbrev--save)"#).unwrap();
+        let contents = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            contents.contains("(define-abbrev 'global-abbrev-table"),
+            "{contents}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
