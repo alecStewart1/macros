@@ -13637,3 +13637,33 @@ mod abbrev_lib {
         );
     }
 }
+
+#[cfg(test)]
+mod abbrev_hook_injection {
+    use super::*;
+
+    #[test]
+    fn symbol_hook_receives_hostile_expansion_as_data() {
+        let (engine, _rx) = ScriptEngine::new();
+        crate::runtime::startup_scripts().iter().for_each(|src| {
+            engine.eval(src).expect("startup script");
+        });
+        // A hook named by 'symbol receives the expansion via a string-built
+        // eval-string; a quote in the expansion must stay DATA, not code.
+        engine
+            .eval(r#"(define hook-got #f)
+                     (define (abbrev-test-hook s) (set! hook-got s))"#)
+            .unwrap();
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "z" "\") (evil-delete-buffer) (\"" abbrev-test-hook)"#)
+            .unwrap();
+        assert_eq!(
+            engine
+                .eval(r#"(begin (abbrev--call-pred 'abbrev-test-hook (cdr (assoc 'expansion (abbrev-symbol "z" 'global-abbrev-table)))) hook-got)"#)
+                .unwrap()
+                .value
+                .unwrap(),
+            r#""\") (evil-delete-buffer) (\"""#
+        );
+    }
+}

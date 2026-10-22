@@ -369,8 +369,10 @@
 ;; convention as hooks.scm). Called with one argument.
 (define (abbrev--call-pred f arg)
   (cond ((procedure? f) (f arg))
+        ;; Escape ARG for the string literal — an expansion containing `"`
+        ;; must not break out of the eval-string (code injection).
         ((symbol? f) (eval-string (string-append "(" (symbol->string f)
-                                                 " \"" arg "\")")))
+                                                 " \"" (abbrev--escape arg) "\")")))
         (else #f)))
 
 ;; v0 stub replaced: the real abbrev--ts-context-ok lives in the :ts-context
