@@ -1,4 +1,4 @@
-;; requires: core completion
+;; requires: core completion hooks
 
 ;; abbrev — Emacs-style abbreviations, the Macros port of `abbrev`.
 ;; An abbrev is a short word that expands to something longer via an explicit
@@ -24,6 +24,104 @@
 
 ;; table-name -> hash of abbrev -> property alist
 (define *abbrev-tables* (hash))
+
+;; :ts-context — syntax-context predicate --------------------------------------
+;; (define-abbrev 'prog-mode-abbrev-table "x" "y" #f '(:ts-context "@comment"))
+;; expands only when the abbrev sits inside a comment (a space-separated list
+;; also works: '(:ts-context "@comment @string")). Names may carry the '@' of
+;; tree-sitter highlight captures or be bare words; either way the enclosing
+;; node KIND just has to contain the name (so "comment" matches the
+;; line_comment/block_comment/comment node kinds across grammars).
+;;
+;; tree-sitter-node-at is callback-async, so we cache the enclosing node chain
+;; (kind start end) at point and refresh it debounced after edits and cursor
+;; moves — but only while some in-scope abbrev actually uses :ts-context
+;; (zero cost otherwise). Reading the cache at expand time is synchronous, so
+;; the predicate behaves like :enable-function; worst case the cache is one
+;; edit cycle stale (the same trade rainbow.scm and spell.scm make). The cache
+;; is buffer-global: with multiple cursors, :ts-context follows the PRIMARY
+;; cursor only. In a grammar-less buffer no callback ever fires, so an abbrev
+;; with :ts-context simply never expands — a visible, documented degradation.
+
+(define *abbrev-ts-captures* '())    ; (kind start end) records, last refresh
+(define *abbrev-ts-hooked* #f)
+
+;; #t when any table in scope has an abbrev with a :ts-context prop.
+(define (abbrev--ts-any-wanted?)
+  (let outer ((ts (hash->list *abbrev-tables*)))
+    (if (null? ts)
+        #f
+        (let inner ((es (hash->list (cdr (car ts)))))
+          (cond ((null? es) (outer (cdr ts)))
+                ((cdr (assoc 'ts-context (cdr (car es)))) #t)
+                (else (inner (cdr es))))))))
+
+;; Refresh the cache: node chain at point, primary cursor. Async — the result
+;; lands in abbrev--ts-apply. No-grammar buffers just never call back.
+(define (abbrev--ts-refresh)
+  (when (abbrev--ts-any-wanted?)
+    (tree-sitter-node-at (point) 'abbrev--ts-apply)))
+
+;; Debounced schedule (core.scm's make-debounce): a burst of edits refreshes
+;; once. The hooks call this by name.
+(define abbrev--ts-schedule (make-debounce "abbrev-ts" 250 abbrev--ts-refresh))
+
+;; Callback for tree-sitter-node-at: records are "kind\tstart\tend" lines
+;; (byte offsets, innermost first). Return value is ignored.
+(define (abbrev--ts-apply records)
+  (set! *abbrev-ts-captures*
+        (filter (lambda (x) x)
+                (map (lambda (rec)
+                       (let ((p (split-many rec "\t")))
+                         (if (>= (length p) 3)
+                             (list (nth p 0)
+                                   (string->number (nth p 1))
+                                   (string->number (nth p 2)))
+                             #f)))
+                     (non-empty-lines records))))
+  #f)
+
+;; Hook the refresh onto edit + motion only while some abbrev wants
+;; :ts-context; called from define-abbrev / clear-abbrev.
+(define (abbrev--ts-update-hooks)
+  (let ((want (abbrev--ts-any-wanted?)))
+    (cond ((and want (not *abbrev-ts-hooked*))
+           (set! *abbrev-ts-hooked* #t)
+           (add-hook "after-change-functions" "abbrev--ts-schedule")
+           (add-hook "post-command-hook" "abbrev--ts-schedule"))
+          ((and (not want) *abbrev-ts-hooked*)
+           (set! *abbrev-ts-hooked* #f)
+           (remove-hook "after-change-functions" "abbrev--ts-schedule")
+           (remove-hook "post-command-hook" "abbrev--ts-schedule")))))
+
+;; #t when NODE-KIND is one of NAMES (a '@'-stripped context name), either
+;; exactly or by substring — so "comment" matches line_comment/block_comment.
+(define (abbrev--kind-match? kind names)
+  (cond ((null? names) #f)
+        ((or (string=? kind (car names))
+             (string-contains? kind (car names)))
+         #t)
+        (else (abbrev--kind-match? kind (cdr names)))))
+
+;; Drop the leading '@' of a capture-style name, if any.
+(define (abbrev--strip-at n)
+  (if (and (> (string-length n) 0) (string=? "@" (substring n 0 1)))
+      (substring n 1 (string-length n))
+      n))
+
+;; True when the entry has no :ts-context, or one of its context names matches
+;; a cached node kind whose span overlaps START..END (byte offsets).
+(define (abbrev--ts-context-ok entry start end)
+  (let ((want (cdr (assoc 'ts-context entry))))
+    (or (not want)
+        (let ((names (map abbrev--strip-at (non-empty-lines (replace-regexp-in-string " " "\n" want)))))
+          (let loop ((cs *abbrev-ts-captures*))
+            (cond ((null? cs) #f)
+                  ((and (abbrev--kind-match? (car (car cs)) names)
+                        (<= (nth (car cs) 1) end)     ; overlap test: the
+                        (>= (nth (car cs) 2) start))  ; spans share bytes
+                   #t)
+                  (else (loop (cdr cs)))))))))
 
 ;; --- tables ------------------------------------------------------------------
 ;; An abbrev table is a Steel hash: abbrev string -> property alist:
@@ -95,12 +193,14 @@
                       (cons 'case-fixed (abbrev--plist-get props ':case-fixed))
                       (cons 'enable-function (abbrev--plist-get props ':enable-function))
                       (cons 'ts-context (abbrev--plist-get props ':ts-context)))))
-    (abbrev--put-table tname (hash-insert t name entry))))
+    (abbrev--put-table tname (hash-insert t name entry))
+    (abbrev--ts-update-hooks)))
 
 ;; (clear-abbrev [table]) — remove every abbrev from TABLE (default global).
 (define (clear-abbrev . table)
   (abbrev--put-table
-   (symbol->string (if (null? table) 'global-abbrev-table (car table))) (hash)))
+   (symbol->string (if (null? table) 'global-abbrev-table (car table))) (hash))
+  (abbrev--ts-update-hooks))
 
 ;; (abbrev-symbol abbrev [local-table]) — the property alist for ABBREV.
 ;; Resolution order: local (mode) table → :parents (in list order, via
@@ -166,8 +266,8 @@
                                                  " \"" arg "\")")))
         (else #f)))
 
-;; v0 stub — replaced by the real predicate in Task 4.
-(define (abbrev--ts-context-ok entry start end) #t)
+;; v0 stub replaced: the real abbrev--ts-context-ok lives in the :ts-context
+;; section above.
 
 ;; Shared expansion core: replace the word (START . END) with EXP, then run
 ;; HOOK. Queued edits apply in order (yasnippet.scm): delete the abbrev, then
