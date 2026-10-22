@@ -1,4 +1,4 @@
-;; requires: core
+;; requires: core completion
 
 ;; abbrev — Emacs-style abbreviations, the Macros port of `abbrev`.
 ;; An abbrev is a short word that expands to something longer via an explicit
@@ -205,5 +205,60 @@
 
 (register-command 'expand-abbrev)
 (define-key "fundamental" "ctrl-x '" 'expand-abbrev)
+
+;; --- abbrev-mode: the M-x toggle ---------------------------------------------
+;; Enabling registers the abbrev CAPF; disabling removes it.
+
+(define *abbrev-mode-on* #f)
+(define *abbrev-capf-registered* #f)
+(define *abbrev-capf-min-prefix* 2)   ; decline prefixes shorter than this
+(define (set-abbrev-capf-min-prefix n) (set! *abbrev-capf-min-prefix* n))
+
+;; Completes a prefix against the local + global tables; local shadows global.
+;; Candidates are (text annotation) pairs — annotation = the expansion.
+;; Flag-gated (there is NO remove-completion-at-point-function primitive —
+;; verified): the CAPF registers once, on first enable, and declines with '()
+;; while the mode is off. Registration order = priority order, so a user who
+;; wants abbrevs before dabbrev enables abbrev-mode early in init.scm.
+(define (abbrev-capf prefix)
+  (if (or (not *abbrev-mode-on*)
+          (< (string-length prefix) *abbrev-capf-min-prefix*))
+      '()
+      (let loop ((entries (append (hash->list (abbrev--get-table
+                                               (string-append (major-mode)
+                                                              "-abbrev-table")))
+                                  (hash->list (abbrev--get-table
+                                               "global-abbrev-table"))))
+                 (out '()))
+        (if (null? entries)
+            (reverse out)
+            (let ((a (car (car entries))) (entry (cdr (car entries))))
+              (if (and (abbrev--prefix? prefix a)
+                       (not (string=? prefix a))
+                       (not (assoc a out)))
+                  (loop (cdr entries)
+                        (cons (list a (cdr (assoc 'expansion entry))) out))
+                  (loop (cdr entries) out)))))))
+
+(define (abbrev--prefix? prefix s)
+  ;; steel-core has no string-prefix? — hand-rolled substring compare.
+  (and (>= (string-length s) (string-length prefix))
+       (string=? prefix (substring s 0 (string-length prefix)))))
+
+(define (abbrev-mode)
+  (cond (*abbrev-mode-on*
+         (set! *abbrev-mode-on* #f)
+         (message "abbrev-mode disabled"))
+        ((not *abbrev-capf-registered*)
+         (set! *abbrev-capf-registered* #t)
+         (set! *abbrev-mode-on* #t)
+         (add-completion-at-point-function "abbrev-capf")
+         (message "abbrev-mode enabled"))
+        (else
+         (set! *abbrev-mode-on* #t)
+         (message "abbrev-mode enabled"))))
+
+(register-command 'abbrev-mode)
+
 
 
