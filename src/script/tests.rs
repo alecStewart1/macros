@@ -13530,3 +13530,110 @@ mod bookmarks_lib {
         );
     }
 }
+
+mod abbrev_lib {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "abbrev");
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, q: &str) -> String {
+        engine
+            .eval(q)
+            .unwrap_or_else(|e| panic!("{q}: {e}"))
+            .value
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn define_global_abbrev_lands_in_the_global_table() {
+        let engine = engine();
+        assert_eq!(
+            v(&engine, r#"(define-global-abbrev "teh" "the")"#),
+            "\"teh\""
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(cdr (assoc 'expansion (abbrev-symbol "teh" 'global-abbrev-table)))"#
+            ),
+            "\"the\""
+        );
+        // Plain user abbrev: not system, so it round-trips to the abbrev file.
+        assert_eq!(
+            v(&engine, r#"(abbrev--entry-form "global-abbrev-table" "teh" (abbrev-symbol "teh" 'global-abbrev-table))"#),
+            "\"(define-abbrev 'global-abbrev-table \\\"teh\\\" \\\"the\\\" #f)\""
+        );
+    }
+
+    #[test]
+    fn system_abbrev_does_not_overwrite_user_abbrev_unless_force() {
+        let engine = engine();
+        // User defines first.
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "x" "user-expansion")"#)
+            .unwrap();
+        // A plain system abbrev must NOT clobber it.
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "x" "system-expansion" #f '(:system #t))"#)
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#),
+            "\"user-expansion\""
+        );
+        // :system 'force overrides the user's abbrev.
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "x" "forced" #f '(:system 'force))"#)
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#),
+            "\"forced\""
+        );
+        // 'force is stored as #t (the force value itself is not kept).
+        assert_eq!(
+            v(&engine, r#"(cdr (assoc 'system (abbrev-symbol "x" 'global-abbrev-table)))"#),
+            "#true"
+        );
+    }
+
+    #[test]
+    fn system_abbrevs_are_excluded_from_the_saved_file() {
+        let engine = engine();
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "sys" "s" #f '(:system #t))"#)
+            .unwrap();
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "usr" "u")"#)
+            .unwrap();
+        let file = v(&engine, r#"(abbrev--serialize)"#);
+        assert!(file.contains(r#"(define-abbrev 'global-abbrev-table \"usr\""#), "{file}");
+        assert!(!file.contains(r#"\"sys\""#), "system abbrev leaked into file: {file}");
+        assert!(file.contains(";; system abbrev (not saved):"), "{file}");
+    }
+
+    #[test]
+    fn define_abbrev_table_definitions_are_system_by_default() {
+        let engine = engine();
+        engine
+            .eval(r#"(define-abbrev-table 'rust-mode-abbrev-table '(("fnr" "fn rec"))) "#)
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(cdr (assoc 'system (abbrev-symbol "fnr" 'rust-mode-abbrev-table)))"#),
+            "#true"
+        );
+        // …and a definition naming its own :system keeps that value.
+        engine
+            .eval(
+                r#"(define-abbrev-table 'go-mode-abbrev-table
+                    '(("gom" "module" #f (:system #f))))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(cdr (assoc 'system (abbrev-symbol "gom" 'go-mode-abbrev-table)))"#),
+            "#false"
+        );
+    }
+}

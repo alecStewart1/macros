@@ -21,7 +21,43 @@
 ;; set-abbrev-expand-on-insert-exit). Case rules: TEH → THE, Teh → The, and
 ;; `:case-fixed` expansions insert exactly as defined. Anonymous procedures as
 ;; hooks/predicates don't persist to the abbrev file — use 'symbol names.
-
+;;
+;; COMMANDS & API
+;;   expand-abbrev (C-x ')   replace the word before point with its expansion;
+;;                           silent no-op when :enable-function/:ts-context decline
+;;   abbrev-mode (M-x)       toggle the abbrev completion-at-point source;
+;;                           there is no other behavior behind this toggle
+;;   define-abbrev           (TABLE NAME EXPANSION &optional HOOK PROPS) —
+;;                           Emacs signature; TABLE is a quoted symbol
+;;   define-global-abbrev    (NAME EXPANSION &optional HOOK PROPS) — plain
+;;                           user abbrev in the global table (not :system)
+;;   define-abbrev-table     (SYMBOL DEFINITIONS &optional DOCSTRING PROPS);
+;;                           :parents names tables tried before the global one;
+;;                           definitions default to :system #t (Emacs rule)
+;;   clear-abbrev, abbrev-symbol, abbrev-table-p
+;;   write-abbrev-file / read-abbrev-file      explicit persistence (Scheme data)
+;;   set-save-abbrevs / set-abbrev-file-name  'silent by default (auto-save on
+;;                           exit to ~/.config/macros/abbrevs.scm, no messages);
+;;                           no file is written while no abbrevs exist
+;;   set-abbrev-capf-min-prefix           shortest prefix abbrev completion
+;;                                        answers (default 2)
+;;   set-abbrev-expand-on-insert-exit     expand silently when leaving evil /
+;;                                        helix insert mode with escape
+;;
+;; PROPS
+;;   :case-fixed #t         insert the expansion exactly as defined
+;;   :enable-function pred  proc or 'symbol taking the abbrev; #f declines
+;;                          silently (checked first)
+;;   :ts-context "X"        expand only inside a matching tree-sitter node
+;;                          (space-separated list; '@' optional). The node chain
+;;                          is cached debounced, so it can be one edit cycle
+;;                          stale; in a grammar-less buffer the abbrev never
+;;                          expands. With multiple cursors this follows the
+;;                          primary cursor only.
+;;   :system #t / 'force    "system" abbreviation: NOT saved to the abbrev
+;;                          file (define it in init.scm instead). A system
+;;                          abbrev will not overwrite a non-system abbrev of
+;;                          the same name unless :system is 'force.
 
 ;; table-name -> hash of abbrev -> property alist
 (define *abbrev-tables* (hash))
@@ -178,13 +214,19 @@
          (t (abbrev--get-table tname)))
     (when parents (abbrev--put-parents tname parents))
     ;; definitions: ((name expansion [hook [props]]) …)
+    ;; Emacs rule: abbrevs declared via define-abbrev-table are SYSTEM abbrevs
+    ;; (:system #t) — they are not saved to the user's abbrev file. A definition
+    ;; that names its own :system keeps that value.
     (for-each
      (lambda (d)
        ;; no cadddr in this Steel build — use list-ref (verified: list-ref ✓)
-       (apply define-abbrev
-              symbol (car d) (cadr d)
-              (append (if (> (length d) 2) (list (list-ref d 2)) '(#f))
-                      (if (> (length d) 3) (list (list-ref d 3)) '()))))
+       (let ((dprops (if (> (length d) 3) (list-ref d 3) '())))
+         (apply define-abbrev
+                symbol (car d) (cadr d)
+                (append (if (> (length d) 2) (list (list-ref d 2)) '(#f))
+                        (list (if (abbrev--plist-get dprops ':system)
+                                  dprops
+                                  (append dprops '(:system #t))))))))
      definitions)))
 
 ;; :parents — list of table names tried after the local table, before global.
@@ -208,20 +250,45 @@
 ;; (define-abbrev TABLE NAME EXPANSION &optional HOOK PROPS) — Emacs signature.
 ;; TABLE is a quoted symbol ('global-abbrev-table, 'rust-mode-abbrev-table, …).
 ;; HOOK is a procedure or 'symbol run after expansion (pass #f for none).
-;; PROPS is a plist: (:case-fixed #t :enable-function 'pred :ts-context "@comment").
+;; PROPS is a plist: (:case-fixed #t :enable-function 'pred :ts-context "X"
+;;                    :system #t|'force).
+;; :system marks a "system" abbrev: it is excluded from the saved abbrev file
+;; (define those in init.scm) and will not overwrite an existing NON-system
+;; abbrev of the same name unless :system is 'force (Emacs rule).
 ;; Redefining an abbrev REPLACES it (hash-insert semantics).
 (define (define-abbrev table name expansion . rest)
   (let* ((hook (if (null? rest) #f (car rest)))
          (props (if (or (null? rest) (null? (cdr rest))) '() (cadr rest)))
          (tname (symbol->string table))
          (t (abbrev--get-table tname))
+         (existing (hash-try-get t name))
+         (system-flag (abbrev--plist-get props ':system))
+         ;; Store #t for 'force — like Emacs, the force value itself is not kept.
+         (system-val (if (eq? system-flag 'force) #t system-flag))
          (entry (list (cons 'expansion expansion)
                       (cons 'hook hook)
                       (cons 'case-fixed (abbrev--plist-get props ':case-fixed))
                       (cons 'enable-function (abbrev--plist-get props ':enable-function))
-                      (cons 'ts-context (abbrev--plist-get props ':ts-context)))))
-    (abbrev--put-table tname (hash-insert t name entry))
-    (abbrev--ts-update-hooks)))
+                      (cons 'ts-context (abbrev--plist-get props ':ts-context))
+                      (cons 'system system-val))))
+    ;; A system abbrev does not overwrite a non-system abbrev that already has
+    ;; an expansion, unless :system is 'force (Emacs's protection rule).
+    (cond ((and system-flag
+                (not (eq? system-flag 'force))
+                existing
+                (cdr (assoc 'expansion existing))
+                (not (cdr (assoc 'system existing))))
+           name)   ; skipped — the user's abbrev wins
+          (else
+           (abbrev--put-table tname (hash-insert t name entry))
+           (abbrev--ts-update-hooks)
+           name))))
+
+;; (define-global-abbrev NAME EXPANSION &optional HOOK PROPS) — convenience
+;; form: define-abbrev into 'global-abbrev-table. Not :system; for abbrevs
+;; that should never reach the abbrev file use define-abbrev with :system.
+(define (define-global-abbrev name expansion . rest)
+  (apply define-abbrev 'global-abbrev-table name expansion rest))
 
 ;; (clear-abbrev [table]) — remove every abbrev from TABLE (default global).
 (define (clear-abbrev . table)
@@ -490,31 +557,35 @@
         (else "")))
 
 ;; One (define-abbrev …) form for an entry, or #f when it can't round-trip.
+;; System abbrevs are never serialized (Emacs rule: the abbrev file holds only
+;; user abbrevs) — the caller leaves a ;; comment naming them.
 (define (abbrev--entry-form tname name entry)
   (let ((exp (cdr (assoc 'expansion entry)))
         (hook (cdr (assoc 'hook entry)))
         (enable (cdr (assoc 'enable-function entry))))
-    (if (or (and hook (procedure? hook))
-            (and enable (procedure? enable)))
-        #f  ; anonymous procedure — caller leaves a ;; comment
-        (let* ((props (string-append
-                       (if enable (abbrev--prop-frag 'enable-function enable) "")
-                       (if (cdr (assoc 'case-fixed entry))
-                           (abbrev--prop-frag 'case-fixed #t)
-                           "")
-                       (let ((ts (cdr (assoc 'ts-context entry))))
-                         (if ts (abbrev--prop-frag 'ts-context ts) ""))))
-               (props-arg (if (> (string-length props) 0)
-                              (string-append " '(" props ")")
-                              ""))
-               (hook-arg (cond ((not hook) "#f")
-                               ((symbol? hook)
-                                (string-append "'" (symbol->string hook)))
-                               (else "#f"))))
-          (string-append "(define-abbrev '" tname
-                         " \"" (abbrev--escape name) "\""
-                         " \"" (abbrev--escape exp) "\""
-                         " " hook-arg props-arg ")")))))
+    (cond ((cdr (assoc 'system entry)) #f)  ; system abbrev — never saved
+          ((or (and hook (procedure? hook))
+               (and enable (procedure? enable)))
+           #f)  ; anonymous procedure — caller leaves a ;; comment
+          (else
+           (let* ((props (string-append
+                          (if enable (abbrev--prop-frag 'enable-function enable) "")
+                          (if (cdr (assoc 'case-fixed entry))
+                              (abbrev--prop-frag 'case-fixed #t)
+                              "")
+                          (let ((ts (cdr (assoc 'ts-context entry))))
+                            (if ts (abbrev--prop-frag 'ts-context ts) ""))))
+                  (props-arg (if (> (string-length props) 0)
+                                 (string-append " '(" props ")")
+                                 ""))
+                  (hook-arg (cond ((not hook) "#f")
+                                  ((symbol? hook)
+                                   (string-append "'" (symbol->string hook)))
+                                  (else "#f"))))
+             (string-append "(define-abbrev '" tname
+                            " \"" (abbrev--escape name) "\""
+                            " \"" (abbrev--escape exp) "\""
+                            " " hook-arg props-arg ")"))))))
 
 ;; (define-abbrev-table 'name '() #f '(:parents '(…))) for :parents declarations.
 (define (abbrev--parents-forms)
@@ -551,8 +622,11 @@
                                 (inner (cdr es)
                                        (cons (if form
                                                  (string-append form "\n")
-                                                 (string-append ";; not saved (anonymous procedure): "
-                                                                tname " " name "\n"))
+                                                 (if (cdr (assoc 'system entry))
+                                                     (string-append ";; system abbrev (not saved): "
+                                                                    tname " " name "\n")
+                                                     (string-append ";; not saved (anonymous procedure): "
+                                                                    tname " " name "\n")))
                                              acc))))))))
           (loop (cdr ts) (append forms out))))))
 
