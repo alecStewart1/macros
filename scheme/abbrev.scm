@@ -1,4 +1,4 @@
-;; requires: core completion hooks
+;; requires: core completion hooks modeline
 
 ;; abbrev — Emacs-style abbreviations, the Macros port of `abbrev`.
 ;; See web/content/docs/abbrev.md for the user-facing docs (including the
@@ -13,23 +13,42 @@
 ;;
 ;; Props (plist): :case-fixed, :enable-function, :ts-context.
 ;;
-;; `abbrev-mode` is the M-x toggle: it adds/removes the abbrev completion-at-
-;; point source. Tables auto-save silently on exit (`save-abbrevs` 'silent,
-;; set-save-abbrevs to change) to `abbrev-file-name` (set-abbrev-file-name).
+;; `abbrev-mode` is the buffer-local minor mode: while on in a buffer, an
+;; abbrev expands automatically when you finish typing it (a word terminator
+;; — space, punct, … — triggers expansion, Emacs-style) and abbrevs appear as
+;; a completion-at-point source. `abbrev-mode` toggles the current buffer;
+;; `set-abbrev-mode-default` turns it on everywhere by default (buffers with
+;; an explicit toggle win). Tables auto-save silently on exit
+;; (`save-abbrevs` 'silent, set-save-abbrevs to change) to
+;; `abbrev-file-name` (set-abbrev-file-name), and the file is read back on
+;; after-init-hook. Defines made while startup runs count as :system, so the
+;; file only holds abbrevs added interactively.
 ;;
-;; There is NO typing-time auto-expansion: expansion happens only when you run
-;; `expand-abbrev` (or, optionally, on insert-exit — see
-;; set-abbrev-expand-on-insert-exit). Case rules: TEH → THE, Teh → The, and
+;; There is no command-free magic beyond that: besides `abbrev-mode`'s
+;; typing-time expansion, expansion happens when you run `expand-abbrev` (or,
+;; optionally, on insert-exit — see set-abbrev-expand-on-insert-exit). Case
+;; rules: TEH → THE, Teh → The, and
 ;; `:case-fixed` expansions insert exactly as defined. Anonymous procedures as
 ;; hooks/predicates don't persist to the abbrev file — use 'symbol names.
 ;;
 ;; COMMANDS & API
 ;;   expand-abbrev (C-x ')   replace the word before point with its expansion;
 ;;                           silent no-op when :enable-function/:ts-context decline
-;;   abbrev-mode (M-x)       toggle the abbrev completion-at-point source;
-;;                           there is no other behavior behind this toggle
+;;   abbrev-mode (M-x)       buffer-local minor mode: typing-time abbrev
+;;                           expansion + the abbrev completion source
+;;   set-abbrev-mode-default #t   enable abbrev-mode by default in every
+;;                           buffer without an explicit toggle (init.scm)
+;;   add-global-abbrev (C-x a g)     define an abbrev interactively: the word
+;;   add-mode-abbrev (C-x a m)       (or region) before point is the expansion,
+;;   inverse-add-global-abbrev       the name (or, for the inverse pair, the
+;;   inverse-add-mode-abbrev         expansion) is read from the minibuffer —
+;;                           inverse-add then expands the word in place
+;;   unexpand-abbrev (M-x)   restore the abbrev of the last expansion
+;;   abbrev-prefix-mark (C-x a -)    prefix trick: type prefix, mark, type
+;;                           abbrev, expand — the hyphen is removed
 ;;   define-abbrev           (TABLE NAME EXPANSION &optional HOOK PROPS) —
-;;                           Emacs signature; TABLE is a quoted symbol
+;;                           Emacs signature; TABLE is a quoted symbol;
+;;                           EXPANSION #f undefines the abbrev
 ;;   define-global-abbrev    (NAME EXPANSION &optional HOOK PROPS) — plain
 ;;                           user abbrev in the global table (not :system)
 ;;   define-abbrev-table     (SYMBOL DEFINITIONS &optional DOCSTRING PROPS);
@@ -50,11 +69,11 @@
 ;;   :enable-function pred  proc or 'symbol taking the abbrev; #f declines
 ;;                          silently (checked first)
 ;;   :ts-context "X"        expand only inside a matching tree-sitter node
-;;                          (space-separated list; '@' optional). The node chain
-;;                          is cached debounced, so it can be one edit cycle
-;;                          stale; in a grammar-less buffer the abbrev never
-;;                          expands. With multiple cursors this follows the
-;;                          primary cursor only.
+;;                          (space-separated list; '@' optional). Resolved
+;;                          synchronously at expansion time via ts-ancestors;
+;;                          in a grammar-less buffer the abbrev never expands.
+;;                          With multiple cursors this follows the primary
+;;                          cursor only.
 ;;   :system #t / 'force    "system" abbreviation: NOT saved to the abbrev
 ;;                          file (define it in init.scm instead). A system
 ;;                          abbrev will not overwrite a non-system abbrev of
@@ -62,6 +81,12 @@
 
 ;; table-name -> hash of abbrev -> property alist
 (define *abbrev-tables* (hash))
+
+;; #t while startup runs (bundled scripts + init.scm): define-abbrev then
+;; marks its definitions :system unless they name their own :system. Flipped
+;; off on after-init-hook (abbrev--after-init), together with reading the
+;; saved abbrev file back in.
+(define *abbrev--init-phase* #t)
 
 ;; :ts-context — syntax-context predicate --------------------------------------
 ;; (define-abbrev 'prog-mode-abbrev-table "x" "y" #f '(:ts-context "@comment"))
@@ -71,66 +96,16 @@
 ;; node KIND just has to contain the name (so "comment" matches the
 ;; line_comment/block_comment/comment node kinds across grammars).
 ;;
-;; tree-sitter-node-at is callback-async, so we cache the enclosing node chain
-;; (kind start end) at point and refresh it debounced after edits and cursor
-;; moves — but only while some in-scope abbrev actually uses :ts-context
-;; (zero cost otherwise). Reading the cache at expand time is synchronous, so
-;; the predicate behaves like :enable-function; worst case the cache is one
-;; edit cycle stale (the same trade rainbow.scm and spell.scm make). The cache
-;; is buffer-global: with multiple cursors, :ts-context follows the PRIMARY
-;; cursor only. In a grammar-less buffer no callback ever fires, so an abbrev
+;; (ts-ancestors pos) is a synchronous read over the published snapshot, so
+;; :ts-context resolves the enclosing node chain at expansion time — no cache,
+;; no hook, no staleness. In a grammar-less buffer it returns '() and an abbrev
 ;; with :ts-context simply never expands — a visible, documented degradation.
 
-(define *abbrev-ts-captures* '())    ; (kind start end) records, last refresh
-(define *abbrev-ts-hooked* #f)
-
-;; #t when any table in scope has an abbrev with a :ts-context prop.
-(define (abbrev--ts-any-wanted?)
-  (let outer ((ts (hash->list *abbrev-tables*)))
-    (if (null? ts)
-        #f
-        (let inner ((es (hash->list (cdr (car ts)))))
-          (cond ((null? es) (outer (cdr ts)))
-                ((cdr (assoc 'ts-context (cdr (car es)))) #t)
-                (else (inner (cdr es))))))))
-
-;; Refresh the cache: node chain at point, primary cursor. Async — the result
-;; lands in abbrev--ts-apply. No-grammar buffers just never call back.
-(define (abbrev--ts-refresh)
-  (when (abbrev--ts-any-wanted?)
-    (tree-sitter-node-at (point) 'abbrev--ts-apply)))
-
-;; Debounced schedule (core.scm's make-debounce): a burst of edits refreshes
-;; once. The hooks call this by name.
-(define abbrev--ts-schedule (make-debounce "abbrev-ts" 250 abbrev--ts-refresh))
-
-;; Callback for tree-sitter-node-at: records are "kind\tstart\tend" lines
-;; (byte offsets, innermost first). Return value is ignored.
-(define (abbrev--ts-apply records)
-  (set! *abbrev-ts-captures*
-        (filter (lambda (x) x)
-                (map (lambda (rec)
-                       (let ((p (split-many rec "\t")))
-                         (if (>= (length p) 3)
-                             (list (nth p 0)
-                                   (string->number (nth p 1))
-                                   (string->number (nth p 2)))
-                             #f)))
-                     (non-empty-lines records))))
-  #f)
-
-;; Hook the refresh onto edit + motion only while some abbrev wants
-;; :ts-context; called from define-abbrev / clear-abbrev.
-(define (abbrev--ts-update-hooks)
-  (let ((want (abbrev--ts-any-wanted?)))
-    (cond ((and want (not *abbrev-ts-hooked*))
-           (set! *abbrev-ts-hooked* #t)
-           (add-hook "after-change-functions" "abbrev--ts-schedule")
-           (add-hook "post-command-hook" "abbrev--ts-schedule"))
-          ((and (not want) *abbrev-ts-hooked*)
-           (set! *abbrev-ts-hooked* #f)
-           (remove-hook "after-change-functions" "abbrev--ts-schedule")
-           (remove-hook "post-command-hook" "abbrev--ts-schedule")))))
+;; Drop the leading '@' of a capture-style name, if any.
+(define (abbrev--strip-at n)
+  (if (and (> (string-length n) 0) (string=? "@" (substring n 0 1)))
+      (substring n 1 (string-length n))
+      n))
 
 ;; #t when NODE-KIND is one of NAMES (a '@'-stripped context name), either
 ;; exactly or by substring — so "comment" matches line_comment/block_comment.
@@ -141,25 +116,20 @@
          #t)
         (else (abbrev--kind-match? kind (cdr names)))))
 
-;; Drop the leading '@' of a capture-style name, if any.
-(define (abbrev--strip-at n)
-  (if (and (> (string-length n) 0) (string=? "@" (substring n 0 1)))
-      (substring n 1 (string-length n))
-      n))
-
 ;; True when the entry has no :ts-context, or one of its context names matches
-;; a cached node kind whose span overlaps START..END (byte offsets).
+;; an enclosing node kind whose span overlaps START..END (byte offsets).
+;; (ts-ancestors) yields a flat (kind start end …) list, innermost first.
 (define (abbrev--ts-context-ok entry start end)
   (let ((want (cdr (assoc 'ts-context entry))))
     (or (not want)
         (let ((names (map abbrev--strip-at (non-empty-lines (replace-regexp-in-string " " "\n" want)))))
-          (let loop ((cs *abbrev-ts-captures*))
-            (cond ((null? cs) #f)
-                  ((and (abbrev--kind-match? (car (car cs)) names)
-                        (<= (nth (car cs) 1) end)     ; overlap test: the
-                        (>= (nth (car cs) 2) start))  ; spans share bytes
+          (let loop ((cs (ts-ancestors start)))
+            (cond ((< (length cs) 3) #f)
+                  ((and (abbrev--kind-match? (nth cs 0) names)
+                        (<= (nth cs 1) end)     ; overlap test: the
+                        (>= (nth cs 2) start))  ; spans share bytes
                    #t)
-                  (else (loop (cdr cs)))))))))
+                  (else (loop (cdr (cdr (cdr cs)))))))))))
 
 ;; --- tables ------------------------------------------------------------------
 ;; An abbrev table is a Steel hash: abbrev string -> property alist:
@@ -227,7 +197,7 @@
     ;; that names its own :system keeps that value.
     (for-each
      (lambda (d)
-       ;; no cadddr in this Steel build — use list-ref (verified: list-ref ✓)
+       ;; no cadddr in this Steel build — use list-ref
        (let ((dprops (if (> (length d) 3) (list-ref d 3) '())))
          (apply define-abbrev
                 symbol (car d) (cadr d)
@@ -265,7 +235,9 @@
 ;;                    :system #t|'force).
 ;; :system marks a "system" abbrev: it is excluded from the saved abbrev file
 ;; (define those in init.scm) and will not overwrite an existing NON-system
-;; abbrev of the same name unless :system is 'force (Emacs rule).
+;; abbrev of the same name unless :system is 'force (Emacs rule). Defines made
+;; during the init phase become system abbrevs automatically — see
+;; *abbrev--init-phase*.
 ;; Redefining an abbrev REPLACES it (hash-insert semantics).
 (define (define-abbrev table name expansion . rest)
   (let* ((hook (if (null? rest) #f (car rest)))
@@ -273,7 +245,14 @@
          (tname (symbol->string table))
          (t (abbrev--get-table tname))
          (existing (hash-try-get t name))
-         (system-flag (abbrev--plist-get props ':system))
+         ;; Anything defined while the init phase runs (bundled scripts +
+         ;; init.scm) counts as a system abbrev unless it names its own
+         ;; :system — the abbrev file only holds abbrevs added interactively,
+         ;; so startup definitions never double up with the saved file.
+         (system-flag (if (and *abbrev--init-phase*
+                               (not (abbrev--plist-has? ':system props)))
+                          #t
+                          (abbrev--plist-get props ':system)))
          ;; Store #t for 'force — like Emacs, the force value itself is not kept.
          (system-val (if (eq? system-flag 'force) #t system-flag))
          (entry (list (cons 'expansion expansion)
@@ -284,7 +263,15 @@
                       (cons 'system system-val))))
     ;; A system abbrev does not overwrite a non-system abbrev that already has
     ;; an expansion, unless :system is 'force (Emacs's protection rule).
-    (cond ((and system-flag
+    ;; EXPANSION #f undefines the abbrev (Emacs rule).
+    (cond ((not expansion)
+           (abbrev--put-table tname (hash-remove t name))
+           ;; Say so only when something was actually removed — a misspelled
+           ;; name shouldn't announce an undefinition that never happened.
+           (when existing
+             (message (string-append "Undefined abbrev: " name)))
+           name)
+          ((and system-flag
                 (not (eq? system-flag 'force))
                 existing
                 (cdr (assoc 'expansion existing))
@@ -297,7 +284,6 @@
            name)
           (else
            (abbrev--put-table tname (hash-insert t name entry))
-           (abbrev--ts-update-hooks)
            name))))
 
 ;; (define-global-abbrev NAME EXPANSION &optional HOOK PROPS) — convenience
@@ -309,48 +295,88 @@
 ;; (clear-abbrev [table]) — remove every abbrev from TABLE (default global).
 (define (clear-abbrev . table)
   (abbrev--put-table
-   (symbol->string (if (null? table) 'global-abbrev-table (car table))) (hash))
-  (abbrev--ts-update-hooks))
+   (symbol->string (if (null? table) 'global-abbrev-table (car table))) (hash)))
 
 ;; (abbrev-symbol abbrev [local-table]) — the property alist for ABBREV.
 ;; Resolution order: local (mode) table → :parents (in list order, via
 ;; *abbrev-table-parents*) → global. #f when none has it. LOCAL-TABLE may be
-;; given as the bare mode symbol ('rust-mode) or the full table name
-;; ('rust-mode-abbrev-table); when omitted, the current buffer's major mode
-;; table is used.
-(define (abbrev-symbol abbrev . local)
-  (let* ((given (if (null? local)
-                    (major-mode)
-                    (symbol->string (car local))))
-         (local-name (if (and (>= (string-length given) 13)
-                              (string=? (substring given
-                                                    (- (string-length given) 13)
-                                                    (string-length given))
-                                        "-abbrev-table"))
-                         given
-                         (string-append given "-abbrev-table")))
-         (hit (or (hash-try-get (abbrev--get-table local-name) abbrev)
-                  (abbrev--lookup-parents local-name abbrev))))
-    (if hit hit (hash-try-get (abbrev--get-table "global-abbrev-table") abbrev))))
+;; given as the bare language name ("rust"), a mode symbol ('rust-mode), or a
+;; full table name ('rust-mode-abbrev-table); when omitted, the current
+;; buffer's major mode table is used.
+;;
+;; Table-name normalization: `major-mode` returns the bare language name
+;; ("rust", "python" — see register_snapshot_read "major-mode"), while a
+;; mode's abbrev table is "<mode>-abbrev-table" (rust → rust-mode-abbrev-table,
+;; per the (add-hook "rust" …) naming in language-modes.scm). A name that
+;; already ends in -mode takes just "-abbrev-table"; a full table name is kept.
+(define (abbrev--ends-with? n suffix)
+  (let ((gl (string-length n)) (sl (string-length suffix)))
+    (and (>= gl sl)
+         (string=? (substring n (- gl sl) gl) suffix))))
 
-(define (abbrev--lookup-parents tname abbrev)
-  (let loop ((parents (hash-try-get *abbrev-table-parents* tname)))
-    ;; hash-try-get yields #f when the table declares no parents — stop there
-    ;; (Steel's null? does not accept #f).
-    (cond ((not parents) #f)
-          ((null? parents) #f)
-          ((hash-try-get (abbrev--get-table (car parents)) abbrev))
-          (else (loop (cdr parents))))))
+(define (abbrev--local-table-name given)
+  (let ((n (if (symbol? given) (symbol->string given) given)))
+    (cond ((abbrev--ends-with? n "-abbrev-table") n)
+          ((abbrev--ends-with? n "-mode") (string-append n "-abbrev-table"))
+          (else (string-append n "-mode-abbrev-table")))))
+
+;; The tables to search for the current buffer, in order: local, its :parents,
+;; global. Shared by abbrev-symbol and abbrev-capf so the two can't drift.
+;; LOCAL is a bare language name, a mode symbol, or a full table name.
+(define (abbrev--table-chain local)
+  (let* ((local-name (abbrev--local-table-name local))
+         (parents (or (hash-try-get *abbrev-table-parents* local-name) '()))
+         (chain (cons local-name parents)))
+    ;; Global last, unless the chain already reaches it (local table IS
+    ;; global, or a parent declares it) — searching it twice is harmless but
+    ;; the capf would pay for the wasted pass.
+    (if (member "global-abbrev-table" chain)
+        chain
+        (append chain (list "global-abbrev-table")))))
+
+(define (abbrev-symbol abbrev . local)
+  (abbrev--find-in (abbrev--table-chain
+                    (if (null? local) (major-mode) (car local)))
+                   abbrev))
+
+(define (abbrev--find-in names abbrev)
+  ;; Emacs looks the abbrev up case-sensitively first, then case-folded —
+  ;; unless the entry is :case-fixed, which demands an exact match.
+  (if (null? names)
+      #f
+      (let* ((table (abbrev--get-table (car names)))
+             (hit (hash-try-get table abbrev)))
+        (if hit
+            hit
+            (let ((folded (hash-try-get table (string-downcase abbrev))))
+              (if (and folded
+                       (not (cdr (assoc 'case-fixed folded))))
+                  folded
+                  (abbrev--find-in (cdr names) abbrev)))))))
 
 ;; --- expansion ---------------------------------------------------------------
 (define (abbrev--word-char? s) (>= (string-match "[A-Za-z0-9_]" s) 0))
 
+;; (start . word) for the identifier ending at byte POS, or #f. Char-safe:
+;; buffer offsets are BYTES but the scan walks the CHARACTERS of a byte
+;; window (string->list; the window read snaps to char boundaries), then
+;; converts the word back to a byte span with utf8-length — multi-byte text
+;; (`café`) is never sliced mid-codepoint and never shifts the span. A word
+;; longer than the window is not an abbrev; #f.
+(define (abbrev--trailing-word-at pos)
+  (let* ((from (max 0 (- pos 256)))
+         (cs (reverse (string->list (buffer-substring from pos)))))
+    (let loop ((rest cs) (wordc '()))
+      (cond ((and (pair? rest) (abbrev--word-char? (string (car rest))))
+             (if (= (length wordc) 128)
+                 #f  ; over-long word: not an abbrev
+                 (loop (cdr rest) (cons (car rest) wordc))))
+            ((null? wordc) #f)
+            (else (let ((word (list->string wordc)))
+                    (cons (- pos (utf8-length word)) word)))))))
+
 ;; (start . word) for the identifier ending at point, or #f.
-(define (abbrev--word-before)
-  (let loop ((i (point)))
-    (if (and (> i 0) (abbrev--word-char? (buffer-substring (- i 1) i)))
-        (loop (- i 1))
-        (if (< i (point)) (cons i (buffer-substring i (point))) #f))))
+(define (abbrev--word-before) (abbrev--trailing-word-at (point)))
 
 ;; Case rule (Emacs default; skipped when :case-fixed is set):
 ;;   typed all-caps -> expansion all-caps     TEH -> THE
@@ -369,8 +395,7 @@
                               (substring expansion 1 (string-length expansion))))
               (else expansion)))))
 
-;; NOTE: steel-core 0.8.x has NO every? / char-upper-case? — hand-rolled here
-;; (verified against the steel-core primitive surface).
+;; NOTE: steel-core has no every? / char-upper-case? — hand-rolled below.
 (define (abbrev--alpha? c) (or (abbrev--upper? c) (char<=? #\a c #\z)))
 (define (abbrev--upper? c) (char<=? #\A c #\Z))
 (define (abbrev--all-upper? word)
@@ -391,97 +416,370 @@
                                                  " \"" (abbrev--escape arg) "\")")))
         (else #f)))
 
-;; v0 stub replaced: the real abbrev--ts-context-ok lives in the :ts-context
-;; section above.
+;; Shared expansion core: replace the word (START . END) — WORD is the abbrev
+;; name as typed — with EXP, then run HOOK. Queued edits apply in order
+;; (yasnippet.scm): delete the abbrev, then insert the expansion at its
+;; start. Used by expand-abbrev, the typing-time expansion and the
+;; Records (WORD EXP START BUFFER) for unexpand-abbrev.
+(define *abbrev-last* #f)
 
-;; Shared expansion core: replace the word (START . END) with EXP, then run
-;; HOOK. Queued edits apply in order (yasnippet.scm): delete the abbrev, then
-;; insert the expansion at its start. Used by expand-abbrev and the
-;; insert-exit wrappers.
-(define (abbrev--expand-at start end exp hook)
+(define (abbrev--expand-at start end word exp hook)
+  (set! *abbrev-last*
+        (list word exp start (current-buffer)))
   (delete-region start end)
   (goto-char start)
   (insert exp)
   (when hook (abbrev--call-pred hook exp)))
 
+;; The predicate chain shared by every expansion entry point: find the
+;; abbrev, run :enable-function then :ts-context, apply case rules, expand.
+;; Replaces the byte span START..END (WORD is the abbrev name as typed —
+;; it may be shorter than the span, e.g. the prefix-mark hyphen). Returns #f
+;; when a predicate declined (silent, like Emacs).
+(define (abbrev--expand-named start end word)
+  (let ((entry (abbrev-symbol word)))
+    (cond
+      ((not entry)
+       (message (string-append "No abbrev: " word)))
+      ((let ((pred (cdr (assoc 'enable-function entry))))
+         (and pred (not (abbrev--call-pred pred word))))
+       #f)  ; predicate declined — stay silent, like Emacs
+      ;; Buffer offsets are BYTES for the span; WORD only shapes the lookup
+      ;; and the case rules, so no char/byte arithmetic on it here.
+      ((not (abbrev--ts-context-ok entry start end))
+       #f)  ; wrong syntax context — silent
+      (else
+       (let ((exp (abbrev--apply-case word
+                                      (cdr (assoc 'expansion entry))
+                                      entry)))
+         (abbrev--expand-at start end word exp
+                            (cdr (assoc 'hook entry)))
+         (message (string-append "Expanded: " word)))))))
+
 ;; expand-abbrev — replace the word before point with its expansion (local
-;; table first, then global). :enable-function runs first, then :ts-context;
-;; the HOOK runs after a successful expansion. Primary cursor only.
+;; table first, then :parents, then global). Works whether or not
+;; abbrev-mode is on, like Emacs. :enable-function runs first, then
+;; :ts-context; the HOOK runs after a successful expansion. Primary cursor
+;; only. With a prefix marked (abbrev-prefix-mark), the abbrev starts at the
+;; mark instead of at the word before point.
 (define (expand-abbrev)
-  (let ((wb (abbrev--word-before)))
-    (if (not wb)
-        (message "No word before point")
-        (let ((entry (abbrev-symbol (cdr wb))))
-          (cond
-            ((not entry)
-             (message (string-append "No abbrev: " (cdr wb))))
-            ((let ((pred (cdr (assoc 'enable-function entry))))
-               (and pred (not (abbrev--call-pred pred (cdr wb)))))
-             #f)  ; predicate declined — stay silent, like Emacs
-            ((not (abbrev--ts-context-ok entry (car wb) (point)))
-             #f)  ; wrong syntax context — silent
-            (else
-             (let ((exp (abbrev--apply-case (cdr wb)
-                                            (cdr (assoc 'expansion entry))
-                                            entry)))
-               (abbrev--expand-at (car wb) (point) exp
-                                  (cdr (assoc 'hook entry)))
-               (message (string-append "Expanded: " (cdr wb))))))))))
+  (if *abbrev--prefix-mark*
+      (abbrev--expand-prefix-marked)
+      (let ((wb (abbrev--word-before)))
+        (if (not wb)
+            (message "No word before point")
+            (abbrev--expand-named (car wb) (point) (cdr wb))))))
 
 (register-command 'expand-abbrev)
 (define-key "fundamental" "ctrl-x '" 'expand-abbrev)
 
-;; --- abbrev-mode: the M-x toggle ---------------------------------------------
-;; Enabling registers the abbrev CAPF; disabling removes it.
+;; --- interactive definition (Emacs add-*-abbrev) -----------------------------
+;; Emacs's define-at-point commands: the expansion is the word (or region)
+;; before point, the name is read from the minibuffer — and the inverse pair
+;; reads the expansion instead, then expands in place. No prefix-argument
+;; word counts; the region or one word is the expansion (arg 0 / default).
 
-(define *abbrev-mode-on* #f)
+(define (abbrev--define-interactively tname kind)
+  (let ((exp (if (region-active?)
+                 (buffer-substring (region-beginning) (region-end))
+                 (let ((wb (abbrev--word-before)))
+                   (if wb (cdr wb) #f)))))
+    (if (not exp)
+        (message (string-append "No " kind " abbrev: nothing before point"))
+        (read-string
+         (string-append "Define " kind " abbrev that expands into \"" exp "\": ")
+         (lambda (name)
+           (if (string=? name "")
+               (message "No abbrev name given")
+               (begin
+                 (define-abbrev (string->symbol tname) name exp)
+                 (message (string-append "Defined " kind " abbrev: "
+                                         name " -> " exp)))))))))
+
+(define (abbrev--inverse-add-interactively tname kind)
+  (let ((wb (abbrev--word-before)))
+    (if (not wb)
+        (message (string-append "No " kind " abbrev: nothing before point"))
+        (read-string
+         (string-append "Expansion for " kind " abbrev \"" (cdr wb) "\": ")
+         (lambda (exp)
+           (if (string=? exp "")
+               (message "No expansion given")
+               (begin
+                 (define-abbrev (string->symbol tname) (cdr wb) exp)
+                 ;; Expand the word in place, like inverse-add-abbrev.
+                 (delete-region (car wb) (point))
+                 (goto-char (car wb))
+                 (insert exp)
+                 (message (string-append "Defined " kind " abbrev: "
+                                         (cdr wb))))))))))
+
+(define (add-global-abbrev)
+  (abbrev--define-interactively "global-abbrev-table" "global"))
+
+(define (add-mode-abbrev)
+  (abbrev--define-interactively
+   (string-append (major-mode) "-mode-abbrev-table") "mode"))
+
+(define (inverse-add-global-abbrev)
+  (abbrev--inverse-add-interactively "global-abbrev-table" "global"))
+
+(define (inverse-add-mode-abbrev)
+  (abbrev--inverse-add-interactively
+   (string-append (major-mode) "-mode-abbrev-table") "mode"))
+
+(register-command 'add-global-abbrev)
+(register-command 'add-mode-abbrev)
+(register-command 'inverse-add-global-abbrev)
+(register-command 'inverse-add-mode-abbrev)
+(define-key "fundamental" "ctrl-x a g" 'add-global-abbrev)
+(define-key "fundamental" "ctrl-x a m" 'add-mode-abbrev)
+(define-key "fundamental" "ctrl-x a i g" 'inverse-add-global-abbrev)
+(define-key "fundamental" "ctrl-x a i m" 'inverse-add-mode-abbrev)
+
+;; --- unexpand-abbrev ----------------------------------------------------------
+;; Undo the last expansion without touching anything edited since: the
+;; expansion text is replaced by the abbrev name as it was typed. The record
+;; (kept by abbrev--expand-at, above) is scoped to the buffer it expanded in —
+;; a stale record from another buffer must not rewrite text here. (Unbound by
+;; default, like Emacs: undo lives on C-x C-u / C-/ and C-x u is too easy to
+;; fat-finger for it.)
+
+(define (unexpand-abbrev)
+  (let ((rec *abbrev-last*))
+    (if (and rec (string=? (nth rec 3) (current-buffer)))
+        (let* ((word (nth rec 0))
+               (exp (nth rec 1))
+               (start (nth rec 2))
+               ;; buffer offsets are BYTES; string-length counts chars.
+               (end (+ start (utf8-length exp))))
+          (if (and (>= start 0)
+                   (<= end (point-max))
+                   (string=? (buffer-substring start end) exp))
+              (begin
+                (delete-region start end)
+                (goto-char start)
+                (insert word)
+                (set! *abbrev-last* #f)
+                (message "Unexpanded"))
+              (message "No abbrev expansion at its original location")))
+        (message "No abbrev expansion to undo"))))
+
+(register-command 'unexpand-abbrev)
+
+;; --- abbrev-prefix-mark ---------------------------------------------------------
+;; Emacs's prefix trick: type the prefix, run this (a hyphen is inserted),
+;; type the abbrev, then expand — the expansion replaces the abbrev and the
+;; hyphen goes away, leaving prefix + expansion. The mark carries its buffer:
+;; switching buffers disarms it rather than expanding at a stale position.
+(define *abbrev--prefix-mark* #f)   ; (position buffer) while armed
+
+(define (abbrev-prefix-mark)
+  (set! *abbrev--prefix-mark* (list (point) (current-buffer)))
+  (insert "-")
+  (message "Abbrev prefix marked"))
+
+;; The abbrev starts at the mark; the hyphen the mark inserted is part of the
+;; replaced span, so prefix + expansion remain and the hyphen goes away. The
+;; word is read from the UN-deleted buffer — queued edits (the hyphen insert,
+;; the expansion's own edits) are not visible until the command batch
+;; applies — and the lookup strips the hyphen instead of relying on deleting
+;; it mid-eval. A stale mark (marked in another buffer) falls back to
+;; word-before-point rather than touching text at a random position; nothing
+;; typed after the hyphen falls back the same way.
+(define (abbrev--expand-prefix-marked)
+  (let ((start (nth *abbrev--prefix-mark* 0))
+        (marked-buffer (nth *abbrev--prefix-mark* 1)))
+    (set! *abbrev--prefix-mark* #f)
+    (if (not (string=? marked-buffer (current-buffer)))
+        (let ((wb (abbrev--word-before)))
+          (if (not wb)
+              (message "No word before point")
+              (abbrev--expand-named (car wb) (point) (cdr wb))))
+        (if (and (< start (point))
+                 (string=? (buffer-substring start (+ start 1)) "-"))
+            ;; Lookup skips the hyphen; the replacement span keeps it, so the
+            ;; expansion overwrites mark..point wholesale.
+            (abbrev--expand-named start (point)
+                                  (buffer-substring (+ start 1) (point)))
+            (let ((wb (abbrev--word-before)))
+              (if (not wb)
+                  (message "No word before point")
+                  (abbrev--expand-named (car wb) (point) (cdr wb))))))))
+
+(register-command 'abbrev-prefix-mark)
+(define-key "fundamental" "ctrl-x a -" 'abbrev-prefix-mark)
+
+;; --- abbrev-mode: the buffer-local minor mode ---------------------------------
+;; The Emacs `abbrev-mode` minor mode (Macros has no minor-mode framework yet
+;; — this follows spell.scm's hand-rolled shape). Like Emacs, the mode is a
+;; buffer-local value with a global default:
+;;   * `abbrev-mode` (M-x) toggles the CURRENT buffer, recording an explicit
+;;     value that shadows the default (a buffer-local variable write);
+;;   * `set-abbrev-mode-default` sets the default — #t enables the mode in
+;;     every buffer that has no explicit toggle (Emacs's "Customize this
+;;     variable to non-nil to enable Abbrev mode by default in all buffers").
+;; Hooks register while the mode is live anywhere (default on, or any buffer
+;; explicitly on) and come down when it is not; the mode-line slot names the
+;; focused buffer's state.
+
+(define *abbrev-state* '())          ; buffer name -> explicit #t/#f, when set
+(define *abbrev-mode-default* #f)    ; the global default value
 (define *abbrev-capf-registered* #f)
-(define *abbrev-capf-min-prefix* 2)   ; decline prefixes shorter than this
+(define *abbrev-capf-min-prefix* 2)  ; decline prefixes shorter than this
 (define (set-abbrev-capf-min-prefix n) (set! *abbrev-capf-min-prefix* n))
 
-;; Completes a prefix against the local + global tables; local shadows global.
+;; An absent per-buffer entry inherits the default, like a buffer-local
+;; variable with no local value. Explicit values are stored WRAPPED in a list
+;; — buffer-state-get cannot tell a stored #f from "no entry", so the wrapper
+;; preserves the tri-state (default / explicitly on / explicitly off).
+(define (abbrev--on?)
+  (let ((e (alist-ref *abbrev-state* (current-buffer))))
+    (if e (car e) *abbrev-mode-default*)))
+(define (abbrev--on-set! v)
+  (set! *abbrev-state* (alist-set *abbrev-state* (current-buffer) (list v))))
+
+;; Keep the edit hook registered exactly while the mode is live somewhere.
+(define (abbrev--update-hook)
+  (if (or *abbrev-mode-default*
+          (not (null? (filter (lambda (e) (car (cdr e))) *abbrev-state*))))
+      (add-hook "after-change-functions" "abbrev--auto-expand")
+      (remove-hook "after-change-functions" "abbrev--auto-expand")))
+
+(define (set-abbrev-mode-default v)
+  (set! *abbrev-mode-default* v)
+  (abbrev--update-hook)
+  (abbrev--update-modeline))
+
+;; Mode-line lighter (a slot: names the focused buffer, the same trade
+;; spell-mode makes until per-buffer lighters exist).
+(mode-line-add-segment (ml-slot* "abbrev" "" "  " ""))
+(define (abbrev--update-modeline)
+  (set-mode-line-slot "abbrev" (if (abbrev--on?) "abbrev" "")))
+(define (abbrev--buffer-switch) (abbrev--update-modeline))
+(add-hook "buffer-switch-hook" "abbrev--buffer-switch")
+
+;; Completes a prefix against the full table chain (local, :parents, global —
+;; the same resolution abbrev-symbol uses), earlier tables shadowing later.
 ;; Candidates are (text annotation) pairs — annotation = the expansion.
-;; Flag-gated (there is NO remove-completion-at-point-function primitive —
-;; verified): the CAPF registers once, on first enable, and declines with '()
-;; while the mode is off. Registration order = priority order, so a user who
-;; wants abbrevs before dabbrev enables abbrev-mode early in init.scm.
+;; Flag-gated (there is no remove-completion-at-point-function primitive):
+;; the CAPF registers once, on first enable, and declines with '() in
+;; buffers where the mode is off. Registration order = priority order, so a
+;; user who wants abbrevs before dabbrev enables abbrev-mode early in
+;; init.scm.
 (define (abbrev-capf prefix)
-  (if (or (not *abbrev-mode-on*)
+  (if (or (not (abbrev--on?))
           (< (string-length prefix) *abbrev-capf-min-prefix*))
       '()
-      (let loop ((entries (append (hash->list (abbrev--get-table
-                                               (string-append (major-mode)
-                                                              "-abbrev-table")))
-                                  (hash->list (abbrev--get-table
-                                               "global-abbrev-table"))))
-                 (out '()))
-        (if (null? entries)
+      (let outer ((tables (abbrev--table-chain (major-mode))) (out '()))
+        (if (null? tables)
             (reverse out)
-            (let ((a (car (car entries))) (entry (cdr (car entries))))
-              (if (and (abbrev--prefix? prefix a)
-                       (not (string=? prefix a))
-                       (not (assoc a out)))
-                  (loop (cdr entries)
-                        (cons (list a (cdr (assoc 'expansion entry))) out))
-                  (loop (cdr entries) out)))))))
+            (let inner ((entries (hash->list (abbrev--get-table (car tables))))
+                        (out out))
+              (if (null? entries)
+                  (outer (cdr tables) out)
+                  (let ((a (car (car entries))) (entry (cdr (car entries))))
+                    (if (and (abbrev--prefix? prefix a)
+                             (not (string=? prefix a))
+                             (not (assoc a out)))
+                        (inner (cdr entries)
+                               (cons (list a (cdr (assoc 'expansion entry))) out))
+                        (inner (cdr entries) out)))))))))
 
 (define (abbrev--prefix? prefix s)
   ;; steel-core has no string-prefix? — hand-rolled substring compare.
   (and (>= (string-length s) (string-length prefix))
        (string=? prefix (substring s 0 (string-length prefix)))))
 
+;; Typing-time expansion (Emacs abbrev-mode semantics): after each change,
+;; when the character just inserted is NOT a word character (space, punct,
+;; newline, …), the word ending just before it is expanded — silently, and
+;; the terminator stays. Runs only in buffers where the mode is on; cost is
+;; one flag read per change plus, on a real trigger, one windowed substring
+;; read and hash lookup. Follows the primary cursor; a grammar-less buffer
+;; just never passes the :ts-context check.
+;;
+;; Re-entrancy guard (Emacs's abbrev-start-location). Editor::edit runs
+;; after-change-functions on EVERY applied edit — including each half of the
+;; delete-region+insert pair an expansion queues, and including plain
+;; deletions. So the guard is a persistent record (start exp buffer), not a
+;; one-shot flag:
+;;   * the DELETE half of our own expansion re-fires with point on the mark —
+;;     stand down, and KEEP the guard armed for the insert half;
+;;   * the INSERT half (or anything later that finds the expansion text still
+;;     sitting exactly where we put it) stands down too — re-expanding would
+;;     be a no-op edit that re-queues the same pair forever (`etc` -> `etc.`);
+;;   * any other fire just fails the match and expands normally.
+;; Disarming the guard from the hook was tried and is wrong: the delete fire
+;; clears it before the insert fire arrives, reopening the loop.
+(define *abbrev--auto-guard* #f)   ; (start-byte expansion buffer)
+
+;; #t when GUARD matches the current buffer and its expansion text sits at
+;; its recorded start — the signature of our own queued insert.
+(define (abbrev--guard-in-place? guard)
+  (and guard
+       (string=? (nth guard 2) (current-buffer))
+       (let ((end (+ (nth guard 0) (utf8-length (nth guard 1)))))
+         (and (<= end (point-max))
+              (string=? (nth guard 1)
+                        (buffer-substring (nth guard 0) end))))))
+
+(define (abbrev--auto-expand)
+  (when (and (abbrev--on?) (> (point) 1))
+    (let ((guard *abbrev--auto-guard*))
+      ;; Only insertions expand. `(last-change)` is the Emacs
+      ;; `(beg end old-len)` triple of the edit that fired this hook; a
+      ;; deletion or replacement (old-len > 0 — undo, kill, our own queued
+      ;; DeleteRegion) must not expand, however terminator-like the buffer
+      ;; happens to look at point now.
+      (when (= (nth (last-change) 2) 0)
+        ;; The delete half of our own expansion re-fires with point on the
+        ;; mark, expansion text gone. Stand down entirely — the insert half
+        ;; fires next and must still find the guard armed.
+        (unless (and guard
+                     (= (point) (nth guard 0))
+                     (string=? (nth guard 2) (current-buffer)))
+          ;; The terminator is the last CHAR before point — read a small byte
+          ;; window (buffer-substring snaps to char boundaries) and take its
+          ;; last character, so multi-byte terminators (`é`, `…`) never slice
+          ;; badly.
+          (let* ((tail (reverse (string->list
+                                 (buffer-substring (max 0 (- (point) 4)) (point)))))
+                 (term (and (pair? tail) (car tail))))
+            (when (and term (not (abbrev--word-char? (string term))))
+              (let* ((end (- (point) (char-bytes term)))
+                     (wb (abbrev--trailing-word-at end)))
+                (when wb
+                  (let* ((word (cdr wb))
+                         (start (car wb))
+                         (entry (abbrev-symbol word)))
+                    (when (and (not (abbrev--guard-in-place? guard))
+                               entry
+                               (let ((pred (cdr (assoc 'enable-function entry))))
+                                 (not (and pred (not (abbrev--call-pred pred word)))))
+                               (abbrev--ts-context-ok entry start end))
+                      (let ((exp (abbrev--apply-case
+                                  word
+                                  (cdr (assoc 'expansion entry))
+                                  entry)))
+                        (set! *abbrev--auto-guard*
+                              (list start exp (current-buffer)))
+                        (abbrev--expand-at start end word exp
+                                           (cdr (assoc 'hook entry)))))))))))))))
+
 (define (abbrev-mode)
-  (cond (*abbrev-mode-on*
-         (set! *abbrev-mode-on* #f)
-         (message "abbrev-mode disabled"))
-        ((not *abbrev-capf-registered*)
-         (set! *abbrev-capf-registered* #t)
-         (set! *abbrev-mode-on* #t)
-         (add-completion-at-point-function "abbrev-capf")
-         (message "abbrev-mode enabled"))
-        (else
-         (set! *abbrev-mode-on* #t)
-         (message "abbrev-mode enabled"))))
+  (if (abbrev--on?)
+      (begin
+        (abbrev--on-set! #f)
+        (message "abbrev-mode disabled"))
+      (begin
+        (unless *abbrev-capf-registered*
+          (set! *abbrev-capf-registered* #t)
+          (add-completion-at-point-function "abbrev-capf"))
+        (abbrev--on-set! #t)
+        (message "abbrev-mode enabled")))
+  (abbrev--update-hook)
+  (abbrev--update-modeline))
 
 (register-command 'abbrev-mode)
 
@@ -492,18 +790,35 @@
 ;; (never editing evil.scm/helix.scm); the state-exit command is invoked by
 ;; 'symbol name through eval-string, so this stays load-order safe no matter
 ;; where evil.scm/helix.scm land in the startup graph.
+;; Disabling RESTORES the bindings that were in place before enabling
+;; (key-binding), so a user's own escape binding is never overwritten — when
+;; nothing was bound, the plain state-exit command goes back.
 
 (define *abbrev-expand-on-insert-exit* #f)
+;; ((mode . command) …) — the escape bindings captured on enable.
+(define *abbrev--saved-escape* '())
+
+;; Remember the current escape binding of MODE (an insert keymap), falling
+;; back to DEFAULT when nothing is bound there yet.
+(define (abbrev--save-escape mode default)
+  (let ((cmd (key-binding mode "escape")))
+    (set! *abbrev--saved-escape*
+          (cons (cons mode (if (string=? cmd "") default cmd))
+                (filter (lambda (b) (not (string=? (car b) mode)))
+                        *abbrev--saved-escape*)))))
 
 (define (set-abbrev-expand-on-insert-exit v)
   (set! *abbrev-expand-on-insert-exit* v)
   (if v
       (begin
+        (abbrev--save-escape "evil-insert" "evil-normal-state")
+        (abbrev--save-escape "helix-insert" "helix-normal-state")
         (bind-key "evil-insert" "escape" 'abbrev--evil-insert-exit)
         (bind-key "helix-insert" "escape" 'abbrev--helix-insert-exit))
       (begin
-        (bind-key "evil-insert" "escape" 'evil-normal-state)
-        (bind-key "helix-insert" "escape" 'helix-normal-state))))
+        (for-each (lambda (b) (bind-key (car b) "escape" (cdr b)))
+                  *abbrev--saved-escape*)
+        (set! *abbrev--saved-escape* '()))))
 
 ;; Expansion core shared with expand-abbrev: full predicate chain (case rules,
 ;; :enable-function, :ts-context) + hook, but SILENT — escape should not nag.
@@ -522,6 +837,7 @@
                 (else
                  (abbrev--expand-at
                   (car wb) (point)
+                  (cdr wb)
                   (abbrev--apply-case (cdr wb)
                                       (cdr (assoc 'expansion entry))
                                       entry)
@@ -542,8 +858,9 @@
 ;; The abbrev file is Scheme data: exactly the (define-abbrev …) forms that
 ;; rebuild the tables — so `read-abbrev-file` is just `load`, and any string
 ;; (quotes, newlines, tabs, any control char) round-trips through the escaped
-;; literal. The file is a BACKUP; the in-memory tables are the source of truth,
-;; and re-reading replaces entries (hash-insert semantics), never duplicates.
+;; literal. The file is read back on after-init-hook and rewritten on exit;
+;; the in-memory tables are the source of truth, and re-reading replaces
+;; entries (hash-insert semantics), never duplicates.
 ;; It is written only when at least one savable abbrev exists — an all-system
 ;; or all-anonymous table serializes to just ;; comments, and that is not a
 ;; save. Skipped system redefinitions (a user abbrev winning) announce
@@ -559,8 +876,8 @@
 
 ;; Scheme string literal escaping for the serialized forms: backslash and
 ;; quote, then ANY control char (<32 — \n, \t, \r, …) uniformly as a \u{hex};
-;; escape (steel's lexer reads \u{…} in string literals — verified in
-;; steel-parser's read_string_escape), so every control character round-trips.
+;; escape (steel's lexer reads \u{…} in string literals), so every control
+;; character round-trips.
 (define (abbrev--escape s)
   (let ((unquoted (string-replace
                    (string-replace s "\\" "\\\\")
@@ -683,7 +1000,18 @@
 (define (set-abbrev-file-name path) (set! *abbrev-file-name* path))
 (define (set-save-abbrevs val) (set! *save-abbrevs* val))
 
+;; after-init-hook: the init phase (bundled scripts + init.scm) is over —
+;; defines from here on are user abbrevs — and the saved abbrev file is read
+;; back, Emacs's abbrev_defs style. Reading replaces entries (hash-insert
+;; semantics), so re-loading never duplicates; init-time defines were marked
+;; :system, so they don't appear in the file in the first place.
+(define (abbrev--after-init)
+  (set! *abbrev--init-phase* #f)
+  (when (file-exists? *abbrev-file-name*)
+    (read-abbrev-file)))
+
 (add-hook "kill-emacs-hook" "abbrev--save")
+(add-hook "after-init-hook" "abbrev--after-init")
 
 ;; Default location; init.scm can override.
 (set! *abbrev-file-name*
