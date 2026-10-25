@@ -2241,7 +2241,6 @@ impl Editor {
 
         let cursor = self.apply_tracked_replace(range, new_text);
         self.active.modified = true;
-
         if let Some((start_byte, old_end_byte, start_point, old_end_point)) = positions {
             let new_end_byte = start_byte + new_text.len();
             let new_end_point = self.active.buffer.point_at(new_end_byte);
