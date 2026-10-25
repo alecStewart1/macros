@@ -13,19 +13,18 @@
 ;;
 ;; Props (plist): :case-fixed, :enable-function, :ts-context.
 ;;
-;; `abbrev-mode` is the buffer-local minor mode: while on in a buffer, an
-;; abbrev expands automatically when you finish typing it (a word terminator
-;; — space, punct, … — triggers expansion, Emacs-style) and abbrevs appear as
-;; a completion-at-point source. `abbrev-mode` toggles the current buffer;
-;; `set-abbrev-mode-default` turns it on everywhere by default (buffers with
-;; an explicit toggle win). Tables auto-save silently on exit
+;; `abbrev-mode` is the buffer-local minor mode: while on in a buffer, abbrevs
+;; appear as a completion-at-point source and the mode line shows the
+;; `abbrev` indicator. Expansion itself is MANUAL for now — typing-time
+;; expansion (Emacs's auto-expand on a word terminator) is planned once
+;; Macros has real minor-mode support; `abbrev-mode` is where it will
+;; attach. Tables auto-save silently on exit
 ;; (`save-abbrevs` 'silent, set-save-abbrevs to change) to
 ;; `abbrev-file-name` (set-abbrev-file-name), and the file is read back on
 ;; after-init-hook. Defines made while startup runs count as :system, so the
 ;; file only holds abbrevs added interactively.
 ;;
-;; There is no command-free magic beyond that: besides `abbrev-mode`'s
-;; typing-time expansion, expansion happens when you run `expand-abbrev` (or,
+;; There is no command-free magic beyond that: expansion happens when you run `expand-abbrev` (or,
 ;; optionally, on insert-exit — see set-abbrev-expand-on-insert-exit). Case
 ;; rules: TEH → THE, Teh → The, and
 ;; `:case-fixed` expansions insert exactly as defined. Anonymous procedures as
@@ -34,8 +33,10 @@
 ;; COMMANDS & API
 ;;   expand-abbrev (C-x ')   replace the word before point with its expansion;
 ;;                           silent no-op when :enable-function/:ts-context decline
-;;   abbrev-mode (M-x)       buffer-local minor mode: typing-time abbrev
-;;                           expansion + the abbrev completion source
+;;   abbrev-mode (M-x)       buffer-local minor mode: the abbrev completion
+;;                           source + the mode-line indicator (typing-time
+;;                           expansion is planned for when real minor-mode
+;;                           support lands)
 ;;   set-abbrev-mode-default #t   enable abbrev-mode by default in every
 ;;                           buffer without an explicit toggle (init.scm)
 ;;   add-global-abbrev (C-x a g)     define an abbrev interactively: the word
@@ -419,8 +420,8 @@
 ;; Shared expansion core: replace the word (START . END) — WORD is the abbrev
 ;; name as typed — with EXP, then run HOOK. Queued edits apply in order
 ;; (yasnippet.scm): delete the abbrev, then insert the expansion at its
-;; start. Used by expand-abbrev, the typing-time expansion and the
-;; Records (WORD EXP START BUFFER) for unexpand-abbrev.
+;; start. Used by expand-abbrev and the Records (WORD EXP START BUFFER) for
+;; unexpand-abbrev.
 (define *abbrev-last* #f)
 
 (define (abbrev--expand-at start end word exp hook)
@@ -639,16 +640,12 @@
 (define (abbrev--on-set! v)
   (set! *abbrev-state* (alist-set *abbrev-state* (current-buffer) (list v))))
 
-;; Keep the edit hook registered exactly while the mode is live somewhere.
-(define (abbrev--update-hook)
-  (if (or *abbrev-mode-default*
-          (not (null? (filter (lambda (e) (car (cdr e))) *abbrev-state*))))
-      (add-hook "after-change-functions" "abbrev--auto-expand")
-      (remove-hook "after-change-functions" "abbrev--auto-expand")))
-
+;; No after-change hook for now: auto-expansion is gone (see below), so
+;; nothing should register on `after-change-functions`. The toggle, mode-line
+;; indicator and completion source stay; the hook re-registers here when
+;; typing-time expansion comes back with real minor-mode support.
 (define (set-abbrev-mode-default v)
   (set! *abbrev-mode-default* v)
-  (abbrev--update-hook)
   (abbrev--update-modeline))
 
 ;; Mode-line lighter (a slot: names the focused buffer, the same trade
@@ -691,81 +688,14 @@
   (and (>= (string-length s) (string-length prefix))
        (string=? prefix (substring s 0 (string-length prefix)))))
 
-;; Typing-time expansion (Emacs abbrev-mode semantics): after each change,
-;; when the character just inserted is NOT a word character (space, punct,
-;; newline, …), the word ending just before it is expanded — silently, and
-;; the terminator stays. Runs only in buffers where the mode is on; cost is
-;; one flag read per change plus, on a real trigger, one windowed substring
-;; read and hash lookup. Follows the primary cursor; a grammar-less buffer
-;; just never passes the :ts-context check.
-;;
-;; Re-entrancy guard (Emacs's abbrev-start-location). Editor::edit runs
-;; after-change-functions on EVERY applied edit — including each half of the
-;; delete-region+insert pair an expansion queues, and including plain
-;; deletions. So the guard is a persistent record (start exp buffer), not a
-;; one-shot flag:
-;;   * the DELETE half of our own expansion re-fires with point on the mark —
-;;     stand down, and KEEP the guard armed for the insert half;
-;;   * the INSERT half (or anything later that finds the expansion text still
-;;     sitting exactly where we put it) stands down too — re-expanding would
-;;     be a no-op edit that re-queues the same pair forever (`etc` -> `etc.`);
-;;   * any other fire just fails the match and expands normally.
-;; Disarming the guard from the hook was tried and is wrong: the delete fire
-;; clears it before the insert fire arrives, reopening the loop.
-(define *abbrev--auto-guard* #f)   ; (start-byte expansion buffer)
-
-;; #t when GUARD matches the current buffer and its expansion text sits at
-;; its recorded start — the signature of our own queued insert.
-(define (abbrev--guard-in-place? guard)
-  (and guard
-       (string=? (nth guard 2) (current-buffer))
-       (let ((end (+ (nth guard 0) (utf8-length (nth guard 1)))))
-         (and (<= end (point-max))
-              (string=? (nth guard 1)
-                        (buffer-substring (nth guard 0) end))))))
-
-(define (abbrev--auto-expand)
-  (when (and (abbrev--on?) (> (point) 1))
-    (let ((guard *abbrev--auto-guard*))
-      ;; Only insertions expand. `(last-change)` is the Emacs
-      ;; `(beg end old-len)` triple of the edit that fired this hook; a
-      ;; deletion or replacement (old-len > 0 — undo, kill, our own queued
-      ;; DeleteRegion) must not expand, however terminator-like the buffer
-      ;; happens to look at point now.
-      (when (= (nth (last-change) 2) 0)
-        ;; The delete half of our own expansion re-fires with point on the
-        ;; mark, expansion text gone. Stand down entirely — the insert half
-        ;; fires next and must still find the guard armed.
-        (unless (and guard
-                     (= (point) (nth guard 0))
-                     (string=? (nth guard 2) (current-buffer)))
-          ;; The terminator is the last CHAR before point — read a small byte
-          ;; window (buffer-substring snaps to char boundaries) and take its
-          ;; last character, so multi-byte terminators (`é`, `…`) never slice
-          ;; badly.
-          (let* ((tail (reverse (string->list
-                                 (buffer-substring (max 0 (- (point) 4)) (point)))))
-                 (term (and (pair? tail) (car tail))))
-            (when (and term (not (abbrev--word-char? (string term))))
-              (let* ((end (- (point) (char-bytes term)))
-                     (wb (abbrev--trailing-word-at end)))
-                (when wb
-                  (let* ((word (cdr wb))
-                         (start (car wb))
-                         (entry (abbrev-symbol word)))
-                    (when (and (not (abbrev--guard-in-place? guard))
-                               entry
-                               (let ((pred (cdr (assoc 'enable-function entry))))
-                                 (not (and pred (not (abbrev--call-pred pred word)))))
-                               (abbrev--ts-context-ok entry start end))
-                      (let ((exp (abbrev--apply-case
-                                  word
-                                  (cdr (assoc 'expansion entry))
-                                  entry)))
-                        (set! *abbrev--auto-guard*
-                              (list start exp (current-buffer)))
-                        (abbrev--expand-at start end word exp
-                                           (cdr (assoc 'hook entry)))))))))))))))
+;; Typing-time expansion (Emacs's expand-on-terminator) is deliberately NOT
+;; implemented. It was removed because the hook's `(point)` runs one char
+;; behind — the snapshot is published inside `edit()`, before `type_text`
+;; calls `collapse_to` — and because `abbrev--expand-at` left the cursor
+;; before the terminator while the guard was never cleared, so
+;; `abbrev--guard-in-place?` blocked every later expansion in the buffer.
+;; When this returns with real minor-mode support, test it end-to-end through
+;; `type_text` (`teh teh `) — not with hand-set snapshots, which hid both.
 
 (define (abbrev-mode)
   (if (abbrev--on?)
@@ -778,7 +708,6 @@
           (add-completion-at-point-function "abbrev-capf"))
         (abbrev--on-set! #t)
         (message "abbrev-mode enabled")))
-  (abbrev--update-hook)
   (abbrev--update-modeline))
 
 (register-command 'abbrev-mode)
@@ -978,14 +907,19 @@
                                              acc))))))))
           (loop (cdr ts) (append forms out))))))
 
-;; Silent internal saver — never messages (the 'silent contract). No file is
-;; written when *save-abbrevs* is #f or nothing savable exists: a serialization
-;; of only ;; comments (all-system / all-anonymous tables) is not a save.
+;; Silent internal saver — never messages (the 'silent contract). When the
+;; last savable abbrev is removed, `abbrev--serialize` returns only ;;
+;; comments (or ""), so a `(string-contains? s "(define-abbrev")` check alone
+;; would skip the write and leave the old file on disk — the removals would
+;; come back at the next startup via `(read-abbrev-file)`. So: write when
+;; there is something savable, and ALSO when the file already exists, even if
+;; the serialization is only ;; comments. A file is never created for a
+;; comment-only state.
 (define (abbrev--save)
   (when *save-abbrevs*
     (let ((s (abbrev--serialize)))
-      (when (and (> (string-length s) 0)
-                 (string-contains? s "(define-abbrev"))
+      (when (or (string-contains? s "(define-abbrev")
+                (file-exists? *abbrev-file-name*))
         (write-file *abbrev-file-name* s)))))
 
 ;; User-facing explicit commands.

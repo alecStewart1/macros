@@ -13700,7 +13700,7 @@ mod abbrev_lib {
     }
 
     #[test]
-    fn save_writes_nothing_when_only_comments_would_be_serialized() {
+    fn save_never_creates_a_comment_only_file_but_overwrites_an_existing_one() {
         let engine = engine();
         let dir = std::env::temp_dir().join(format!("abbrev-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -13728,6 +13728,18 @@ mod abbrev_lib {
             contents.contains("(define-abbrev 'global-abbrev-table"),
             "{contents}"
         );
+        // Undefining the last user abbrev must clear the stale entry from the
+        // existing file (comment-only serialization still overwrites it)…
+        engine
+            .eval(r#"(define-abbrev 'global-abbrev-table "usr" #f)"#)
+            .unwrap();
+        engine.eval(r#"(abbrev--save)"#).unwrap();
+        let contents = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !contents.contains("(define-abbrev"),
+            "stale entry survived the save: {contents}"
+        );
+        // …but an existing file IS rewritten (comment-only serialization overwrites).
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13741,13 +13753,6 @@ mod abbrev_lib {
         let out = engine.eval("(abbrev-mode)").unwrap();
         assert_eq!(v(&engine, "(abbrev--on?)"), "#true");
         assert!(
-            out.commands.iter().any(
-                |c| matches!(c, EditorCommand::AddHook(hook, _) if hook == "after-change-functions")
-            ),
-            "{:?}",
-            out.commands
-        );
-        assert!(
             out.commands
                 .iter()
                 .any(|c| matches!(c, EditorCommand::SetModeLineSlot(k, val)
@@ -13758,13 +13763,6 @@ mod abbrev_lib {
         // Disabling flips the flag back, removes the hook, clears the lighter.
         let out = engine.eval("(abbrev-mode)").unwrap();
         assert_eq!(v(&engine, "(abbrev--on?)"), "#false");
-        assert!(
-        out.commands.iter().any(
-            |c| matches!(c, EditorCommand::RemoveHook(hook, _) if hook == "after-change-functions")
-        ),
-        "{:?}",
-        out.commands
-    );
         assert!(
             out.commands
                 .iter()
@@ -13790,10 +13788,6 @@ mod abbrev_lib {
         // …and turning the default off leaves the explicit buffer on.
         engine.eval(r#"(set-abbrev-mode-default #f)"#).unwrap();
         assert_eq!(v(&engine, "(abbrev--on?)"), "#true");
-        // With no explicit toggles left, the edit hook comes down.
-        engine.eval(r#"(abbrev--on-set! #f)"#).unwrap();
-        engine.eval(r#"(abbrev--update-hook)"#).unwrap();
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#false");
     }
 
     #[test]
@@ -14169,159 +14163,6 @@ mod abbrev_lib {
     }
 
     #[test]
-    fn auto_expand_expands_the_word_before_a_terminator() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--on-set! #t)"#).unwrap();
-        snapshot_with(&engine, "x teh ");
-        let out = engine.eval("(abbrev--auto-expand)").unwrap();
-        // The queued edit replaces exactly the byte span of "teh" (2..5).
-        assert_eq!(expand_edits(&out), (2, 5, "the".to_string()));
-        // The guard is armed for the re-fire the insert will cause.
-        assert_eq!(v(&engine, "(nth *abbrev--auto-guard* 0)"), "2");
-        assert_eq!(v(&engine, r#"(nth *abbrev--auto-guard* 1)"#), r#""the""#);
-    }
-
-    #[test]
-    fn auto_expand_is_char_safe_around_multibyte_text() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--on-set! #t)"#).unwrap();
-        // Multi-byte chars on BOTH sides: "café " ends at byte 6 and the word
-        // runs right up against a 2-byte terminator. The byte-wise scan this
-        // replaces mis-sliced the terminator read and the backward word walk.
-        snapshot_with(&engine, "café tehé");
-        let out = engine.eval("(abbrev--auto-expand)").unwrap();
-        assert_eq!(expand_edits(&out), (6, 9, "the".to_string()));
-    }
-
-    #[test]
-    fn auto_expand_does_not_retrigger_on_its_own_expansion() {
-        let engine = engine();
-        // A self-triggering abbrev: its own expansion ends in the same
-        // terminator. Without the guard, the insert's after-change re-fire
-        // would find "etc" again and expand forever.
-        engine
-            .eval(r#"(define-global-abbrev "etc" "etc.")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--on-set! #t)"#).unwrap();
-        snapshot_with(&engine, "etc ");
-        let out = engine.eval("(abbrev--auto-expand)").unwrap();
-        assert!(edits(&out), "first fire expands: {:?}", out.commands);
-        // Simulate the queued edit applying: the DELETE half fires first
-        // (buffer "etc", point on the mark at byte 0, the queued
-        // DeleteRegion published as last-change)…
-        engine.set_snapshot(EditorSnapshot {
-            text: Rope::from_str("etc"),
-            point: 0,
-            line: 0,
-            last_change: (0, 0, 3),
-            ..Default::default()
-        });
-        engine.eval("(abbrev--auto-expand)").unwrap();
-        // …and the guard survives it for the insert half.
-        assert_eq!(v(&engine, "(nth *abbrev--auto-guard* 0)"), "0");
-        snapshot_with(&engine, "etc.");
-        let out = engine.eval("(abbrev--auto-expand)").unwrap();
-        assert!(
-            !edits(&out),
-            "the re-fire must stand down: {:?}",
-            out.commands
-        );
-    }
-
-    #[test]
-    fn auto_expand_guard_persists_until_superseded() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--on-set! #t)"#).unwrap();
-        snapshot_with(&engine, "x teh ");
-        engine.eval("(abbrev--auto-expand)").unwrap();
-        // The guard is armed: (start exp buffer) = (2 "the" buffer).
-        assert_eq!(v(&engine, "(nth *abbrev--auto-guard* 0)"), "2");
-        assert_eq!(v(&engine, r#"(nth *abbrev--auto-guard* 1)"#), r#""the""#);
-        // An unrelated later fire leaves the persistent guard alone…
-        snapshot_with(&engine, "x thea");
-        engine.eval("(abbrev--auto-expand)").unwrap();
-        assert_eq!(v(&engine, "(nth *abbrev--auto-guard* 0)"), "2");
-        // …and a new expansion elsewhere supersedes it.
-        engine.eval(r#"(define-global-abbrev "ab" "ab.")"#).unwrap();
-        snapshot_with(&engine, "the ab ");
-        engine.eval("(abbrev--auto-expand)").unwrap();
-        assert_eq!(v(&engine, "(nth *abbrev--auto-guard* 0)"), "4");
-    }
-
-    #[test]
-    fn auto_expand_ignores_deletions_and_replacements() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--on-set! #t)"#).unwrap();
-        // A deletion (kill, backward-delete, undo) that happens to leave a
-        // terminator-looking char before point must NOT expand: last-change's
-        // old-len is > 0. Without the gate, `x teh|` deleting "h" would
-        // expand "te" — deleting the "x" and its space below leaves "teh "
-        // looking freshly typed.
-        snapshot_with(&engine, "x teh ");
-        engine.set_snapshot(EditorSnapshot {
-            last_change: (0, 2, 2),
-            text: Rope::from_str("x teh "),
-            point: 6,
-            line: 0,
-            ..Default::default()
-        });
-        assert!(!edits(&engine.eval("(abbrev--auto-expand)").unwrap()));
-        // Replacement edits (old-len > 0) are equally declined…
-        engine.set_snapshot(EditorSnapshot {
-            last_change: (2, 5, 3),
-            text: Rope::from_str("x teh "),
-            point: 6,
-            line: 0,
-            ..Default::default()
-        });
-        assert!(!edits(&engine.eval("(abbrev--auto-expand)").unwrap()));
-        // …while a pure insertion (old-len == 0) expands.
-        engine.set_snapshot(EditorSnapshot {
-            last_change: (5, 6, 0),
-            text: Rope::from_str("x teh "),
-            point: 6,
-            line: 0,
-            ..Default::default()
-        });
-        assert!(edits(&engine.eval("(abbrev--auto-expand)").unwrap()));
-    }
-
-    #[test]
-    fn last_change_reports_the_most_recent_edit_triple() {
-        let (engine, _rx) = ScriptEngine::new();
-        for src in crate::runtime::startup_scripts() {
-            engine.eval(src).unwrap();
-        }
-        // The no-change startup state reads as an inert triple.
-        engine.set_snapshot(EditorSnapshot {
-            text: Rope::from_str("abc"),
-            point: 3,
-            line: 0,
-            ..Default::default()
-        });
-        assert_eq!(v(&engine, "(last-change)"), "(0 0 0)");
-        // The editor publishes (beg end old-len) per applied edit; the
-        // snapshot is the bridge, so a published triple round-trips.
-        engine.set_snapshot(EditorSnapshot {
-            last_change: (3, 4, 0),
-            ..Default::default()
-        });
-        assert_eq!(v(&engine, "(last-change)"), "(3 4 0)");
-    }
-
-    #[test]
     fn ts_context_abbrev_never_expands_without_a_grammar() {
         let engine = engine();
         engine
@@ -14330,13 +14171,14 @@ mod abbrev_lib {
                (define-global-abbrev "tsb" "expanded")"#,
             )
             .unwrap();
-        engine.eval(r#"(abbrev--on-set! #t)"#).unwrap();
         // Grammar-less buffer (no tree-sitter here): the :ts-context abbrev
         // declines — the documented degradation — its sibling expands.
-        snapshot_with(&engine, "tsa ");
-        assert!(!edits(&engine.eval("(abbrev--auto-expand)").unwrap()));
-        snapshot_with(&engine, "tsb ");
-        assert!(edits(&engine.eval("(abbrev--auto-expand)").unwrap()));
+        // Manual expansion: expand-abbrev runs the same predicate chain with
+        // point right after the word (no terminator typed).
+        snapshot_with(&engine, "tsa");
+        assert!(!edits(&engine.eval("(expand-abbrev)").unwrap()));
+        snapshot_with(&engine, "tsb");
+        assert!(edits(&engine.eval("(expand-abbrev)").unwrap()));
     }
 
     #[test]

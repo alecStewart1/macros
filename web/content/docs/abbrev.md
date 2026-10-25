@@ -5,11 +5,11 @@ description: Emacs-style abbrevs — type a short word, expand it into something
 
 # Abbreviations
 
-Emacs-style abbreviations (`abbrev.el`). An abbrev is a short word that expands to something longer — `teh` → `the`. With `abbrev-mode` on, expansion happens automatically when you finish typing the word; you can also expand on demand with `expand-abbrev`.
+Emacs-style abbreviations (`abbrev.el`). An abbrev is a short word that expands to something longer — `teh` → `the`. Expansion is explicit: you run `expand-abbrev` (<kbd>C-x '</kbd>) or leave insert mode with expand-on-insert-exit enabled. (Typing-time expansion — the word expanding the moment you type a terminator, as in Emacs — is planned once Macros has real minor-mode support.)
 
 ## Expanding
 
-`abbrev-mode` is a buffer-local minor mode with a global default, like in Emacs (there is no `global-abbrev-mode` — Emacs doesn't have one either). `M-x abbrev-mode` toggles the current buffer: the moment you type a word terminator (space, punctuation, …) after an abbrev, the word is replaced by its expansion — `teh ` becomes `the `. The expansion is silent, and `:enable-function` / `:ts-context` predicates can decline it like any other. Leave the mode off in a buffer and nothing expands behind your back; an `abbrev` indicator appears in the mode line while it's on.
+Expansion is manual for now: <kbd>C-x '</kbd> (`expand-abbrev`), or on insert exit (see below). `abbrev-mode` is a buffer-local minor mode with a global default, like in Emacs (there is no `global-abbrev-mode` — Emacs doesn't have one either), but it only toggles the abbrev completion source and the `abbrev` mode-line indicator — expansion as you type is coming later. Leave the mode off in a buffer and abbrevs don't complete there.
 
 To enable it everywhere by default — Emacs's "enable Abbrev mode by default in all buffers" — put this in your `init.scm`:
 
@@ -21,7 +21,7 @@ Buffers where you've toggled `abbrev-mode` explicitly keep their own value.
 
 | Key | Command | Action |
 | --- | --- | --- |
-| <kbd>M-x</kbd> | `abbrev-mode` | Toggle typing-time abbrev expansion + the abbrev completion source in the current buffer |
+| <kbd>M-x</kbd> | `abbrev-mode` | Toggle the abbrev completion source + the mode-line indicator in the current buffer |
 | <kbd>C-x '</kbd> | `expand-abbrev` | Replace the word before point with its expansion |
 | <kbd>C-x a g</kbd> | `add-global-abbrev` | Define a global abbrev: the word (or region) before point is the expansion, the name is read from the minibuffer |
 | <kbd>C-x a m</kbd> | `add-mode-abbrev` | Same, into the current mode's abbrev table |
@@ -31,6 +31,8 @@ Buffers where you've toggled `abbrev-mode` explicitly keep their own value.
 | <kbd>C-x a -</kbd> | `abbrev-prefix-mark` | Prefix trick: type a prefix, mark it, type the abbrev, expand — the hyphen disappears |
 
 Case works like Emacs: type `TEH` and you get `THE`, type `Teh` and you get `The`, otherwise the expansion is inserted exactly as defined (lookup is case-insensitive unless the abbrev is `:case-fixed`). A prefix predicate or syntax-context rule can silently decline to expand (see below).
+
+> **Note:** `expand-abbrev` replaces the word *before point*. In evil or helix **normal state** the cursor sits on the last letter of the word, so <kbd>C-x '</kbd> sees only the letters before it — after `teh <kbd>esc</kbd>` it reports `No abbrev: te`. Expand while still in insert state (point is right after the word there), set `set-abbrev-expand-on-insert-exit #t` so leaving insert mode expands for you, or press `a` in normal state (insert after cursor) to put point past the last letter, then <kbd>C-x '</kbd>.
 
 When leaving insert mode in [evil](/docs/modal-editing) or [helix](/docs/helix) you can also expand automatically:
 
@@ -112,7 +114,7 @@ Abbrevs declared through `define-abbrev-table` are system abbrevs by default —
 
 ## Saving
 
-Your abbrevs auto-save on exit to `abbrev-file-name` (`~/.config/macros/abbrevs.scm` by default), silently — no messages, and no file at all until you have at least one savable abbrev. The file is loaded back automatically at the end of startup, Emacs's `abbrev_defs` style: the file holds only the abbrevs you added interactively, and re-loading replaces entries rather than duplicating them. The file is Scheme data: exactly the `(define-abbrev …)` forms that rebuild the tables, so you can read, edit, or version it like any config.
+Your abbrevs auto-save on exit to `abbrev-file-name` (`~/.config/macros/abbrevs.scm` by default), silently — no messages, and no file at all until you have at least one savable abbrev. Undefining your last abbrev (or making every remaining one a system abbrev) rewrites the existing file without them, so stale entries never come back at the next startup. The file is loaded back automatically at the end of startup, Emacs's `abbrev_defs` style: the file holds only the abbrevs you added interactively, and re-loading replaces entries rather than duplicating them. The file is Scheme data: exactly the `(define-abbrev …)` forms that rebuild the tables, so you can read, edit, or version it like any config.
 
 ```scheme
 (write-abbrev-file)            ; save now
