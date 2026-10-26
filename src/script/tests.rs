@@ -13714,750 +13714,280 @@ mod bookmarks_lib {
     }
 }
 
-mod abbrev_lib {
+#[cfg(test)]
+mod minor_mode_probes {
     use super::*;
 
     fn engine() -> ScriptEngine {
         let (engine, _rx) = ScriptEngine::new();
-        load_with_deps(&engine, "abbrev");
-        // Tests exercise interactive semantics; the init phase (defines
-        // becoming :system) has its own tests below.
-        engine.eval("(set! *abbrev--init-phase* #f)").unwrap();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
         engine
     }
 
-    fn v(engine: &ScriptEngine, q: &str) -> String {
-        engine
-            .eval(q)
-            .unwrap_or_else(|e| panic!("{q}: {e}"))
-            .value
-            .unwrap_or_default()
-    }
-
+    // Task 0 probe 1: procedural macros (syntax-case + datum->syntax +
+    // string->symbol) work in Macros' embedded engine.
     #[test]
-    fn define_global_abbrev_lands_in_the_global_table() {
+    fn probe_syntax_case_and_datum_syntax() {
         let engine = engine();
-        assert_eq!(
-            v(&engine, r#"(define-global-abbrev "teh" "the")"#),
-            "\"teh\""
-        );
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "teh" 'global-abbrev-table)))"#
-            ),
-            "\"the\""
-        );
-        // Plain user abbrev: not system, so it round-trips to the abbrev file.
-        assert_eq!(
-            v(
-                &engine,
-                r#"(abbrev--entry-form "global-abbrev-table" "teh" (abbrev-symbol "teh" 'global-abbrev-table))"#
-            ),
-            "\"(define-abbrev 'global-abbrev-table \\\"teh\\\" \\\"the\\\" #f)\""
-        );
-    }
-
-    #[test]
-    fn system_abbrev_does_not_overwrite_user_abbrev_unless_force() {
-        let engine = engine();
-        // User defines first.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "x" "user-expansion")"#)
-            .unwrap();
-        // A plain system abbrev must NOT clobber it.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "x" "system-expansion" #f '(:system #t))"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#
-            ),
-            "\"user-expansion\""
-        );
-        // :system 'force overrides the user's abbrev.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "x" "forced" #f '(:system 'force))"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "x" 'global-abbrev-table)))"#
-            ),
-            "\"forced\""
-        );
-        // 'force is stored as #t (the force value itself is not kept).
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'system (abbrev-symbol "x" 'global-abbrev-table)))"#
-            ),
-            "#true"
-        );
-    }
-
-    #[test]
-    fn system_abbrevs_are_excluded_from_the_saved_file() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "sys" "s" #f '(:system #t))"#)
-            .unwrap();
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "usr" "u")"#)
-            .unwrap();
-        let file = v(&engine, r#"(abbrev--serialize)"#);
-        assert!(
-            file.contains(r#"(define-abbrev 'global-abbrev-table \"usr\""#),
-            "{file}"
-        );
-        assert!(
-            !file.contains(r#"\"sys\""#),
-            "system abbrev leaked into file: {file}"
-        );
-        assert!(file.contains(";; system abbrev (not saved):"), "{file}");
-    }
-
-    #[test]
-    fn define_abbrev_table_definitions_are_system_by_default() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-abbrev-table 'rust-mode-abbrev-table '(("fnr" "fn rec"))) "#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'system (abbrev-symbol "fnr" 'rust-mode-abbrev-table)))"#
-            ),
-            "#true"
-        );
-        // …and a definition naming its own :system keeps that value.
-        engine
-            .eval(
-                r#"(define-abbrev-table 'go-mode-abbrev-table
-                    '(("gom" "module" #f (:system #f))))"#,
-            )
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'system (abbrev-symbol "gom" 'go-mode-abbrev-table)))"#
-            ),
-            "#false"
-        );
-    }
-
-    #[test]
-    fn escape_round_trips_carriage_return_and_other_control_chars() {
-        let engine = engine();
-        // \r and friends all become \u{hex}; escapes (steel's lexer reads
-        // them), so the serialization can never contain a raw control byte.
-        assert_eq!(v(&engine, r#"(abbrev--escape "a\rb")"#), r#""a\\u{d};b""#);
-        assert_eq!(v(&engine, r#"(abbrev--escape "x\tyz")"#), r#""x\\u{9};yz""#);
-    }
-
-    #[test]
-    fn skipped_system_redefinition_messages() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "m" "user")"#)
-            .unwrap();
+        // Steel's datum->syntax is a COMPILE-TIME identifier-rewrite pass
+        // (replace_idents.rs) that requires literal identifier arguments —
+        // computed-name synthesis has to go through with-syntax binding a
+        // symbol VALUE instead.
         let out = engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "m" "system" #f '(:system #t))"#)
+            .eval(
+                r#"(define-syntax (probe stx)
+                     (syntax-case stx ()
+                       [(_ name)
+                        (with-syntax ([mapped (string->symbol
+                                               (string-append
+                                                (symbol->string
+                                                 (syntax->datum #'name))
+                                                "-suffix"))])
+                          #'(define mapped 42))]))
+                 (probe thing)
+                 thing-suffix"#,
+            )
             .unwrap();
-        assert!(
-            out.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::Message(m) if m.contains("skipped"))),
-            "expected a skip message: {:?}",
-            out.commands
-        );
-        // …and the user's abbrev still wins.
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "m" 'global-abbrev-table)))"#
-            ),
-            "\"user\""
-        );
+        assert_eq!(out.value.unwrap(), "42");
     }
 
+    // Task 0 probe 2: keyword literals read as colon-prefixed symbols.
     #[test]
-    fn save_never_creates_a_comment_only_file_but_overwrites_an_existing_one() {
+    fn probe_keywords_are_symbols() {
         let engine = engine();
-        let dir = std::env::temp_dir().join(format!("abbrev-save-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("abbrevs.scm");
-        engine
-            .eval(&format!(r#"(set-abbrev-file-name {:?})"#, file))
-            .unwrap();
-        // Only a system abbrev → serialization is just a ;; comment → no save.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "sys" "s" #f '(:system #t))"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--save)"#).unwrap();
-        assert!(
-            !file.exists(),
-            "comment-only serialization must not be written"
-        );
-        // A user abbrev flips it to a real save.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "usr" "u")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--save)"#).unwrap();
-        let contents = std::fs::read_to_string(&file).unwrap();
-        assert!(
-            contents.contains("(define-abbrev 'global-abbrev-table"),
-            "{contents}"
-        );
-        // Undefining the last user abbrev must clear the stale entry from the
-        // existing file (comment-only serialization still overwrites it)…
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "usr" #f)"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--save)"#).unwrap();
-        let contents = std::fs::read_to_string(&file).unwrap();
-        assert!(
-            !contents.contains("(define-abbrev"),
-            "stale entry survived the save: {contents}"
-        );
-        // …but an existing file IS rewritten (comment-only serialization overwrites).
-        let _ = std::fs::remove_dir_all(&dir);
+        let out = engine.eval("(eq? (quote :lighter) ':lighter)").unwrap();
+        assert_eq!(out.value.unwrap(), "#true");
+        let name = engine.eval("(symbol->string ':lighter)").unwrap();
+        assert_eq!(name.value.unwrap(), "\":lighter\"");
     }
 
+    // Task 0 probe 3: bind-key accepts an arbitrary new map name.
     #[test]
-    fn abbrev_mode_toggles_per_buffer_with_a_lighter() {
+    fn probe_arbitrary_keymap_name() {
         let engine = engine();
-        // Off by default; the CAPF declines.
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#false");
-        assert_eq!(v(&engine, r#"(abbrev-capf "te")"#), "()");
-        // The mode registers its lighter slot at load; enabling writes it.
-        let out = engine.eval("(abbrev-mode)").unwrap();
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#true");
-        assert!(
-            out.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::SetModeLineSlot(k, val)
-                if k == "abbrev" && val == "abbrev")),
-            "{:?}",
-            out.commands
-        );
-        // Disabling flips the flag back, removes the hook, clears the lighter.
-        let out = engine.eval("(abbrev-mode)").unwrap();
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#false");
-        assert!(
-            out.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::SetModeLineSlot(k, val)
-                if k == "abbrev" && val.is_empty())),
-            "{:?}",
-            out.commands
-        );
-    }
-
-    #[test]
-    fn abbrev_mode_default_applies_until_a_buffer_toggles() {
-        let engine = engine();
-        // The Emacs "enable by default in all buffers" path: with no
-        // buffer-local value, the default answers everywhere.
-        engine.eval(r#"(set-abbrev-mode-default #t)"#).unwrap();
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#true");
-        // An explicit buffer toggle shadows the default, either way…
-        engine.eval("(abbrev-mode)").unwrap();
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#false");
-        engine.eval("(abbrev-mode)").unwrap();
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#true");
-        // …and turning the default off leaves the explicit buffer on.
-        engine.eval(r#"(set-abbrev-mode-default #f)"#).unwrap();
-        assert_eq!(v(&engine, "(abbrev--on?)"), "#true");
-    }
-
-    #[test]
-    fn define_abbrev_nil_undefines() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
         let out = engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "teh" #f)"#)
+            .eval(r#"(begin (bind-key "probe-map" "ctrl-c x" 'self-insert-command)
+                            "ok")"#)
             .unwrap();
-        assert_eq!(
-            v(&engine, r#"(abbrev-symbol "teh" 'global-abbrev-table)"#),
-            "#false"
-        );
-        assert!(
-            out.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::Message(m) if m.contains("Undefined"))),
-            "{:?}",
-            out.commands
-        );
-    }
-
-    #[test]
-    fn expansions_record_last_for_unexpand_and_prefix_mark_state() {
-        let engine = engine();
-        // abbrev--expand-at records (word exp start buffer) — unexpand's data,
-        // scoped to the expanding buffer.
-        engine
-            .eval(r#"(abbrev--expand-at 0 3 "teh" "the" #f)"#)
-            .unwrap();
-        assert_eq!(v(&engine, r#"(nth *abbrev-last* 0)"#), r#""teh""#);
-        assert_eq!(v(&engine, r#"(nth *abbrev-last* 1)"#), r#""the""#);
-        assert_eq!(v(&engine, r#"(nth *abbrev-last* 2)"#), "0");
-        assert_eq!(
-            v(
-                &engine,
-                r#"(string=? (nth *abbrev-last* 3) (current-buffer))"#
-            ),
-            "#true"
-        );
-        // The prefix mark is armed by abbrev-prefix-mark (a hyphen insert is
-        // queued), tagged with its buffer, and consumed on expand.
-        let out = engine.eval(r#"(abbrev-prefix-mark)"#).unwrap();
-        assert_eq!(v(&engine, r#"(nth *abbrev--prefix-mark* 0)"#), "0");
-        assert_eq!(
-            v(
-                &engine,
-                r#"(string=? (nth *abbrev--prefix-mark* 1) (current-buffer))"#
-            ),
-            "#true"
-        );
-        assert!(
-            out.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::Insert(t) if t == "-")),
-            "{:?}",
-            out.commands
-        );
-    }
-
-    #[test]
-    fn lookup_case_folds_like_emacs_unless_case_fixed() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        // TEH / Teh look up the stored lower-case abbrev (Emacs's
-        // abbrev--symbol case folding); the case rules then shape it.
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "TEH" 'global-abbrev-table)))"#
-            ),
-            "\"the\""
-        );
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "Teh" 'global-abbrev-table)))"#
-            ),
-            "\"the\""
-        );
-        // A :case-fixed entry demands an exact match.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "Aaa" "exact" #f '(:case-fixed #t))"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "Aaa" 'global-abbrev-table)))"#
-            ),
-            "\"exact\""
-        );
-        assert_eq!(
-            v(&engine, r#"(abbrev-symbol "AAA" 'global-abbrev-table)"#),
-            "#false"
-        );
-    }
-
-    #[test]
-    fn local_table_name_normalizes_the_bare_language_name() {
-        let engine = engine();
-        // `major-mode` returns the bare language name ("rust"), and the docs
-        // define `rust-mode-abbrev-table` — so the mode table must gain
-        // `-mode-abbrev-table`, not just `-abbrev-table`.
-        assert_eq!(
-            v(&engine, r#"(abbrev--local-table-name "rust")"#),
-            r#""rust-mode-abbrev-table""#
-        );
-        // A name already ending in -mode just gains -abbrev-table; a full
-        // table name passes through.
-        assert_eq!(
-            v(&engine, r#"(abbrev--local-table-name "rust-mode")"#),
-            r#""rust-mode-abbrev-table""#
-        );
-        assert_eq!(
-            v(
-                &engine,
-                r#"(abbrev--local-table-name 'rust-mode-abbrev-table)"#
-            ),
-            r#""rust-mode-abbrev-table""#
-        );
-    }
-
-    #[test]
-    fn abbrev_symbol_without_a_table_uses_the_major_mode_table() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        // No explicit table: the chain is walked (empty major-mode here just
-        // means no local table) and the global table answers.
-        assert_eq!(
-            v(&engine, r#"(cdr (assoc 'expansion (abbrev-symbol "teh")))"#),
-            "\"the\""
-        );
-        // The mode table named from the bare language name is consulted
-        // before the global one.
-        engine
-            .eval(r#"(define-abbrev 'rust-mode-abbrev-table "teh" "fn rec")"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "teh" 'rust)))"#
-            ),
-            "\"fn rec\""
-        );
-    }
-
-    #[test]
-    fn table_chain_walks_parents_then_global() {
-        let engine = engine();
-        engine
-            .eval(
-                r#"(define-abbrev-table 'prog-mode-abbrev-table '()
-                #f '(:parents '()))
-               (define-abbrev-table 'rust-mode-abbrev-table '()
-                #f '(:parents '(prog-mode-abbrev-table)))"#,
-            )
-            .unwrap();
-        assert_eq!(
-            v(&engine, r#"(abbrev--table-chain 'rust)"#),
-            r#"("rust-mode-abbrev-table" "prog-mode-abbrev-table" "global-abbrev-table")"#
-        );
-        // abbrev-symbol resolves through the chain…
-        engine
-            .eval(r#"(define-abbrev 'prog-mode-abbrev-table "anc" "ancestor")"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "anc" 'rust)))"#
-            ),
-            "\"ancestor\""
-        );
-        // …and so does the completion source (which reads the buffer's
-        // major-mode; the test engine's snapshot names it "rust").
-        engine.set_snapshot(EditorSnapshot {
-            major_mode: "rust".into(),
-            ..Default::default()
-        });
-        engine.eval(r#"(abbrev--on-set! #t)"#).unwrap();
-        assert_eq!(
-            v(&engine, r#"(abbrev-capf "an")"#),
-            r#"(("anc" "ancestor"))"#
-        );
-    }
-
-    #[test]
-    fn init_phase_defines_become_system_until_after_init() {
-        let (engine, _rx) = ScriptEngine::new();
-        load_with_deps(&engine, "abbrev");
-        // Bundled scripts + init.scm run with the phase on: plain defines are
-        // system abbrevs (never saved), unless they name their own :system.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "a" "auto")"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'system (abbrev-symbol "a" 'global-abbrev-table)))"#
-            ),
-            "#true"
-        );
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "b" "explicit" #f '(:system #f))"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'system (abbrev-symbol "b" 'global-abbrev-table)))"#
-            ),
-            "#false"
-        );
-        // after-init-hook ends the phase (no saved file here)…
-        engine
-            .eval(r#"(set-abbrev-file-name "/nonexistent-abbrev-test.scm")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--after-init)"#).unwrap();
-        assert_eq!(v(&engine, "*abbrev--init-phase*"), "#false");
-        // …and defines from then on are user abbrevs.
-        engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "c" "user")"#)
-            .unwrap();
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'system (abbrev-symbol "c" 'global-abbrev-table)))"#
-            ),
-            "#false"
-        );
-    }
-
-    #[test]
-    fn loading_abbrev_registers_the_after_init_hook() {
-        let (engine, _rx) = ScriptEngine::new();
-        let out = load_with_deps(&engine, "abbrev");
-        let hooks: Vec<String> = out
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                EditorCommand::AddHook(hook, _) => Some(hook.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(hooks.contains(&"after-init-hook".to_string()), "{hooks:?}");
-        assert!(hooks.contains(&"kill-emacs-hook".to_string()), "{hooks:?}");
-    }
-
-    #[test]
-    fn saved_abbrev_file_round_trips_through_after_init() {
-        let engine = engine();
-        // PID alone would collide if another abbrev test copied this pattern
-        // (cargo runs tests in threads within one process); line!() is unique.
-        let dir =
-            std::env::temp_dir().join(format!("abbrev-load-{}-{}", std::process::id(), line!()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Removes the dir even when an assert panics.
-        struct DirGuard(std::path::PathBuf);
-        impl Drop for DirGuard {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _guard = DirGuard(dir.clone());
-        let file = dir.join("abbrevs.scm");
-        engine
-            .eval(&format!(r#"(set-abbrev-file-name {:?})"#, file))
-            .unwrap();
-        engine
-            .eval(r#"(define-global-abbrev "rtd" "round trip")"#)
-            .unwrap();
-        engine.eval(r#"(abbrev--save)"#).unwrap();
-        // Simulate the next startup: fresh tables, init phase on, file read
-        // back by the after-init hook.
-        engine
-            .eval(
-                r#"(set! *abbrev-tables* (hash))
-               (set! *abbrev--init-phase* #t)
-               (abbrev--after-init)"#,
-            )
-            .unwrap();
-        assert_eq!(v(&engine, "*abbrev--init-phase*"), "#false");
-        assert_eq!(
-            v(
-                &engine,
-                r#"(cdr (assoc 'expansion (abbrev-symbol "rtd" 'global-abbrev-table)))"#
-            ),
-            "\"round trip\""
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn disabling_insert_exit_restores_the_previous_escape_binding() {
-        let engine = engine();
-        engine
-            .eval(
-                r#"(define-key "evil-insert" "escape" "my-own-exit")
-               (set-abbrev-expand-on-insert-exit #t)"#,
-            )
-            .unwrap();
-        assert_eq!(
-            v(&engine, r#"(key-binding "evil-insert" "escape")"#),
-            r#""abbrev--evil-insert-exit""#
-        );
-        engine
-            .eval(r#"(set-abbrev-expand-on-insert-exit #f)"#)
-            .unwrap();
-        // The user's own binding comes back — not a hard-coded state exit.
-        assert_eq!(
-            v(&engine, r#"(key-binding "evil-insert" "escape")"#),
-            r#""my-own-exit""#
-        );
-        // With nothing previously bound, the plain state exit is restored.
-        engine
-            .eval(r#"(set-abbrev-expand-on-insert-exit #t)"#)
-            .unwrap();
-        engine
-            .eval(r#"(define-key "helix-insert" "escape" "")"#)
-            .unwrap();
-        engine
-            .eval(r#"(set-abbrev-expand-on-insert-exit #f)"#)
-            .unwrap();
-        assert_eq!(
-            v(&engine, r#"(key-binding "helix-insert" "escape")"#),
-            r#""helix-normal-state""#
-        );
-    }
-
-    /// Snapshot with TEXT (byte POINT at its end) in the abbrev test engine.
-    fn snapshot_with(engine: &ScriptEngine, text: &str) {
-        engine.set_snapshot(EditorSnapshot {
-            text: Rope::from_str(text),
-            point: text.len(),
-            line: 0,
-            ..Default::default()
-        });
-    }
-
-    fn edits(out: &EvalResult) -> bool {
-        out.commands.iter().any(|c| {
-            matches!(
-                c,
-                EditorCommand::DeleteRegion { .. } | EditorCommand::Insert(_)
-            )
-        })
-    }
-
-    /// The (start, end, expansion) of an expansion's queued edit pair.
-    fn expand_edits(out: &EvalResult) -> (usize, usize, String) {
-        let span = out
-            .commands
-            .iter()
-            .find_map(|c| match c {
-                EditorCommand::DeleteRegion { start, end } => Some((*start, *end)),
-                _ => None,
-            })
-            .expect("a DeleteRegion");
-        let text = out
-            .commands
-            .iter()
-            .find_map(|c| match c {
-                EditorCommand::Insert(t) => Some(t.clone()),
-                _ => None,
-            })
-            .expect("an Insert");
-        (span.0, span.1, text)
-    }
-
-    #[test]
-    fn ts_context_abbrev_never_expands_without_a_grammar() {
-        let engine = engine();
-        engine
-            .eval(
-                r#"(define-abbrev 'global-abbrev-table "tsa" "expanded" #f '(:ts-context "comment"))
-               (define-global-abbrev "tsb" "expanded")"#,
-            )
-            .unwrap();
-        // Grammar-less buffer (no tree-sitter here): the :ts-context abbrev
-        // declines — the documented degradation — its sibling expands.
-        // Manual expansion: expand-abbrev runs the same predicate chain with
-        // point right after the word (no terminator typed).
-        snapshot_with(&engine, "tsa");
-        assert!(!edits(&engine.eval("(expand-abbrev)").unwrap()));
-        snapshot_with(&engine, "tsb");
-        assert!(edits(&engine.eval("(expand-abbrev)").unwrap()));
-    }
-
-    #[test]
-    fn unexpand_restores_the_abbrev_text_in_its_buffer() {
-        let engine = engine();
-        snapshot_with(&engine, "the");
-        engine
-            .eval(r#"(abbrev--expand-at 0 3 "teh" "the" #f)"#)
-            .unwrap();
-        let out = engine.eval("(unexpand-abbrev)").unwrap();
-        assert_eq!(expand_edits(&out), (0, 3, "teh".to_string()));
-        assert_eq!(v(&engine, "*abbrev-last*"), "#false");
-        // A second unexpand has nothing to undo.
-        let out = engine.eval("(unexpand-abbrev)").unwrap();
-        assert!(!edits(&out), "{:?}", out.commands);
-    }
-
-    #[test]
-    fn prefix_mark_is_consumed_on_expand() {
-        let engine = engine();
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        // "the -teh" — the mark sits on the hyphen at byte 4; nothing typed
-        // after it would fall back, but here the abbrev follows the hyphen.
-        snapshot_with(&engine, "x -teh");
-        engine
-            .eval(r#"(set! *abbrev--prefix-mark* (list 2 (current-buffer)))"#)
-            .unwrap();
-        let out = engine.eval("(expand-abbrev)").unwrap();
-        // The mark is consumed…
-        assert_eq!(v(&engine, "*abbrev--prefix-mark*"), "#false");
-        // …and the queued edit replaces the hyphen AND the abbrev (2..6),
-        // leaving the prefix: "x the".
-        assert_eq!(expand_edits(&out), (2, 6, "the".to_string()));
-    }
-
-    #[test]
-    fn define_abbrev_nil_message_only_when_something_was_defined() {
-        let engine = engine();
-        // Undefining a name that never existed: no announcement.
-        let out = engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "nope" #f)"#)
-            .unwrap();
-        assert!(
-            !out.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::Message(m) if m.contains("Undefined"))),
-            "{:?}",
-            out.commands
-        );
-        // A real undefinition still announces.
-        engine
-            .eval(r#"(define-global-abbrev "teh" "the")"#)
-            .unwrap();
-        let out = engine
-            .eval(r#"(define-abbrev 'global-abbrev-table "teh" #f)"#)
-            .unwrap();
-        assert!(
-            out.commands
-                .iter()
-                .any(|c| matches!(c, EditorCommand::Message(m) if m.contains("Undefined"))),
-            "{:?}",
-            out.commands
-        );
+        assert_eq!(out.value.unwrap(), "\"ok\"");
     }
 }
 
-mod abbrev_hook_injection {
+#[cfg(test)]
+mod minor_mode_lib {
     use super::*;
 
-    #[test]
-    fn symbol_hook_receives_hostile_expansion_as_data() {
+    fn engine() -> ScriptEngine {
         let (engine, _rx) = ScriptEngine::new();
-        crate::runtime::startup_scripts().iter().for_each(|src| {
-            engine.eval(src).expect("startup script");
-        });
-        // A hook named by 'symbol receives the expansion via a string-built
-        // eval-string; a quote in the expansion must stay DATA, not code.
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, expr: &str) -> String {
+        engine.eval(expr).unwrap().value.unwrap()
+    }
+
+    #[test]
+    fn minor_mode_registry_roundtrip() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
         engine
             .eval(
-                r#"(define hook-got #f)
-                 (define (abbrev-test-hook s) (set! hook-got s))"#,
+                r#"(minor-mode--register! 'test-mode
+                                        (list (cons 'lighter " Tst")
+                                              (cons 'init-value #f)
+                                              (cons 'keymap '())))"#,
             )
             .unwrap();
+        assert_eq!(v(&engine, "(minor-mode--registered? 'test-mode)"), "#true");
+        assert_eq!(v(&engine, "(minor-mode--registered? 'nope)"), "#false");
+        assert_eq!(v(&engine, "(minor-mode-lighter 'test-mode)"), "\" Tst\"");
+        assert_eq!(v(&engine, "(minor-mode-init-value 'test-mode)"), "#false");
+    }
+
+    #[test]
+    fn minor_mode_state_is_buffer_local_with_tri_state() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
         engine
-        .eval(r#"(define-abbrev 'global-abbrev-table "z" "\") (evil-delete-buffer) (\"" abbrev-test-hook)"#)
-        .unwrap();
+            .eval(r#"(minor-mode--register! 'm1 (list (cons 'lighter "") (cons 'init-value #f) (cons 'keymap '())))"#)
+            .unwrap();
+        // Off by default (inherits init-value when no per-buffer entry).
+        assert_eq!(v(&engine, "(minor-mode--on? 'm1)"), "#false");
+        // Enable in the current buffer.
+        engine.eval("(minor-mode--set-state! 'm1 #true)").unwrap();
+        assert_eq!(v(&engine, "(minor-mode--on? 'm1)"), "#true");
+        // A stored #f must read as "explicitly off", not "no entry" (tri-state).
+        engine.eval("(minor-mode--set-state! 'm1 #false)").unwrap();
+        assert_eq!(v(&engine, "(minor-mode--on? 'm1)"), "#false");
+        assert_eq!(v(&engine, "(minor-mode--explicitly-set? 'm1)"), "#true");
+    }
+
+    #[test]
+    fn define_minor_mode_expands_and_toggles() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        let defined = engine
+            .eval(
+                r#"(define-minor-mode test-mode
+                     "A test minor mode."
+                     :lighter " Tst"
+                     :keymap (("ctrl-c t" test-mode-thing))
+                     (message "test-mode body ran"))"#,
+            )
+            .unwrap();
+        // The command exists and is M-x registered.
         assert_eq!(
+            v(&engine, r#"(if (member "test-mode" *interactive-commands*) "y" "n")"#),
+            "\"y\""
+        );
+        // Registered with the right lighter and keymap.
+        assert_eq!(v(&engine, "(minor-mode-lighter 'test-mode)"), "\" Tst\"");
+        assert_eq!(
+            v(&engine, "(length (minor-mode--prop 'test-mode 'keymap))"),
+            "1"
+        );
+        // Toggle on: state flips, body thunk runs, message queued.
+        let out = engine.eval("(test-mode)").unwrap();
+        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#true");
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::Message(_))),
+            "expected body message, got {:?}",
+            out.commands
+        );
+        // Toggle off.
+        engine.eval("(test-mode)").unwrap();
+        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#false");
+        // Explicit arg semantics: #f disables, 1 enables, 0 disables.
+        engine.eval("(test-mode #false) (test-mode 1)").unwrap();
+        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#true");
+        engine.eval("(test-mode 0)").unwrap();
+        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#false");
+        // Hook fires as a RunHook command named "test-mode-hook".
+        let out = engine.eval("(test-mode 1)").unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunHook(h) if h == "test-mode-hook")),
+            "no test-mode-hook fire: {:?}",
+            out.commands
+        );
+        // Synthesized Emacs-parity bindings exist (with-syntax symbol splice
+        // worked). No `bound?` primitive — evaluate the names directly; an
+        // unbound identifier would error through `.unwrap()`.
+        assert!(
+            v(&engine, "test-mode-map").contains("ctrl-c t"),
+            "test-mode-map missing bindings: {:?}",
+            v(&engine, "test-mode-map")
+        );
+        assert_eq!(v(&engine, "test-mode-hook"), "#false");
+        // The lighter slot segment was registered at define time (the segment
+        // append re-applies the format → SetModeLineFormat).
+        assert!(
+            defined
+                .commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetModeLineFormat(_))),
+            "no mode line segment registered: {:?}",
+            defined.commands
+        );
+    }
+
+    #[test]
+    fn minor_mode_rejects_unknown_keywords_and_bad_docs() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        assert!(engine
+            .eval(r#"(define-minor-mode bad-mode "d." :group 'tools)"#)
+            .is_err());
+        assert!(engine.eval(r#"(define-minor-mode bad-mode 42)"#).is_err());
+        assert!(engine
+            .eval(r#"(define-minor-mode bad-mode "d." :lighter)"#)
+            .is_err());
+    }
+
+    #[test]
+    fn minor_mode_public_api_and_startup() {
+        // Full startup order proves the new module loads clean with deps.
+        let engine = engine();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
         engine
-            .eval(r#"(begin (abbrev--call-pred 'abbrev-test-hook (cdr (assoc 'expansion (abbrev-symbol "z" 'global-abbrev-table)))) hook-got)"#)
-            .unwrap()
-            .value
-            .unwrap(),
-        r#""\") (evil-delete-buffer) (\"""#
-    );
+            .eval(r#"(define-minor-mode smoke-mode "d." :lighter " Sm")"#)
+            .unwrap();
+        assert_eq!(v(&engine, "(minor-mode-enabled? 'smoke-mode)"), "#false");
+        engine.eval("(smoke-mode)").unwrap();
+        assert_eq!(v(&engine, "(minor-mode-enabled? 'smoke-mode)"), "#true");
+    }
+}
+
+#[cfg(test)]
+mod syntax_probe {
+    use super::*;
+    fn e() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+    }
+
+    #[test]
+    fn probe_bare_stx_single_form() {
+        let eng = e();
+        let out = eng
+            .eval("(define-syntax p2 (lambda (stx) (syntax-case stx () [(_ a) #`(+ a 1)]))) (p2 4)")
+            .unwrap();
+        assert_eq!(out.value.unwrap(), "5");
+    }
+
+    #[test]
+    fn probe_bare_stx_inner_define() {
+        let eng = e();
+        let out = eng
+            .eval(concat!(
+                "(define-syntax p3 (lambda (stx) ",
+                "(define (d s) (syntax->datum s)) ",
+                "(syntax-case stx () [(_ a) #`(+ a 1)]))) ",
+                "(p3 4)"
+            ))
+            .unwrap();
+        assert_eq!(out.value.unwrap(), "5");
+    }
+
+    #[test]
+    fn probe_rest_ellipsis_to_datum() {
+        let eng = e();
+        let out = eng
+            .eval(concat!(
+                "(define-syntax p4 (lambda (stx) ",
+                "(syntax-case stx () ",
+                "[(_ a rest ...) (let ((items (syntax->datum #'(rest ...)))) ",
+                "#`(quote #,items))]))) ",
+                "(p4 x y z)"
+            ))
+            .unwrap();
+        eprintln!("p4 result: {:?}", out.value);
+        assert_eq!(out.value.unwrap(), "(y z)");
+    }
+}
+
+#[cfg(test)]
+mod syntax_probe2 {
+    use super::*;
+    fn e() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+    }
+
+    #[test]
+    fn probe_shallow_datum() {
+        let eng = e();
+        let out = eng
+            .eval(include_str!("../../.hermes/tmp/probe3.scm"))
+            .unwrap();
+        eprintln!("p7 result: {:?}", out.value);
     }
 
     /// Rectangles (scheme/rectangles.scm): the region's corners become a
