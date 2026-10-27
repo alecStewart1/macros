@@ -1,4 +1,4 @@
-;; requires: core hooks minor-mode
+;; requires: core hooks minor-mode mode-local
 
 ;; derived-mode.scm — `define-derived-mode` for Macros (Phase 2 of the mode
 ;; framework; see web/content/docs/derived-mode.md).
@@ -22,6 +22,9 @@
 ;;    the editor fires it on apply — running it here too would double-fire.
 ;;  - `:grammar` is deliberately absent: name the mode after the grammar id
 ;;    (`set-major-mode` attaches a bundled language by name match).
+;;  - Mode-local variables (scheme/mode-local.scm): the expansion registers
+;;    the child→parent edge, so the child inherits every parent value it has
+;;    not set itself.
 ;;
 ;; The macro shape follows scheme/minor-mode.scm and its probe-verified Steel
 ;; constraints: no dotted patterns/improper lists anywhere (keymap bindings
@@ -93,6 +96,7 @@
                                    (list 'set-major-mode child-name)
                                    (cons 'begin
                                          (append body (list #f))))))
+                 (list 'mode-local--set-parent child-name parent-name)
                  (list 'register-command (list 'quote child-sym)))))])))
 
 ;; --- auto-mode-alist -----------------------------------------------------------
