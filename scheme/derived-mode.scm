@@ -89,3 +89,41 @@
                                    (cons 'begin
                                          (append body (list #f))))))
                  (list 'register-command (list 'quote child-sym)))))])))
+
+;; --- auto-mode-alist -----------------------------------------------------------
+;; Scheme-level file association (Emacs's `auto-mode-alist`): entries are
+;; (REGEX . MODE-NAME), walked FIRST-match-wins; `add-auto-mode` prepends so
+;; later calls win, preserving Emacs add-to-list priority semantics.
+;;
+;; REGEX DIALECT: Macros' regexp primitives ride the Rust `regex` crate, which
+;; does NOT support Emacs's `'` end-of-string anchor — use `$`
+;; (`(add-auto-mode "\\.foo$" "foo-mode")`).
+;;
+;; One find-file-hook covers the WHOLE alist; buffers with no matching entry
+;; pay one string-match per entry, and there is no per-mode hook churn. The
+;; mode command runs via eval-string (the same mechanism execute-command uses)
+;; because hooks fire by name across the engine boundary.
+(define *auto-mode-alist* '())
+
+(define (add-auto-mode pattern mode-name)
+  (set! *auto-mode-alist*
+        (cons (cons pattern mode-name) *auto-mode-alist*)))
+
+;; Pure matcher — the testable seam (the live find-file hook can't be driven
+;; headlessly).
+(define (auto-mode--match path)
+  (let loop ((entries *auto-mode-alist*))
+    (cond ((null? entries) #f)
+          ((>= (string-match (caar entries) path) 0) (cdar entries))
+          (else (loop (cdr entries))))))
+
+;; Dispatch for an explicit path — what the hook calls with the buffer's file.
+(define (auto-mode--apply-for path)
+  (let ((mode (auto-mode--match path)))
+    (when mode
+      (eval-string (string-append "(" mode ")")))))
+
+(define (auto-mode--maybe)
+  (let ((path (buffer-file-name)))
+    (when path (auto-mode--apply-for path))))
+(add-hook "find-file-hook" "auto-mode--maybe")
