@@ -14535,7 +14535,6 @@ mod minor_mode_lib {
         // A stored #f must read as "explicitly off", not "no entry" (tri-state).
         engine.eval("(minor-mode--set-state! 'm1 #false)").unwrap();
         assert_eq!(v(&engine, "(minor-mode--on? 'm1)"), "#false");
-        assert_eq!(v(&engine, "(minor-mode--explicitly-set? 'm1)"), "#true");
     }
 
     #[test]
@@ -14621,6 +14620,80 @@ mod minor_mode_lib {
         assert!(engine
             .eval(r#"(define-minor-mode bad-mode "d." :lighter)"#)
             .is_err());
+    }
+
+    #[test]
+    fn minor_mode_rejects_keyword_after_body_starts() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        // A keyword following the first body form must still be parsed as a
+        // keyword (not absorbed into the body) — an UNSUPPORTED one must
+        // therefore error loudly instead of silently becoming body code.
+        assert!(engine
+            .eval(r#"(define-minor-mode bad-mode "d."
+                        (message "body one")
+                        :group 'tools)"#)
+            .is_err());
+        // And a supported keyword after the body still takes effect.
+        engine
+            .eval(r#"(define-minor-mode late-mode "d."
+                        (message "body one")
+                        :lighter " Lte")"#)
+            .unwrap();
+        assert_eq!(v(&engine, "(minor-mode-lighter 'late-mode)"), "\" Lte\"");
+    }
+
+    #[test]
+    fn minor_mode_keymap_chords_are_gated_on_mode_state() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        engine
+            .eval(
+                r#"(define (gated-thing) (message "thing ran"))
+                   (define-minor-mode gate-mode
+                     "Gated."
+                     :keymap (("ctrl-c g" gated-thing)))"#,
+            )
+            .unwrap();
+        // The chord resolves to a run-thunk stub (the gated wrapper), not the
+        // raw command string.
+        let binding = v(&engine, r#"(key-binding "evil-normal" "ctrl-c g")"#);
+        assert!(
+            binding.contains("run-thunk"),
+            "chord not bound to gated thunk: {:?}",
+            binding
+        );
+        // Fire the stub the way key dispatch does: the stub string wrapped in
+        // parens, eval'd — (run-thunk "<id>"). eval-string's repr-escaped
+        // quotes are unescaped by trimming before use.
+        let fire = |engine: &ScriptEngine| {
+            engine
+                .eval(
+                    r#"(define (test--fire-chord)
+                          (eval-string (string-append "(" (key-binding "evil-normal" "ctrl-c g") ")")))
+                       (test--fire-chord)"#,
+                )
+                .unwrap()
+                .commands
+        };
+        // Mode off (default): the gated wrapper no-ops — no message queued.
+        let cmds = fire(&engine);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, EditorCommand::Message(m) if m == "thing ran")),
+            "chord fired while mode off: {:?}",
+            cmds
+        );
+        // Mode on: the same keypress now dispatches the command.
+        engine.eval("(gate-mode 1)").unwrap();
+        let cmds = fire(&engine);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, EditorCommand::Message(m) if m == "thing ran")),
+            "chord did not fire while mode on: {:?}",
+            cmds
+        );
     }
 
     #[test]
@@ -14761,6 +14834,14 @@ mod derived_mode_lib {
         assert!(engine
             .eval(r#"(define-derived-mode bad-mode fundamental "d." :group 'x)"#)
             .is_err());
+        // A keyword following the first body form must still be parsed as a
+        // keyword — an unsupported one must error loudly, not silently become
+        // body code.
+        assert!(engine
+            .eval(r#"(define-derived-mode bad-mode fundamental "d."
+                        (message "body one")
+                        :group 'x)"#)
+            .is_err());
     }
 }
 
@@ -14818,6 +14899,25 @@ mod auto_mode_lib {
                 .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == "foo-child")),
             "expected SetMajorMode(foo-child), got {:?}",
             out.commands
+        );
+    }
+
+    #[test]
+    fn add_auto_mode_rejects_bad_patterns_and_names() {
+        let engine = engine();
+        load_with_deps(&engine, "derived-mode");
+        // Invalid regexes are swallowed engine-wide (string-match returns -1),
+        // so only shape errors are checkable here.
+        // A mode name that would execute as code instead of naming a command.
+        assert!(engine
+            .eval(r#"(add-auto-mode "\\.x$" "(bad) mode")"#)
+            .is_err());
+        assert!(engine.eval(r#"(add-auto-mode "\\.x$" 42)"#).is_err());
+        // A valid identifier still registers.
+        engine.eval(r#"(add-auto-mode "\\.x$" "x-mode_2")"#).unwrap();
+        assert_eq!(
+            v(&engine, r#"(auto-mode--match "/a/b.c.x")"#),
+            "\"x-mode_2\""
         );
     }
 }

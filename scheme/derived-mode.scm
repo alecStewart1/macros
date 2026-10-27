@@ -41,22 +41,27 @@
                              ((null? x) '())
                              ((pair? x) (cons (deep (car x)) (deep (cdr x))))
                              (else x))))
-              (parsed (let peel ((items items) (kws '()))
-                        (cond ((null? items) (cons '() (reverse kws)))
+              (parsed (let peel ((items items) (kws '()) (body '()))
+                        (cond ((null? items)
+                               (cons (reverse body) (reverse kws)))
                               ((and (pair? items)
                                     (memq (car items) '(:keymap))
                                     (pair? (cdr items)))
                                (peel (cddr items)
-                                     (cons (list (car items) (cadr items)) kws)))
+                                     (cons (list (car items) (cadr items)) kws)
+                                     body))
                               ((memq (car items) '(:keymap))
                                (error "define-derived-mode: keyword needs a value:"
                                       (car items)))
                               ((and (pair? items)
                                     (symbol? (car items))
                                     (starts-with? (symbol->string (car items)) ":"))
+                               ;; Keeps scanning THROUGH the body, so a stray
+                               ;; keyword after the first body form still errors
+                               ;; loudly instead of being absorbed as body.
                                (error "define-derived-mode: unsupported keyword:"
                                       (car items)))
-                              (else (cons items (reverse kws))))))
+                              (else (peel (cdr items) kws (cons (car items) body))))))
               (body (car parsed))
               (kws (cdr parsed))
               (doc-str (syntax->datum #'doc)))
@@ -105,7 +110,25 @@
 ;; because hooks fire by name across the engine boundary.
 (define *auto-mode-alist* '())
 
+;; A mode name must be a plain command identifier: it is spliced into
+;; `(MODE-NAME)` and handed to eval-string, so anything with parens, quotes or
+;; whitespace would execute as code rather than name a command.
+(define (auto-mode--valid-name? s)
+  (and (string? s)
+       (>= (string-length s) 1)
+       ;; string-match returns the match position, or -1 when the pattern
+       ;; does not occur — -1 is truthy in Scheme, so compare explicitly.
+       (< (string-match "[^a-zA-Z0-9_-]" s) 0)))
+
 (define (add-auto-mode pattern mode-name)
+  (unless (string? pattern)
+    (error "add-auto-mode: pattern must be a string:" pattern))
+  ;; NOTE: an invalid regex fails SILENT at match time (string-match returns
+  ;; -1 for both no-match and bad-pattern) — that is engine-wide behavior,
+  ;; not something this alist can fix.
+  (unless (auto-mode--valid-name? mode-name)
+    (error "add-auto-mode: mode-name must be a command identifier (a-zA-Z0-9-_):"
+           mode-name))
   (set! *auto-mode-alist*
         (cons (cons pattern mode-name) *auto-mode-alist*)))
 
