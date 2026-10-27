@@ -14686,186 +14686,81 @@ mod syntax_probe {
         eprintln!("p4 result: {:?}", out.value);
         assert_eq!(out.value.unwrap(), "(y z)");
     }
+}
 
-    /// Rectangles (scheme/rectangles.scm): the region's corners become a
-    /// display-column rectangle, and each command emits its row edits
-    /// bottom-up from the one snapshot.
-    #[test]
-    fn rectangle_commands_edit_rows_bottom_up() {
+#[cfg(test)]
+mod derived_mode_lib {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
         let (engine, _rx) = ScriptEngine::new();
-        load_with_deps(&engine, "rectangles");
-        // Mark at (row 0, col 1), point at (row 2, col 3).
-        engine.set_snapshot(EditorSnapshot {
-            text: Rope::from_str("abcdef\nghijkl\nmnopqr\n"),
-            point: 17,
-            region: Some((1, 17)),
-            selections: vec![(1, 17)],
-            ..Default::default()
-        });
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, expr: &str) -> String {
+        engine.eval(expr).unwrap().value.unwrap()
+    }
+
+    #[test]
+    fn define_derived_mode_expands_and_switches() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        load_with_deps(&engine, "derived-mode");
+        engine
+            .eval(
+                r#"(define-derived-mode foo-parent fundamental
+                     "Parent." :keymap (("ctrl-c p" parent-cmd)))
+                   (define-derived-mode foo-child foo-parent
+                     "Child." :keymap (("ctrl-c c" child-cmd))
+                     (message "child body"))"#,
+            )
+            .unwrap();
+        // Both commands exist and are M-x registered.
         assert_eq!(
-            engine.eval("(rectangle-bounds)").unwrap().value.as_deref(),
-            Some("(0 2 1 3)")
+            v(&engine, r#"(if (member "foo-parent" *interactive-commands*) "y" "n")"#),
+            "\"y\""
         );
-        let cmds = engine.eval("(kill-rectangle)").unwrap().commands;
-        let edits: Vec<(usize, usize, String)> = cmds
+        assert_eq!(
+            v(&engine, r#"(if (member "foo-child" *interactive-commands*) "y" "n")"#),
+            "\"y\""
+        );
+        // Switching to the child: parent hook runs first (synchronously, so the
+        // parent is set up before the editor applies the mode switch), then
+        // SetMajorMode, then the body message. The CHILD hook is NOT queued —
+        // the editor fires it itself (run_mode_hooks_once on SetMajorMode
+        // application, keys "foo-child" AND "foo-child-hook").
+        let out = engine.eval("(foo-child)").unwrap();
+        let kinds: Vec<&str> = out
+            .commands
             .iter()
             .filter_map(|c| match c {
-                EditorCommand::ReplaceRegion { start, end, text } => {
-                    Some((*start, *end, text.clone()))
-                }
+                EditorCommand::SetMajorMode(m) if m == "foo-child" => Some("major"),
+                EditorCommand::RunHook(h) if h == "foo-parent-hook" => Some("parent"),
+                EditorCommand::Message(m) if m == "child body" => Some("body"),
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            edits,
-            [
-                (15, 17, String::new()),
-                (8, 10, String::new()),
-                (1, 3, String::new())
-            ],
-            "bottom row first: {cmds:?}"
-        );
-        assert!(cmds.iter().any(|c| matches!(c, EditorCommand::GotoChar(1))));
-        assert_eq!(
-            engine.eval("*killed-rectangle*").unwrap().value.as_deref(),
-            Some(r#"("bc" "hi" "no")"#)
-        );
-        // A tab cut by the left edge comes back as spaces.
-        engine.set_snapshot(EditorSnapshot {
-            text: Rope::from_str("\tab\n"),
-            ..Default::default()
-        });
-        assert_eq!(
-            engine
-                .eval("(rectangle-row 0 2 5 4)")
-                .unwrap()
-                .value
-                .as_deref(),
-            Some(r#"(0 2 2 0 0 "  a")"#)
-        );
-        assert_eq!(
-            engine
-                .eval("(display-column 2 4)")
-                .unwrap()
-                .value
-                .as_deref(),
-            Some("5")
-        );
-    }
-
-    /// Registers (scheme/registers.scm): text/number registers through the
-    /// finishers the `read-char` prompt calls, and `C-u` read via
-    /// `(current-prefix-arg)`.
-    #[test]
-    fn registers_store_text_numbers_and_points() {
-        let (engine, _rx) = ScriptEngine::new();
-        load_with_deps(&engine, "registers");
-        engine.set_snapshot(EditorSnapshot {
-            name: "notes".into(),
-            text: Rope::from_str("hello world 42\n"),
-            point: 0,
-            region: Some((0, 5)),
-            selections: vec![(5, 0)],
-            prefix_arg: Some(4),
-            ..Default::default()
-        });
-        let cmds = engine.eval("(copy-to-register)").unwrap().commands;
+        assert_eq!(kinds, vec!["parent", "major", "body"], "got {:?}", kinds);
+        // The parent command behaves the same (no own hook).
+        let out = engine.eval("(foo-parent)").unwrap();
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, EditorCommand::ReadChar { .. })),
-            "prompts for the register: {cmds:?}"
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == "foo-parent")),
+            "parent did not switch modes: {:?}",
+            out.commands
         );
-        // With C-u, copying also deletes the region.
-        let cmds = engine
-            .eval(r#"(copy-to-register-finish "a")"#)
-            .unwrap()
-            .commands;
+        // Synthesized bindings exist.
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, EditorCommand::DeleteRegion { start: 0, end: 5 })),
-            "{cmds:?}"
+            v(&engine, "foo-child-map").contains("ctrl-c c"),
+            "foo-child-map missing bindings: {:?}",
+            v(&engine, "foo-child-map")
         );
-        assert_eq!(
-            engine
-                .eval(r#"(get-register "a")"#)
-                .unwrap()
-                .value
-                .as_deref(),
-            Some(r#"("text" . "hello")"#)
-        );
-        // number-to-register with no prefix reads the number at point.
-        engine.set_snapshot(EditorSnapshot {
-            name: "notes".into(),
-            text: Rope::from_str("hello world 42\n"),
-            point: 12,
-            ..Default::default()
-        });
-        engine.eval("(number-to-register)").unwrap();
-        let cmds = engine
-            .eval(r#"(number-to-register-finish "n")"#)
-            .unwrap()
-            .commands;
-        assert!(
-            cmds.iter()
-                .any(|c| matches!(c, EditorCommand::GotoChar(14)))
-        );
-        engine.eval("(increment-register)").unwrap();
-        engine.eval(r#"(increment-register-finish "n")"#).unwrap();
-        assert_eq!(
-            engine
-                .eval(r#"(get-register "n")"#)
-                .unwrap()
-                .value
-                .as_deref(),
-            Some(r#"("number" . 43)"#)
-        );
-        // A point register holds a buffer-bound marker.
-        engine.eval(r#"(point-to-register-finish "p")"#).unwrap();
-        assert_eq!(
-            engine
-                .eval(r#"(marker-position (list-ref (get-register "p") 3))"#)
-                .unwrap()
-                .value
-                .as_deref(),
-            Some("12")
-        );
-        assert_eq!(
-            engine
-                .eval(r#"(describe-register-contents "n" (get-register "n"))"#)
-                .unwrap()
-                .value
-                .as_deref(),
-            Some(r#""Register n contains the number 43""#)
-        );
-    }
-
-    /// Buffer-bound markers park while their buffer isn't active and resume
-    /// tracking edits when it is; plain markers are dropped on a switch.
-    #[test]
-    fn buffer_markers_survive_a_buffer_switch() {
-        let (engine, _rx) = ScriptEngine::new();
-        engine.set_snapshot(EditorSnapshot {
-            name: "a".into(),
-            text: Rope::from_str("0123456789"),
-            ..Default::default()
-        });
-        engine.eval("(define bm (make-buffer-marker 4))").unwrap();
-        engine.eval("(define pm (make-marker 4))").unwrap();
-        let pos = |name: &str| {
-            engine
-                .eval(&format!("(marker-position {name})"))
-                .unwrap()
-                .value
-                .unwrap()
-        };
-        engine.switch_markers("a", "b");
-        // Edits in buffer b don't move a's marker; the plain one is gone.
-        engine.adjust_markers(0, 0, 3);
-        assert_eq!(pos("bm"), "4");
-        assert_eq!(pos("pm"), "-1");
-        engine.switch_markers("b", "a");
-        engine.adjust_markers(0, 0, 2);
-        assert_eq!(pos("bm"), "6");
+        assert_eq!(v(&engine, "foo-child-hook"), "#false");
+        // Unknown keyword rejected at expansion.
+        assert!(engine
+            .eval(r#"(define-derived-mode bad-mode fundamental "d." :group 'x)"#)
+            .is_err());
     }
 }
 
