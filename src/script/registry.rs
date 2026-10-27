@@ -114,6 +114,7 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
         ("mc-clear", McClear),
         ("kill-buffer", KillBuffer),
         ("mcp-server-info", McpServerInfo),
+        ("server-edit", ServerEdit),
         ("kill-buffer-and-window", KillBufferAndWindow),
         ("quit", Quit),
         ("lsp-find-definition", LspDefinition),
