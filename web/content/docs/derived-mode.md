@@ -39,6 +39,7 @@ Then `M-x mylang-mode` switches the current buffer.
 - **Keymap inheritance is not automatic.** Keymaps resolve per mode-name over the mode stack; a child's map holds only the child's bindings. To share chords with the parent, repeat them or put them on the parent.
 - **Hook order**: parent hook fires first, then the switch applies and the child's hooks fire — Emacs `run-mode-hooks` order. The child's hooks are fired by the editor itself, not by your body. **Do not add `(run-hooks "mylang-mode-hook")` to the body** (the older Emacs idiom) — the editor already fires it, so it would run twice.
 - **No `:syntax-table`, `:abbrev-table`, or `:group`** — not part of Macros' model.
+- **Mode-local variables**: the expansion registers the parent edge with the `mode-local` module, so the child inherits every mode-local value the parent has set. See [Mode-local variables](/docs/mode-local).
 
 ## File association: `add-auto-mode`
 

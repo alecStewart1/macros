@@ -14482,8 +14482,10 @@ mod minor_mode_probes {
     fn probe_arbitrary_keymap_name() {
         let engine = engine();
         let out = engine
-            .eval(r#"(begin (bind-key "probe-map" "ctrl-c x" 'self-insert-command)
-                            "ok")"#)
+            .eval(
+                r#"(begin (bind-key "probe-map" "ctrl-c x" 'self-insert-command)
+                            "ok")"#,
+            )
             .unwrap();
         assert_eq!(out.value.unwrap(), "\"ok\"");
     }
@@ -14552,7 +14554,10 @@ mod minor_mode_lib {
             .unwrap();
         // The command exists and is M-x registered.
         assert_eq!(
-            v(&engine, r#"(if (member "test-mode" *interactive-commands*) "y" "n")"#),
+            v(
+                &engine,
+                r#"(if (member "test-mode" *interactive-commands*) "y" "n")"#
+            ),
             "\"y\""
         );
         // Registered with the right lighter and keymap.
@@ -14613,13 +14618,17 @@ mod minor_mode_lib {
     fn minor_mode_rejects_unknown_keywords_and_bad_docs() {
         let engine = engine();
         load_with_deps(&engine, "minor-mode");
-        assert!(engine
-            .eval(r#"(define-minor-mode bad-mode "d." :group 'tools)"#)
-            .is_err());
+        assert!(
+            engine
+                .eval(r#"(define-minor-mode bad-mode "d." :group 'tools)"#)
+                .is_err()
+        );
         assert!(engine.eval(r#"(define-minor-mode bad-mode 42)"#).is_err());
-        assert!(engine
-            .eval(r#"(define-minor-mode bad-mode "d." :lighter)"#)
-            .is_err());
+        assert!(
+            engine
+                .eval(r#"(define-minor-mode bad-mode "d." :lighter)"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -14629,16 +14638,22 @@ mod minor_mode_lib {
         // A keyword following the first body form must still be parsed as a
         // keyword (not absorbed into the body) — an UNSUPPORTED one must
         // therefore error loudly instead of silently becoming body code.
-        assert!(engine
-            .eval(r#"(define-minor-mode bad-mode "d."
+        assert!(
+            engine
+                .eval(
+                    r#"(define-minor-mode bad-mode "d."
                         (message "body one")
-                        :group 'tools)"#)
-            .is_err());
+                        :group 'tools)"#
+                )
+                .is_err()
+        );
         // And a supported keyword after the body still takes effect.
         engine
-            .eval(r#"(define-minor-mode late-mode "d."
+            .eval(
+                r#"(define-minor-mode late-mode "d."
                         (message "body one")
-                        :lighter " Lte")"#)
+                        :lighter " Lte")"#,
+            )
             .unwrap();
         assert_eq!(v(&engine, "(minor-mode-lighter 'late-mode)"), "\" Lte\"");
     }
@@ -14790,11 +14805,17 @@ mod derived_mode_lib {
             .unwrap();
         // Both commands exist and are M-x registered.
         assert_eq!(
-            v(&engine, r#"(if (member "foo-parent" *interactive-commands*) "y" "n")"#),
+            v(
+                &engine,
+                r#"(if (member "foo-parent" *interactive-commands*) "y" "n")"#
+            ),
             "\"y\""
         );
         assert_eq!(
-            v(&engine, r#"(if (member "foo-child" *interactive-commands*) "y" "n")"#),
+            v(
+                &engine,
+                r#"(if (member "foo-child" *interactive-commands*) "y" "n")"#
+            ),
             "\"y\""
         );
         // Switching to the child: parent hook runs first (synchronously, so the
@@ -14831,17 +14852,23 @@ mod derived_mode_lib {
         );
         assert_eq!(v(&engine, "foo-child-hook"), "#false");
         // Unknown keyword rejected at expansion.
-        assert!(engine
-            .eval(r#"(define-derived-mode bad-mode fundamental "d." :group 'x)"#)
-            .is_err());
+        assert!(
+            engine
+                .eval(r#"(define-derived-mode bad-mode fundamental "d." :group 'x)"#)
+                .is_err()
+        );
         // A keyword following the first body form must still be parsed as a
         // keyword — an unsupported one must error loudly, not silently become
         // body code.
-        assert!(engine
-            .eval(r#"(define-derived-mode bad-mode fundamental "d."
+        assert!(
+            engine
+                .eval(
+                    r#"(define-derived-mode bad-mode fundamental "d."
                         (message "body one")
-                        :group 'x)"#)
-            .is_err());
+                        :group 'x)"#
+                )
+                .is_err()
+        );
     }
 }
 
@@ -14863,17 +14890,26 @@ mod auto_mode_lib {
         let engine = engine();
         load_with_deps(&engine, "derived-mode");
         engine
-            .eval(r#"(add-auto-mode "\\.foo$" "foo-child")
-                     (add-auto-mode "\\.foo$" "other-mode")"#)
+            .eval(
+                r#"(add-auto-mode "\\.foo$" "foo-child")
+                     (add-auto-mode "\\.foo$" "other-mode")"#,
+            )
             .unwrap();
         // Prepending means the LATER call wins for the same pattern (Emacs
         // add-to-list priority semantics).
-        assert_eq!(v(&engine, r#"(auto-mode--match "/tmp/x/a.foo")"#), "\"other-mode\"");
+        assert_eq!(
+            v(&engine, r#"(auto-mode--match "/tmp/x/a.foo")"#),
+            "\"other-mode\""
+        );
         // No match → #f; no entries → #f.
         assert_eq!(v(&engine, r#"(auto-mode--match "/tmp/x/a.bar")"#), "#false");
         // The live hook no-ops on a pathless buffer (queueing nothing).
         let out = engine.eval("(auto-mode--maybe)").unwrap();
-        assert!(out.commands.is_empty(), "unexpected commands: {:?}", out.commands);
+        assert!(
+            out.commands.is_empty(),
+            "unexpected commands: {:?}",
+            out.commands
+        );
     }
 
     #[test]
@@ -14883,8 +14919,10 @@ mod auto_mode_lib {
             engine.eval(src).unwrap();
         }
         engine
-            .eval(r#"(define-derived-mode foo-child fundamental "Child.")
-                     (add-auto-mode "\\.foo$" "foo-child")"#)
+            .eval(
+                r#"(define-derived-mode foo-child fundamental "Child.")
+                     (add-auto-mode "\\.foo$" "foo-child")"#,
+            )
             .unwrap();
         // Simulate a file buffer by driving the hook's dispatch helper with an
         // explicit path (buffer-file-name can't be forced headlessly). The
@@ -14909,16 +14947,183 @@ mod auto_mode_lib {
         // Invalid regexes are swallowed engine-wide (string-match returns -1),
         // so only shape errors are checkable here.
         // A mode name that would execute as code instead of naming a command.
-        assert!(engine
-            .eval(r#"(add-auto-mode "\\.x$" "(bad) mode")"#)
-            .is_err());
+        assert!(
+            engine
+                .eval(r#"(add-auto-mode "\\.x$" "(bad) mode")"#)
+                .is_err()
+        );
         assert!(engine.eval(r#"(add-auto-mode "\\.x$" 42)"#).is_err());
         // A valid identifier still registers.
-        engine.eval(r#"(add-auto-mode "\\.x$" "x-mode_2")"#).unwrap();
+        engine
+            .eval(r#"(add-auto-mode "\\.x$" "x-mode_2")"#)
+            .unwrap();
         assert_eq!(
             v(&engine, r#"(auto-mode--match "/a/b.c.x")"#),
             "\"x-mode_2\""
         );
+    }
+}
+
+#[cfg(test)]
+mod mode_local_lib {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, expr: &str) -> String {
+        engine.eval(expr).unwrap().value.unwrap()
+    }
+
+    #[test]
+    fn mode_local_set_get_isolates_modes() {
+        let engine = engine();
+        load_with_deps(&engine, "mode-local");
+        engine
+            .eval(
+                r#"(mode-local-set "a-mode" 'tab-width 4)
+                   (mode-local-set "b-mode" 'tab-width 8)
+                   ;; Overwrite wins; explicit #f is a real value.
+                   (mode-local-set "a-mode" 'tab-width 2)
+                   (mode-local-set "a-mode" 'disabled #f)"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "a-mode" 'tab-width 99)"#),
+            "2"
+        );
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "b-mode" 'tab-width 99)"#),
+            "8"
+        );
+        // Unknown mode / variable fall to the default.
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "nope" 'tab-width 99)"#),
+            "99"
+        );
+        assert_eq!(v(&engine, r#"(mode-local-value "a-mode" 'other 99)"#), "99");
+        // Explicitly-set #f is a hit, not "unset" (values are stored wrapped).
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "a-mode" 'disabled 'unset)"#),
+            "#false"
+        );
+        // Symbol mode names normalize to the same slot.
+        assert_eq!(
+            v(&engine, r#"(mode-local-value 'a-mode 'tab-width 99)"#),
+            "2"
+        );
+    }
+
+    #[test]
+    fn setq_mode_local_macro_bindings() {
+        let engine = engine();
+        load_with_deps(&engine, "mode-local");
+        engine
+            .eval(
+                r#"(setq-mode-local "m-mode"
+                       (indent 2)
+                       (greeting (string-append "hi" "!")))"#,
+            )
+            .unwrap();
+        assert_eq!(v(&engine, r#"(mode-local-value "m-mode" 'indent 0)"#), "2");
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "m-mode" 'greeting "")"#),
+            r#""hi!""#
+        );
+        // Zero bindings is a no-op, not an error.
+        engine.eval(r#"(setq-mode-local "m-mode")"#).unwrap();
+        // Malformed bindings error at expansion.
+        assert!(
+            engine
+                .eval(r#"(setq-mode-local "m-mode" (lonely))"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn derived_child_inherits_parent_mode_locals() {
+        let engine = engine();
+        load_with_deps(&engine, "derived-mode");
+        engine
+            .eval(
+                r#"(define-derived-mode ml-parent fundamental "Parent.")
+                   (define-derived-mode ml-child ml-parent "Child.")
+                   (setq-mode-local "ml-parent" (inherited 7))
+                   (setq-mode-local "ml-child" (own 3))"#,
+            )
+            .unwrap();
+        // Parent value visible from the child; own value wins.
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "ml-child" 'inherited 0)"#),
+            "7"
+        );
+        assert_eq!(v(&engine, r#"(mode-local-value "ml-child" 'own 0)"#), "3");
+        // The parent does NOT see the child's value.
+        assert_eq!(v(&engine, r#"(mode-local-value "ml-parent" 'own 0)"#), "0");
+        // The child override shadows the parent for shared vars.
+        engine
+            .eval(
+                r#"(setq-mode-local "ml-parent" (shared 1))
+                     (setq-mode-local "ml-child" (shared 2))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "ml-child" 'shared 0)"#),
+            "2"
+        );
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "ml-parent" 'shared 0)"#),
+            "1"
+        );
+        // The parent edge was registered at expansion time — for the child
+        // AND for ml-parent itself (it derives from fundamental).
+        assert_eq!(
+            v(&engine, r#"(mode-local-parent "ml-child")"#),
+            r#""ml-parent""#
+        );
+        assert_eq!(
+            v(&engine, r#"(mode-local-parent "ml-parent")"#),
+            r#""fundamental""#
+        );
+        // fundamental is shared space: a value set there is visible to every
+        // mode that has not set its own (documented behavior).
+        engine
+            .eval(r#"(setq-mode-local "fundamental" (from-root 5))"#)
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "ml-child" 'from-root 0)"#),
+            "5"
+        );
+        engine
+            .eval(r#"(setq-mode-local "ml-child" (from-root 6))"#)
+            .unwrap();
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "ml-child" 'from-root 0)"#),
+            "6"
+        );
+    }
+
+    #[test]
+    fn mode_local_chain_cycle_guard_returns_default() {
+        let engine = engine();
+        load_with_deps(&engine, "mode-local");
+        // Runtime-CONSTRUCTED names: an eq?-based visited check would miss
+        // these non-interned strings and recurse forever.
+        engine
+            .eval(
+                r#"(mode-local--set-parent (string-append "cyc" "-x")
+                                           (string-append "cyc" "-y"))
+                   (mode-local--set-parent (string-append "cyc" "-y")
+                                           (string-append "cyc" "-x"))"#,
+            )
+            .unwrap();
+        // A hand-made cycle terminates at the default instead of looping.
+        assert_eq!(v(&engine, r#"(mode-local-value "cyc-x" 'v 42)"#), "42");
+        // A bad mode-name type errors clearly instead of failing inside
+        // string=?.
+        assert!(engine.eval(r#"(mode-local-value 42 'v 0)"#).is_err());
     }
 }
 
