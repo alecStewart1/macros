@@ -49,9 +49,6 @@
 ;; distinguishable from "no entry" (both falsy) — the tri-state gotcha.
 (define *minor-mode-state* '())
 
-(define (minor-mode--explicitly-set? name)
-  (if (assq name (buffer-state-get *minor-mode-state* '())) #t #f))
-
 (define (minor-mode--on? name)
   (let ((cell (assq name (buffer-state-get *minor-mode-state* '()))))
     (if cell (car (cadr cell))
@@ -84,6 +81,37 @@
   (unless (null? keymap)
     (define-keys-in *minor-mode-key-targets*
       (map (lambda (b) (list (car b) (cadr b))) keymap))))
+
+;; Run a :keymap command from the gated wrapper. Command resolution must be
+;; KEYpress-time (the symbol may not be defined yet at expansion), so symbols
+;; and plain strings go through eval-string — same trust level as bind-key's
+;; string form. %c command strings are refused: the substitution happens in the
+;; key-dispatch layer BEFORE the bound string is evaluated, so a thunk wrapper
+;; would see the literal %c and eval garbage.
+(define (minor-mode--invoke cmd)
+  (cond ((symbol? cmd)
+         (eval-string (string-append "(" (symbol->string cmd) ")")))
+        ((and (string? cmd) (not (string-contains? cmd "%c")))
+         (eval-string (string-append "(" cmd ")")))
+        (else
+         (error "minor-mode :keymap: use a 'symbol command (or a %c-free string); wrap %c forms in a command:"
+                cmd))))
+
+;; GATED installer for minor-mode chords: each chord binds a thunk that no-ops
+;; unless the mode is ON in the current buffer (minor-mode--on? reads per-buffer
+;; state). This is what makes "dispatched only while the mode is on" true;
+;; `minor-mode--install-keys` above stays UNGATED because derived (major) modes
+;; reuse it and a major mode's keys must not consult minor-mode state.
+(define (minor-mode--install-gated-keys name keymap)
+  (unless (null? keymap)
+    (for-each
+     (lambda (b)
+       (define-keys-in *minor-mode-key-targets*
+         (list (list (car b)
+                     (lambda ()
+                       (when (minor-mode--on? name)
+                         (minor-mode--invoke (cadr b))))))))
+     keymap)))
 
 ;; Lighter slot: minor modes only. Registered once per mode at define time.
 (define (minor-mode--register-lighter name)
@@ -133,7 +161,7 @@
 ;;     (define NAME-map <keymap datum>)             ; introspection alist
 ;;     (define NAME-hook #f)                        ; parity binding; the LIVE
 ;;                                                  ; hook key is the STRING
-;;     (minor-mode--install-keys 'NAME '<keymap>)
+;;     (minor-mode--install-gated-keys 'NAME '<keymap>)
 ;;     (minor-mode--register-lighter 'NAME)
 ;;     (minor-mode--register! 'NAME props-with-body-thunk)
 ;;     (define-command (NAME . arg) (minor-mode--toggle 'NAME arg)))
@@ -158,23 +186,28 @@
                              ((null? x) '())
                              ((pair? x) (cons (deep (car x)) (deep (cdr x))))
                              (else x))))
-              (parsed (let peel ((items items) (kws '()))
-                        (cond ((null? items) (cons '() (reverse kws)))
+              (parsed (let peel ((items items) (kws '()) (body '()))
+                        (cond ((null? items)
+                               (cons (reverse body) (reverse kws)))
                               ((and (pair? items)
                                     (memq (car items)
                                           '(:lighter :init-value :keymap))
                                     (pair? (cdr items)))
                                (peel (cddr items)
-                                     (cons (list (car items) (cadr items)) kws)))
+                                     (cons (list (car items) (cadr items)) kws)
+                                     body))
                               ((memq (car items) '(:lighter :init-value :keymap))
                                (error "define-minor-mode: keyword needs a value:"
                                       (car items)))
                               ((and (pair? items)
                                     (symbol? (car items))
                                     (starts-with? (symbol->string (car items)) ":"))
+                               ;; Keeps scanning THROUGH the body, so a stray
+                               ;; keyword after the first body form still errors
+                               ;; loudly instead of being absorbed as body.
                                (error "define-minor-mode: unsupported keyword:"
                                       (car items)))
-                              (else (cons items (reverse kws))))))
+                              (else (peel (cdr items) kws (cons (car items) body))))))
               (body (car parsed))
               (kws (cdr parsed))
               (doc-str (syntax->datum #'doc)))
@@ -203,7 +236,7 @@
                  (list 'define
                        (string->symbol (string-append mode-name "-hook"))
                        #f)
-                 (list 'minor-mode--install-keys (list 'quote name-sym)
+                 (list 'minor-mode--install-gated-keys (list 'quote name-sym)
                        (list 'quote keymap))
                  (list 'minor-mode--register-lighter (list 'quote name-sym))
                  (list 'minor-mode--register!

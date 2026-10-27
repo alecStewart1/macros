@@ -33,7 +33,7 @@ Then `M-x my-mode` toggles it in the current buffer.
 
 - `:lighter STRING` — mode-line text while on (default `""`).
 - `:init-value BOOL` — the mode's state in buffers that haven't toggled it (default `#f`).
-- `:keymap ((CHORD COMMAND) ...)` — chords active while the mode is on. Note this is a Steel list: chord and command as two elements, not Emacs's dotted `(CHORD . COMMAND)`.
+- `:keymap ((CHORD COMMAND) ...)` — chords active while the mode is on. Note this is a Steel list: chord and command as two elements, not Emacs's dotted `(CHORD . COMMAND)`. Commands are `'symbol`s (or plain strings without `%c`); `%c` substitution forms aren't supported inside a minor-mode keymap — wrap them in a named command first.
 
 Unknown keywords raise an error at definition time. Not supported: `:global`, `:variable`, `:interactive`, `:set`/`:initialize`/`:type`, `:after-hook`, and the pre-Emacs-21 positional triplet.
 
