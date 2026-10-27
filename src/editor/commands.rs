@@ -32,7 +32,12 @@ impl Editor {
                 }
                 self.end_undo_group();
             }
-            _ => self.apply_command_once(command, cx),
+            // Commands that read the argument (`C-u C-SPC`) find it here.
+            arg => {
+                self.emacs.prefix_arg = arg;
+                self.apply_command_once(command, cx);
+                self.emacs.prefix_arg = None;
+            }
         }
         self.reconcile_locks(cx);
     }
@@ -148,8 +153,15 @@ impl Editor {
                 let o = self.active.buffer.line_range_at(self.point()).end;
                 self.goto(o, cx);
             }
-            BeginningOfBuffer => self.goto(self.accessible().start, cx),
-            EndOfBuffer => self.goto(self.accessible().end, cx),
+            // Emacs leaves the mark where `M-<` / `M->` started.
+            BeginningOfBuffer => {
+                self.push_mark_quietly(self.point());
+                self.goto(self.accessible().start, cx);
+            }
+            EndOfBuffer => {
+                self.push_mark_quietly(self.point());
+                self.goto(self.accessible().end, cx);
+            }
             ExtendBackwardChar => {
                 let o = self.active.buffer.prev_grapheme(self.point());
                 self.select_to(o, cx);
@@ -158,7 +170,8 @@ impl Editor {
                 let o = self.active.buffer.next_grapheme(self.point());
                 self.select_to(o, cx);
             }
-            SetMark => self.set_mark(cx),
+            SetMark => self.set_mark_command(cx),
+            EmacsInput(cmd) => self.emacs_input_command(cmd, cx),
             DeactivateMark => self.deactivate_mark(cx),
             RectangleMarkMode => self.rectangle_mark_mode(cx),
             ExchangePointAndMark => self.exchange_point_and_mark(cx),

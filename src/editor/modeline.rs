@@ -153,6 +153,9 @@ impl Editor {
                         if self.is_narrowed() {
                             modes.push("Narrow");
                         }
+                        if self.overwrite_mode_active() {
+                            modes.push("Ovwrt");
+                        }
                         modes.join(" ")
                     }
                     MlField::EvilMode => self.evil_mode_name().unwrap_or("").to_string(),
