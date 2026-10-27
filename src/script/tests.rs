@@ -14764,6 +14764,64 @@ mod derived_mode_lib {
     }
 }
 
+#[cfg(test)]
+mod auto_mode_lib {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, expr: &str) -> String {
+        engine.eval(expr).unwrap().value.unwrap()
+    }
+
+    #[test]
+    fn auto_mode_alist_walks_first_match_wins() {
+        let engine = engine();
+        load_with_deps(&engine, "derived-mode");
+        engine
+            .eval(r#"(add-auto-mode "\\.foo$" "foo-child")
+                     (add-auto-mode "\\.foo$" "other-mode")"#)
+            .unwrap();
+        // Prepending means the LATER call wins for the same pattern (Emacs
+        // add-to-list priority semantics).
+        assert_eq!(v(&engine, r#"(auto-mode--match "/tmp/x/a.foo")"#), "\"other-mode\"");
+        // No match → #f; no entries → #f.
+        assert_eq!(v(&engine, r#"(auto-mode--match "/tmp/x/a.bar")"#), "#false");
+        // The live hook no-ops on a pathless buffer (queueing nothing).
+        let out = engine.eval("(auto-mode--maybe)").unwrap();
+        assert!(out.commands.is_empty(), "unexpected commands: {:?}", out.commands);
+    }
+
+    #[test]
+    fn auto_mode_hook_switches_mode_for_matching_path() {
+        let engine = engine();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine
+            .eval(r#"(define-derived-mode foo-child fundamental "Child.")
+                     (add-auto-mode "\\.foo$" "foo-child")"#)
+            .unwrap();
+        // Simulate a file buffer by driving the hook's dispatch helper with an
+        // explicit path (buffer-file-name can't be forced headlessly). The
+        // mode command runs via eval-string, so its SetMajorMode lands in the
+        // same command stream.
+        let out = engine
+            .eval(r#"(auto-mode--apply-for "/tmp/proj/readme.foo")"#)
+            .unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == "foo-child")),
+            "expected SetMajorMode(foo-child), got {:?}",
+            out.commands
+        );
+    }
+}
+
 mod abbrev_hook_injection {
     use super::*;
 
