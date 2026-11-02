@@ -82,10 +82,11 @@
 
 ;; DEFAULT is REQUIRED (a rest-arg default can come back #<void> when omitted
 ;; — engine quirk); pass 'unset if you want "was it set at all" instead.
-;; Walks child → parent → ... with a visited guard against hand-made cycles.
-;; The visited list is compared with string=? (a plain memq on strings only
-;; matches interned literals — names built at runtime would slip past it).
-(define (mode-local-value mode var default)
+;; The EXPLICIT form walks mode → parent → ... with a visited guard against
+;; hand-made cycles. The visited list is compared with string=? (a plain memq
+;; on strings only matches interned literals — names built at runtime would
+;; slip past it).
+(define (mode-local--explicit mode var default)
   (let walk ((name (mode-local--name mode)) (seen '()))
     (let ((hit (mode-local--lookup1 name var)))
       (cond ((not (eq? hit 'unset)) hit)
@@ -99,6 +100,39 @@
                (if parent
                    (walk parent (cons name seen))
                    default)))))))
+
+;; The CURRENT buffer's mode names, bottom-up (snapshot read, space-joined).
+(define (mode-local--stack-names)
+  (let ((s (mode-stack)))
+    (if (equal? s "") '() (split-many s " "))))
+
+;; (mode-local-value VAR DEFAULT) — no mode: search the buffer's mode stack
+;; TOP-DOWN. An active minor mode overrides the major; a child overrides its
+;; parent (the ancestors are ON the stack, so inheritance is free — the
+;; parent-table walk below is only needed when code names a mode directly).
+;; NOTE: *mode-local-parents* STAYS for the explicit form — snapshot reads are
+;; nullary, so Scheme cannot ask the Rust registry for an ARBITRARY mode's
+;; parent, only about the active buffer.
+(define (mode-local--stack-value var default)
+  (let loop ((names (reverse (mode-local--stack-names))))
+    (if (null? names)
+        default
+        (let ((hit (mode-local--lookup1 (car names) var)))
+          (if (eq? hit 'unset)
+              (loop (cdr names))
+              hit)))))
+
+;; Arity dispatch: (MODE VAR DEFAULT) names a mode (parent-table walk);
+;; (VAR DEFAULT) uses the active buffer's stack.
+(define (mode-local-value . args)
+  (cond ((and (pair? args) (pair? (cdr args)) (null? (cddr args)))
+         (mode-local--stack-value (car args) (cadr args)))
+        ((and (pair? args) (pair? (cdr args)) (pair? (cddr args))
+              (null? (cdddr args)))
+         (mode-local--explicit (car args) (cadr args) (caddr args)))
+        (else
+         (error "mode-local-value: expected (mode-local-value MODE VAR DEFAULT) or (mode-local-value VAR DEFAULT):"
+                args))))
 
 ;; --- setq-mode-local ------------------------------------------------------------
 ;; Emacs-compatible shape: (setq-mode-local MODE (VAR VALUE) ...) — vars are

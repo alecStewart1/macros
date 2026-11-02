@@ -259,6 +259,22 @@ impl Editor {
     pub(super) fn after_activation(&mut self, deliberate: bool, cx: &mut Context<Self>) {
         self.parse_full();
         self.ensure_cursor_visible();
+        // `:init-value` minor modes come on in a buffer's FIRST activation;
+        // the flag means a later user disable sticks (no re-push per switch).
+        if !self.active.init_minors_ran {
+            self.active.init_minors_ran = true;
+            for (name, lighter) in self.mode_registry.init_minors() {
+                if !self.active.modes.minor(&name) {
+                    self.active.modes.push(Mode {
+                        name: name.clone(),
+                        language: None,
+                        minor: true,
+                        lighter,
+                    });
+                    self.fire_mode_hooks(&[name]);
+                }
+            }
+        }
         self.run_mode_hooks_once(cx);
         self.switch_hooks(deliberate);
         cx.notify();
@@ -453,6 +469,18 @@ impl Editor {
         self.docs().any(|doc| visits_identity(doc, identity))
     }
 
+    /// The user's `add-auto-mode` match for `path` (first entry wins; later
+    /// registrations shadow earlier ones for the same pattern).
+    pub(super) fn auto_mode_for(&self, path: &Path) -> Option<String> {
+        let name = path.to_string_lossy();
+        self.auto_modes.iter().find_map(|(p, m)| {
+            regex::Regex::new(p)
+                .ok()
+                .is_some_and(|re| re.is_match(&name))
+                .then(|| m.clone())
+        })
+    }
+
     /// Install a freshly-read file as the active buffer (foreground half of the
     /// async `find_file`, and of LSP's `visit_path`). Re-checks for an existing
     /// buffer on the file — another route may have opened it meanwhile — and
@@ -477,6 +505,14 @@ impl Editor {
         self.move_to(0, cx);
         if let Some(goto) = goto {
             self.goto_line_column(goto, cx); // `macros --client +LINE:COL`
+        }
+        // The user's auto-mode entries beat the built-in extension→language
+        // detection and apply BEFORE the mode hooks, so a matching buffer
+        // enters its final mode with hooks fired exactly once (no
+        // detect-then-override double switch). SetMajorMode runs the hooks
+        // itself; the call below is then a no-op (hooks_ran).
+        if let Some(mode) = self.auto_mode_for(&path) {
+            self.apply_command(EditorCommand::SetMajorMode(mode), cx);
         }
         self.run_mode_hooks_once(cx);
         self.echo(format!("Visiting {name}"), cx);

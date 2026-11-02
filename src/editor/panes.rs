@@ -953,10 +953,9 @@ impl Editor {
             return false;
         }
         let state = self.evil_keymap();
-        let major: Option<String> = self.active.modes.names().last().map(|s| s.to_string());
         match self
             .keymap
-            .resolve_evil(state, major.as_deref(), key)
+            .resolve_evil(state, &self.active.modes, key)
             .map(str::to_string)
         {
             Some(expr) => {

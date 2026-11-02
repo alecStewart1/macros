@@ -70,6 +70,47 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         EditorCommand::RetargetFileBuffers,
     );
     register_unary(reg, queue, "set-major-mode", EditorCommand::SetMajorMode);
+    // `(register-mode name parent language)` — register a mode definition
+    // (derivation parent + language; "" means none). Queued: it is installed
+    // when the command applies, before any later set-major-mode.
+    register_ternary(reg, queue, "register-mode", |name, parent, language| {
+        EditorCommand::RegisterMode {
+            name,
+            parent,
+            language,
+        }
+    });
+    // `(register-minor-mode-def name lighter init-value)` — register a minor
+    // mode's lighter/init-value ("" lighter = none). Named `-def` to avoid
+    // the Scheme-level register-minor-mode (describe-mode's listing).
+    register_ternary(
+        reg,
+        queue,
+        "register-minor-mode-def",
+        |name, lighter, init_value| EditorCommand::RegisterMinorMode {
+            name,
+            lighter,
+            init_value,
+        },
+    );
+    register_unary(
+        reg,
+        queue,
+        "enable-minor-mode",
+        EditorCommand::EnableMinorMode,
+    );
+    register_unary(
+        reg,
+        queue,
+        "disable-minor-mode",
+        EditorCommand::DisableMinorMode,
+    );
+    // `(add-auto-mode-impl pattern mode)` — a user auto-mode entry. Queued;
+    // consulted by open_file before the built-in extension detection. Named
+    // `-impl` to avoid colliding with the Scheme-level add-auto-mode wrapper.
+    register_binary(reg, queue, "add-auto-mode-impl", |pattern, mode| {
+        EditorCommand::AddAutoMode { pattern, mode }
+    });
     register_unary(reg, queue, "open-file", EditorCommand::OpenFile);
     register_unary(
         reg,

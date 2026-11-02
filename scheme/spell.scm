@@ -269,12 +269,18 @@
         (spell--schedule)))))
 
 ;; --- mode line ---------------------------------------------------------------------
-(mode-line-add-segment (ml-slot* "spell" "" "  " ""))
-(define (spell--update-modeline)
-  (set-mode-line-slot "spell" (if (spell--on?) "spell" "")))
+;; The mode stack mirror (sanctioned state-routing, not the full framework:
+;; spell keeps its hand-rolled toggle for the distinct on/off actions, the
+;; enable-abort when no checker exists, and the custom messages). spell-mode
+;; is a real stack entry — the " spell" lighter renders from the mode line
+;; and C-h m lists it — mirrored from the Scheme state on every toggle and
+;; buffer switch.
+(register-minor-mode-def "spell-mode" " spell" #f)
+(define (spell--sync-stack)
+  ((if (spell--on?) enable-minor-mode disable-minor-mode) "spell-mode"))
 
 (define (spell--buffer-switch)
-  (spell--update-modeline)
+  (spell--sync-stack)
   (spell--schedule))
 
 ;; --- the minor mode -----------------------------------------------------------------
@@ -295,7 +301,7 @@
         (set! *spell-state* (buffer-state-set *spell-state* #f))
         (spell--set-errors '())
         (clear-overlay-faces-matching "spell-error")
-        (spell--update-modeline)
+        (spell--sync-stack)
         (message "spell-mode off"))
       (begin
         (unless *spell-backend* (set! *spell-backend* (spell--resolve-backend)))
@@ -305,7 +311,7 @@
             (begin
               (spell--ensure-hooks)
               (set! *spell-state* (buffer-state-set *spell-state* #t))
-              (spell--update-modeline)
+              (spell--sync-stack)
               (spell--check-now)
               (message (string-append "spell-mode on ("
                                       (symbol->string *spell-backend*) ")")))))))

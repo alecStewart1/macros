@@ -633,7 +633,12 @@
 ;; An absent per-buffer entry inherits the default, like a buffer-local
 ;; variable with no local value. Explicit values are stored WRAPPED in a list
 ;; — buffer-state-get cannot tell a stored #f from "no entry", so the wrapper
-;; preserves the tri-state (default / explicitly on / explicitly off).
+;; preserves the tri-state (default / explicitly on / explicitly off). The
+;; SCHEME tri-state stays the truth (Emacs: "customize the variable
+;; abbrev-mode to a non-nil value" enables by default; a buffer can toggle
+;; itself off and stay off); the mode STACK entry is a mirror of it —
+;; registered via register-minor-mode-def so the lighter renders from the
+;; stack and C-h m lists the mode — synced on every toggle and buffer switch.
 (define (abbrev--on?)
   (let ((e (alist-ref *abbrev-state* (current-buffer))))
     (if e (car e) *abbrev-mode-default*)))
@@ -646,15 +651,16 @@
 ;; typing-time expansion comes back with real minor-mode support.
 (define (set-abbrev-mode-default v)
   (set! *abbrev-mode-default* v)
-  (abbrev--update-modeline))
+  (abbrev--sync-stack))
 
-;; Mode-line lighter (a slot: names the focused buffer, the same trade
-;; spell-mode makes until per-buffer lighters exist).
-(mode-line-add-segment (ml-slot* "abbrev" "" "  " ""))
-(define (abbrev--update-modeline)
-  (set-mode-line-slot "abbrev" (if (abbrev--on?) "abbrev" "")))
-(define (abbrev--buffer-switch) (abbrev--update-modeline))
-(add-hook "buffer-switch-hook" "abbrev--buffer-switch")
+;; The mode stack mirror: abbrev-mode is a real stack entry (so the " abbrev"
+;; lighter renders from the mode line and C-h m lists it), present in THIS
+;; buffer iff abbrev--on? is true. Synced on toggle, default change, and
+;; buffer switch — the same paths the old mode-line slot used.
+(register-minor-mode-def "abbrev-mode" " abbrev" #f)
+(define (abbrev--sync-stack)
+  ((if (abbrev--on?) enable-minor-mode disable-minor-mode) "abbrev-mode"))
+(add-hook "buffer-switch-hook" "abbrev--sync-stack")
 
 ;; Completes a prefix against the full table chain (local, :parents, global —
 ;; the same resolution abbrev-symbol uses), earlier tables shadowing later.
@@ -708,7 +714,7 @@
           (add-completion-at-point-function "abbrev-capf"))
         (abbrev--on-set! #t)
         (message "abbrev-mode enabled")))
-  (abbrev--update-modeline))
+  (abbrev--sync-stack))
 
 (register-command 'abbrev-mode)
 

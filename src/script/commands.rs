@@ -292,6 +292,38 @@ pub enum EditorCommand {
     /// Set the active (editable) buffer's major mode by name, so its keymap
     /// applies (e.g. shell-mode rebinding RET). Does not make the buffer special.
     SetMajorMode(String),
+    /// Register a mode definition: derivation parent and optional language.
+    /// When the mode becomes major, `set-major-mode` builds the buffer's stack
+    /// from the ancestry (fundamental → … → mode), so keymap resolution, mode
+    /// hooks and grammar attachment inherit down the chain. `""` means "none"
+    /// for parent and language (there is no Option<String> argument bridge).
+    RegisterMode {
+        name: String,
+        parent: String,
+        language: String,
+    },
+    /// Register a minor-mode definition: its lighter ("" = none) and whether
+    /// it is `:init-value` (enabled in newly-activated buffers). Queued by
+    /// `define-minor-mode`; the enable/disable commands read it back.
+    RegisterMinorMode {
+        name: String,
+        lighter: String,
+        init_value: bool,
+    },
+    /// Push the minor mode onto the active buffer's mode stack (above the
+    /// major), fire its hooks, and update the mode line. Idempotent.
+    EnableMinorMode(String),
+    /// A user `add-auto-mode` entry (Rust `regex` pattern → mode NAME). The
+    /// editor consults these BEFORE the built-in extension→language detection
+    /// on `open_file`, so a matching file opens straight into its final mode
+    /// with its hooks fired exactly once (no detect-then-override double
+    /// switch).
+    AddAutoMode {
+        pattern: String,
+        mode: String,
+    },
+    /// Remove the minor mode from the stack, fire its hooks. Idempotent.
+    DisableMinorMode(String),
     /// Switch the active buffer into the editor-aware `macros-steel` major mode:
     /// stack it on `fundamental`, attach the `macros-scheme` language (Scheme
     /// highlighting plus the built-in editor-API server), and re-run mode hooks

@@ -31,3 +31,14 @@
 (for-each define-language-mode
           (filter (lambda (lang) (not (equal? lang "scheme")))
                   (bundled-languages)))
+
+;; Register every bundled language mode with the Rust mode registry: the
+;; `<lang>-mode-hook` alias works for all of them (run_mode_hooks_once fires
+;; `<name>`, `<name>-hook` AND `<name>-mode-hook`), and set-major-mode builds
+;; the stack from the registry (same shape as before — fundamental → lang,
+;; grammar via the language field — now through one code path). Scheme is
+;; excluded as above: it keeps its editor-aware commands.
+(for-each
+ (lambda (lang) (register-mode lang "" lang))
+ (filter (lambda (lang) (not (equal? lang "scheme")))
+         (bundled-languages)))

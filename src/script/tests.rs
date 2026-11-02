@@ -13933,25 +13933,25 @@ mod abbrev_lib {
         // Off by default; the CAPF declines.
         assert_eq!(v(&engine, "(abbrev--on?)"), "#false");
         assert_eq!(v(&engine, r#"(abbrev-capf "te")"#), "()");
-        // The mode registers its lighter slot at load; enabling writes it.
+        // The mode's stack entry mirrors the tri-state: enabling queues
+        // EnableMinorMode (the " abbrev" lighter renders from the stack; no
+        // SetModeLineSlot anymore).
         let out = engine.eval("(abbrev-mode)").unwrap();
         assert_eq!(v(&engine, "(abbrev--on?)"), "#true");
         assert!(
             out.commands
                 .iter()
-                .any(|c| matches!(c, EditorCommand::SetModeLineSlot(k, val)
-                if k == "abbrev" && val == "abbrev")),
+                .any(|c| matches!(c, EditorCommand::EnableMinorMode(n) if n == "abbrev-mode")),
             "{:?}",
             out.commands
         );
-        // Disabling flips the flag back, removes the hook, clears the lighter.
+        // Disabling flips the flag back and removes the stack entry.
         let out = engine.eval("(abbrev-mode)").unwrap();
         assert_eq!(v(&engine, "(abbrev--on?)"), "#false");
         assert!(
             out.commands
                 .iter()
-                .any(|c| matches!(c, EditorCommand::SetModeLineSlot(k, val)
-                if k == "abbrev" && val.is_empty())),
+                .any(|c| matches!(c, EditorCommand::DisableMinorMode(n) if n == "abbrev-mode")),
             "{:?}",
             out.commands
         );
@@ -14523,20 +14523,39 @@ mod minor_mode_lib {
     }
 
     #[test]
-    fn minor_mode_state_is_buffer_local_with_tri_state() {
+    fn minor_mode_state_lives_on_the_mode_stack() {
         let engine = engine();
         load_with_deps(&engine, "minor-mode");
         engine
             .eval(r#"(minor-mode--register! 'm1 (list (cons 'lighter "") (cons 'init-value #f) (cons 'keymap '())))"#)
             .unwrap();
-        // Off by default (inherits init-value when no per-buffer entry).
+        // Off while the snapshot's stack carries no minor modes.
         assert_eq!(v(&engine, "(minor-mode--on? 'm1)"), "#false");
-        // Enable in the current buffer.
-        engine.eval("(minor-mode--set-state! 'm1 #true)").unwrap();
+        // On: the mode is a stack entry, published as the snapshot's
+        // space-joined minor_modes.
+        engine.set_snapshot(EditorSnapshot {
+            minor_modes: "m1".into(),
+            ..Default::default()
+        });
         assert_eq!(v(&engine, "(minor-mode--on? 'm1)"), "#true");
-        // A stored #f must read as "explicitly off", not "no entry" (tri-state).
-        engine.eval("(minor-mode--set-state! 'm1 #false)").unwrap();
-        assert_eq!(v(&engine, "(minor-mode--on? 'm1)"), "#false");
+        // Enable/disable queue the Rust stack commands; the toggle itself is
+        // idempotent at the Scheme layer (no command when already off).
+        let on = engine.eval(r#"(enable-minor-mode "m1")"#).unwrap();
+        assert!(
+            on.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::EnableMinorMode(n) if n == "m1"))
+        );
+        let off = engine
+            .eval(r#"(disable-minor-mode "m1") (disable-minor-mode "m1")"#)
+            .unwrap();
+        // Scheme queues on every call — the editor's apply arm is the
+        // idempotency point (it no-ops when the mode isn't on the stack).
+        assert!(
+            off.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DisableMinorMode(n) if n == "m1"))
+        );
     }
 
     #[test]
@@ -14566,9 +14585,24 @@ mod minor_mode_lib {
             v(&engine, "(length (minor-mode--prop 'test-mode 'keymap))"),
             "1"
         );
-        // Toggle on: state flips, body thunk runs, message queued.
+        // Registered on the Rust side: stack entry + lighter + init-value.
+        assert!(
+            defined.commands.iter().any(
+                |c| matches!(c, EditorCommand::RegisterMinorMode { name, lighter, init_value }
+                    if name == "test-mode" && lighter == " Tst" && !init_value)
+            ),
+            "no RegisterMinorMode queued: {:?}",
+            defined.commands
+        );
+        // Toggle on: EnableMinorMode queued, body thunk runs. The state itself
+        // lives in Rust — no RunHook and no SetModeLineSlot from Scheme (the
+        // editor fires the hook on apply; the lighter renders from the stack).
         let out = engine.eval("(test-mode)").unwrap();
-        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#true");
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::EnableMinorMode(n) if n == "test-mode"))
+        );
         assert!(
             out.commands
                 .iter()
@@ -14576,22 +14610,43 @@ mod minor_mode_lib {
             "expected body message, got {:?}",
             out.commands
         );
-        // Toggle off.
-        engine.eval("(test-mode)").unwrap();
-        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#false");
-        // Explicit arg semantics: #f disables, 1 enables, 0 disables.
-        engine.eval("(test-mode #false) (test-mode 1)").unwrap();
-        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#true");
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunHook(_))),
+            "Scheme must not fire hooks: {:?}",
+            out.commands
+        );
+        // Toggle off: the snapshot now carries the mode as active, so the
+        // toggle flips to DisableMinorMode.
+        engine.set_snapshot(EditorSnapshot {
+            minor_modes: "test-mode".into(),
+            ..Default::default()
+        });
+        let out = engine.eval("(test-mode)").unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DisableMinorMode(n) if n == "test-mode"))
+        );
+        // Explicit arg semantics against a live snapshot: #f disables, 1 is a
+        // no-op when already on, 0 disables.
+        engine.eval("(test-mode #false)").unwrap();
+        let out = engine.eval("(test-mode 1)").unwrap();
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::EnableMinorMode(_))),
+            "no redundant enable while on: {:?}",
+            out.commands
+        );
         engine.eval("(test-mode 0)").unwrap();
-        assert_eq!(v(&engine, "(minor-mode--on? 'test-mode)"), "#false");
-        // Hook fires as a RunHook command named "test-mode-hook".
+        engine.set_snapshot(EditorSnapshot::default());
         let out = engine.eval("(test-mode 1)").unwrap();
         assert!(
             out.commands
                 .iter()
-                .any(|c| matches!(c, EditorCommand::RunHook(h) if h == "test-mode-hook")),
-            "no test-mode-hook fire: {:?}",
-            out.commands
+                .any(|c| matches!(c, EditorCommand::EnableMinorMode(n) if n == "test-mode"))
         );
         // Synthesized Emacs-parity bindings exist (with-syntax symbol splice
         // worked). No `bound?` primitive — evaluate the names directly; an
@@ -14602,14 +14657,14 @@ mod minor_mode_lib {
             v(&engine, "test-mode-map")
         );
         assert_eq!(v(&engine, "test-mode-hook"), "#false");
-        // The lighter slot segment was registered at define time (the segment
-        // append re-applies the format → SetModeLineFormat).
+        // No mode-line slot is registered at define time — the lighter renders
+        // from the stack entry RegisterMinorMode just created.
         assert!(
-            defined
+            !defined
                 .commands
                 .iter()
                 .any(|c| matches!(c, EditorCommand::SetModeLineFormat(_))),
-            "no mode line segment registered: {:?}",
+            "no scheme-side mode line registration expected: {:?}",
             defined.commands
         );
     }
@@ -14659,55 +14714,46 @@ mod minor_mode_lib {
     }
 
     #[test]
-    fn minor_mode_keymap_chords_are_gated_on_mode_state() {
+    fn minor_mode_keymap_binds_are_mode_scoped_not_global() {
         let engine = engine();
         load_with_deps(&engine, "minor-mode");
         engine
             .eval(
                 r#"(define (gated-thing) (message "thing ran"))
                    (define-minor-mode gate-mode
-                     "Gated."
+                     "Scoped."
                      :keymap (("ctrl-c g" gated-thing)))"#,
             )
             .unwrap();
-        // The chord resolves to a run-thunk stub (the gated wrapper), not the
-        // raw command string.
-        let binding = v(&engine, r#"(key-binding "evil-normal" "ctrl-c g")"#);
-        assert!(
-            binding.contains("run-thunk"),
-            "chord not bound to gated thunk: {:?}",
-            binding
+        // The chord lands in the mode's OWN map plus the per-state maps for
+        // evil/helix — all scoped to the mode — and NOT in the shared global
+        // Normal maps (two modes can bind the same chord; Emacs-style users
+        // get the bindings too).
+        assert_eq!(
+            v(&engine, r#"(key-binding "gate-mode" "ctrl-c g")"#),
+            "\"gated-thing\""
         );
-        // Fire the stub the way key dispatch does: the stub string wrapped in
-        // parens, eval'd — (run-thunk "<id>"). eval-string's repr-escaped
-        // quotes are unescaped by trimming before use.
-        let fire = |engine: &ScriptEngine| {
-            engine
-                .eval(
-                    r#"(define (test--fire-chord)
-                          (eval-string (string-append "(" (key-binding "evil-normal" "ctrl-c g") ")")))
-                       (test--fire-chord)"#,
-                )
-                .unwrap()
-                .commands
-        };
-        // Mode off (default): the gated wrapper no-ops — no message queued.
-        let cmds = fire(&engine);
-        assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, EditorCommand::Message(m) if m == "thing ran")),
-            "chord fired while mode off: {:?}",
-            cmds
+        assert_eq!(
+            v(
+                &engine,
+                r#"(key-binding "evil-normal:gate-mode" "ctrl-c g")"#
+            ),
+            "\"gated-thing\""
         );
-        // Mode on: the same keypress now dispatches the command.
-        engine.eval("(gate-mode 1)").unwrap();
-        let cmds = fire(&engine);
-        assert!(
-            cmds.iter()
-                .any(|c| matches!(c, EditorCommand::Message(m) if m == "thing ran")),
-            "chord did not fire while mode on: {:?}",
-            cmds
+        assert_eq!(
+            v(
+                &engine,
+                r#"(key-binding "helix-normal:gate-mode" "ctrl-c g")"#
+            ),
+            "\"gated-thing\""
+        );
+        assert_eq!(
+            v(&engine, r#"(key-binding "evil-normal" "ctrl-c g")"#),
+            "\"\""
+        );
+        assert_eq!(
+            v(&engine, r#"(key-binding "helix-normal" "ctrl-c g")"#),
+            "\"\""
         );
     }
 
@@ -14722,8 +14768,63 @@ mod minor_mode_lib {
             .eval(r#"(define-minor-mode smoke-mode "d." :lighter " Sm")"#)
             .unwrap();
         assert_eq!(v(&engine, "(minor-mode-enabled? 'smoke-mode)"), "#false");
-        engine.eval("(smoke-mode)").unwrap();
+        // Toggling queues the Rust stack command; the reported state follows
+        // the snapshot's minor_modes (the editor's stack).
+        let out = engine.eval("(smoke-mode)").unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::EnableMinorMode(n) if n == "smoke-mode"))
+        );
+        engine.set_snapshot(EditorSnapshot {
+            minor_modes: "smoke-mode".into(),
+            ..Default::default()
+        });
         assert_eq!(v(&engine, "(minor-mode-enabled? 'smoke-mode)"), "#true");
+    }
+
+    #[test]
+    fn define_minor_mode_lists_in_describe_mode() {
+        // Full startup: help-extras (register-minor-mode / enabled-minor-modes)
+        // must be loaded, as the define-minor-mode expansion now calls it.
+        let engine = engine();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine
+            .eval(r#"(define-minor-mode dm-mode "Doc mode." :lighter " DM")"#)
+            .unwrap();
+        // Off by default: not listed.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "dm-mode" (enabled-minor-modes)) "y" "n")"#
+            ),
+            "\"n\""
+        );
+        engine.eval("(dm-mode 1)").unwrap();
+        engine.set_snapshot(EditorSnapshot {
+            minor_modes: "dm-mode".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "dm-mode" (enabled-minor-modes)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        // Toggling off queues the removal from the stack; with the stack
+        // applied (snapshot reset), it's gone from the report.
+        engine.eval("(dm-mode 0)").unwrap();
+        engine.set_snapshot(EditorSnapshot::default());
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "dm-mode" (enabled-minor-modes)) "y" "n")"#
+            ),
+            "\"n\""
+        );
     }
 }
 
@@ -14790,84 +14891,242 @@ mod derived_mode_lib {
     }
 
     #[test]
-    fn define_derived_mode_expands_and_switches() {
+    fn define_derived_mode_bare_naming_and_registry() {
         let engine = engine();
         load_with_deps(&engine, "minor-mode");
         load_with_deps(&engine, "derived-mode");
-        engine
+        engine.eval("(define *mylang-ran* #f)").unwrap();
+        // Both spellings name the mode "mylang"; the command is mylang-mode.
+        let out = engine
             .eval(
-                r#"(define-derived-mode foo-parent fundamental
-                     "Parent." :keymap (("ctrl-c p" parent-cmd)))
-                   (define-derived-mode foo-child foo-parent
-                     "Child." :keymap (("ctrl-c c" child-cmd))
-                     (message "child body"))"#,
+                r#"(define-derived-mode mylang-mode fundamental "M."
+                     :keymap (("ctrl-c z" mylang-cmd))
+                     (set! *mylang-ran* #t))"#,
             )
             .unwrap();
-        // Both commands exist and are M-x registered.
-        assert_eq!(
-            v(
-                &engine,
-                r#"(if (member "foo-parent" *interactive-commands*) "y" "n")"#
-            ),
-            "\"y\""
+        assert!(
+            out.commands.iter().any(|c| matches!(
+                c,
+                EditorCommand::RegisterMode { name, parent, language }
+                    if name == "mylang" && parent.is_empty() && language.is_empty()
+            )),
+            "expected RegisterMode(mylang, no parent, no language): {:?}",
+            out.commands
         );
-        assert_eq!(
-            v(
-                &engine,
-                r#"(if (member "foo-child" *interactive-commands*) "y" "n")"#
-            ),
-            "\"y\""
-        );
-        // Switching to the child: parent hook runs first (synchronously, so the
-        // parent is set up before the editor applies the mode switch), then
-        // SetMajorMode, then the body message. The CHILD hook is NOT queued —
-        // the editor fires it itself (run_mode_hooks_once on SetMajorMode
-        // application, keys "foo-child" AND "foo-child-hook").
-        let out = engine.eval("(foo-child)").unwrap();
-        let kinds: Vec<&str> = out
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                EditorCommand::SetMajorMode(m) if m == "foo-child" => Some("major"),
-                EditorCommand::RunHook(h) if h == "foo-parent-hook" => Some("parent"),
-                EditorCommand::Message(m) if m == "child body" => Some("body"),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(kinds, vec!["parent", "major", "body"], "got {:?}", kinds);
-        // The parent command behaves the same (no own hook).
-        let out = engine.eval("(foo-parent)").unwrap();
+        // Keys are scoped to the BARE name (stack entries are bare).
+        assert!(out.commands.iter().any(|c| matches!(
+            c,
+            EditorCommand::DefineKey(m, s, _)
+                if (m == "mylang" || m == "evil-normal:mylang" || m == "helix-normal:mylang")
+                    && s == "ctrl-c z"
+        )));
+        // Running the command: the setup body runs, then the switch to the
+        // BARE mode name.
+        let out = engine.eval("(mylang-mode)").unwrap();
         assert!(
             out.commands
                 .iter()
-                .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == "foo-parent")),
-            "parent did not switch modes: {:?}",
-            out.commands
+                .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == "mylang"))
         );
-        // Synthesized bindings exist.
+        assert_eq!(v(&engine, "(if *mylang-ran* \"y\" \"n\")"), "\"y\"");
+        // No RunHook is queued by the macro anymore — the editor fires the
+        // whole chain bottom-up on the SetMajorMode apply.
         assert!(
-            v(&engine, "foo-child-map").contains("ctrl-c c"),
-            "foo-child-map missing bindings: {:?}",
-            v(&engine, "foo-child-map")
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunHook(_)))
         );
-        assert_eq!(v(&engine, "foo-child-hook"), "#false");
-        // Unknown keyword rejected at expansion.
+        // M-x registration and the synthesized parity bindings use the
+        // COMMAND name.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "mylang-mode" *interactive-commands*) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert!(v(&engine, "mylang-mode-map").contains("ctrl-c z"));
+        assert_eq!(v(&engine, "mylang-mode-hook"), "#false");
+        // The bare spelling of CHILD works identically.
+        engine
+            .eval(r#"(define-derived-mode other fundamental "O.")"#)
+            .unwrap();
+        let out = engine.eval("(other-mode)").unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == "other"))
+        );
+        // Unsupported keywords still error at expansion — before and after
+        // the first body form.
         assert!(
             engine
                 .eval(r#"(define-derived-mode bad-mode fundamental "d." :group 'x)"#)
                 .is_err()
         );
-        // A keyword following the first body form must still be parsed as a
-        // keyword — an unsupported one must error loudly, not silently become
-        // body code.
         assert!(
             engine
                 .eval(
                     r#"(define-derived-mode bad-mode fundamental "d."
-                        (message "body one")
-                        :group 'x)"#
+                     (message "body one")
+                     :group 'x)"#
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn derived_mode_setups_chain_ancestors_first() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        load_with_deps(&engine, "derived-mode");
+        engine.eval("(define *trace* '())").unwrap();
+        engine
+            .eval(
+                r#"(define-derived-mode ga-mode fundamental "A."
+                     (set! *trace* (cons "ga" *trace*)))
+                   (define-derived-mode gb-mode ga "B."
+                     (set! *trace* (cons "gb" *trace*)))"#,
+            )
+            .unwrap();
+        engine.eval("(gb-mode)").unwrap();
+        // cons order: "gb" is first in the list, so "ga" ran BEFORE it.
+        assert_eq!(
+            v(&engine, r#"(if (equal? *trace* '("gb" "ga")) "y" "n")"#),
+            "\"y\""
+        );
+    }
+
+    #[test]
+    fn derived_mode_refuses_existing_command_but_reloads_own() {
+        let engine = engine();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        // rust-mode is a bundled, registered command → refuse.
+        assert!(
+            engine
+                .eval(r#"(define-derived-mode rust-mode fundamental "R.")"#)
+                .is_err()
+        );
+        // Re-defining a framework-made mode (a config reload) is fine.
+        engine
+            .eval(r#"(define-derived-mode mine-mode fundamental "M.")"#)
+            .unwrap();
+        assert!(
+            engine
+                .eval(r#"(define-derived-mode mine-mode fundamental "M.")"#)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn derived_mode_language_keyword() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        load_with_deps(&engine, "derived-mode");
+        let out = engine
+            .eval(r#"(define-derived-mode mylang fundamental "M." :language mylang)"#)
+            .unwrap();
+        assert!(
+            out.commands.iter().any(|c| matches!(
+                c,
+                EditorCommand::RegisterMode { name, language, .. }
+                    if name == "mylang" && language == "mylang"
+            )),
+            "expected RegisterMode with language: {:?}",
+            out.commands
+        );
+        // A non-symbol/string :language value is refused at expansion.
+        assert!(
+            engine
+                .eval(r#"(define-derived-mode bad fundamental "B." :language 42)"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn derived_mode_keymap_is_mode_scoped() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        load_with_deps(&engine, "derived-mode");
+        let out = engine
+            .eval(
+                r#"(define-derived-mode zz-mode fundamental "Z."
+                     :keymap (("ctrl-c z" zz-cmd)))"#,
+            )
+            .unwrap();
+        // The :keymap must land in the mode's own map and the per-state maps
+        // (bare mode name), NOT the shared global Normal maps — a derived
+        // mode's keys work in that mode only.
+        let mut scoped = 0;
+        let mut global = 0;
+        for c in &out.commands {
+            if let EditorCommand::DefineKey(map, seq, _) = c {
+                if seq == "ctrl-c z" {
+                    match map.as_str() {
+                        "zz" | "evil-normal:zz" | "helix-normal:zz" => scoped += 1,
+                        "evil-normal" | "helix-normal" => global += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            scoped, 3,
+            "expected 3 mode-scoped DefineKey: {:?}",
+            out.commands
+        );
+        assert_eq!(
+            global, 0,
+            "derived keys must not land in the global Normal maps"
+        );
+    }
+
+    #[test]
+    fn fundamental_parent_hook_is_not_fired_by_the_macro() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        load_with_deps(&engine, "derived-mode");
+        engine
+            .eval(r#"(define-derived-mode fz-mode fundamental "F.")"#)
+            .unwrap();
+        let out = engine.eval("(fz-mode)").unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetMajorMode(m) if m == "fz"))
+        );
+        // `fundamental` is always at the bottom of the stack, so the editor's
+        // run_mode_hooks_once fires it once on the SetMajorMode apply — the
+        // macro never fires mode hooks itself.
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunHook(h) if h == "fundamental-hook")),
+            "macro must not fire fundamental-hook: {:?}",
+            out.commands
+        );
+    }
+
+    #[test]
+    fn register_mode_primitive_queues_the_definition() {
+        let engine = engine();
+        load_with_deps(&engine, "derived-mode");
+        let out = engine
+            .eval(r#"(register-mode "mylang" "mylang-parent" "")"#)
+            .unwrap();
+        assert!(
+            out.commands.iter().any(|c| matches!(
+                c,
+                EditorCommand::RegisterMode {
+                    name,
+                    parent,
+                    language,
+                } if name == "mylang" && parent == "mylang-parent" && language.is_empty()
+            )),
+            "expected RegisterMode queued: {:?}",
+            out.commands
         );
     }
 }
@@ -14886,7 +15145,7 @@ mod auto_mode_lib {
     }
 
     #[test]
-    fn auto_mode_alist_walks_first_match_wins() {
+    fn auto_mode_alist_walks_first_match_wins_and_dedups() {
         let engine = engine();
         load_with_deps(&engine, "derived-mode");
         engine
@@ -14895,20 +15154,39 @@ mod auto_mode_lib {
                      (add-auto-mode "\\.foo$" "other-mode")"#,
             )
             .unwrap();
-        // Prepending means the LATER call wins for the same pattern (Emacs
-        // add-to-list priority semantics).
+        // The LATER call wins for the same pattern (Emacs add-to-list
+        // priority) — and the same-pattern entry is REPLACED, not duplicated,
+        // so a reloaded config doesn't pile up duplicates.
         assert_eq!(
             v(&engine, r#"(auto-mode--match "/tmp/x/a.foo")"#),
             "\"other-mode\""
         );
-        // No match → #f; no entries → #f.
+        assert_eq!(v(&engine, "(length *auto-mode-alist*)"), "1");
+        // No match → #f.
         assert_eq!(v(&engine, r#"(auto-mode--match "/tmp/x/a.bar")"#), "#false");
-        // The live hook no-ops on a pathless buffer (queueing nothing).
-        let out = engine.eval("(auto-mode--maybe)").unwrap();
+        // The live path is Rust: each add-auto-mode queues an AddAutoMode.
+        // A framework-derived COMMAND (`<bare>-mode`) is translated to the
+        // bare stack-entry name; other identifiers pass through untouched.
+        engine
+            .eval(r#"(define-derived-mode kid-mode fundamental "K.")"#)
+            .unwrap();
+        let out = engine
+            .eval(
+                r#"(add-auto-mode "\\.kid$" "kid-mode")
+                       (add-auto-mode "\\.special$" "magit-status")"#,
+            )
+            .unwrap();
         assert!(
-            out.commands.is_empty(),
-            "unexpected commands: {:?}",
             out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::AddAutoMode { pattern, mode }
+                if pattern == "\\.kid$" && mode == "kid"))
+        );
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::AddAutoMode { pattern, mode }
+                if pattern == "\\.special$" && mode == "magit-status"))
         );
     }
 
@@ -14920,8 +15198,10 @@ mod auto_mode_lib {
         }
         engine
             .eval(
+                // add-auto-mode names the COMMAND (`<bare>-mode`), which
+                // eval-string dispatches.
                 r#"(define-derived-mode foo-child fundamental "Child.")
-                     (add-auto-mode "\\.foo$" "foo-child")"#,
+                     (add-auto-mode "\\.foo$" "foo-child-mode")"#,
             )
             .unwrap();
         // Simulate a file buffer by driving the hook's dispatch helper with an
@@ -15014,6 +15294,45 @@ mod mode_local_lib {
             v(&engine, r#"(mode-local-value 'a-mode 'tab-width 99)"#),
             "2"
         );
+    }
+
+    #[test]
+    fn mode_local_value_stack_form_walks_top_down() {
+        let engine = engine();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine
+            .eval(
+                r#"(setq-mode-local 'fundamental (indent 2))
+                   (setq-mode-local 'mylang (indent 4))
+                   (setq-mode-local 'my-minor (indent 8))"#,
+            )
+            .unwrap();
+        // Stack: fundamental → mylang → my-minor (minor on top wins).
+        engine.set_snapshot(EditorSnapshot {
+            mode_stack: "fundamental mylang my-minor".into(),
+            ..Default::default()
+        });
+        assert_eq!(v(&engine, "(mode-local-value 'indent 99)"), "8");
+        // Drop the minor: the major wins.
+        engine.set_snapshot(EditorSnapshot {
+            mode_stack: "fundamental mylang".into(),
+            ..Default::default()
+        });
+        assert_eq!(v(&engine, "(mode-local-value 'indent 99)"), "4");
+        // Nothing set on the stack: default (fundamental has no 'tab-stop).
+        engine.set_snapshot(EditorSnapshot {
+            mode_stack: "fundamental other".into(),
+            ..Default::default()
+        });
+        assert_eq!(v(&engine, "(mode-local-value 'tab-stop 99)"), "99");
+        assert_eq!(v(&engine, "(mode-local-value 'indent 99)"), "2");
+        // The explicit 3-arg form still walks the parent table.
+        engine
+            .eval(r#"(mode-local--set-parent "mylang" "fundamental")"#)
+            .unwrap();
+        assert_eq!(v(&engine, "(mode-local-value 'mylang 'indent 99)"), "4");
     }
 
     #[test]
@@ -15336,5 +15655,45 @@ mod abbrev_hook_injection {
         engine.switch_markers("b", "a");
         engine.adjust_markers(0, 0, 2);
         assert_eq!(pos("bm"), "6");
+    }
+}
+
+#[cfg(test)]
+mod minor_mode_stack_lib {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+    }
+
+    #[test]
+    fn enable_disable_minor_mode_queue_commands() {
+        let engine = engine();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        let out = engine
+            .eval(
+                r#"(register-minor-mode-def "m1" " M1" #f)
+                   (enable-minor-mode "m1")
+                   (disable-minor-mode "m1")"#,
+            )
+            .unwrap();
+        assert!(out.commands.iter().any(|c| matches!(
+            c,
+            EditorCommand::RegisterMinorMode { name, lighter, init_value }
+                if name == "m1" && lighter == " M1" && !init_value
+        )));
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::EnableMinorMode(n) if n == "m1"))
+        );
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::DisableMinorMode(n) if n == "m1"))
+        );
     }
 }

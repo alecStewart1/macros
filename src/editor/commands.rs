@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use gpui::{Context, SharedString, px};
 
 use crate::highlight::Highlighter;
-use crate::mode::{Mode, ModeStack};
+use crate::mode::{Mode, ModeDef, ModeStack};
 use crate::script::EditorCommand;
 use crate::theme::Theme;
 
@@ -507,19 +507,40 @@ impl Editor {
             KillBufferNamed(name) => self.kill_buffer_named_confirming(&name, cx),
             RetargetFileBuffers(old, new) => self.retarget_file_buffers(&old, &new, cx),
             SetMajorMode(mode) => {
-                // A mode whose name matches a bundled tree-sitter language carries
-                // that language, so highlighting AND the language server follow the
-                // mode — `M-x rust-mode` on any buffer colors it and (via the
-                // `fundamental` `enable-lsp` hook below) starts rust-analyzer.
-                // Modes with no grammar (shell-mode, git-commit-mode, …) install
-                // only the keymap and leave any existing highlighter alone.
-                let language_highlighter = Highlighter::for_language(&mode);
-                let mut new_mode = Mode::new(&mode);
-                if language_highlighter.is_some() {
-                    new_mode = new_mode.with_language(&mode);
+                // Buffer-local minor modes SURVIVE a major-mode switch (Emacs
+                // parity): capture them and re-push on the rebuilt stack.
+                let minors = self.active.modes.minor_modes_cloned();
+                // A REGISTERED mode builds its stack from the ancestry
+                // (fundamental → …ancestors… → mode): keymap resolution, mode
+                // hooks and the grammar all inherit down the chain. An
+                // unregistered name keeps the legacy behavior — the language
+                // is the mode name when a grammar with that exact id exists,
+                // else keymap only.
+                let language: Option<String> = match self.mode_registry.get(&mode) {
+                    Some(_) => {
+                        self.active.modes = self.mode_registry.build_stack(&mode);
+                        self.active.modes.active_language().map(str::to_string)
+                    }
+                    None => {
+                        let language = Highlighter::for_language(&mode).map(|_| mode.clone());
+                        // Switching TO fundamental must not stack a second
+                        // fundamental entry on the base.
+                        self.active.modes = if mode == "fundamental" {
+                            ModeStack::fundamental()
+                        } else {
+                            let mut new_mode = Mode::new(&mode);
+                            if let Some(l) = &language {
+                                new_mode = new_mode.with_language(l.clone());
+                            }
+                            ModeStack::with_major(new_mode)
+                        };
+                        language
+                    }
+                };
+                for m in minors {
+                    self.active.modes.push(m);
                 }
-                self.active.modes = ModeStack::with_major(new_mode);
-                if let Some(h) = language_highlighter {
+                if let Some(h) = language.as_deref().and_then(Highlighter::for_language) {
                     self.active.highlighter = Some(h);
                     self.parse_full();
                 } else if mode == "anvil-repl-mode" {
@@ -545,6 +566,73 @@ impl Editor {
                 self.active.hooks_ran = false;
                 self.run_mode_hooks_once(cx);
                 cx.notify();
+            }
+            RegisterMode {
+                name,
+                parent,
+                language,
+            } => {
+                // `""` is the wire encoding of "none" (see the variant doc).
+                let parent = (!parent.is_empty()).then_some(parent);
+                // `:language` default: the bare name when a grammar with that
+                // exact id exists (the rust-mode → "rust" convention).
+                let language = if language.is_empty() {
+                    Highlighter::for_language(&name).map(|_| name.clone())
+                } else {
+                    Some(language)
+                };
+                self.mode_registry.register(
+                    &name,
+                    ModeDef {
+                        parent,
+                        language,
+                        ..Default::default()
+                    },
+                );
+            }
+            RegisterMinorMode {
+                name,
+                lighter,
+                init_value,
+            } => {
+                self.mode_registry.register(
+                    &name,
+                    ModeDef {
+                        minor: true,
+                        lighter: (!lighter.is_empty()).then_some(lighter),
+                        init_value,
+                        ..Default::default()
+                    },
+                );
+            }
+            EnableMinorMode(name) => {
+                if !self.active.modes.minor(&name) {
+                    let lighter = self
+                        .mode_registry
+                        .get(&name)
+                        .and_then(|d| d.lighter.clone());
+                    self.active.modes.push(Mode {
+                        name: name.clone(),
+                        language: None,
+                        minor: true,
+                        lighter,
+                    });
+                    self.fire_mode_hooks(&[name]);
+                }
+                cx.notify();
+            }
+            DisableMinorMode(name) => {
+                if self.active.modes.minor(&name) {
+                    self.active.modes.remove_minor(&name);
+                    self.fire_mode_hooks(&[name]);
+                }
+                cx.notify();
+            }
+            AddAutoMode { pattern, mode } => {
+                // Replace-on-pattern: a reloaded config must not duplicate
+                // entries. Later registrations shadow earlier ones (prepend).
+                self.auto_modes.retain(|(p, _)| p != &pattern);
+                self.auto_modes.insert(0, (pattern, mode));
             }
             SetSpecialMode(mode) => {
                 if mode.is_empty() {

@@ -556,13 +556,12 @@ impl Editor {
         } else {
             format!("{} {}", self.pending_keys.join(" "), chord)
         };
-        // The active major mode (top of the stack) scopes bindings, so an
-        // `evil-normal:rust` keymap can shadow the global `evil-normal`.
+        // Every active mode's scoped keymap ("evil-normal:<mode>") shadows
+        // the global Normal map, top of the stack first.
         let state = self.evil_keymap();
-        let major: Option<String> = self.active.modes.names().last().map(|s| s.to_string());
         if let Some(expr) = self
             .keymap
-            .resolve_evil(state, major.as_deref(), &candidate)
+            .resolve_evil(state, &self.active.modes, &candidate)
             .map(str::to_string)
         {
             self.pending_keys.clear();
@@ -596,7 +595,7 @@ impl Editor {
         }
         if self
             .keymap
-            .is_prefix_evil(state, major.as_deref(), &candidate)
+            .is_prefix_evil(state, &self.active.modes, &candidate)
         {
             self.pending_keys.push(chord);
             // Keep the count visible while the chord completes (`3d-` → `3dd`).

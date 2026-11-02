@@ -43,13 +43,20 @@
 (define *minor-modes* '())   ; ((name . on?-thunk) …)
 (define (register-minor-mode name on?)
   (set! *minor-modes* (alist-set *minor-modes* name on?)))
-(register-minor-mode "abbrev-mode" (lambda () (abbrev--on?)))
-(register-minor-mode "spell-mode" (lambda () (spell--on?)))
+;; abbrev-mode and spell-mode live on the mode stack now (their Scheme state
+;; mirrors onto it), so they come through enabled-minor-modes automatically.
 (register-minor-mode "evil-mode" (lambda () (and (evil-enabled?) (not (helix-enabled?)))))
 (register-minor-mode "helix-mode" (lambda () (helix-enabled?)))
 
+;; Stack minor modes are the truth for define-minor-mode modes (they are
+;; entries on the buffer's mode stack); the hand-registered predicates below
+;; still cover modes that live outside the framework (evil/helix — editor
+;; toggles, not stack entries).
 (define (enabled-minor-modes)
-  (sort-strings (map car (filter (lambda (m) ((cdr m))) *minor-modes*))))
+  (sort-strings
+   (dedup (append (let ((s (active-minor-modes)))
+                    (if (equal? s "") '() (split-many s " ")))
+                  (map car (filter (lambda (m) ((cdr m))) *minor-modes*))))))
 
 ;; A keymap's bindings as indented "key    command" rows, or a note when empty.
 (define (help--keymap-rows km)
