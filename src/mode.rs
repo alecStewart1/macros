@@ -234,10 +234,10 @@ impl ModeRegistry {
         let mut stack = ModeStack::fundamental();
         for mode in chain.iter().rev() {
             let mut m = Mode::new(mode.as_str());
-            if mode == name {
-                if let Some(l) = language.clone() {
-                    m = m.with_language(l);
-                }
+            if mode == name
+                && let Some(l) = language.clone()
+            {
+                m = m.with_language(l);
             }
             stack.push(m);
         }

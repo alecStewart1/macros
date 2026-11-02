@@ -15062,13 +15062,13 @@ mod derived_mode_lib {
         let mut scoped = 0;
         let mut global = 0;
         for c in &out.commands {
-            if let EditorCommand::DefineKey(map, seq, _) = c {
-                if seq == "ctrl-c z" {
-                    match map.as_str() {
-                        "zz" | "evil-normal:zz" | "helix-normal:zz" => scoped += 1,
-                        "evil-normal" | "helix-normal" => global += 1,
-                        _ => {}
-                    }
+            if let EditorCommand::DefineKey(map, seq, _) = c
+                && seq == "ctrl-c z"
+            {
+                match map.as_str() {
+                    "zz" | "evil-normal:zz" | "helix-normal:zz" => scoped += 1,
+                    "evil-normal" | "helix-normal" => global += 1,
+                    _ => {}
                 }
             }
         }
