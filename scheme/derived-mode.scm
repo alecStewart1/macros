@@ -201,19 +201,11 @@
        ;; does not occur — -1 is truthy in Scheme, so compare explicitly.
        (< (string-match "[^a-zA-Z0-9_-]" s) 0)))
 
-;; A framework-derived mode's COMMAND is `<bare>-mode` while the stack entry
-;; is the bare name — translate so the Rust path can SetMajorMode it. Any
-;; other identifier (a hand-rolled special-mode name, an unregistered mode)
-;; is passed through untouched.
-(define (auto-mode--mode-name mode-name)
-  (if (and (member mode-name *derived-mode-commands*)
-           (>= (string-length mode-name) 5)
-           (string=? (substring mode-name (- (string-length mode-name) 5)
-                                  (string-length mode-name))
-                     "-mode"))
-      (substring mode-name 0 (- (string-length mode-name) 5))
-      mode-name))
-
+;; The live Rust path dispatches to the COMMAND, so the table stores the
+;; command name VERBATIM — no `<bare>-mode` → bare translation here. Running
+;; the command (not a raw SetMajorMode) is what makes derived-mode bodies run,
+;; lets bundled modes keep their grammar wiring, and preserves hand-written
+;; mode-command setup.
 (define (add-auto-mode pattern mode-name)
   (unless (string? pattern)
     (error "add-auto-mode: pattern must be a string:" pattern))
@@ -226,13 +218,14 @@
   ;; Dedup same-pattern: a reloaded config must not duplicate entries. The
   ;; alist stays as the pure test seam / introspection surface; the LIVE path
   ;; is Rust (add-auto-mode-impl queues an entry consulted by open_file
-  ;; BEFORE the built-in extension→language detection, so a matching file
-  ;; opens straight into its final mode with hooks fired exactly once).
+  ;; BEFORE the built-in extension→language detection). open_file dispatches
+  ;; to the command via eval-string, so derived-mode bodies, bundled-mode
+  ;; wiring and hand-written mode commands all run.
   (set! *auto-mode-alist*
         (cons (cons pattern mode-name)
               (filter (lambda (e) (not (string=? (car e) pattern)))
                       *auto-mode-alist*)))
-  (add-auto-mode-impl pattern (auto-mode--mode-name mode-name)))
+  (add-auto-mode-impl pattern mode-name))
 
 ;; Pure matcher — the testable seam / introspection surface (the live path is
 ;; Rust's auto_modes table, applied by open_file).

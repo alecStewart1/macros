@@ -661,7 +661,7 @@ pub struct Editor {
     /// parent + language, consulted when a mode becomes major so the stack is
     /// built from the ancestry (keymaps/hooks/grammar inherit down the chain).
     mode_registry: ModeRegistry,
-    /// User `add-auto-mode` entries (pattern → mode NAME), later-registered
+    /// User `add-auto-mode` entries (pattern → command NAME), later-registered
     /// first. Consulted by `open_file` before the built-in extension→language
     /// detection.
     auto_modes: Vec<(String, String)>,

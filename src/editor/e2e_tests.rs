@@ -1832,6 +1832,168 @@ fn auto_mode_beats_extension_detection(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn auto_mode_runs_derived_mode_body(cx: &mut gpui::TestAppContext) {
+    // The Rust auto-mode table dispatches to the mode COMMAND, not a raw
+    // SetMajorMode — so a `define-derived-mode` BODY runs when a matching
+    // file is opened (the raw-command path skipped it entirely).
+    let dir = std::env::temp_dir().join("macros-auto-mode-body-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("b.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define *body-ran* #f)
+               (define-derived-mode foo-mode fundamental "F."
+                 (set! *body-ran* #t))
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    let ran = editor.read_with(cx, |e, _| {
+        e.script
+            .eval("(if *body-ran* \"y\" \"n\")")
+            .unwrap()
+            .value
+            .unwrap()
+    });
+    assert_eq!(ran, "\"y\"", "derived-mode body must run on auto-mode open");
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.active.modes.names(), vec!["fundamental", "foo"]);
+    });
+}
+
+#[gpui::test]
+fn auto_mode_bundled_mode_keeps_grammar(cx: &mut gpui::TestAppContext) {
+    // A bundled mode named through add-auto-mode (`rust-mode`) runs the
+    // COMMAND, so the buffer lands in the registered `rust` stack entry with
+    // its grammar — not a bare `rust-mode` entry with no language.
+    let dir = std::env::temp_dir().join("macros-auto-mode-rust-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("c.foo");
+    std::fs::write(&path, "fn main() {}").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(r#"(add-auto-mode "\\.foo$" "rust-mode")"#, cx);
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.active.modes.major(),
+            "rust",
+            "bundled mode command must resolve to the registered stack entry"
+        );
+        assert_eq!(
+            e.active_language().as_deref(),
+            Some("rust"),
+            "bundled mode must keep its grammar when opened via add-auto-mode"
+        );
+    });
+}
+
+#[gpui::test]
+fn auto_mode_startup_starts_configured_lsp(cx: &mut gpui::TestAppContext) {
+    // Opening a file through add-auto-mode runs the mode command, whose hooks
+    // (`fundamental`'s `enable-lsp`) start the server configured for the
+    // buffer's language. `sleep` stands in for a real server: it spawns
+    // successfully and stays alive (so the client is inserted and not exited)
+    // without speaking the protocol — readiness is a real server's concern,
+    // covered elsewhere; this pins the WIRING, auto-mode → command → hooks →
+    // maybe_start_lsp.
+    let dir = std::env::temp_dir().join(format!("macros-auto-mode-lsp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("d.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define-derived-mode foo-mode fundamental "F." :language foo)
+               (set-lsp "foo" "sleep 1000")
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    // The spawn is synchronous within open_file's command apply, but pump a
+    // little for the async machinery to settle before asserting.
+    let started = |ed: &Entity<Editor>, cx: &mut TestAppContext| {
+        ed.read_with(cx, |e, _| e.servers.get("foo").is_some_and(|s| !s.exited))
+    };
+    for _ in 0..40 {
+        if started(&editor, cx) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&editor, cx);
+    }
+    assert!(started(&editor, cx), "LSP server for `foo` never started");
+    editor.read_with(cx, |e, _| {
+        assert!(
+            e.lsp_log.is_empty(),
+            "a successful start must not log errors: {:?}",
+            e.lsp_log.iter().collect::<Vec<_>>()
+        );
+    });
+}
+
+#[gpui::test]
+fn auto_mode_lsp_spawn_failure_is_reported(cx: &mut gpui::TestAppContext) {
+    // A server configured with a nonexistent binary (bad user config, or the
+    // program is genuinely missing) must fail VISIBLY on the auto-mode path:
+    // the cause lands in *lsp-log* (persistent) and the echo area, and no
+    // half-dead server entry is left in the map.
+    let dir = std::env::temp_dir().join(format!("macros-auto-mode-lspfail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("e.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define-derived-mode foo-mode fundamental "F." :language foo)
+               (set-lsp "foo" "macros-no-such-lsp-binary-xyz")
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    editor.read_with(cx, |e, _| {
+        assert!(
+            !e.servers.contains_key("foo"),
+            "a failed spawn must not leave a server entry"
+        );
+        assert!(
+            e.lsp_log
+                .iter()
+                .any(|l| l.contains("could not start")
+                    && l.contains("macros-no-such-lsp-binary-xyz")),
+            "spawn failure must be recorded in *lsp-log*: {:?}",
+            e.lsp_log.iter().collect::<Vec<_>>()
+        );
+    });
+}
+
+#[gpui::test]
 fn bundled_language_mode_hook_alias(cx: &mut gpui::TestAppContext) {
     // The registry pass in language-modes.scm gives every bundled language
     // the `<lang>-mode-hook` alias (rust has its own direct test; this pins

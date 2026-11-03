@@ -74,7 +74,7 @@ impl ModeStack {
         self.modes.iter().any(|m| m.minor && m.name == name)
     }
 
-    /// The bottom-most non-minor mode above `fundamental` (the major), for
+    /// The top-most non-minor mode above `fundamental` (the major), for
     /// `major-mode` reporting — the top of the stack may be a minor.
     pub fn major(&self) -> &str {
         self.modes
@@ -191,13 +191,18 @@ impl ModeRegistry {
     }
 
     /// Minor modes to enable automatically in a buffer that hasn't applied
-    /// init-values yet (`define-minor-mode`'s `:init-value`).
+    /// init-values yet (`define-minor-mode`'s `:init-value`). Sorted by name:
+    /// `defs` is a HashMap, so without the sort the enable order (and thus
+    /// key precedence and lighter order) would vary between runs.
     pub fn init_minors(&self) -> Vec<(String, Option<String>)> {
-        self.defs
+        let mut minors: Vec<_> = self
+            .defs
             .iter()
             .filter(|(_, d)| d.minor && d.init_value)
             .map(|(n, d)| (n.clone(), d.lighter.clone()))
-            .collect()
+            .collect();
+        minors.sort_by(|a, b| a.0.cmp(&b.0));
+        minors
     }
 
     /// The mode and its ancestors, NEAREST FIRST (`gc`, `gb`, `ga` for

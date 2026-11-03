@@ -15165,8 +15165,8 @@ mod auto_mode_lib {
         // No match → #f.
         assert_eq!(v(&engine, r#"(auto-mode--match "/tmp/x/a.bar")"#), "#false");
         // The live path is Rust: each add-auto-mode queues an AddAutoMode.
-        // A framework-derived COMMAND (`<bare>-mode`) is translated to the
-        // bare stack-entry name; other identifiers pass through untouched.
+        // The table stores the COMMAND name verbatim — open_file dispatches to
+        // it via eval-string, so derived-mode bodies and bundled wiring run.
         engine
             .eval(r#"(define-derived-mode kid-mode fundamental "K.")"#)
             .unwrap();
@@ -15180,7 +15180,7 @@ mod auto_mode_lib {
             out.commands
                 .iter()
                 .any(|c| matches!(c, EditorCommand::AddAutoMode { pattern, mode }
-                if pattern == "\\.kid$" && mode == "kid"))
+                if pattern == "\\.kid$" && mode == "kid-mode"))
         );
         assert!(
             out.commands

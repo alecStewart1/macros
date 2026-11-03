@@ -89,6 +89,12 @@
                             (string-append "helix-normal:" n))
         (map (lambda (b) (list (car b) (cadr b))) keymap)))))
 
+;; STALE-SNAPSHOT CAVEAT: `minor-mode-active?` reads the command-time snapshot
+;; taken BEFORE this command runs, so two toggles of the SAME mode within one
+;; script both see the pre-command state (the second toggle computes the same
+;; flip as the first). Interactive use and one toggle per script are fine;
+;; scripts that need the fresh state should check the return value of the
+;; first toggle instead of re-reading `minor-mode-active?`.
 ;; Emacs arg semantics: no arg = toggle; #t or positive number = on; #f or
 ;; non-positive number = off. minor-mode-active? reads the PRE-command
 ;; snapshot — exactly the state before this command. Order per call: run the

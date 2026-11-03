@@ -509,10 +509,23 @@ impl Editor {
         // The user's auto-mode entries beat the built-in extension→language
         // detection and apply BEFORE the mode hooks, so a matching buffer
         // enters its final mode with hooks fired exactly once (no
-        // detect-then-override double switch). SetMajorMode runs the hooks
-        // itself; the call below is then a no-op (hooks_ran).
+        // detect-then-override double switch). The entry names the COMMAND
+        // (Emacs's `auto-mode-alist` semantics), dispatched via eval-string —
+        // NOT a raw SetMajorMode, so derived-mode bodies, bundled-mode
+        // grammar wiring and hand-written mode commands all run. The command's
+        // SetMajorMode runs the hooks itself; the call below is then a no-op
+        // (hooks_ran). Deadline-bounded like `run_mode_hooks_once` (we're on
+        // the UI thread; a looping mode command must not hang the editor).
         if let Some(mode) = self.auto_mode_for(&path) {
-            self.apply_command(EditorCommand::SetMajorMode(mode), cx);
+            let (commands, error) = self
+                .script
+                .eval_collecting_within(&format!("({mode})"), SYNC_HOOK_TIMEOUT);
+            for command in commands {
+                self.apply_command(command, cx);
+            }
+            if let Some(err) = error {
+                self.echo(format!("auto-mode ({mode}): {err}"), cx);
+            }
         }
         self.run_mode_hooks_once(cx);
         self.echo(format!("Visiting {name}"), cx);
