@@ -140,7 +140,8 @@ pub struct EditorSnapshot {
     /// for `point-min` / `point-max` and the searches; `None` when widened.
     pub narrow: Option<(usize, usize)>,
     /// Active minor-mode names, space-joined ("" when none) — the stack
-    /// entries above the major. Scheme tests membership via
+    /// entries above the major plus any `:global` modes that are on. Scheme
+    /// tests membership via
     /// `(active-minor-modes)`.
     pub minor_modes: String,
     /// The active buffer's mode names, bottom-up, space-joined
