@@ -1,0 +1,231 @@
+;; requires: core
+
+;; minor-mode.scm — a `define-minor-mode` framework for Macros, with minor
+;; modes as real entries on the editor's mode stack (Rust state).
+;; Doc: web/content/docs/minor-mode.md
+;;
+;; Emacs parity subset: :lighter, :init-value, :keymap, and a toggle body.
+;; Modes are buffer-local. `:global`, `:variable`, `:interactive`,
+;; `:set`/`:initialize`/`:type`, `:after-hook`, and the pre-Emacs-21
+;; positional triplet are NOT supported — see the doc page for why.
+;;
+;; The model (M3 of the mode framework):
+;;  - Enabling a mode pushes it onto the buffer's mode stack ABOVE the major
+;;    (enable-minor-mode / disable-minor-mode primitives); it survives a
+;;    major-mode switch. Per-buffer state lives in Rust, not a Scheme alist.
+;;  - KEYS are real per-mode maps: the mode's own map (plain Emacs dispatch
+;;    resolves it over the stack while the mode is on it) plus
+;;    "<state>:<mode>" maps for modal users. Two minor modes can bind the
+;;    same chord and each keeps its own binding; nothing is a gated thunk in
+;;    the shared global Normal maps.
+;;  - The mode line renders the mode's LIGHTER from the stack entry (no
+;;    Scheme slot per mode).
+;;  - HOOKS: the editor fires NAME-hook (and NAME / NAME-mode-hook) on enable
+;;    AND disable, from the same path as major-mode hooks.
+;;  - `:init-value` modes are pushed at a buffer's FIRST activation (Rust
+;;    side, init_minors_ran) — a later user disable sticks.
+;;
+;; Probe outcomes that still govern the macro mechanics (see
+;; src/script/tests.rs :: minor_mode_probes): syntax-case identifier synthesis
+;; via whole-datum return, keywords-are-symbols, shallow syntax->datum, no
+;; dotted patterns.
+
+;; --- registry ----------------------------------------------------------------
+;; name -> props alist: lighter, init-value, keymap, doc, body thunk.
+(define *minor-modes* '())
+
+(define (minor-mode--register! name props)
+  (set! *minor-modes*
+        (cons (cons name props)
+              (filter (lambda (e) (not (eq? (car e) name))) *minor-modes*))))
+
+(define (minor-mode--entry name)
+  (let loop ((entries *minor-modes*))
+    (cond ((null? entries) #f)
+          ((eq? (caar entries) name) (car entries))
+          (else (loop (cdr entries))))))
+
+(define (minor-mode--registered? name) (if (minor-mode--entry name) #t #f))
+
+(define (minor-mode--prop name key)
+  (let ((e (minor-mode--entry name)))
+    (if e (cdr (assq key (cdr e))) #f)))
+
+(define (minor-mode-lighter name)    (minor-mode--prop name 'lighter))
+(define (minor-mode-init-value name) (minor-mode--prop name 'init-value))
+
+;; --- per-buffer state (Rust: entries on the mode stack) -----------------------
+;; Active minor modes are stack entries above the major. The snapshot carries
+;; them space-joined; membership is all Scheme needs (mode names are
+;; identifiers — no spaces).
+(define (minor-mode-active? name)
+  (let ((n (if (symbol? name) (symbol->string name) name)))
+    (string-contains? (string-append " " (active-minor-modes) " ")
+                      (string-append " " n " "))))
+
+(define (minor-mode--on? name) (minor-mode-active? name))
+
+;; --- helpers used by the macro expansion --------------------------------------
+(define (minor-mode--kwval kws key default)
+  (cond ((null? kws) default)
+        ((eq? (caar kws) key) (cadar kws))
+        (else (minor-mode--kwval (cdr kws) key default))))
+
+;; The user-visible hook name for a mode (the editor fires it on enable and
+;; disable; keys NAME, "NAME-hook" and "NAME-mode-hook" all run).
+(define (minor-mode-hook-name name)
+  (string-append (symbol->string name) "-hook"))
+
+;; Mode-SCOPED key installer, shared by minor modes and derived majors: the
+;; mode's own map (plain Emacs dispatch resolves it over the mode stack — the
+;; mode IS on the stack while active) plus the per-state maps, so evil/helix
+;; users get the key wherever the mode is on. Nothing lands in the shared
+;; global Normal maps.
+(define (minor-mode--install-scoped-keys name keymap)
+  (unless (null? keymap)
+    (let ((n (symbol->string name)))
+      (define-keys-in (list n
+                            (string-append "evil-normal:" n)
+                            (string-append "helix-normal:" n))
+        (map (lambda (b) (list (car b) (cadr b))) keymap)))))
+
+;; STALE-SNAPSHOT CAVEAT: `minor-mode-active?` reads the command-time snapshot
+;; taken BEFORE this command runs, so two toggles of the SAME mode within one
+;; script both see the pre-command state (the second toggle computes the same
+;; flip as the first). Interactive use and one toggle per script are fine;
+;; scripts that need the fresh state should check the return value of the
+;; first toggle instead of re-reading `minor-mode-active?`.
+;; Emacs arg semantics: no arg = toggle; #t or positive number = on; #f or
+;; non-positive number = off. minor-mode-active? reads the PRE-command
+;; snapshot — exactly the state before this command. Order per call: run the
+;; body ONLY on an actual flip (DEVIATION from Emacs, which runs the body on
+;; every invocation; use MODE-hook for unconditional per-invocation work),
+;; queue the enable/disable (the EDITOR applies it and fires NAME-hook from
+;; the same path as major-mode hooks), message. The lighter renders from the
+;; stack, so there is no slot to update.
+(define (minor-mode--toggle name arg)
+  (let* ((on? (if (null? arg)
+                  (not (minor-mode-active? name))
+                  (let ((a (car arg)))
+                    (cond ((eq? a #f) #f)
+                          ((number? a) (> a 0))
+                          (else #t)))))
+         (was (minor-mode-active? name)))
+    (unless (equal? on? was)
+      (let ((body (minor-mode--prop name 'body)))
+        (when body (body)))
+      ((if on? enable-minor-mode disable-minor-mode)
+       (symbol->string name)))
+    (message (string-append (symbol->string name)
+                            (if on? " enabled" " disabled")))
+    on?))
+
+;; --- the macro ----------------------------------------------------------------
+;; Grammar: (define-minor-mode NAME DOC [:lighter S] [:init-value B]
+;;                                [:keymap ((CHORD . CMD) ...)] [BODY ...])
+;; Expansion shape:
+;;   (begin
+;;     (define NAME-map <keymap datum>)             ; introspection alist
+;;     (define NAME-hook #f)                        ; parity binding; the LIVE
+;;                                                  ; hook key is the STRING
+;;     (minor-mode--install-scoped-keys 'NAME '<keymap>)
+;;     (register-minor-mode-def "NAME" lighter init-value)  ; Rust stack entry
+;;     (minor-mode--register! 'NAME props-with-body-thunk)
+;;     (define NAME (lambda arg (minor-mode--toggle 'NAME arg)))
+;;     (register-command 'NAME))
+;;
+;; Everything inside (define-syntax ...) except the final template runs at
+;; EXPANSION time. A bare `:kw` in Steel reads as an ordinary SYMBOL whose name
+;; includes the colon, so `:lighter` and `':lighter` are eq, and any
+;; colon-prefixed symbol that survives peeling is an UNSUPPORTED keyword —
+;; loud error at expansion, not silent body forms.
+(define-syntax define-minor-mode
+  (lambda (stx)
+    (syntax-case stx ()
+      [(_ name doc rest ...)
+       (let* ((mode-name (symbol->string (syntax->datum #'name)))
+              ;; syntax->datum is SHALLOW: nested lists (e.g. the :keymap
+              ;; alist) stay Syntax-wrapped, and dotted pairs cannot appear
+              ;; in macro arguments at all (the expander refuses improper
+              ;; lists) — hence :keymap bindings are 2-lists (CHORD COMMAND).
+              (items (syntax->datum #'(rest ...)))
+              (items (let deep ((x items))
+                       (cond ((syntax? x) (deep (syntax->datum x)))
+                             ((null? x) '())
+                             ((pair? x) (cons (deep (car x)) (deep (cdr x))))
+                             (else x))))
+              (parsed (let peel ((items items) (kws '()) (body '()))
+                        (cond ((null? items)
+                               (cons (reverse body) (reverse kws)))
+                              ((and (pair? items)
+                                    (memq (car items)
+                                          '(:lighter :init-value :keymap))
+                                    (pair? (cdr items)))
+                               (peel (cddr items)
+                                     (cons (list (car items) (cadr items)) kws)
+                                     body))
+                              ((memq (car items) '(:lighter :init-value :keymap))
+                               (error "define-minor-mode: keyword needs a value:"
+                                      (car items)))
+                              ((and (pair? items)
+                                    (symbol? (car items))
+                                    (starts-with? (symbol->string (car items)) ":"))
+                               ;; Keeps scanning THROUGH the body, so a stray
+                               ;; keyword after the first body form still errors
+                               ;; loudly instead of being absorbed as body.
+                               (error "define-minor-mode: unsupported keyword:"
+                                      (car items)))
+                              (else (peel (cdr items) kws (cons (car items) body))))))
+              (body (car parsed))
+              (kws (cdr parsed))
+              (doc-str (syntax->datum #'doc)))
+         ;; Expander-time code can only call PRIMITIVES — module defines
+         ;; don't exist yet at macro-expansion (compile) time.
+         (define (kwval kws key default)
+           (cond ((null? kws) default)
+                 ((eq? (caar kws) key) (cadar kws))
+                 (else (kwval (cdr kws) key default))))
+         (unless (string? doc-str)
+           (error "define-minor-mode: DOC must be a string:" doc-str))
+         (let ((lighter (kwval kws ':lighter ""))
+               (init-value (kwval kws ':init-value #f))
+               (keymap (kwval kws ':keymap '()))
+               (name-sym (syntax->datum #'name)))
+           ;; The whole expansion is a constructed datum returned from the
+           ;; transformer — defines land in the caller's scope (probe:
+           ;; syntax_probe2 :: probe_whole_datum_splice). A procedural-macro
+           ;; template cannot contain a dotted list, so the toggle command is
+           ;; (lambda arg …) — rest-args — plus an explicit register-command,
+           ;; exactly what define-command expands to.
+           (list 'begin
+                 (list 'define
+                       (string->symbol (string-append mode-name "-map"))
+                       (list 'quote keymap))
+                 (list 'define
+                       (string->symbol (string-append mode-name "-hook"))
+                       #f)
+                 (list 'minor-mode--install-scoped-keys (list 'quote name-sym)
+                       (list 'quote keymap))
+                 ;; The Rust-side definition: stack entry + lighter +
+                 ;; :init-value handling. "" lighter = none.
+                 (list 'register-minor-mode-def mode-name lighter init-value)
+                 (list 'minor-mode--register!
+                       (list 'quote name-sym)
+                       (list 'list
+                             (list 'cons ''lighter lighter)
+                             (list 'cons ''init-value init-value)
+                             (list 'cons ''keymap (list 'quote keymap))
+                             (list 'cons ''doc doc-str)
+                             (list 'cons ''body
+                                   (cons 'lambda
+                                         (cons '()
+                                               (append body (list #f)))))))
+                 (list 'define name-sym
+                       (list 'lambda 'arg
+                             (list 'minor-mode--toggle
+                                   (list 'quote name-sym) 'arg)))
+                 (list 'register-command (list 'quote name-sym)))))])))
+
+;; Public: is NAME on in the current buffer? Other modules gate their hooks
+;; and key handlers on this (reads the pre-command snapshot).
+(define (minor-mode-enabled? name) (minor-mode-active? name))

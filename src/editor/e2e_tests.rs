@@ -1693,3 +1693,371 @@ fn helm_marks_drive_accept_and_the_action_menu(cx: &mut TestAppContext) {
     settle(&ed, cx);
     assert_eq!(picked(&ed, cx).as_deref(), Some(r#"("b:x" "b:y")"#));
 }
+
+#[gpui::test]
+fn rust_mode_hook_alias_fires(cx: &mut gpui::TestAppContext) {
+    // run_mode_hooks_once fires <mode>, <mode>-hook AND <mode>-mode-hook, so
+    // the Emacs-style `(add-hook "rust-mode-hook" …)` works for the bare-named
+    // bundled modes (rust-mode → mode "rust").
+    let editor = setup(cx, "fn main() {}");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define *seen* #f)
+               (add-hook "rust-mode-hook" (lambda () (set! *seen* #t)))
+               (rust-mode)"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    let seen = editor.read_with(cx, |e, _| {
+        e.script
+            .eval("(if *seen* \"y\" \"n\")")
+            .unwrap()
+            .value
+            .unwrap()
+    });
+    assert_eq!(seen, "\"y\"");
+}
+
+#[gpui::test]
+fn derived_mode_chain_hooks_and_grammar(cx: &mut gpui::TestAppContext) {
+    // A registered ga → gb → gc chain: hooks fire bottom-up (furthest
+    // ancestor first), each mode exactly once — fundamental included once,
+    // no macro-side double fire — and the grammar comes from the nearest
+    // ancestor that declares one (gb's :language rust).
+    let editor = setup(cx, "text");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define *mode-trace* '())
+               (define (trace! tag) (set! *mode-trace* (cons tag *mode-trace*)))
+               (add-hook "fundamental-hook" (lambda () (trace! "fundamental")))
+               (define-derived-mode ga-mode fundamental "A.")
+               (define-derived-mode gb-mode ga-mode "B." :language rust)
+               (define-derived-mode gc-mode gb-mode "C.")
+               (add-hook "ga-mode-hook" (lambda () (trace! "ga")))
+               (add-hook "gb-mode-hook" (lambda () (trace! "gb")))
+               (add-hook "gc-mode-hook" (lambda () (trace! "gc")))
+               (gc-mode)"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    let trace = editor.read_with(cx, |e, _| {
+        e.script
+            .eval("(reverse *mode-trace*)")
+            .unwrap()
+            .value
+            .unwrap()
+    });
+    assert_eq!(trace, "(\"fundamental\" \"ga\" \"gb\" \"gc\")");
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.active.modes.names(),
+            vec!["fundamental", "ga", "gb", "gc"]
+        );
+        assert_eq!(e.active_language().as_deref(), Some("rust"));
+    });
+}
+
+#[gpui::test]
+fn minor_modes_stack_precedence_and_survival(cx: &mut gpui::TestAppContext) {
+    // Minor modes are real stack entries above the major: keys resolve from
+    // the mode's own maps (two modes can share a chord), the lighter renders
+    // in the mode line, and they SURVIVE a major-mode switch (Emacs parity).
+    let editor = setup(cx, "text");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define-minor-mode ma-mode "A." :lighter " MA" :keymap (("ctrl-c a" ma-cmd)))
+               (define-minor-mode mb-mode "B." :lighter " MB" :keymap (("ctrl-c a" mb-cmd)))
+               (ma-mode 1)
+               (mb-mode 1)
+               (set-major-mode "fundamental")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.read_with(cx, |e, _| {
+        // Both minors on, stacked above the major — and still on after the
+        // major-mode switch to fundamental.
+        assert_eq!(
+            e.active.modes.names(),
+            vec!["fundamental", "ma-mode", "mb-mode"]
+        );
+        // The mode line renders lighters for minors, names for majors.
+        let text: String = e
+            .mode_line_segments()
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert!(
+            text.contains("fundamental") && text.contains("MA") && text.contains("MB"),
+            "mode line: {text}"
+        );
+        // major-mode reporting ignores minors.
+        assert_eq!(e.active.modes.major(), "fundamental");
+    });
+}
+
+#[gpui::test]
+fn auto_mode_beats_extension_detection(cx: &mut gpui::TestAppContext) {
+    // A file whose extension has NO built-in language but whose PATH matches
+    // a user add-auto-mode entry opens straight into that mode — the Rust
+    // table is consulted before extension→language detection, so hooks fire
+    // exactly once (no detect-then-override double switch).
+    let dir = std::env::temp_dir().join("macros-auto-mode-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define-derived-mode foo-mode fundamental "F.")
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.active.modes.names(),
+            vec!["fundamental", "foo"],
+            "auto-mode entry must win"
+        );
+    });
+}
+
+#[gpui::test]
+fn auto_mode_runs_derived_mode_body(cx: &mut gpui::TestAppContext) {
+    // The Rust auto-mode table dispatches to the mode COMMAND, not a raw
+    // SetMajorMode — so a `define-derived-mode` BODY runs when a matching
+    // file is opened (the raw-command path skipped it entirely).
+    let dir = std::env::temp_dir().join("macros-auto-mode-body-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("b.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define *body-ran* #f)
+               (define-derived-mode foo-mode fundamental "F."
+                 (set! *body-ran* #t))
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    let ran = editor.read_with(cx, |e, _| {
+        e.script
+            .eval("(if *body-ran* \"y\" \"n\")")
+            .unwrap()
+            .value
+            .unwrap()
+    });
+    assert_eq!(ran, "\"y\"", "derived-mode body must run on auto-mode open");
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.active.modes.names(), vec!["fundamental", "foo"]);
+    });
+}
+
+#[gpui::test]
+fn auto_mode_bundled_mode_keeps_grammar(cx: &mut gpui::TestAppContext) {
+    // A bundled mode named through add-auto-mode (`rust-mode`) runs the
+    // COMMAND, so the buffer lands in the registered `rust` stack entry with
+    // its grammar — not a bare `rust-mode` entry with no language.
+    let dir = std::env::temp_dir().join("macros-auto-mode-rust-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("c.foo");
+    std::fs::write(&path, "fn main() {}").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(r#"(add-auto-mode "\\.foo$" "rust-mode")"#, cx);
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.active.modes.major(),
+            "rust",
+            "bundled mode command must resolve to the registered stack entry"
+        );
+        assert_eq!(
+            e.active_language().as_deref(),
+            Some("rust"),
+            "bundled mode must keep its grammar when opened via add-auto-mode"
+        );
+    });
+}
+
+#[gpui::test]
+fn auto_mode_startup_starts_configured_lsp(cx: &mut gpui::TestAppContext) {
+    // Opening a file through add-auto-mode runs the mode command, whose hooks
+    // (`fundamental`'s `enable-lsp`) start the server configured for the
+    // buffer's language. `sleep` stands in for a real server: it spawns
+    // successfully and stays alive (so the client is inserted and not exited)
+    // without speaking the protocol — readiness is a real server's concern,
+    // covered elsewhere; this pins the WIRING, auto-mode → command → hooks →
+    // maybe_start_lsp.
+    let dir = std::env::temp_dir().join(format!("macros-auto-mode-lsp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("d.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define-derived-mode foo-mode fundamental "F." :language foo)
+               (set-lsp "foo" "sleep 1000")
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    // The spawn is synchronous within open_file's command apply, but pump a
+    // little for the async machinery to settle before asserting.
+    let started = |ed: &Entity<Editor>, cx: &mut TestAppContext| {
+        ed.read_with(cx, |e, _| e.servers.get("foo").is_some_and(|s| !s.exited))
+    };
+    for _ in 0..40 {
+        if started(&editor, cx) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&editor, cx);
+    }
+    assert!(started(&editor, cx), "LSP server for `foo` never started");
+    editor.read_with(cx, |e, _| {
+        assert!(
+            e.lsp_log.is_empty(),
+            "a successful start must not log errors: {:?}",
+            e.lsp_log.iter().collect::<Vec<_>>()
+        );
+    });
+}
+
+#[gpui::test]
+fn auto_mode_lsp_spawn_failure_is_reported(cx: &mut gpui::TestAppContext) {
+    // A server configured with a nonexistent binary (bad user config, or the
+    // program is genuinely missing) must fail VISIBLY on the auto-mode path:
+    // the cause lands in *lsp-log* (persistent) and the echo area, and no
+    // half-dead server entry is left in the map.
+    let dir = std::env::temp_dir().join(format!("macros-auto-mode-lspfail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("e.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define-derived-mode foo-mode fundamental "F." :language foo)
+               (set-lsp "foo" "macros-no-such-lsp-binary-xyz")
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    editor.read_with(cx, |e, _| {
+        assert!(
+            !e.servers.contains_key("foo"),
+            "a failed spawn must not leave a server entry"
+        );
+        assert!(
+            e.lsp_log
+                .iter()
+                .any(|l| l.contains("could not start")
+                    && l.contains("macros-no-such-lsp-binary-xyz")),
+            "spawn failure must be recorded in *lsp-log*: {:?}",
+            e.lsp_log.iter().collect::<Vec<_>>()
+        );
+    });
+}
+
+#[gpui::test]
+fn bundled_language_mode_hook_alias(cx: &mut gpui::TestAppContext) {
+    // The registry pass in language-modes.scm gives every bundled language
+    // the `<lang>-mode-hook` alias (rust has its own direct test; this pins
+    // the loop covering all languages).
+    let editor = setup(cx, "fn main() {}");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define *seen* #f)
+               (add-hook "go-mode-hook" (lambda () (set! *seen* #t)))
+               (go-mode)"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    let seen = editor.read_with(cx, |e, _| {
+        e.script
+            .eval("(if *seen* \"y\" \"n\")")
+            .unwrap()
+            .value
+            .unwrap()
+    });
+    assert_eq!(seen, "\"y\"");
+}
+
+#[gpui::test]
+fn minor_mode_enable_disable_is_idempotent_at_the_apply(cx: &mut gpui::TestAppContext) {
+    // The editor's apply arm is the idempotency point: a redundant enable or
+    // disable must not re-push/re-remove, and — the real bug this guards —
+    // must not double-fire the mode's hooks (spell's cleanup, a user's
+    // counters, would run twice).
+    let editor = setup(cx, "text");
+    // Each toggle is its own script run — the pre-command snapshot refreshes
+    // between evals, exactly as separate keystrokes dispatch in real use.
+    // (Batching them in ONE eval would read one stale snapshot for all five:
+    // the documented snapshot-model caveat, not a bug.)
+    for src in [
+        r#"(define-minor-mode idem-mode "I." :lighter " Id")"#,
+        r#"(define *fires* 0)
+           (add-hook "idem-mode-hook" (lambda () (set! *fires* (+ *fires* 1))))"#,
+        "(idem-mode 1)",
+        "(idem-mode 1)",
+        "(idem-mode 1)",
+        "(idem-mode 0)",
+        "(idem-mode 0)",
+    ] {
+        editor.update(cx, |e, cx| {
+            // Real dispatch publishes the snapshot before every eval
+            // (`run_script`/key dispatch); `run_script_blocking` alone
+            // doesn't, so publish here to give the toggle's pre-command
+            // read the previous command's applied state.
+            e.publish_point();
+            e.run_script_blocking(src, cx);
+        });
+        settle(&editor, cx);
+    }
+    editor.read_with(cx, |e, _| {
+        // One stack entry despite three enables; gone despite two disables.
+        assert!(
+            !e.active.modes.minor("idem-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+        // Enable + disable = exactly 2 hook fires, not 5.
+        let fires = e.script.eval("*fires*").unwrap().value.unwrap();
+        assert_eq!(fires, "2", "hook must fire once per real transition");
+    });
+}

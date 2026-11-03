@@ -149,12 +149,14 @@ impl Editor {
                     .to_string(),
                     MlField::BufferName => self.buffer_name().to_string(),
                     MlField::Modes => {
-                        let mut modes = self.active.modes.names();
+                        // Majors render their name; minors their lighter
+                        // (fallback: the name).
+                        let mut modes = self.active.modes.names_with_lighters();
                         if self.is_narrowed() {
-                            modes.push("Narrow");
+                            modes.push("Narrow".to_string());
                         }
                         if self.overwrite_mode_active() {
-                            modes.push("Ovwrt");
+                            modes.push("Ovwrt".to_string());
                         }
                         modes.join(" ")
                     }

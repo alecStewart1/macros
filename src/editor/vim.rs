@@ -1526,10 +1526,9 @@ impl Editor {
             self.evil_run_operator(op, count, "(evil-motion \"line\")", cx);
             return Handled::Yes;
         }
-        let major: Option<String> = self.active.modes.names().last().map(|s| s.to_string());
         if let Some(expr) = self
             .keymap
-            .resolve_evil(OPERATOR_KEYMAP, major.as_deref(), &candidate)
+            .resolve_evil(OPERATOR_KEYMAP, &self.active.modes, &candidate)
             .map(str::to_string)
         {
             self.pending_keys.clear();
@@ -1560,7 +1559,7 @@ impl Editor {
         }
         if self
             .keymap
-            .is_prefix_evil(OPERATOR_KEYMAP, major.as_deref(), &candidate)
+            .is_prefix_evil(OPERATOR_KEYMAP, &self.active.modes, &candidate)
         {
             self.pending_keys.push(chord);
             self.vim.op = Some(op);

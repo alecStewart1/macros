@@ -65,6 +65,13 @@ pub struct EditorSnapshot {
     /// The accessible byte range while the buffer is narrowed (`C-x n n`),
     /// for `point-min` / `point-max` and the searches; `None` when widened.
     pub narrow: Option<(usize, usize)>,
+    /// Active minor-mode names, space-joined ("" when none) — the stack
+    /// entries above the major. Scheme tests membership via
+    /// `(active-minor-modes)`.
+    pub minor_modes: String,
+    /// The active buffer's mode names, bottom-up, space-joined
+    /// ("fundamental rust my-minor" — topmost last), for `(mode-stack)`.
+    pub mode_stack: String,
     /// The active region's byte range, if the mark is active.
     pub region: Option<(usize, usize)>,
     /// Every selection as an `(anchor, head)` pair — primary first, then any

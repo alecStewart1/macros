@@ -23,7 +23,7 @@ use crate::highlight::{Edit, Highlighter, HlSpan};
 use crate::lsp::{
     self, CompletionItem, Diagnostic, LanguageServer, LspClient, RawDiagnostic, SteelLsp,
 };
-use crate::mode::{Keymap, Mode, ModeStack};
+use crate::mode::{Keymap, Mode, ModeRegistry, ModeStack};
 use crate::script::{EditorCommand, ScriptEngine, ScriptOutcome};
 use crate::sexp::{last_sexp, top_level_form_at};
 use crate::terminal::{TermEvent, Terminal};
@@ -292,6 +292,10 @@ struct Document {
     read_only: bool,
     /// Whether this buffer's mode hooks have run (Emacs: once per buffer).
     hooks_ran: bool,
+    /// Whether this buffer's `:init-value` minor modes have been pushed (they
+    /// come on at a buffer's FIRST activation; the flag keeps a later user
+    /// disable sticky across switches).
+    init_minors_ran: bool,
     /// When `Some(mode)`, this is a read-only program-generated buffer (the
     /// magit pattern): plain keys are commands resolved against `mode`'s keymap
     /// rather than self-inserting.
@@ -653,6 +657,14 @@ pub struct Editor {
     modal_helix: bool,
     /// Mode name -> Steel functions to run when that mode is enabled.
     hooks: HashMap<String, Vec<String>>,
+    /// Mode definitions registered from Scheme (`register-mode`): derivation
+    /// parent + language, consulted when a mode becomes major so the stack is
+    /// built from the ancestry (keymaps/hooks/grammar inherit down the chain).
+    mode_registry: ModeRegistry,
+    /// User `add-auto-mode` entries (pattern → command NAME), later-registered
+    /// first. Consulted by `open_file` before the built-in extension→language
+    /// detection.
+    auto_modes: Vec<(String, String)>,
     /// Point's buffer line at the last `post-command-hook` fire, so the hook runs
     /// once per cursor-line change rather than on every intra-command move.
     last_hook_line: Option<usize>,
@@ -1526,6 +1538,8 @@ impl Editor {
             extra_cursors: Vec::new(),
             modal_helix: false,
             hooks: HashMap::new(),
+            mode_registry: ModeRegistry::default(),
+            auto_modes: Vec::new(),
             last_hook_line: None,
             capf_functions: Vec::new(),
             kill_ring: Vec::new(),
@@ -3815,13 +3829,9 @@ impl Editor {
                 .highlighter
                 .as_ref()
                 .and_then(|h| h.tree().cloned()),
-            major_mode: self
-                .active
-                .modes
-                .names()
-                .last()
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
+            major_mode: self.active.modes.major().to_string(),
+            minor_modes: self.active.modes.minor_names().join(" "),
+            mode_stack: self.active.modes.names().join(" "),
             grid: self.active.grid.as_deref().map(|g| g.snapshot()),
         });
     }
@@ -4401,24 +4411,39 @@ impl Editor {
             .unwrap_or_else(|| server_key.to_string())
     }
 
-    /// Run the active buffer's mode hooks once (Emacs `run-mode-hooks`). For each
-    /// active mode, every Scheme function registered with `add-hook` on the
-    /// mode's name or on `<mode>-hook` is called
-    /// (deduplicated, so a function on both `fundamental` and `steel` runs once).
-    /// This is where steel-mode's `(add-hook "steel" "enable-lsp")` brings up the
+    /// Run the active buffer's mode hooks once (Emacs `run-mode-hooks`). For
+    /// each mode in the MAJOR CHAIN, every Scheme function registered with
+    /// `add-hook` on the mode's name, `<mode>-hook` or `<mode>-mode-hook` is
+    /// called (deduplicated, so a function on both `fundamental` and `steel`
+    /// runs once). Minor modes' hooks fire on their own enable/disable, not
+    /// here — otherwise they'd re-fire on every major-mode switch. This is
+    /// where steel-mode's `(add-hook "steel" "enable-lsp")` brings up the
     /// LSP — entirely Scheme-driven, with the default set in `steel-mode.scm`.
     pub fn run_mode_hooks_once(&mut self, cx: &mut Context<Self>) {
         if self.active.hooks_ran {
             return;
         }
         self.active.hooks_ran = true;
+        let names = self.active.modes.major_chain_names();
+        self.fire_mode_hooks(&names);
+        let _ = cx;
+    }
+
+    /// Fire the hooks registered for `modes` — each mode's `<mode>`,
+    /// `<mode>-hook` and `<mode>-mode-hook` keys — deduplicated ACROSS modes
+    /// (a function on both `fundamental` and `steel` runs once).
+    /// `run_mode_hooks_once` walks the stack's major chain with this;
+    /// minor-mode enable/disable fire their own mode's hooks through it too.
+    fn fire_mode_hooks(&mut self, modes: &[String]) {
         let mut seen = std::collections::HashSet::new();
         let mut to_run = Vec::new();
-        for mode in self.active.modes.names() {
-            // `(add-hook "grid-mode" f)` and Emacs's `(add-hook "grid-mode-hook" f)`
-            // both run.
+        for mode in modes {
+            // `(add-hook "grid-mode" f)`, Emacs's `(add-hook "grid-mode-hook"
+            // f)` and — for the bare-named bundled modes — `(add-hook
+            // "rust-mode-hook" f)` all run.
             let emacs_name = format!("{mode}-hook");
-            for key in [mode, emacs_name.as_str()] {
+            let command_name = format!("{mode}-mode-hook");
+            for key in [mode.as_str(), emacs_name.as_str(), command_name.as_str()] {
                 if let Some(functions) = self.hooks.get(key) {
                     for function in functions {
                         if seen.insert(function.clone()) {
@@ -4432,7 +4457,6 @@ impl Editor {
             // Dispatch to the engine thread; results apply via the drain task.
             self.script.dispatch_action(&function, None);
         }
-        let _ = cx;
     }
 
     /// Diagnostics for the active buffer, mapped to byte offsets.
@@ -5106,6 +5130,7 @@ fn blank_document(
         modified: false,
         read_only: false,
         hooks_ran: false,
+        init_minors_ran: false,
         special: None,
         line_faces: HashMap::new(),
         line_icons: HashMap::new(),
