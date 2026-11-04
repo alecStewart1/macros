@@ -59,10 +59,13 @@ regex = "1"
 # the `diff-strings` / `diff-inline` primitives behind scheme/ediff.scm.
 similar = "3"
 # ripgrep, as a library: `ignore` is its gitignore-aware parallel directory
-# walker; `grep` is its content searcher. Drives the Scheme-configurable
-# `walk-files` / `grep-files` primitives (no external `rg` binary needed).
+# walker; `grep-regex` + `grep-searcher` are its content matcher/searcher.
+# Drives the Scheme-configurable `walk-files` / `grep-files` primitives (no
+# external `rg` binary needed). The `grep` facade crate was dropped: it also
+# pulls grep-cli and grep-printer, which we never use.
 ignore = "0.4"
-grep = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 # Filesystem watching: powers buffer auto-revert and live dired-sidebar/dired refresh.
 # `-mini` coalesces the OS event storm into a debounced batch on its own thread;
 # we forward each batch onto the GPUI foreground (see `Editor::on_fs_events`).
@@ -117,9 +120,16 @@ codebook-tree-sitter-typst = "0.12.1"
 # grid extracted from Alacritty. We drive it as a library (it has no renderer of
 # its own) for the embedded terminal — see `src/terminal.rs`.
 alacritty_terminal = "0.26.0"
-# Decode raster images (PNG/JPEG/GIF/…) for Org inline-image display. Same
+# Decode raster images (PNG/JPEG/GIF/WebP) for Org inline-image display. Same
 # version GPUI uses, so `image::Frame` matches what `RenderImage::new` expects.
-image = "0.25"
+# default-features off: the default format set also compiles bmp, ico, pnm,
+# tga, tiff, hdr, dds, exr, qoi, farbfeld — none of which Org images use.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 # Unique node IDs for org-roam (`(org-id-new)`) and local-time formatting for
 # timestamps / agenda "today" (`(current-time fmt)`). Both already in the tree
 # transitively via gpui; promoted to direct deps for the Scheme primitives.
@@ -133,7 +143,7 @@ chrono = "0.4"
 # (fetched as a `.sha256` sidecar next to the artifact on R2).
 ureq = "3"
 semver = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 # Encoding + OS randomness for the Scheme crypto primitives (`base64url-encode`,
 # `hex->base64url`, `random-bytes`) that let a Steel package run an OAuth PKCE
@@ -176,7 +186,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # macros-email-client; also usable by any package wanting a real database). The
 # `bundled` feature compiles SQLite from source — no system libsqlite3 — and
 # includes FTS5, the full-text search engine those primitives expose.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
 # for staging update downloads and compiled user grammars (src/grammar.rs).
 dirs = "7"
@@ -193,9 +203,10 @@ libloading = "0.9"
 # `revision` for the HEAD rev-walk behind `gix-log`, `mailmap` so blame shows
 # `.mailmap`-resolved authors like `git blame` does, and `sha1` so gix-hash's
 # `Kind` object-id enum is non-empty (without a sha feature the whole crate
-# fails to compile). `max-performance-safe` pulls the pure-Rust `zlib-rs`
+# fails to compile). `max-performance` (renamed from `max-performance-safe` in
+# 0.90, when zlib-rs became unconditional) pulls the pure-Rust `zlib-rs`
 # inflate — fast, and no system zlib/C toolchain required.
-gix = { version = "0.89.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "mailmap", "max-performance-safe"] }
+gix = { version = "0.90.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "mailmap", "max-performance"] }
 
 # All unix: `libc::kill` for the process-group kill in `kill-process`. On
 # macOS additionally `libc::statfs` to detect a read-only volume (DMG / App
