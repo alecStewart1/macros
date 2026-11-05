@@ -174,7 +174,9 @@
   (message (if *markdown-scale-headings*
                "Headings enlarged" "Headings at body size")))
 
-;; --- navigation -------------------------------------------------------------
+;; --- navigation ----------------------------------------------------------------
+
+;; Move to the next heading line at or below point (message when none).
 (define-command (md-next-heading)
   (let ((lines (md-lines)))
     (let loop ((n (+ (buffer-line) 1)))
@@ -182,6 +184,7 @@
             ((md-heading-line? (nth lines n)) (goto-line n))
             (else (loop (+ n 1)))))))
 
+;; Move to the previous heading line at or above point (message when none).
 (define-command (md-previous-heading)
   (let ((lines (md-lines)))
     (let loop ((n (- (buffer-line) 1)))
@@ -304,7 +307,9 @@
   (unfold-all)
   (md--refresh-fold-markers))
 
-;; --- emphasis helpers -------------------------------------------------------
+;; --- emphasis helpers -----------------------------------------------------------
+
+;; Wrap the region (or insert a pair at point) in bold / italic / code delimiters.
 (define (md-wrap-region left right)
   (if (region-active?)
       (let ((s (region-beginning)) (e (region-end)))
@@ -319,7 +324,8 @@
 (define-command (md-italic) (md-wrap-region "*" "*"))
 (define-command (md-code)   (md-wrap-region "`" "`"))
 
-;; --- keymap (consulted for buffers in markdown-mode) ------------------------
+;; --- keymap (consulted for buffers in markdown-mode) ----------------------------
+
 (define-key "markdown" "ctrl-c ctrl-n" 'md-next-heading)
 (define-key "markdown" "ctrl-c ctrl-p" 'md-previous-heading)
 (define-key "markdown" "ctrl-c tab" 'md-fold-section)

@@ -239,7 +239,8 @@
 ;; abbrev of the same name unless :system is 'force (Emacs rule). Defines made
 ;; during the init phase become system abbrevs automatically — see
 ;; *abbrev--init-phase*.
-;; Redefining an abbrev REPLACES it (hash-insert semantics).
+;; Redefining an abbrev REPLACES it wholesale — the old expansion, hook and
+;; props are dropped (hash-insert semantics).
 (define (define-abbrev table name expansion . rest)
   (let* ((hook (if (null? rest) #f (car rest)))
          (props (if (or (null? rest) (null? (cdr rest))) '() (cadr rest)))
@@ -298,18 +299,7 @@
   (abbrev--put-table
    (symbol->string (if (null? table) 'global-abbrev-table (car table))) (hash)))
 
-;; (abbrev-symbol abbrev [local-table]) — the property alist for ABBREV.
-;; Resolution order: local (mode) table → :parents (in list order, via
-;; *abbrev-table-parents*) → global. #f when none has it. LOCAL-TABLE may be
-;; given as the bare language name ("rust"), a mode symbol ('rust-mode), or a
-;; full table name ('rust-mode-abbrev-table); when omitted, the current
-;; buffer's major mode table is used.
-;;
-;; Table-name normalization: `major-mode` returns the bare language name
-;; ("rust", "python" — see register_snapshot_read "major-mode"), while a
-;; mode's abbrev table is "<mode>-abbrev-table" (rust → rust-mode-abbrev-table,
-;; per the (add-hook "rust" …) naming in language-modes.scm). A name that
-;; already ends in -mode takes just "-abbrev-table"; a full table name is kept.
+;; #t when N ends with SUFFIX.
 (define (abbrev--ends-with? n suffix)
   (let ((gl (string-length n)) (sl (string-length suffix)))
     (and (>= gl sl)
@@ -335,6 +325,18 @@
         chain
         (append chain (list "global-abbrev-table")))))
 
+;; (abbrev-symbol abbrev [local-table]) — the property alist for ABBREV.
+;; Resolution order: local (mode) table → :parents (in list order, via
+;; *abbrev-table-parents*) → global. #f when none has it. LOCAL-TABLE may be
+;; given as the bare language name ("rust"), a mode symbol ('rust-mode), or a
+;; full table name ('rust-mode-abbrev-table); when omitted, the current
+;; buffer's major mode table is used.
+;;
+;; Table-name normalization: `major-mode` returns the bare language name
+;; ("rust", "python" — see register_snapshot_read "major-mode"), while a
+;; mode's abbrev table is "<mode>-abbrev-table" (rust → rust-mode-abbrev-table,
+;; per the (add-hook "rust" …) naming in language-modes.scm). A name that
+;; already ends in -mode takes just "-abbrev-table"; a full table name is kept.
 (define (abbrev-symbol abbrev . local)
   (abbrev--find-in (abbrev--table-chain
                     (if (null? local) (major-mode) (car local)))
@@ -408,7 +410,8 @@
                  (else #f))))))
 
 ;; HOOK and :enable-function accept a procedure or a 'symbol name (the same
-;; convention as hooks.scm). Called with one argument.
+;; convention as hooks.scm); a symbol is eval-string'd with ARG escaped, so an
+;; argument containing `"` can't break out of the literal.
 (define (abbrev--call-pred f arg)
   (cond ((procedure? f) (f arg))
         ;; Escape ARG for the string literal — an expansion containing `"`
@@ -515,16 +518,22 @@
                  (message (string-append "Defined " kind " abbrev: "
                                          (cdr wb))))))))))
 
+;; C-x a g — define a global abbrev interactively: the word (or region)
+;; before point is the expansion, its name is read from the minibuffer.
 (define (add-global-abbrev)
   (abbrev--define-interactively "global-abbrev-table" "global"))
 
+;; C-x a m — the same for the current major mode's abbrev table.
 (define (add-mode-abbrev)
   (abbrev--define-interactively
    (string-append (major-mode) "-mode-abbrev-table") "mode"))
 
+;; C-x a i g — define a global abbrev the inverse way: read the EXPANSION for
+;; the word before point, then expand that word in place.
 (define (inverse-add-global-abbrev)
   (abbrev--inverse-add-interactively "global-abbrev-table" "global"))
 
+;; C-x a i m — the inverse add for the current major mode's abbrev table.
 (define (inverse-add-mode-abbrev)
   (abbrev--inverse-add-interactively
    (string-append (major-mode) "-mode-abbrev-table") "mode"))
@@ -546,6 +555,7 @@
 ;; default, like Emacs: undo lives on C-x C-u / C-/ and C-x u is too easy to
 ;; fat-finger for it.)
 
+;; M-x unexpand-abbrev — replace the last expansion with the abbrev as typed.
 (define (unexpand-abbrev)
   (let ((rec *abbrev-last*))
     (if (and rec (string=? (nth rec 3) (current-buffer)))
@@ -575,6 +585,8 @@
 ;; switching buffers disarms it rather than expanding at a stale position.
 (define *abbrev--prefix-mark* #f)   ; (position buffer) while armed
 
+;; C-x a - — arm the prefix trick: insert a hyphen, then type the abbrev and
+;; expand — prefix + expansion remain, the hyphen goes away.
 (define (abbrev-prefix-mark)
   (set! *abbrev--prefix-mark* (list (point) (current-buffer)))
   (insert "-")

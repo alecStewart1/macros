@@ -3,61 +3,25 @@
 ;; secrets.scm — one encrypted password store for every package (Emacs
 ;; `auth-source` + ~/.authinfo.gpg).
 ;;
-;; Passwords live in ~/.config/macros/authinfo.gpg, authinfo lines encrypted
-;; with one master passphrase:
-;;
+;; Entries are authinfo lines in ~/.config/macros/authinfo.gpg (option
+;; "authinfo-file"), encrypted with one master passphrase:
 ;;   machine db.example.com login alice port 5432 password hunter2
-;;   machine imap.gmail.com login me@example.com password "has spaces"
 ;;
-;; A package never prompts for a password itself; it asks the store:
-;;
-;;   (secret-get "db.example.com" "alice"
-;;     (lambda (pw) (connect pw))
-;;     'port "5432"                                ; optional extra match key
-;;     'on-cancel (lambda (_) (message "cancelled")))
-;;
-;; The first lookup of a session asks for the master passphrase (once). A hit
-;; goes straight to the callback; a miss prompts "Password for alice@db…:",
-;; offers to save it, and then calls back. The first save creates the file
-;; (you pick the master passphrase then). When a service REJECTS a password
-;; (changed, expired), the package calls
-;;
-;;   (secret-forget "db.example.com" "alice" "5432")
-;;
-;; which deletes it, and the next `secret-get` prompts again.
-;; A password you choose NOT to save (or that fails to save — gpg missing,
-;; passphrase prompt cancelled) is still remembered for the session. If gpg
-;; can't run at all, a miss just prompts and remembers (no save offer).
-;;
-;; Config can name a secret instead of writing it out: called WITHOUT a
-;; callback, `secret-get` returns a reference that `set-option` stores as-is:
-;;
-;;   (set-option "psql-url" (secret-get "psql-url-1" "alice"))
-;;
-;; `get-option` then reads the real value whenever the store can answer (#f
-;; until then), so the secret is never in init.scm or the option table. A
-;; package gates its commands with `(option-ensure "psql-url" k)`, which
-;; prompts — master passphrase, then the value itself if there's no entry
-;; yet, offering to save it — only when the value isn't available.
-;;
-;; Code that must stay synchronous (a catalog query, a completion source) uses
-;;
-;;   (secret-lookup "db.example.com" "alice" "5432")   ; → password or #f
-;;
-;; which never prompts: it answers from the unlocked store or the session, so
-;; gate the user-facing command with `secret-get` first and look up inside.
-;;
-;; Requests are served one at a time, so two packages asking at once get two
-;; prompts in turn rather than one displacing the other.
+;; Packages never prompt themselves — they ask the store:
+;;   (secret-get host user callback)           async; prompts on a miss,
+;;                                             offers to save, then calls back
+;;   (secret-lookup host user [port])          sync; never prompts (#f if absent)
+;;   (secret-forget host user [port])          service rejected it: delete, and
+;;                                             the next secret-get prompts again
+;; Config can name a secret instead of writing it out: (secret-get host user)
+;; with no callback returns a reference for `set-option`; gate commands reading
+;; it with (option-ensure name k). A password not saved (or a failed save) is
+;; still remembered for the session.
 ;;
 ;; Commands: secrets-unlock, secrets-lock, secrets-add, secrets-change-passphrase.
-;; Options (init.scm):
-;;   (set-option "authinfo-file" "~/.config/macros/authinfo.gpg")   ; the default
-;;   (set-option "gpg-command" "/opt/homebrew/bin/gpg")   ; default: auto-detect
-;;
-;; The decrypted store (and the session's unsaved passwords) lives in Rust
-;; memory (src/authinfo.rs) until quit or `secrets-lock`; Scheme only ever sees
-;; the one password it asked for.
+;; State: the decrypted store and unsaved session passwords live in Rust memory
+;; (src/authinfo.rs) until quit or `secrets-lock`; Scheme only ever sees the one
+;; password it asked for. Requests are served one at a time.
 
 (define (secrets-file)
   (let ((v (get-option "authinfo-file")))
@@ -274,6 +238,7 @@
     (and ref (begin (apply secret-forget ref) #t))))
 
 ;; ── commands ──────────────────────────────────────────────────────────────────
+;; M-x secrets-unlock — prompt for the master passphrase now.
 (define-command (secrets-unlock)
   (cond ((authinfo-unlocked?) (message "authinfo: already unlocked"))
         ((not (file-exists? (secrets-file)))
@@ -284,6 +249,7 @@
                     (lambda () (message "authinfo: unlocked") (done))
                     done))))))
 
+;; M-x secrets-lock — drop the decrypted store and session passwords.
 (define-command (secrets-lock)
   (authinfo-lock)
   (message "authinfo: locked (unsaved session passwords forgotten too)"))
@@ -304,6 +270,7 @@
                         (lambda () (secrets--save host user port pw) (done))
                         done))))))))))))
 
+;; M-x secrets-change-passphrase — re-encrypt authinfo.gpg with a new one.
 (define-command (secrets-change-passphrase)
   (if (not (file-exists? (secrets-file)))
       (message "authinfo: no authinfo.gpg yet")

@@ -536,10 +536,7 @@
   (completing-read "Paste special: " (map car grid-paste-special--choices)
                    'grid-paste-special--pick))
 
-;; `C-c C-d` / `du` (helix `gx`): Remove duplicates (Excel's Data › Remove
-;; Duplicates). Prompts for the columns to compare — header names (or
-;; letters), comma-separated; empty means the selection's columns, or all.
-;; From Scheme, pass them: (grid-remove-duplicates '("email" "name")).
+;; The spreadsheet column letter for a 0-based index: 0 → "a", 26 → "aa".
 (define (grid-column-letter i)
   (let ((ch (string (integer->char (+ 65 (remainder i 26))))))
     (if (< i 26) ch (string-append (grid-column-letter (- (quotient i 26) 1)) ch))))
@@ -549,6 +546,10 @@
     (if (null? names)
         (map grid-column-letter (range 0 (min 702 (cadr (grid-dimensions)))))
         names)))
+;; `C-c C-d` / `du` (helix `gx`): Remove duplicates (Excel's Data › Remove
+;; Duplicates). Prompts for the columns to compare — header names (or
+;; letters), comma-separated; empty means the selection's columns, or all.
+;; From Scheme, pass them: (grid-remove-duplicates '("email" "name")).
 (define (grid-remove-duplicates . cols)
   (if (null? cols)
       (completing-read "Remove duplicates comparing columns (a, b; empty: all): "
@@ -768,11 +769,11 @@
 ;; Adding, renaming, deleting and moving sheets is one undo step each, taken
 ;; in the buffer shown after it (deleting the sheet shown: in the sheet shown
 ;; next). A CSV grid can grow a second sheet; it then saves as .xlsx.
-;;
-;; `C-c t` / `g t`: pick a sheet with Helm; the one shown is marked "current".
-;; M-a there renames, deletes or moves the picked sheet.
+
 (define (helm-grid-sheets--candidate s)
   (if (equal? s (grid-current-sheet)) (list s "current") s))
+;; `C-c t` / `g t`: pick a sheet with Helm; the one shown is marked "current".
+;; M-a there renames, deletes or moves the picked sheet.
 (define-command (helm-grid-sheets)
   (let ((sheets (grid-sheets)))
     (if (null? sheets)
@@ -915,6 +916,7 @@
             (list "J" "JSON" 'grid-copy-as-json)))))
 
 ;; --- Formulas: Scheme functions ------------------------------------------------
+
 ;; Make a Scheme function callable from grid formulas:
 ;;
 ;;   (define-grid-function (MARGIN price cost)
@@ -924,14 +926,6 @@
 ;; formulas). Arguments arrive as numbers, strings, #t/#f, "" for an empty
 ;; cell, an error as its text ("#N/A"), and a range as a list of rows (each a
 ;; list of values). Return one value; a list is #VALUE!.
-;;
-;; Grid functions run in their own interpreter (so a slow one never freezes
-;; the editor, and one running past `grid-function-timeout` — 120 s unless
-;; set — is stopped). That interpreter knows only what's shared with it: a
-;; function sees its arguments and nothing else, and helpers it calls must be
-;; defined with `define-grid-helper`:
-;;
-;;   (define-grid-helper (money x) (string-append "$" (number->string x)))
 ;;
 ;; Both forms also define the procedure here, so you can try it with M-:.
 ;; While a call runs its cell shows #CALC!; results are cached per arguments.
@@ -943,6 +937,12 @@
        (grid-register-function "function" (symbol->string 'name)
                                '(define (name arg ...) body ...))))))
 
+;; A helper a grid function may call. Grid functions run in their own
+;; interpreter (so a slow one never freezes the editor, and one running past
+;; `grid-function-timeout` — 120 s unless set — is stopped) and see nothing
+;; but their arguments, so any helper must be defined here too:
+;;
+;;   (define-grid-helper (money x) (string-append "$" (number->string x)))
 (define-syntax define-grid-helper
   (syntax-rules ()
     ((_ (name arg ...) body ...)

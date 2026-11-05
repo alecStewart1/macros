@@ -436,9 +436,13 @@
            (set! *qr-exit-visual?* #f)
            (pqr-start from to rx)))))
 
+;; M-% — query-replace: ask y/n at each match of a literal string.
 (define-command (query-replace) (qr-read 'query))
+;; C-M-% — query-replace-regexp: same, against a regexp (\1…\9, \& in TO).
 (define-command (query-replace-regexp) (qr-read 'query-regexp))
+;; M-x replace-string — replace every match of a literal string, no questions.
 (define-command (replace-string) (qr-read 'string))
+;; M-x replace-regexp — replace every regexp match, no questions.
 (define-command (replace-regexp) (qr-read 'regexp))
 
 ;; --- project-wide query-replace --------------------------------------------------
@@ -539,7 +543,10 @@
       (message (string-append "Saved " (int->string (length *pqr-touched*)) " file"
                               (if (= (length *pqr-touched*) 1) "" "s"))))))
 
+;; C-c p r — project query-replace through every project file (see the section
+;; above); alias projectile-replace.
 (define-command (project-query-replace) (qr-read 'project))
+;; C-c p % — the same against a regexp; alias projectile-replace-regexp.
 (define-command (project-query-replace-regexp) (qr-read 'project-regexp))
 (define-command (projectile-replace) (qr-read 'project))
 (define-command (projectile-replace-regexp) (qr-read 'project-regexp))

@@ -205,6 +205,7 @@
             ((<= (car (car hl)) line) (loop (cdr hl) (cdr (car hl))))
             (else best)))))
 
+;; n — move point to the next hunk's header line.
 (define-command (ediff-next-hunk)
   (let ((line (buffer-line)))
     (let loop ((hl *ediff-hunk-lines*))
@@ -212,6 +213,7 @@
             ((> (car (car hl)) line) (goto-line (car (car hl))))
             (else (loop (cdr hl)))))))
 
+;; p — move point to the previous hunk's header line.
 (define-command (ediff-prev-hunk)
   (let ((line (buffer-line)))
     (let loop ((hl (reverse *ediff-hunk-lines*)))
@@ -219,6 +221,7 @@
             ((< (car (car hl)) line) (goto-line (car (car hl))))
             (else (loop (cdr hl)))))))
 
+;; a — copy the hunk at point from buffer A into B (edits stay in the buffers).
 (define-command (ediff-copy-a->b)
   (let ((i (ediff--hunk-at-point)))
     (if (< i 0)
@@ -228,6 +231,7 @@
                              *ediff-b* (nth h 3) (nth h 4))
           (ediff--refresh)))))
 
+;; b — copy the hunk at point from buffer B into A.
 (define-command (ediff-copy-b->a)
   (let ((i (ediff--hunk-at-point)))
     (if (< i 0)
@@ -250,6 +254,8 @@
       (diff-buffers *ediff-a* *ediff-b* 'ediff--on-hunks)
       (message "ediff: pick two buffers first")))
 
+;; M-x ediff-buffers — pick two open buffers and diff them for interactive
+;; merging (n/p/a/b/g/q in the *ediff* buffer, see the section above).
 (define-command (ediff-buffers)
   (completing-read "ediff buffer A: " (buffer-names) 'ediff--pick-a))
 (define (ediff--pick-a a)

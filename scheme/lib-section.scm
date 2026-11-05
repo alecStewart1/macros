@@ -24,6 +24,7 @@
 ;; text; folds persist by id, exactly like magit).
 
 ;; --- build state (reset each render) ----------------------------------------
+
 (define *section-lines* '())    ; rendered lines, reversed while building
 (define *section-faces* '())    ; (line face) whole-line colors
 (define *section-n* 0)          ; next line number
@@ -32,7 +33,8 @@
 (define *section-records* '())  ; finished sections (see record shape below)
 (define *section-stack* '())    ; sections currently open (being built)
 
-;; --- persistent fold state (survives re-renders) ----------------------------
+;; --- persistent fold state (survives re-renders) -----------------------------
+
 ;; Ids the user has toggled away from the default. A section renders folded when
 ;; (xor default-collapsed (toggled? id)).
 (define *section-toggled* '())
@@ -53,7 +55,10 @@
 (define (section-body-end s)   (nth s 5))
 (define (section-value s)      (nth s 6))
 
-;; --- emitting lines ---------------------------------------------------------
+;; --- emitting ----------------------------------------------------------------
+
+;; Start a new section: forget any previous build (a half-built section would
+;; leak lines/faces into the next render).
 (define (section-begin)
   (set! *section-lines* '())
   (set! *section-faces* '())
@@ -108,7 +113,9 @@
       (set! *section-records* (cons rec *section-records*))
       (set! *section-stack* (cdr *section-stack*)))))
 
-;; --- rendering --------------------------------------------------------------
+;; --- rendering ---------------------------------------------------------------
+
+;; #t when section `id` renders folded: the user's toggle, else the default.
 (define (section-folded? id)
   (let ((toggled (member id *section-toggled*)))
     (if toggled (not *section-default-collapsed*) *section-default-collapsed*)))
@@ -143,7 +150,8 @@
                  (reverse *section-faces*))
   (section-apply-overlays))
 
-;; --- navigation / interaction -----------------------------------------------
+;; --- navigation / interaction -------------------------------------------------
+
 ;; The innermost section whose heading or body contains `line`, or #f. "Innermost"
 ;; = the matching section with the greatest heading line (nested sections open
 ;; after their parent, so they have larger heading numbers).

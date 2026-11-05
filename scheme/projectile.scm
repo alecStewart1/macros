@@ -21,11 +21,13 @@
 
 ;; --- commands ---------------------------------------------------------------
 
+;; Pick a file from ROOT with a Helm panel (project-files) and open it.
 (define (projectile-find-file-in root)
   (helm (list (list (string-append "Find file in " (basename root))
                     (project-files root)
                     'open-file))))
 
+;; C-c p f — find a file in the current project (relative to its root).
 (define (projectile-find-file)
   (let ((root (project-root (buffer-directory))))
     (if root (projectile-find-file-in root) (message "Not in a project"))))
@@ -37,6 +39,8 @@
   (projectile-recent-add root)
   (projectile-find-file-in root))
 
+;; C-c p p — pick a project from the known list (recent + session) and open a
+;; file in it.
 (define (projectile-switch-project)
   (if (null? *project-known*)
       (message "No known projects yet — open a file in one first")
@@ -74,6 +78,8 @@
       ;; grep-files reports 1-based line numbers; the jump is 0-based.
       (find-file-goto-line (car parts) (max 0 (- ln 1))))))
 
+;; C-c p g — grep the project with a LIVE Helm picker: type a regexp and the
+;; matches narrow as you go; RET jumps to the file at that line.
 (define (projectile-grep)
   (if (project-root (buffer-directory))
       (helm (list (list "Grep project"
@@ -101,6 +107,8 @@
                          path)))
            (results-record "" path (- line 1) (string-append rel ":" (cadr parts) ":") text)))))
 
+;; The read-string half of projectile-grep-buffer: reads the regexp, then runs
+;; the search in the current project into *grep*.
 (define (projectile-grep-buffer-run pattern)
   (let ((root (project-root (buffer-directory))))
     (if (not root)

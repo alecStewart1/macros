@@ -43,11 +43,8 @@
 ;; Self-contained on purpose: this file doesn't require language-modes.scm, so
 ;; it can't lean on that file's helpers.
 
-;; Define `<id>-mode` as a nullary interactive command, so once the grammar has
-;; loaded you can `M-x <id>-mode` on any buffer to colorize it (set-major-mode is
-;; registry-aware). Defined eagerly at install time because the name is data; the
-;; command is harmless until the grammar finishes loading. Mirrors
-;; language-modes.scm's bundled-language commands.
+;; Define `<id>-mode` as an interactive command (eval'd at install time because
+;; the name is data); mirrors language-modes.scm's bundled-language commands.
 (define (grammar--define-mode id)
   (let ((cmd (string-append id "-mode")))
     (eval-string

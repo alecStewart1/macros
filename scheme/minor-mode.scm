@@ -56,16 +56,14 @@
   (let ((e (minor-mode--entry name)))
     (if e (cdr (assq key (cdr e))) #f)))
 
+;; Registered lighter / :init-value for NAME.
 (define (minor-mode-lighter name)    (minor-mode--prop name 'lighter))
 (define (minor-mode-init-value name) (minor-mode--prop name 'init-value))
 
 ;; --- per-buffer state (Rust: entries on the mode stack) -----------------------
-;; Active minor modes are stack entries above the major. The snapshot carries
-;; them space-joined; membership is all Scheme needs (mode names are
-;; identifiers — no spaces). `(active-minor-modes)` also applies the
-;; enable/disable-minor-mode calls this script has queued so far (Rust side,
-;; reset per script), so a read after a toggle sees it. Toggles queued after
-;; a buffer or window switch target the new buffer and are not reflected.
+;; NAME is active if it's in the pre-command snapshot plus the toggles this
+;; script has queued (so a read after a toggle sees it — but toggles queued
+;; after a buffer or window switch target the new buffer and are not reflected).
 (define (minor-mode-active? name)
   (let ((n (if (symbol? name) (symbol->string name) name)))
     (string-contains? (string-append " " (active-minor-modes) " ")
@@ -79,16 +77,13 @@
         ((eq? (caar kws) key) (cadar kws))
         (else (minor-mode--kwval (cdr kws) key default))))
 
-;; The user-visible hook name for a mode (the editor fires it on enable and
-;; disable; keys NAME, "NAME-hook" and "NAME-mode-hook" all run).
+;; The live hook is the STRING "NAME-hook"; the editor runs keys NAME,
+;; NAME-hook and NAME-mode-hook on enable and disable.
 (define (minor-mode-hook-name name)
   (string-append (symbol->string name) "-hook"))
 
-;; Mode-SCOPED key installer, shared by minor modes and derived majors: the
-;; mode's own map (plain Emacs dispatch resolves it over the mode stack — the
-;; mode IS on the stack while active) plus the per-state maps, so evil/helix
-;; users get the key wherever the mode is on. Nothing lands in the shared
-;; global Normal maps.
+;; The mode's own map plus "<state>:<mode>" maps (evil/helix) — never the
+;; shared global Normal maps.
 (define (minor-mode--install-scoped-keys name keymap)
   (unless (null? keymap)
     (let ((n (symbol->string name)))
@@ -97,16 +92,9 @@
                             (string-append "helix-normal:" n))
         (map (lambda (b) (list (car b) (cadr b))) keymap)))))
 
-;; Emacs arg semantics: no arg = toggle; #t or positive number = on; #f or
-;; non-positive number = off. minor-mode-active? reads the pre-command
-;; snapshot plus the toggles this script already queued, so `(m) (m)` flips
-;; twice. Order per call: queue the enable/disable FIRST (the EDITOR applies
-;; it and fires NAME-hook from the same path as major-mode hooks), so the body
-;; sees the new state, as in Emacs's `(if my-mode (setup) (teardown))`; then
-;; run the body ONLY on an actual flip (DEVIATION from Emacs, which runs the
-;; body on every invocation; use MODE-hook for unconditional per-invocation
-;; work); then message. The lighter renders from the stack, so there is no
-;; slot to update.
+;; Queue the enable/disable FIRST (the editor applies it and fires NAME-hook),
+;; then the body, so the body sees the new state; the body runs only on an
+;; actual flip (Emacs runs it on every invocation — use NAME-hook for that).
 (define (minor-mode--toggle name arg)
   (let* ((on? (if (null? arg)
                   (not (minor-mode-active? name))

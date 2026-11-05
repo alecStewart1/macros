@@ -27,12 +27,13 @@
   (helm (list (list "M-x" (all-commands) 'execute-command))))
 (define-key "fundamental" "alt-x" 'helm-execute-command)
 
+;; --- keymap-aware help ---------------------------------------------------------
 ;; Every help command below searches `active-keymaps` (core.scm) — the modal
 ;; Normal map, when one is active, then `fundamental` — rather than assuming
 ;; "fundamental". Without it `C-h k j` answered "j is unbound" to a vim user and
 ;; `C-h b` never listed a single modal binding, leaving the whole modal keymap
 ;; undiscoverable from inside the editor.
-;;
+
 ;; describe-key (C-h k): what is a chord bound to? Searches the active modal
 ;; keymap first, then fundamental (the Emacs chords survive into modal mode).
 (define (describe-key) (read-string "Describe key (e.g. ctrl-x ctrl-f): " 'describe-key-finish))

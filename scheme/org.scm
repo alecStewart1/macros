@@ -173,6 +173,7 @@
 ;; ===========================================================================
 ;; Buffer line / offset helpers (operate on the active buffer)
 ;; ===========================================================================
+
 (define (org--lines) (buffer-lines))
 
 ;; Lines-list variants: loops should split the buffer ONCE via (org--lines) and
@@ -938,15 +939,16 @@
               (goto-line P))
             (message "No sibling above"))))))
 
-;; C-c C-q — set the headline's tags (colon- or space-separated input). The
-;; heading line is captured in the callback closure (read-string accepts one).
-(define (org--current-tags H) (nth (org--parse-headline (org--line-text H)) 4))
+;; C-c C-q — set the headline's tags (colon- or space-separated input).
 (define-command (org-set-tags)
   (let ((H (org--heading-line-at-point)))
     (if H
         (read-string "Tags: " (lambda (input) (org--set-tags-apply H input))
                      (org--current-tags H))
         (message "Not on a heading"))))
+;; Tags currently on headline H (nil when none).
+(define (org--current-tags H) (nth (org--parse-headline (org--line-text H)) 4))
+
 (define (org--normalize-tags s)
   (string-join (filter (lambda (x) (not (equal? x "")))
                        (split-many (replace-regexp-in-string "[ \t]+" ":" (string-trim s)) ":"))
@@ -1114,6 +1116,7 @@
 ;; ===========================================================================
 ;; Layer 3b — HTML export (walks the AST)
 ;; ===========================================================================
+
 (define (org--escape-html s)
   (replace-regexp-in-string ">" "&gt;"
     (replace-regexp-in-string "<" "&lt;"
@@ -1328,10 +1331,16 @@
 (define-command (org-agenda-redo)
   (if *org--agenda-view* (org--agenda-show *org--agenda-view*) (org-agenda)))
 
-;; C-c a — agenda: every dated/TODO headline across the agenda files.
+;; Agenda views all render into the read-only *Org Agenda* buffer: RET (or a
+;; mouse click) visits the entry, g rebuilds the current view. Where Emacs's
+;; org-agenda is a letter dispatcher (a/t/T/m/M/…), Macros binds each view as
+;; its own command.
+
+;; C-c a — agenda: every dated/TODO headline across the agenda files
+;; (org-set-agenda-files, or the directory Org files live in).
 (define-command (org-agenda)
   (org--agenda-show (lambda () (org--sort-entries (org--all-entries)))))
-;; C-c t — just the open TODO items.
+;; C-c t — the global TODO list: open items only, any keyword.
 (define-command (org-todo-list)
   (org--agenda-show
    (lambda ()
@@ -1408,6 +1417,7 @@
 ;; ===========================================================================
 ;; Layer 5a — table alignment
 ;; ===========================================================================
+
 (define (org--table-bounds L)
   (let ((lines (org--lines)))
     (let ((n (length lines)))
@@ -1593,6 +1603,8 @@
                                      (org--list-swap (org--cells-pad l ncols) col other))))
                               slice)))
             (org--retab-goto start end (org--format-table swapped) ridx other)))))))
+;; Move the current column one slot right / left (M-S-right / M-S-left); the
+;; table realigns and point follows the column.
 (define-command (org-table-move-column-right) (org--table-move-column 1))
 (define-command (org-table-move-column-left)  (org--table-move-column -1))
 
@@ -1629,6 +1641,7 @@
                                   (org--row-from-cells (append head (list "") tail)))))
                           slice)))
           (org--retab-goto start end (org--format-table grown) ridx col))))))
+;; Remove the column at point (realigned; refuses the last one).
 (define-command (org-table-delete-column)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
@@ -1662,6 +1675,7 @@
              (after  (org--slice slice (+ ridx 1) (- (length slice) 1)))
              (rows (append before (list (org--pipes (+ ncols 1))) after)))
         (org--retab-goto start end (org--format-table rows) (+ ridx 1) 0)))))
+;; Delete the current data row (the separator row is kept).
 (define-command (org-table-delete-row)
   (let* ((L (buffer-line)) (b (org--table-bounds L)))
     (when b
@@ -1896,6 +1910,7 @@
 (define (org--set-latex-shown v)
   (set! *org-latex-shown* (buffer-state-set *org-latex-shown* v)))
 
+;; Show every `[[file:…]]`/image link in the buffer as an inline image.
 (define-command (org-display-inline-images)
   (clear-line-images)
   (org--set-latex-shown #f)
@@ -1908,6 +1923,7 @@
               (begin (set-line-image i p) (loop (cdr lines) (+ i 1) (+ n 1)))
               (loop (cdr lines) (+ i 1) n))))))
 
+;; Hide the inline images again.
 (define-command (org-remove-inline-images)
   (clear-line-images) (org--set-images-shown #f) (message "Inline images hidden"))
 
@@ -1981,6 +1997,7 @@
 ;; ===========================================================================
 ;; C-c C-c dispatcher (context-sensitive, like Org's)
 ;; ===========================================================================
+
 (define (org-ctrl-c-ctrl-c)
   (let* ((L (buffer-line)) (line (org--line-text L)))
     (cond ((org--src-block-bounds L) (org-babel-execute))
@@ -2004,7 +2021,6 @@
   (org--fontify)
   (message (if *org-indent* "Org indent on" "Org indent off")))
 
-;; ===========================================================================
 ;; ===========================================================================
 ;; Layer 7 — calendar / date arithmetic (pure)
 ;; ===========================================================================
@@ -2070,6 +2086,7 @@
 ;; ===========================================================================
 ;; Layer 7b — properties drawers + the entry property API
 ;; ===========================================================================
+
 (define (org--planning-line? line)
   (>= (string-match "^[ \t]*(SCHEDULED|DEADLINE|CLOSED):" line) 0))
 
@@ -2205,7 +2222,10 @@
               (if dead (string-append "DEADLINE: " dead " ") "")
               (if sched (string-append "SCHEDULED: " sched " ") ""))))
 
+;; C-c C-s — set the SCHEDULED date on the current heading (a date, +Nd, or
+;; "today").
 (define-command (org-schedule) (org--plan-read "SCHEDULED"))
+;; C-c C-d — same, for the DEADLINE date.
 (define-command (org-deadline) (org--plan-read "DEADLINE"))
 (define (org--plan-read kind)
   (let ((H (org--heading-line-at-point)))
@@ -2223,9 +2243,10 @@
     (if pidx (org--replace-line pidx newline) (org--insert-lines-after H (list newline)))
     (message (string-append kind " set"))))
 
-;; Insert an active/inactive timestamp at point.
+;; C-c . — insert today's date as an active stamp <YYYY-MM-DD>.
 (define-command (org-time-stamp)
   (insert (string-append "<" (org--days->date-str (org--today-days)) ">")))
+;; C-c ! — same, as an inactive [YYYY-MM-DD] stamp.
 (define-command (org-time-stamp-inactive)
   (insert (string-append "[" (org--days->date-str (org--today-days)) "]")))
 
@@ -2421,6 +2442,7 @@
 ;; ===========================================================================
 ;; Layer 7e — refile + archive
 ;; ===========================================================================
+
 (define (org--current-file-path)
   (let ((f (buffer-file-name)))
     (if (or (not (string? f)) (equal? f ""))
@@ -2548,7 +2570,8 @@
                 (else (loop (cdr ls) (cons (car ls) acc)))))
         (append (list head) plan (list "  :PROPERTIES:" (string-append "  " prop) "  :END:") body))))
 
-;; C-c C-x C-a — archive the subtree to <file>_archive.
+;; C-c C-x C-a — move the current subtree to <file>_archive (created if
+;; missing); DONE headings can be swept there too.
 (define (org--archive-file-path) (string-append (org--current-file-path) "_archive"))
 (define-command (org-archive-subtree)
   (let ((H (org--heading-line-at-point)))
@@ -2706,6 +2729,7 @@
                      (if (if neg (not present) present) (all (cdr ts)) #f))))))))
 
 ;; C-c \ — show every entry whose (inherited) tags match an expression.
+;; "a+b" = AND, "a|b" = OR, "-done" = not done (prompt shows the syntax).
 (define-command (org-tags-view) (read-string "Match tags (work+urgent, a|b, -done): " 'org--tags-view-finish))
 (define (org--tags-view-finish expr)
   (org--agenda-show
@@ -2714,8 +2738,10 @@
       (filter (lambda (e) (and (> (length e) 6) (org--tag-match (string-trim expr) (nth e 6))))
               (org--all-entries #t))))))
 
-;; Custom agenda commands: each is (KEY DESCRIPTION TYPE ARG), TYPE one of
-;; "agenda", "todo" (ARG = keyword), "tags" (ARG = tag expression). e.g.
+;; C-c C-A — pick a custom agenda command from *org-agenda-custom-commands* by
+;; key (completing-read); falls back to the plain agenda when none are defined.
+;; Commands are (KEY DESCRIPTION TYPE ARG): TYPE "agenda", "todo" (ARG = TODO
+;; keyword) or "tags" (ARG = tag expression), e.g.
 ;;   (set! *org-agenda-custom-commands*
 ;;     (list (list "w" "Waiting" "todo" "WAITING")
 ;;           (list "u" "Urgent"  "tags" "urgent")))
@@ -2975,6 +3001,7 @@
 ;; ===========================================================================
 ;; Layer 7j — export backends: Markdown, LaTeX, ASCII (walk the org-parse AST)
 ;; ===========================================================================
+
 (define (org--range n) (let loop ((i 0) (acc '())) (if (>= i n) (reverse acc) (loop (+ i 1) (cons i acc)))))
 (define (org--indent-lines text prefix)
   (join-lines (map (lambda (l) (string-append prefix l)) (split-many text "\n"))))
@@ -3165,6 +3192,7 @@
 ;; ===========================================================================
 ;; Layer 7k — column view (read-only, driven by #+COLUMNS:)
 ;; ===========================================================================
+
 (define *org-columns-default* "%40ITEM %TODO %PRIORITY %TAGS")
 (define (org--columns-spec)
   (let loop ((ls (org--lines)))
@@ -3301,8 +3329,10 @@
 (define (org-meta-return)
   (if (org--list-line-prefix (org--line-text (buffer-line))) (org-insert-item) (org-insert-heading)))
 
+;; ===========================================================================
 ;; Activation
 ;; ===========================================================================
+
 ;; Turn the active buffer into an Org buffer (M-x org-mode, or auto for .org).
 (define (org--activate)
   (set-major-mode "org-mode")
@@ -3315,6 +3345,8 @@
   ;; oversized files, same threshold as fontify so neither hangs the engine.
   (when (org--fontify-ok?) (org--refresh-fold-markers)))
 
+;; M-x org-mode — activate Org mode in the current buffer (normally automatic
+;; for .org files via find-file-hook).
 (define-command (org-mode)
   (org--activate)
   (message "Org mode"))

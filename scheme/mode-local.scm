@@ -40,10 +40,8 @@
          (mode-local--name (cadr m)))
         (else (error "mode-local: mode name must be a string or symbol:" m))))
 
-;; Major modes have two spellings: the command ("mylang-mode", what the docs
-;; and Emacs use) and the bare name on the stack and in the registry
-;; ("mylang"). Values may be stored under either — setq-mode-local is
-;; load-order safe, so it can't consult the registry — and lookups try both.
+;; Values may be stored under either major-mode spelling (command or bare);
+;; lookups try both.
 (define (mode-local--bare name)
   (and (ends-with? name "-mode")
        (substring name 0 (- (string-length name) 5))))
@@ -64,6 +62,7 @@
   (let ((rest (filter (lambda (e) (not (eq? (car e) var))) table)))
     (cons (cons var (list val)) rest)))
 
+;; Set VAR to VAL for MODE (string or symbol; load-order safe).
 (define (mode-local-set mode var val)
   (let ((name (mode-local--name mode)))
     (set! *mode-local-table*
@@ -87,9 +86,8 @@
   (let ((cell (assq var (mode-local--own-table name))))
     (if cell (car (cdr cell)) 'unset)))
 
-;; The value THIS mode set itself, without walking the parent chain, under
-;; either spelling of its name (the bare one wins). Returns 'unset when the
-;; mode has no binding for var (an explicitly-set #f is a real hit — values
+;; The mode's own binding under either spelling of its name, without walking
+;; the parent chain; 'unset when none (an explicit #f is a real hit — values
 ;; are stored wrapped, see the header).
 (define (mode-local--lookup1 name var)
   (let ((hit (mode-local--lookup-own name var)))
@@ -97,12 +95,10 @@
         (mode-local--lookup-own (string-append name "-mode") var)
         hit)))
 
-;; DEFAULT is REQUIRED (a rest-arg default can come back #<void> when omitted
-;; — engine quirk); pass 'unset if you want "was it set at all" instead.
-;; The EXPLICIT form walks mode → parent → ... with a visited guard against
-;; hand-made cycles. The visited list is compared with string=? (a plain memq
-;; on strings only matches interned literals — names built at runtime would
-;; slip past it).
+;; DEFAULT is required (an omitted rest-arg default can come back #<void> —
+;; engine quirk). Walks mode → parent → … with a visited guard against
+;; hand-made cycles (compared with string=?: a plain memq on strings only
+;; matches interned literals, so runtime-built names would slip past).
 (define (mode-local--explicit mode var default)
   (let walk ((name (mode-local--canonical (mode-local--name mode))) (seen '()))
     (let ((hit (mode-local--lookup1 name var)))
@@ -123,11 +119,6 @@
   (let ((s (mode-stack)))
     (if (equal? s "") '() (split-many s " "))))
 
-;; (mode-local-value VAR DEFAULT) — no mode: search the buffer's mode stack
-;; TOP-DOWN. An active minor mode overrides the major; a child overrides its
-;; parent (the ancestors are ON the stack, so inheritance is free — the
-;; registry walk in the explicit form is only needed when code names a mode
-;; directly).
 (define (mode-local--stack-value var default)
   (let loop ((names (reverse (mode-local--stack-names))))
     (if (null? names)
@@ -137,8 +128,10 @@
               (loop (cdr names))
               hit)))))
 
-;; Arity dispatch: (MODE VAR DEFAULT) names a mode (registry parent walk);
-;; (VAR DEFAULT) uses the active buffer's stack.
+;; (mode-local-value VAR DEFAULT): search the current buffer's mode stack
+;; TOP-DOWN — an active minor mode overrides the major, a child its parent.
+;; (mode-local-value MODE VAR DEFAULT): name a mode directly, walking the
+;; registry's parent chain (needed only when the mode isn't on the stack).
 (define (mode-local-value . args)
   (cond ((and (pair? args) (pair? (cdr args)) (null? (cddr args)))
          (mode-local--stack-value (car args) (cadr args)))

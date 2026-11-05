@@ -3,6 +3,14 @@
 ;; Helm — a generic selection framework (the behaviour is in Rust; sources,
 ;; actions, and applications are written in Scheme). These keys are active only
 ;; during a Helm session; arrows / RET / C-g are handled as well.
+;;
+;; Built-in applications: helm-buffers — the buffer picker (C-x b; the Emacs
+;; aliases helm-buffers-list / helm-mini / list-buffers all go there),
+;; helm-find-files (C-x C-f), helm-recentf (C-x C-r), helm-occur (M-s o) and
+;; helm-imenu (M-x only). M-x itself is a Helm source (alt-x).
+;;
+;; Mutable state: *recentf* / *recentf-max* — the recently-visited-files list,
+;; maintained from find-file-hook; everything else is created per session.
 (define-key "helm" "ctrl-n" 'helm-next)
 (define-key "helm" "ctrl-p" 'helm-previous)
 ;; C-SPC marks the candidate for multi-select; RET then acts on every marked one.
@@ -20,11 +28,10 @@
 ;; action. A dynamic source's function may return the same pair form. Example:
 ;;   (list (list "ada" "engineer") "alan" (list "grace" "admiral"))
 
-;; A buffer picker — a Helm application written entirely in Scheme on top of two
-;; Rust primitives: `(buffer-names)` queries the open buffers, and
-;; `switch-to-buffer` is the action. A second action (M-a → Kill) lets you close
-;; buffers from the list, like Emacs `helm-buffers-list`. Special buffers (names
-;; like *scratch*) carry a dimmed "special" annotation — a marginalia-style hint.
+;; The buffer picker: a Helm application over `(buffer-names)` and
+;; `switch-to-buffer`, with a Kill action (M-a) — like Emacs
+;; `helm-buffers-list`. Special buffers (*scratch*, …) get a dimmed
+;; "special" annotation.
 (define (helm-buffer-candidate b)
   (if (starts-with? b "*") (list b "special") b))
 (define (helm-buffers)

@@ -37,10 +37,12 @@
   ;; Replace-per-owner: navigating (dired-in) re-points the watch to the new dir.
   (watch-directories "dired" (list *dired-dir*)))
 
+;; C-x d — open the *dired* listing for the current buffer's directory.
 (define (dired)
   (set! *dired-dir* (buffer-directory))
   (set! *dired-marks* '())
   (dired-render))
+;; Descend into DIR's listing (RET on a directory does this).
 (define (dired-in dir)
   (set! *dired-dir* dir)
   (set! *dired-marks* '())
@@ -158,12 +160,14 @@
   (watch-directories "dired" '())
   (kill-buffer))
 
+;; d — mark the file at point for deletion (x deletes them all).
 (define (dired-mark)
   (let ((p (dired-at-point)))
     (when (and p (not (member p *dired-marks*)))
       (set! *dired-marks* (cons p *dired-marks*))
       (dired-render)
       (next-line))))
+;; u — remove the mark at point.
 (define (dired-unmark)
   (let ((p (dired-at-point)))
     (when p
@@ -171,6 +175,7 @@
       (dired-render)
       (next-line))))
 
+;; x — delete every marked file, after asking.
 (define (dired-do-delete)
   (if (null? *dired-marks*)
       (message "No files marked (mark with d)")
@@ -190,7 +195,8 @@
   (set! *dired-marks* (map (lambda (m) (dired-retarget m p dest)) *dired-marks*))
   (dired-render))
 
-;; Rename / copy: the source path is captured in the prompt's closure (point is
+;; R — rename the file at point, prompting for the new name. The source path
+;; is captured in the prompt's closure (point is
 ;; in the minibuffer by the time the callback runs, so it can't be re-read).
 (define (dired-rename)
   (let ((p (dired-at-point)))
@@ -199,12 +205,14 @@
         (lambda (name)
           (dired-move-file p *dired-dir* name
             (lambda (dest) (dired-moved p dest))))))))
+;; C — copy the file at point, prompting for the destination.
 (define (dired-copy)
   (let ((p (dired-at-point)))
     (when p
       (read-string (string-append "Copy " (basename p) " to: ")
         (lambda (name)
           (dired-copy-file p *dired-dir* name (lambda (dest) (dired-render))))))))
+;; + — create a directory (parents included), prompting for the name.
 (define (dired-mkdir) (read-string "Create directory: " 'dired-mkdir-finish))
 (define (dired-mkdir-finish name)
   (dired-make-directory *dired-dir* name (lambda (dest) (dired-render))))

@@ -241,6 +241,7 @@
     (dap-request "disconnect" #f (lambda (b) #f))
     (dap--schedule-kill)))
 
+;; M-x dap-quit — disconnect, kill the adapter and reset everything.
 (define-command (dap-quit)
   (cond
     ((dap--alive?)
@@ -288,6 +289,8 @@
   (dap--set-modeline)
   (dap--changed))
 
+;; M-x dap-restart — restart the debuggee; falls back to quit + debug when
+;; the adapter can't restart itself (Q in the *dap* panel).
 (define-command (dap-restart)
   (cond
     ((not (dap--alive?)) (message "dap: no session"))
@@ -363,6 +366,7 @@
   (dap--save-breakpoints)
   (dap--changed))
 
+;; Toggle a breakpoint on the current line (persisted across sessions).
 (define-command (dap-toggle-breakpoint)
   (let ((path (dap--buffer-truename))
         (line (+ (buffer-line) 1)))
@@ -378,8 +382,9 @@
                     (cons (list path line "") *dap-breakpoints*)))
           (dap--bp-mutate path)))))
 
-;; Set/edit the breakpoint condition on the current line (adds one if absent).
-(define *dap--cond-target* '())
+(define *dap--cond-target* '())   ; (path line) the prompt acts on
+;; M-x dap-breakpoint-condition — prompt for the current line's breakpoint
+;; condition (pre-filled when one exists; empty = plain breakpoint).
 (define-command (dap-breakpoint-condition)
   (let ((path (dap--buffer-truename))
         (line (+ (buffer-line) 1)))
@@ -401,6 +406,7 @@
                           *dap-breakpoints*)))
       (dap--bp-mutate path))))
 
+;; M-x dap-breakpoints-clear — drop every breakpoint in every file.
 (define-command (dap-breakpoints-clear)
   (let ((files (dap--breakpoint-files)))
     (set! *dap-breakpoints* '())
@@ -439,17 +445,22 @@
                           *dap-breakpoints*)))))))
     (persistence-read-lines "dap-breakpoints")))
 
-;; --- execution control ------------------------------------------------------------
+;; --- execution control (c / s / i / o in the *dap* panel) ---------------------
 (define (dap--exec command)
   (if (not (dap--alive?))
       (message "dap: no session")
       (begin
         (dap-request command (hash "threadId" *dap-thread*) (lambda (b) #f))
         (dap--continue-ui))))
+;; M-x dap-continue — run to the next breakpoint (c).
 (define-command (dap-continue) (dap--exec "continue"))
+;; M-x dap-next — step over the next line (s).
 (define-command (dap-next)     (dap--exec "next"))
+;; M-x dap-step-in — step into the call on the stopped line (i).
 (define-command (dap-step-in)  (dap--exec "stepIn"))
+;; M-x dap-step-out — step out of the current frame (o).
 (define-command (dap-step-out) (dap--exec "stepOut"))
+;; M-x dap-pause — interrupt the running debuggee.
 (define-command (dap-pause)
   (if (not (dap--alive?))
       (message "dap: no session")
@@ -513,7 +524,9 @@
   (let ((f (dap--current-frame)))
     (if f (dap--int (dap--get f 'id)) #f)))
 
+;; M-x dap-up-frame — move up the call stack (outer frames).
 (define-command (dap-up-frame)   (dap--reselect (+ *dap-frame-idx* 1)))
+;; M-x dap-down-frame — move down the call stack (inner frames).
 (define-command (dap-down-frame) (dap--reselect (- *dap-frame-idx* 1)))
 (define (dap--reselect idx)
   (when (and (>= idx 0) (< idx (length *dap-frames*)))
@@ -613,11 +626,13 @@
     (dap--evaluate (string-trim expr) "hover"
                    (lambda (r) (message (string-append expr " ⇒ " r))))))
 
+;; M-x dap-watch-add — add an expression to the watches panel (w).
 (define-command (dap-watch-add) (read-string "Watch expression: " 'dap--watch-add))
 (define (dap--watch-add expr)
   (when (not (equal? (string-trim expr) ""))
     (set! *dap-watches* (append *dap-watches* (list (string-trim expr))))
     (if (eq? *dap-state* 'stopped) (dap--refresh-watches) (dap--changed))))
+;; M-x dap-watch-clear — remove all watch expressions (W).
 (define-command (dap-watch-clear)
   (set! *dap-watches* '())
   (set! *dap-watch-vals* '())
@@ -675,6 +690,8 @@
       (set! *dap--console-opening* #t)
       (set-major-mode "dap-console-mode")
       (select-window orig))))
+;; M-x dap-console — show the *dap-console* buffer (output + REPL) in a
+;; bottom split, keeping focus.
 (define-command (dap-console) (dap--console-show))
 
 ;; RET in the console: send the current line to `evaluate` (context "repl").

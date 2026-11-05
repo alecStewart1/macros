@@ -9,6 +9,21 @@
 ;;
 ;; This mirrors how `magit-section` + `transient` sit on top of plain Emacs
 ;; primitives. Folding-by-regeneration: a refresh just rebuilds the buffer text.
+;;
+;; Keys (in the status buffer; `?` opens the dispatch popup): s/S stage, u/U
+;; unstage, k/x discard, c commit, b branch, P push, F pull, f fetch, z stash,
+;; l log, X reset, M remote, t tag, m merge, B blame file, r rebase, y copy,
+;; i gitignore, $ process output, H history on/off, g refresh, v diff view,
+;; TAB fold a section, S-TAB cycle all, M-n / M-p next/prev section, RET
+;; visit file / show commit, C-g cancel a live push/pull, q quit. Launch with
+;; C-x g (or M-x magit); C-x M picks a repo via Helm; C-x v … is inline blame.
+;;
+;; Mutable state: *magit-dir* is the repo magit scopes to. *magit-sections* /
+;; *magit-hunks* / *magit-groups* / *magit-commit-lines* / *magit-headings*
+;; are the render's navigation tables, rebuilt on every refresh;
+;; *magit-expanded* and *magit-collapsed-groups* persist the user's fold
+;; choices across refreshes; *magit-blame-cache* / *magit-blame-buf* cache
+;; inline-blame records.
 
 ;; Faces (fall back to the default fg if a theme doesn't define them). Every
 ;; "magit-*" face below is user-overridable: redefine any of them in init.scm
@@ -121,8 +136,8 @@
         ((equal? label "renamed")  "magit-label-renamed")
         (else "magit-label-other")))
 
-;; Pad a label to a fixed column so the file names after it line up.
-(define magit-label-width 11)
+(define magit-label-width 11)  ; status-label column width
+;; Pad `s` to a fixed column so the file names after it line up.
 (define (magit-pad s width)
   (let ((len (utf8-length s)))
     (if (>= len width) (string-append s " ")
@@ -163,9 +178,9 @@
                        (let ((ab (magit-parse-ab (car (split-many (cadr br) "]")))))
                          (list (car dots) (car br) (car ab) (cdr ab))))))))))))
 
-;; "ahead 1, behind 2" / "ahead 1" / "behind 2" → (ahead . behind) strings.
 (define (magit-trim-comma s)
   (if (ends-with? s ",") (substring s 0 (- (string-length s) 1)) s))
+;; "ahead 1, behind 2" / "ahead 1" / "behind 2" → (ahead . behind) strings.
 (define (magit-parse-ab s)
   (let loop ((toks (split-many s " ")) (ahead "0") (behind "0"))
     (cond ((null? toks) (cons ahead behind))
@@ -331,7 +346,6 @@
 
 (define (magit-emit text face) (section-line text face))
 
-;; Section accessors over (heading-line path type body-start body-end).
 (define (sec-heading s) (nth s 0))
 (define (sec-path s) (nth s 1))
 (define (sec-type s) (nth s 2))
@@ -384,10 +398,8 @@
 ;; Pairing happens only when a run of N removed lines is immediately followed by
 ;; N added lines (same as diff-highlight); otherwise lines stay whole-line lit.
 
-;; Count of leading elements two CHAR LISTS share — one O(n) walk. (A per-char
-;; `substring` loop is O(n²) here: Steel's substring is char-indexed, so every
-;; call re-walks the string from the start, and long paired lines dominated the
-;; render.) UTF-8 safe: string->list yields chars, not bytes.
+;; O(n) single walk over char lists — a per-char `substring` loop is O(n²)
+;; (Steel's substring re-walks from the start) and once dominated the render.
 (define (magit-common-prefix-chars a b)
   (let loop ((a a) (b b) (n 0))
     (if (and (pair? a) (pair? b) (equal? (car a) (car b)))
@@ -430,8 +442,6 @@
                         (+ byte 1 (utf8-length (substring c1 0 (cdr span))))
                         (if removed? "magit-word-removed" "magit-word-added"))))))
 
-;; The maximal leading run of `lines` whose members start with `prefix`, as
-;; (run . rest).
 (define (magit-split-run lines prefix)
   (let loop ((ls lines) (run '()))
     (if (and (not (null? ls)) (starts-with? (car ls) prefix))
@@ -504,8 +514,6 @@
          (substring (car lines) (string-length prefix) (string-length (car lines))))
         (else (chunk-prefixed (cdr lines) prefix))))
 
-;; The work-tree path a chunk describes: from "+++ b/PATH", or "--- a/PATH" when
-;; the new side is /dev/null (a deletion).
 (define (chunk-path chunk)
   (or (chunk-prefixed chunk "+++ b/")
       (chunk-prefixed chunk "--- a/")))
@@ -603,7 +611,6 @@
                 (cons (list ghead gbody (section-point-line) type path ctx) *magit-groups*)))))
     (magit-group-hunks hunks)))
 
-;; Group accessors over (heading body-start body-end type path context).
 (define (grp-heading g) (nth g 0))
 (define (grp-body-start g) (nth g 1))
 (define (grp-body-end g) (nth g 2))
@@ -720,10 +727,11 @@
           ((= (car (car cs)) line) (cdr (car cs)))
           (else (loop (cdr cs))))))
 
+;; Width of the "Head:" / "Merge:" label column.
+(define magit-header-width 10)
 ;; Emit a header line "<label>   <branch> <rest>", accenting the branch name and
 ;; dimming the rest, so the label column / branch / detail read as three tiers.
 ;; `rest` is "" or starts with its own leading space.
-(define magit-header-width 10)
 (define (magit-emit-header label branch rest)
   (let* ((labelcol (magit-pad label magit-header-width))
          (byte (section-point-byte))

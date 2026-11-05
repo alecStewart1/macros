@@ -118,6 +118,7 @@
 (register-command 'rainbow-refresh)
 
 ;; --- public configuration API -----------------------------------------------
+;; Set the palette (any length); recolors open buffers now.
 (define (rainbow-set-colors colors)
   (when (> (length colors) 0)
     (rainbow--clear) ; the old palette's faces, before the count changes
@@ -126,6 +127,7 @@
     (rainbow--register-faces)
     (rainbow-refresh)))
 
+;; Live-refresh debounce, in ms.
 (define (rainbow-set-delay ms)
   (set! *rainbow-delay* ms))
 
@@ -134,6 +136,7 @@
 (define (rainbow-set-skip-extensions exts)
   (set! *rainbow-skip-extensions* exts))
 
+;; Turn rainbow-delimiters on / off for new and open buffers.
 (define (rainbow-enable)
   (set! *rainbow-enabled* #t)
   (rainbow-refresh))

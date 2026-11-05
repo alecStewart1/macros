@@ -25,6 +25,8 @@
 (define *diag-lines* '())
 (define *diag-n* 0)
 
+;; Append one line to the *diagnostics* list; TARGET is the source line RET
+;; should jump to (or #f for header lines).
 (define (diag-emit text target)
   (set! *diag-lines* (cons text *diag-lines*))
   (when target (set! *diag-targets* (cons (cons *diag-n* target) *diag-targets*)))
@@ -41,6 +43,8 @@
                               "  " sev ": " msg)
                line)))
 
+;; C-c e — list the current buffer's LSP diagnostics in *diagnostics* and
+;; claim next-error navigation for it.
 (define (list-diagnostics)
   (set! *next-error-source* "diagnostics")
   (set! *diag-buffer* (current-buffer))
@@ -76,9 +80,9 @@
 (define-key "diagnostics-mode" "p" 'previous-line)
 
 ;; --- diagnostic navigation (one `next-error` source) ------------------------
-;; Move point to the nearest diagnostic after/before the current line. The list
-;; isn't sorted, so scan for the closest qualifying line. These are the
-;; diagnostics arm of the unified next-error/previous-error defined in shell.scm.
+;; The list isn't sorted, so scan for the closest qualifying line. These are
+;; the diagnostics arm of the unified next-error/previous-error (shell.scm).
+;; M-g n — jump to the nearest diagnostic after the current line.
 (define (diag-next-error)
   (let loop ((rs (diagnostics)) (cur (buffer-line)) (best -1))
     (if (null? rs)
@@ -87,6 +91,7 @@
           (loop (cdr rs) cur
                 (if (and (> ln cur) (or (< best 0) (< ln best))) ln best))))))
 
+;; The diagnostics arm of previous-error (M-g p): the nearest one above.
 (define (diag-previous-error)
   (let loop ((rs (diagnostics)) (cur (buffer-line)) (best -1))
     (if (null? rs)

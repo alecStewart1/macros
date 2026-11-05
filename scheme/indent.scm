@@ -1,20 +1,20 @@
 ;; requires:
 
-;;; indent.scm — per-language indentation width defaults.
-;;;
-;;; Each structural indent level is `tab-width` columns (global default 4). A
-;;; `tab-width:<language>` override sets the step for one language, so OCaml can
-;;; be 2 while Rust stays 4 — matching each ecosystem's formatter, so live
-;;; editing agrees with format-on-save instead of fighting it.
-;;;
-;;; These are DEFAULTS: your init.scm loads after this file, so
-;;;   (set-option "tab-width:ocaml" 4)
-;;; there wins. The <language> key is the editor's language id (the same name
-;;; used in `lsp-language` / syntax highlighting: "ocaml", "ruby", "tsx", …).
-;;;
-;;; Only languages whose indentation is computed here (a tree-sitter indent
-;;; query or the Lisp aligner) are listed — setting a width for a language that
-;;; just copies the previous line's indent would have no effect.
+;; indent.scm — per-language indentation width defaults.
+;;
+;; Each structural indent level is `tab-width` columns (global default 4). A
+;; `tab-width:<language>` override sets the step for one language, so OCaml can
+;; be 2 while Rust stays 4 — matching each ecosystem's formatter, so live
+;; editing agrees with format-on-save instead of fighting it.
+;;
+;; These are DEFAULTS: your init.scm loads after this file, so
+;;   (set-option "tab-width:ocaml" 4)
+;; there wins. The <language> key is the editor's language id (the same name
+;; used in `lsp-language` / syntax highlighting: "ocaml", "ruby", "tsx", …).
+;;
+;; Only languages whose indentation is computed here (a tree-sitter indent
+;; query or the Lisp aligner) are listed — setting a width for a language that
+;; just copies the previous line's indent would have no effect.
 
 ;; --- 2-space ---------------------------------------------------------------
 ;; Lisps: body indented two columns past the special form. `macros-scheme` is
@@ -80,12 +80,13 @@
 ;; way, so it lands at the current column too — a save reformats it.)
 (set-option "indent-after:ocaml" "->")
 (set-option "align-after:ocaml" "in with")
-;; --- JSON ------------------------------------------------------------------
+;; --- JSON --------------------------------------------------------------------
 ;; C-c C-f pretty-prints the buffer (json-mode's beautify key); `M-x
 ;; json-pretty-print` does just the region. Both keep key order, number
-;; spelling and comments, and use `tab-width:json` above. To format on every
-;; save, add to your init.scm:
+;; spelling and comments, and use `tab-width:json` above. A buffer whose JSON
+;; doesn't parse is left untouched (the save still happens).
+(define-key "json" "ctrl-c ctrl-f" 'json-pretty-print-buffer)
+
+;; To format JSON on every save, add to your init.scm:
 ;;   (lsp-language "json" 'extensions '("json")
 ;;                 'format-on-save "json-pretty-print-buffer")
-;; A buffer whose JSON doesn't parse is left untouched (the save still happens).
-(define-key "json" "ctrl-c ctrl-f" 'json-pretty-print-buffer)

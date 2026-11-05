@@ -1,10 +1,28 @@
 ;; requires: core diagnostics lib-async
 
-;; shell.scm — process integration: an Emacs-style `compile` (run a command into
-;; a read-only *compilation* buffer, parse errors, walk them with next-error /
-;; previous-error and jump to the source), grep navigation, and a basic shell.
+;; shell.scm — process integration: an Emacs-style `compile`, grep navigation,
+;; and a basic shell buffer.
+;;
+;;   C-c b     compile        run a command into a read-only *compilation* buffer
+;;   M-x recompile / `g` in *compilation* — rerun the last command
+;;   M-x kill-compilation / C-g in *compilation* — stop the running build
+;;   M-x grep / C-c p g / C-c p G — project grep (see projectile.scm / grep.scm)
+;;   C-c s     shell          an editable *shell* buffer running /bin/sh
+;;
+;; next-error (M-x, and `n`/`p` conventions in result buffers) walks the
+;; matches: compile's parsed error list or the diagnostics (flymake-style)
+;; list, whichever produced results last. In *compilation* / *grep*, RET
+;; (compile-visit / results-visit) jumps to the file+line on the current line.
+;;
+;; Compile state (the command, its cwd, the parsed error list, the nav cursor)
+;; lives in this file's *compile-* variables; the process lane is lib-async's
+;; "compile" channel. Shell state is *shell-proc*.
+;;
+;; Error parsing mirrors Emacs's compilation-error-regexp-alist: `compile-match`
+;; recognizes rust/cargo, python tracebacks, jest/node, go test and gcc/grep
+;; output, first match wins.
 
-;; --- compile (M-x compile / C-c c) ------------------------------------------
+;; --- compile (C-c b; also M-x compile) --------------------------------------
 ;; Error faces (whole-line, applied on the final faced re-render in compile-done).
 (set-face "compilation-error"   "#f92672")  ; red — errors
 (set-face "compilation-warning" "#e6db74")  ; yellow — warnings
@@ -49,6 +67,8 @@
 (define (compile-resolve file)
   (if (starts-with? file "/") file (path-join *compile-dir* file)))
 
+;; C-c b — read a compile command (default: the last one) and run it in the
+;; selected project; results stream into *compilation*.
 (define (compile) (read-string "Compile command: " 'compile-run *compile-last*))
 
 ;; Show *compilation* in a half-height window across the bottom of the screen,
@@ -126,6 +146,7 @@
     (message (if cancelled status
                  (string-append status " — " (int->string (length errs)) " error(s)")))))
 
+;; Rerun the last compile command (prompt default and `g` in *compilation*).
 (define (recompile)
   (when (not (equal? *compile-last* ""))
     (if *compile-fixed-dir*
@@ -141,6 +162,7 @@
   (async-lane-quit "compile"))
 
 ;; --- error navigation (the compile arm of next-error / previous-error) ------
+;; The parsed errors of the last compile, oldest first.
 (define (compile-error-list) (reverse *compile-errors*))
 (define (compile-show idx)
   (let ((errs (compile-error-list)))
@@ -213,6 +235,8 @@
 ;; sends the current line; stdout streams back. No prompt/tty/job-control — a
 ;; simple command runner, not a terminal emulator.
 (define *shell-proc* -1)
+;; M-x shell (C-c s) — open (or refocus) the *shell* buffer, starting /bin/sh
+;; on first use.
 (define (shell)
   (append-to-buffer "*shell*" "")          ; create/switch to a normal buffer
   (set-major-mode "shell-mode")            ; so RET is rebound below
@@ -226,6 +250,8 @@
 (define (shell-exit code)
   (set! *shell-proc* -1)
   (append-to-buffer "*shell*" (string-append "[exited " code "]\n")))
+;; RET in *shell*: send the current line to /bin/sh (newline inserted first, so
+;; RET mid-line doesn't split the command).
 (define (shell-send-input)
   (let* ((b (line-bounds)) (line (buffer-substring (car b) (cadr b))))
     ;; Break the line at its END: RET mid-line used to split the command.

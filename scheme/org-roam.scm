@@ -21,7 +21,8 @@
 ;; ===========================================================================
 ;; State (defined first so the config setters below can touch them)
 ;; ===========================================================================
-;; The node index: each entry is (id title file (tag …)).
+;; The node index: each entry is (id title file (tag …) line) — `line` the
+;; 0-based jump target (0 for a file-level node).
 (define *org-roam-nodes* '())
 ;; Whether the index has been scanned this session.
 (define *org-roam-synced* #f)
@@ -54,15 +55,13 @@
         (set! *org-roam-directory* (car rest))
         (set! *org-roam-synced* #f))))
 
-;; Command used to open external (http / file) links. macOS "open"; set to
-;; "xdg-open" on Linux from init.scm via (set! *org-open-command* "xdg-open").
+;; Command used to open external (http / file) links; "open" on macOS, set to
+;; "xdg-open" on Linux from init.scm.
 (define *org-open-command* "open")
 
 ;; Inline display width (px) of the graph image, and the graphviz render DPI.
-;; Raise the width to see a large graph bigger (it's capped to its natural size,
-;; so the DPI controls how much detail there is to show). Set from init.scm:
-;;   (set! *org-roam-graph-width* 1600)
-;;   (set! *org-roam-graph-dpi* 200)
+;; Both are set from init.scm; the width is capped to the image's natural size,
+;; so the DPI controls how much detail there is to show.
 (define *org-roam-graph-width* 1200)
 (define *org-roam-graph-dpi* 150)
 
@@ -400,8 +399,6 @@
 ;; ===========================================================================
 ;; Graph view (graphviz → inline image)
 ;; ===========================================================================
-;; Emit a DOT graph of the node network and render it with `dot -Tpng`, shown
-;; inline via the Org image pipeline. Needs graphviz (`dot`) on PATH.
 ;; Every node ID referenced by `[[id:…]]` links in `text`, in order.
 (define (org-roam--link-ids text)
   (let loop ((s text) (acc '()))
@@ -494,6 +491,7 @@
     f))
 ;; C-c n d t — open today's daily note (creating it).
 (define-command (org-roam-dailies-goto-today) (open-file (org-roam--ensure-daily (current-time "%Y-%m-%d"))))
+;; C-c n d c — capture into today's daily note (open it, creating it).
 (define-command (org-roam-dailies-capture-today) (org-roam-dailies-goto-today))
 ;; C-c n d d — open a specific date's note.
 (define-command (org-roam-dailies-goto-date) (read-string "Date (YYYY-MM-DD): " 'org-roam--dailies-date-finish))
@@ -591,6 +589,8 @@
 ;; Unlinked references (mentions of this node's title that are not links)
 ;; ===========================================================================
 (define *org-roam-unlinked-targets* '())
+;; C-c n u — list mentions of this node's title that aren't [[id:…]] links, in
+;; a side buffer (RET visits one).
 (define-command (org-roam-unlinked-references)
   (org-roam--ensure-index)
   (let* ((id (org-roam--current-id)) (n (and id (org-roam--node-by-id id))))
@@ -620,6 +620,7 @@
 ;; Persistent index cache (TSV: id <tab> title <tab> file <tab> tags <tab> line)
 ;; ===========================================================================
 (define (org-roam--cache-file) (path-join (org-roam-directory) ".org-roam-cache.tsv"))
+;; M-x org-roam-db-save — write the node index to .org-roam-cache.tsv.
 (define-command (org-roam-db-save)
   (org-roam--ensure-index)
   (write-file (org-roam--cache-file)
@@ -629,6 +630,8 @@
                                           (int->string (org-roam--node-line n))) "\t"))
                      *org-roam-nodes*)))
   (message "org-roam: cache saved"))
+;; M-x org-roam-db-load — load the index from .org-roam-cache.tsv, skipping the
+;; (C-c n s) directory scan.
 (define-command (org-roam-db-load)
   (let ((f (org-roam--cache-file)))
     (if (not (file-exists? f)) (message "org-roam: no cache (run C-c n s)")

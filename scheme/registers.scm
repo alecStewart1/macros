@@ -149,8 +149,11 @@
                         (make-buffer-marker (point))))
   (message (string-append "Saved point to register " r)))
 
-;; C-x r w — remember the window layout in a register.
+;; State for window-configuration-to-register: the target register read from
+;; the command's prompt.
 (define *reg-window-target* #f)
+
+;; C-x r w — remember the window layout in a register; C-x r j restores it.
 (define-command (window-configuration-to-register)
   (reg--prompt "Window configuration to register: " 'window-configuration-to-register-finish))
 (define (window-configuration-to-register-finish r)

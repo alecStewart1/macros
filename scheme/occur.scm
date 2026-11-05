@@ -5,9 +5,11 @@
 ;; occur-edit-mode / wgrep) is the shared framework in lib-results.scm.
 
 ;; --- occur ---------------------------------------------------------------------
-;; List every line matching a regexp (case-insensitive when the regexp is all
-;; lower case, like Emacs's case-fold-search) in *occur*, shown in a window
-;; below the source. Searching runs in Rust over the buffer snapshot
+;; State: the last regexp, offered as the default at the next prompt.
+
+;; List every line matching a regexp in *occur*, shown in a window below the
+;; source (M-x occur). Case-insensitive when the regexp is all lower case, like
+;; Emacs's case-fold-search. Searching runs in Rust over the buffer snapshot
 ;; (`buffer-search-all`), so no copy of the whole buffer crosses into Scheme —
 ;; only the matching lines do.
 (define *occur-last* "")

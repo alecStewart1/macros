@@ -219,9 +219,10 @@
           ((> s 0) (kill-region-between (- s 1) e))   ; last line: take the newline before
           (else (kill-region-between s e)))))
 
-;; delete-trailing-whitespace: strip trailing blanks from every line of the
-;; region, or of the buffer — which also drops blank lines at its end.
+;; The regexp string delete-trailing-whitespace applies per line.
 (define (extras--strip-trailing text) (replace-regexp-in-string "(?m)[ \t]+$" "" text))
+;; M-x delete-trailing-whitespace: strip trailing blanks from every line of
+;; the region, or of the buffer — which also drops blank lines at its end.
 (define (delete-trailing-whitespace)
   (let* ((whole (not (region-active?)))
          (span (if whole (list 0 (point-max)) (extras--line-span (point) (point))))
@@ -239,8 +240,8 @@
           (goto-char (min (+ s (utf8-length new))
                           (+ s before (min (- p ls) (utf8-length line)))))))))
 
-;; keep-lines / flush-lines: keep (or delete) the lines matching a regexp, in
-;; the region or from the line after point to the end of the buffer.
+;; The line span keep-lines / flush-lines act on: the region, or from the
+;; line after point to the end of the buffer.
 (define (extras--rest-span)
   (if (region-active?)
       (extras--line-span (point) (point))
@@ -262,9 +263,12 @@
     (message (string-append "Deleted " (number->string gone)
                             (if (= gone 1) " line" " lines")))))
 
+;; M-x keep-lines — delete every line NOT matching the regexp; the region's
+;; lines, else from the line after point to the end of the buffer.
 (define (keep-lines) (read-string "Keep lines containing match for regexp: " 'keep-lines-finish))
 (define (keep-lines-finish pattern)
   (unless (equal? pattern "") (extras--filter-lines #t pattern)))
+;; M-x flush-lines — delete every line matching the regexp, same span rules.
 (define (flush-lines) (read-string "Flush lines containing match for regexp: " 'flush-lines-finish))
 (define (flush-lines-finish pattern)
   (unless (equal? pattern "") (extras--filter-lines #f pattern)))
@@ -276,6 +280,8 @@
     (cond ((null? ls) (reverse acc))
           ((hash-try-get seen (car ls)) (loop (cdr ls) seen acc))
           (else (loop (cdr ls) (hash-insert seen (car ls) #t) (cons (car ls) acc))))))
+;; M-x delete-duplicate-lines: drop every repeat of an earlier line in the region
+;; (whole buffer without one), keeping the first.
 (define (delete-duplicate-lines)
   (let* ((span (if (region-active?) (extras--line-span (point) (point)) (list 0 (point-max))))
          (s (car span)) (e (cadr span))
@@ -395,6 +401,7 @@
   (if (region-active?)
       (extras--count-message "Region" (buffer-substring (region-beginning) (region-end)))
       (count-words)))
+;; M-x count-words — lines, words and characters of the whole buffer.
 (define (count-words) (extras--count-message "Buffer" (buffer-string)))
 
 ;; How a character reads in what-cursor-position: control chars as C-x.
@@ -469,6 +476,7 @@
          (and (= (point) end)
               (equal? (buffer-substring start end) (list-ref cands i))))))
 
+;; M-/ — expand the word before point to the nearest word that starts with it.
 (define (dabbrev-expand)
   (if (dabbrev--continuing?)
       (let* ((st *dabbrev-state*) (start (car st)) (prefix (cadr st))
@@ -559,6 +567,7 @@
         (insert (string (integer->char n)))
         (message (string-append "Not a character: " choice)))))
 
+;; C-x 8 RET — insert a character chosen by name or hex code point.
 (define (insert-char)
   (helm (list (list "Insert character (name or hex code point)"
                     (list 'raw "insert-char-candidates")

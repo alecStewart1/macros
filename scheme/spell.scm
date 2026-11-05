@@ -65,6 +65,7 @@
   (set! *spell-program-args* args)
   (spell--pipe-stop))
 
+;; Set the recheck debounce (ms), e.g. (spell-set-delay 600).
 (define (spell-set-delay ms) (set! *spell-delay* ms))
 
 ;; Turn spell-mode on automatically when a file with one of these extensions
@@ -90,15 +91,12 @@
   (overlay-set-faces
     (map (lambda (e) (list (nth e 0) (nth e 1) "spell-error")) (spell--errors))))
 
-;; Cache and paint a backend's finished result set, whose byte offsets were
-;; computed against `buffer` at edit tick `tick` — both captured when the text
-;; was SENT for checking, an eval (and a subprocess round-trip) ago. If the
-;; buffer has been edited or switched since, the offsets are stale: caching or
-;; painting them would land squiggles shifted off their words, so skip and
-;; recheck once the current burst settles. When the reply IS fresh, the
-;; guard-buffer-tick covers the last gap — an edit between this eval and the
-;; moment its overlay commands apply makes Rust drop the paint whole and
-;; dispatch `spell--schedule` to reschedule.
+;; Cache and paint a backend's finished result set. Its byte offsets were
+;; captured (with `tick` and `buffer`) when the text was SENT, an async
+;; round-trip ago — if the buffer was edited or switched since they are stale,
+;; so skip and reschedule; guard-buffer-tick covers the last gap (an edit
+;; between this eval and the overlay applying makes Rust drop the paint whole
+;; and dispatch spell--schedule).
 (define (spell--apply-results errors tick buffer)
   (if (and (equal? buffer (current-buffer)) (= tick (buffer-tick)))
       (begin
@@ -353,6 +351,8 @@
               (loop (cdr lines))
               (goto-char (+ *spell-next-base* (string->number (nth p 0)))))))))
 
+;; ] s — jump to the next misspelling (native backend: scans the rest of the
+;; buffer on demand when the cache runs out).
 (define-command (spell-next-error)
   (let ((e (spell--error-after (point))))
     (cond (e (goto-char (nth e 0)))
@@ -363,6 +363,7 @@
                                "spell--native-next-apply")))
           (else (message "No more spelling errors")))))
 
+;; [ s — jump to the previous misspelling.
 (define-command (spell-prev-error)
   (let ((e (spell--error-before (point))))
     (if e
@@ -428,6 +429,8 @@
       (set! *spell-offer* #f)
       (offer (non-empty-lines rows)))))
 
+;; z = — correct the word at point from a Helm list of suggestions (M-a offers
+;; add-to-dictionary / ignore without picking a suggestion).
 (define-command (spell-correct-word)
   (let ((r (spell--word-range)))
     (if (not r)
@@ -452,9 +455,11 @@
         (message "No word at point")
         (action (buffer-substring (car r) (cdr r))))))
 
+;; z g — add the word at point to the (permanent) dictionary.
 (define-command (spell-learn-word-at-point)
   (spell--with-word-at-point spell--learn))
 
+;; M-x spell-ignore-word-at-point — accept the word for this session only.
 (define-command (spell-ignore-word-at-point)
   (spell--with-word-at-point spell--ignore))
 

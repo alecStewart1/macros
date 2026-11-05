@@ -3,9 +3,9 @@
 ;; help-extras.scm — C-h v describe-variable and C-h m describe-mode.
 
 ;; --- describe-variable (C-h v) ------------------------------------------------
-;; Variables are the Scheme globals named `*like-this*` (the convention every
-;; bundled file follows) plus the editor options. Any other global can still
-;; be typed by name.
+
+;; Scheme globals named `*like-this*` (the convention every bundled file
+;; follows) plus the editor options; any other global can still be typed by name.
 (define (help--variable-name? n)
   (and (> (string-length n) 2) (starts-with? n "*") (ends-with? n "*")))
 (define (variable-list)
@@ -17,6 +17,7 @@
         ((boolean? v) (if v "#t" "#f"))
         (else (to-string v))))
 
+;; C-h v — describe a variable: its current value, its doc, and how to set it.
 (define (describe-variable)
   (completing-read "Describe variable: " (variable-list) 'describe-variable-show))
 (define (describe-variable-show name)
@@ -37,9 +38,9 @@
                       '())))))
 
 ;; --- describe-mode (C-h m) ----------------------------------------------------
-;; The buffer's major mode, the minor modes on in it, and the bindings each
-;; keymap adds. Minor modes are registered here with a predicate so packages
-;; (and your config) can list theirs: (register-minor-mode "name" (lambda () …)).
+
+;; Register minor modes here with a predicate so packages (and your config) can
+;; list theirs: (register-minor-mode "name" (lambda () …)).
 ;; NOT `*minor-modes*`: that is minor-mode.scm's define-minor-mode registry,
 ;; and a second top-level define of it here clobbered every mode registered
 ;; before this file loaded (abbrev-mode's toggle body among them).
@@ -51,10 +52,8 @@
 (register-minor-mode "evil-mode" (lambda () (and (evil-enabled?) (not (helix-enabled?)))))
 (register-minor-mode "helix-mode" (lambda () (helix-enabled?)))
 
-;; Stack minor modes are the truth for define-minor-mode modes (they are
-;; entries on the buffer's mode stack); the hand-registered predicates below
-;; still cover modes that live outside the framework (evil/helix — editor
-;; toggles, not stack entries).
+;; Mode-stack entries (define-minor-mode modes) plus the hand-registered
+;; predicates, which cover modes outside that framework (evil/helix).
 (define (enabled-minor-modes)
   (sort-strings
    (dedup (append (let ((s (active-minor-modes)))
@@ -68,12 +67,9 @@
         "  (no bindings of its own)"
         (join-lines (map (lambda (l) (string-append "  " (string-replace l "\t" "    "))) rows)))))
 
-;; One "Key bindings (MODE):" section per active mode keymap, in resolution
-;; order (minors, then the major chain — inherited parents included). The
-;; major always gets a section; other modes only when they bind something.
+;; One "Key bindings (MODE):" section per active minor keymap, then the major.
 ;; The "<state>:<mode>" maps hold the same chords as the plain mode map
-;; (minor-mode--install-scoped-keys binds both), so the plain map stands for
-;; both.
+;; (minor-mode--install-scoped-keys binds both), so the plain map stands for both.
 (define (help--mode-key-sections major)
   (let* ((modal (current-modal-keymap))
          (modes (filter (lambda (km)
@@ -113,6 +109,8 @@
           '())
       (list "Global bindings: C-h B (describe-bindings).")))))
 
+;; C-h m — the buffer's major mode, the minor modes on in it, and the bindings
+;; each keymap adds.
 (define (describe-mode)
   (render-buffer "*help*" "help-mode" (describe-mode-text) '()))
 
