@@ -64,6 +64,10 @@
                    (if (equal? *org-roam-directory* "") "~/org-roam" *org-roam-directory*))
       (begin
         (set! *org-roam-directory* (car rest))
+        ;; The watch was registered on the OLD vault; clear the flag so the
+        ;; next sync re-registers (WatchTree is replace-per-owner) against the
+        ;; new directory instead of leaving it watched-but-stale.
+        (set! *org-roam-watching* #f)
         (set! *org-roam-synced* #f))))
 
 ;; Command used to open external (http / file) links. macOS "open"; set to
@@ -188,16 +192,19 @@
 ;;     nodes   — as before: (id title file (tag …) line)
 ;;     aliases — (string …) parsed from ROAM_ALIASES
 ;;     refs    — (string …) parsed from ROAM_REFS
-;;     links   — per-node outbound [[id:…]] targets (deduped):
-;;               ((node-id link-id …) …). Each link is attributed to the
-;;               nearest node at or above its line — the file-level node for
-;;               front matter, a subtree node from its own heading line down
-;;               (org-roam's per-node edge semantics).
+;;   links   — per-node outbound [[id:…]] targets (deduped):
+;;             ((node-id link-id …) …). Each link is attributed to the
+;;             nearest node at or above its line — the file-level node for
+;;             front matter, a subtree node from its own heading line down
+;;             (org-roam's per-node edge semantics).
+;;   mtime   — the file's modification time (Unix seconds) at scan time; the
+;;             cache loader re-checks it to rescan only what changed.
 (define (org-roam--record-file r) (car r))
 (define (org-roam--record-nodes r) (nth r 1))
 (define (org-roam--record-aliases r) (nth r 2))
 (define (org-roam--record-refs r) (nth r 3))
 (define (org-roam--record-links r) (nth r 4))
+(define (org-roam--record-mtime r) (if (> (length r) 5) (nth r 5) 0))
 
 ;; Append IDS to NODE-ID's entry in a per-node link alist ((id links …) …).
 (define (org-roam--links-add alist node-id ids)
@@ -205,7 +212,11 @@
       alist
       (let hit ((rs alist))
         (cond ((null? rs)
-               (cons (cons node-id ids) alist))
+               ;; Just the new entry — the caller reconstructs the walked
+               ;; prefix around us; returning ALIST here would duplicate it
+               ;; (latent until a file attributed links to one node, then a
+               ;; different one, then back).
+               (list (cons node-id ids)))
               ((equal? (car (car rs)) node-id)
                (cons (cons node-id (append (cdr (car rs)) ids)) (cdr rs)))
               (else (cons (car rs) (hit (cdr rs))))))))
@@ -225,15 +236,26 @@
     (let loop ((ls lines) (i 0)
                (acc (if fl (list fl) '()))
                (cur (if fl (car fl) #f))
+               ;; Outline level of the node links currently attribute to
+               ;; (0 = file-level). Lets an ID-less heading revert
+               ;; attribution to the file node once the ID'd subtree ENDS —
+               ;; a sibling heading is not inside the previous one.
+               (cur-level (if fl 0 #f))
                (links '()))
       (if (null? ls)
           (list path
                 (reverse acc)
                 (if fl (org-roam--parse-quoted-list (org-roam--file-meta text "ROAM_ALIASES")) '())
                 (if fl (org-roam--parse-quoted-list (org-roam--file-meta text "ROAM_REFS")) '())
-                (org-roam--links-finish links))
+                (org-roam--links-finish links)
+                (file-mtime path))
           ;; A heading that introduces a subtree node takes over attribution
-          ;; from this line on (its own heading text included). The first-char
+          ;; from this line on (its own heading text included). A heading
+          ;; WITHOUT an :ID: ends the ID'd subtree it follows when it is at
+          ;; the same or a shallower level — links under it belong to the
+          ;; file-level node (org-roam climbs to the nearest ancestor node;
+          ;; a sibling is not one) — while a DEEPER ID-less heading is still
+          ;; inside the subtree and stays attributed to it. The first-char
           ;; check skips the heading regex on the (vast majority of) body
           ;; lines — the hottest regex work in the scan loop.
           (let* ((l (car ls))
@@ -241,11 +263,21 @@
                               (equal? (string-ref l 0) #\*))
                          (org-roam--heading-text l)
                          #f))
+                 (stars (if ht
+                            (let ((m (string-match "^(\\*+)" l)))
+                              (if (< m 0)
+                                  0
+                                  (utf8-length (nth (regexp-captures "^(\\*+)" l) 1))))
+                            0))
                  (id (if ht (org-roam--drawer-id (cdr ls)) #f))
-                 (cur (if id id cur))
+                 (cur (cond (id id)
+                            ((and ht cur-level (<= stars cur-level))
+                             (if fl (car fl) #f))
+                            (else cur)))
+                 (cur-level (if ht stars cur-level))
                  (acc (if id (cons (list id ht path '() i) acc) acc))
                  (targets (org-roam--link-ids (car ls))))
-            (loop (cdr ls) (+ i 1) acc cur
+            (loop (cdr ls) (+ i 1) acc cur cur-level
                   (if (and cur (not (null? targets)))
                       (org-roam--links-add links cur targets)
                       links)))))))
@@ -349,6 +381,60 @@
     (set! *org-roam-by-alias* by-alias)
     (set! *org-roam-by-file* by-file)))
 
+;; Fold ONE record into the live indexes — the incremental half of a per-file
+;; sync. Mirrors rebuild-indexes' per-record loop exactly (first-seen-wins for
+;; id/title/file), so add-after-remove lands where a full rebuild would.
+(define (org-roam--index-record r)
+  (let ((fl (org-roam--file-level-of (org-roam--record-nodes r))))
+    (for-each
+     (lambda (n)
+       (set! *org-roam-nodes* (cons n *org-roam-nodes*))
+       (when (not (hash-contains? *org-roam-by-id* (car n)))
+         (set! *org-roam-by-id* (hash-insert *org-roam-by-id* (car n) n)))
+       (when (not (hash-contains? *org-roam-by-title* (nth n 1)))
+         (set! *org-roam-by-title* (hash-insert *org-roam-by-title* (nth n 1) n)))
+       (when (or (= (org-roam--node-line n) 0)
+                 (not (hash-contains? *org-roam-by-file* (nth n 2))))
+         (set! *org-roam-by-file* (hash-insert *org-roam-by-file* (nth n 2) n))))
+     (org-roam--record-nodes r))
+    (when fl
+      (for-each (lambda (a)
+                  (set! *org-roam-aliases* (cons (cons a fl) *org-roam-aliases*))
+                  (set! *org-roam-by-alias* (hash-insert *org-roam-by-alias* a fl)))
+                (org-roam--record-aliases r))
+      (for-each (lambda (x) (set! *org-roam-refs* (cons (cons x fl) *org-roam-refs*)))
+                (org-roam--record-refs r)))))
+
+;; Strip ONE record's contributions from the live indexes — the removal half
+;; of a per-file sync. Guarded removes: an entry is only dropped when it
+;; actually points at THIS record's node (another file may legitimately hold
+;; the same title, and first-seen-wins means the hash can hold either).
+(define (org-roam--unindex-record r)
+  (let ((file (org-roam--record-file r)))
+    (for-each
+     (lambda (n)
+       (let ((id (car n)))
+         (when (hash-contains? *org-roam-by-id* id)
+           (set! *org-roam-by-id* (hash-remove *org-roam-by-id* id)))
+         (let ((hit (hash-try-get *org-roam-by-title* (nth n 1))))
+           (when (and hit (equal? (car hit) id))
+             (set! *org-roam-by-title* (hash-remove *org-roam-by-title* (nth n 1)))))))
+     (org-roam--record-nodes r))
+    (when (hash-contains? *org-roam-by-file* file)
+      (set! *org-roam-by-file* (hash-remove *org-roam-by-file* file)))
+    (for-each
+     (lambda (a)
+       (let ((hit (hash-try-get *org-roam-by-alias* a)))
+         (when (and hit (equal? (nth hit 2) file))
+           (set! *org-roam-by-alias* (hash-remove *org-roam-by-alias* a)))))
+     (org-roam--record-aliases r))
+    (set! *org-roam-nodes*
+          (filter (lambda (n) (not (equal? (nth n 2) file))) *org-roam-nodes*))
+    (set! *org-roam-aliases*
+          (filter (lambda (p) (not (equal? (nth (cdr p) 2) file))) *org-roam-aliases*))
+    (set! *org-roam-refs*
+          (filter (lambda (p) (not (equal? (nth (cdr p) 2) file))) *org-roam-refs*))))
+
 ;; --- Live sync (fs-watch + after-save) --------------------------------------
 ;; A change under the roam dir (new files, external edits, git) triggers a
 ;; debounced full re-sync. Edits saved from a buffer take the cheap per-file
@@ -372,7 +458,8 @@
              (org-roam--fs-event-fresh?))
     (org-roam--sync-debounced)))
 
-;; Vulpea pattern: replace one file's record in place and re-derive the indexes.
+;; Vulpea pattern: replace one file's record in place and update ONLY that
+;; record's index contributions (a full rebuild costs O(all nodes) per save).
 ;; Guarded to .org files under the roam directory — anything else is a silent
 ;; no-op, so a stray hook fire or hand call can't inject a foreign record.
 (define (org-roam-db-sync-file path)
@@ -380,13 +467,19 @@
              (string? path)
              (ends-with? path ".org")
              (org-roam--under-vault? path))
-    (set! *org-roam-files*
-          (filter (lambda (r) (not (equal? (org-roam--record-file r) path)))
-                  *org-roam-files*))
-    (when (file-exists? path)
-      (set! *org-roam-files* (cons (org-roam--scan-file path) *org-roam-files*)))
-    (org-roam--rebuild-indexes)
-    (org-roam--save-cache-quiet)))
+    (let ((old (let hit ((rs *org-roam-files*))
+                 (cond ((null? rs) #f)
+                       ((equal? (org-roam--record-file (car rs)) path) (car rs))
+                       (else (hit (cdr rs)))))))
+      (set! *org-roam-files*
+            (filter (lambda (r) (not (equal? (org-roam--record-file r) path)))
+                    *org-roam-files*))
+      (when old (org-roam--unindex-record old))
+      (when (file-exists? path)
+        (let ((rec (org-roam--scan-file path)))
+          (set! *org-roam-files* (cons rec *org-roam-files*))
+          (org-roam--index-record rec)))
+      (org-roam--save-cache-quiet))))
 
 ;; after-save-hook: the common case — the user edits an open roam buffer and
 ;; saves. Registered at load; guarded so it is a no-op before the first sync
@@ -397,7 +490,13 @@
                (not (equal? f ""))
                (ends-with? f ".org")
                (org-roam--under-vault? f))
-      (org-roam-db-sync-file f))))
+      (org-roam-db-sync-file f)
+      ;; The .org write is OUR save — its fs events within the window are that
+      ;; save's echo, and the per-file sync above already indexed the content.
+      ;; (save-cache-quiet alone can't stamp it: a plain body edit leaves the
+      ;; cache bytes unchanged, so nothing is written and nothing is stamped —
+      ;; the .org event would then schedule a full rescan of the vault.)
+      (set! *org-roam-last-cache-write* (string->number (current-time "%s"))))))
 (add-hook "after-save-hook" "org-roam-on-save")
 
 (define (org-roam--ensure-index)
@@ -625,19 +724,24 @@
 ;; Sourced from the scan records' per-node link lists — no file re-reads, and
 ;; links inside a subtree are attributed to that subtree's node, not the file's.
 (define (org-roam--edges)
+  ;; cons + one reverse — appending inside the loop copies the whole
+  ;; accumulator per link (quadratic at vault scale).
   (let loop ((rs *org-roam-files*) (acc '()))
     (if (null? rs)
-        acc
+        (reverse acc)
         (let inner ((ls (org-roam--record-links (car rs))) (acc acc))
           (if (null? ls)
               (loop (cdr rs) acc)
               (inner (cdr ls)
-                     (append acc
-                       (filter (lambda (e)
-                                 (and (not (equal? (car e) (cdr e)))
-                                      (hash-try-get *org-roam-by-id* (cdr e))))
-                               (map (lambda (t) (cons (car (car ls)) t))
-                                    (cdr (car ls)))))))))))
+                     (let add ((ts (cdr (car ls))) (acc acc))
+                       (if (null? ts)
+                           acc
+                           (let ((t (car ts)))
+                             (add (cdr ts)
+                                  (if (or (equal? (car (car ls)) t)
+                                          (not (hash-try-get *org-roam-by-id* t)))
+                                      acc
+                                      (cons (cons (car (car ls)) t) acc))))))))))))
 
 ;; Make a title safe inside a DOT "label": quotes → apostrophes, backslashes and
 ;; newlines → spaces. (Sanitising avoids DOT's escaping rules entirely.)
@@ -838,9 +942,11 @@
 ;; Persistent index cache
 ;; ===========================================================================
 ;; TSV, one row per node: id <tab> title <tab> file <tab> tags <tab> line — plus
-;; a sixth column with that node's outbound link-ids (,-joined) on every row, and
-;; a seventh column with the file's ROAM_ALIASES on the file-level row (line 0),
-;; so graph edges and alias lookups work straight from cache.
+;; a sixth column with that node's outbound link-ids (,-joined) on every row, a
+;; seventh column with the file's ROAM_ALIASES and an eighth with its ROAM_REFS
+;; on the file-level row (line 0), and a ninth with the file's mtime on every
+;; row — so graph edges, alias/ref lookups and staleness detection all work
+;; straight from cache.
 ;;
 ;; The cache lives BESIDE the notes (per-vault, travels with it), so two things
 ;; need care: (1) writing it fires the vault's fs watch — `save-cache-quiet`
@@ -883,24 +989,29 @@
             (loop (byte-drop str (+ m (utf8-length whole)))
                   (cons lit (cons (byte-take str m) acc))))))))
 
-(define (org-roam--node-row n links als)
+(define (org-roam--node-row n links als refs mtime)
   ;; Escape ELEMENTS, not the joined field: the join commas must stay raw for
   ;; the load-side split, while a comma inside a tag/alias becomes \c.
   (let ((tags (string-join (map org-roam--tsv-escape (nth n 3)) ","))
         (lnks (string-join (map org-roam--tsv-escape (org-roam--node-links-of links (car n))) ","))
-        (als (string-join (map org-roam--tsv-escape als) ","))
-        (line (int->string (org-roam--node-line n))))
+        (line (int->string (org-roam--node-line n)))
+        (mt (int->string mtime)))
     (if (= (org-roam--node-line n) 0)
         (string-join (list (nth n 0) (org-roam--tsv-escape (nth n 1)) (org-roam--tsv-escape (nth n 2))
-                           tags line lnks als) "\t")
+                           tags line lnks
+                           (string-join (map org-roam--tsv-escape als) ",")
+                           (string-join (map org-roam--tsv-escape refs) ",")
+                           mt) "\t")
         (string-join (list (nth n 0) (org-roam--tsv-escape (nth n 1)) (org-roam--tsv-escape (nth n 2))
-                           tags line lnks) "\t"))))
+                           tags line lnks mt) "\t"))))
 (define (org-roam--cache-content)
   (join-lines
    (apply append
      (map (lambda (r)
-            (let ((als (org-roam--record-aliases r)))
-              (map (lambda (n) (org-roam--node-row n (org-roam--record-links r) als))
+            (let ((als (org-roam--record-aliases r))
+                  (refs (org-roam--record-refs r))
+                  (mt (org-roam--record-mtime r)))
+              (map (lambda (n) (org-roam--node-row n (org-roam--record-links r) als refs mt))
                    (org-roam--record-nodes r))))
           *org-roam-files*))))
 ;; Write the cache silently, but only when its content actually changed: the
@@ -924,17 +1035,21 @@
       (message (string-append "org-roam: loaded " (int->string (length *org-roam-nodes*)) " node(s) from cache"))
       (message "org-roam: no cache (run C-c n s)")))
 ;; Fold the TSV rows into per-file records; #t on success, #f when absent.
-;; Rows are written grouped by file, but group by path anyway so a hand-edited
-;; cache still loads.
+;; Rows are written grouped by file, and the loader exploits that: a row whose
+;; file matches the HEAD record merges in O(1) — no accumulator scan, no
+;; filter-rebuild (both were quadratic at vault scale). A `seen` hash catches
+;; hand-edited caches where a file's rows appear again later; those take the
+;; old linear-merge path.
 (define (org-roam--load-cache)
   (let ((f (org-roam--cache-file)))
     (if (not (file-exists? f))
         #f
         (let loop ((rows (remove-equal "" (split-many (read-file f) "\n")))
-                   (acc '()))
+                   (acc '())
+                   (seen (hash)))
           (if (null? rows)
               (begin
-                (set! *org-roam-files* (reverse acc))
+                (set! *org-roam-files* (org-roam--reconcile-cache acc))
                 (org-roam--rebuild-indexes)
                 (org-roam--register-watch)
                 (set! *org-roam-synced* #t)
@@ -946,11 +1061,15 @@
                      ;; ((= line 0) on #f) and abort the whole load.
                      (line (if (< (length parts) 5) #f (string->number (nth parts 4)))))
                 (if (not line)
-                    (loop (cdr rows) acc)
-                    (let* ((file (nth parts 2))
+                    (loop (cdr rows) acc seen)
+                    ;; The FILE path is the record key — it must be unescaped
+                    ;; BEFORE any comparison, or a file like `foo, bar.org`
+                    ;; loads under its escaped form and per-file syncs then
+                    ;; add a second record for the real path.
+                    (let* ((file (org-roam--tsv-unescape (nth parts 2)))
                            (node (list (nth parts 0)
                                        (org-roam--tsv-unescape (nth parts 1))
-                                       (org-roam--tsv-unescape file)
+                                       file
                                        (map org-roam--tsv-unescape
                                             (remove-equal "" (split-many (nth parts 3) ",")))
                                        line))
@@ -962,29 +1081,93 @@
                                     (map org-roam--tsv-unescape
                                          (remove-equal "" (split-many (nth parts 6) ",")))
                                     '()))
+                           (refs (if (> (length parts) 7)
+                                     (map org-roam--tsv-unescape
+                                          (remove-equal "" (split-many (nth parts 7) ",")))
+                                     '()))
+                           (mtime (if (> (length parts) 8)
+                                      (or (string->number (nth parts 8)) 0)
+                                      0))
                            (links (if (null? ids)
                                       '()
-                                      (list (cons (nth parts 0) ids))))
-                           (rec (let hit ((rs acc))
-                                  (cond ((null? rs) #f)
-                                        ((equal? (org-roam--record-file (car rs)) file) (car rs))
-                                        (else (hit (cdr rs)))))))
-                      (if rec
-                          ;; Merge the row into the existing record for this
-                          ;; file. Rows arrive in ascending line order, so
-                          ;; APPEND keeps the node order a fresh scan would
-                          ;; produce — first-seen-wins in the by-title/by-id
-                          ;; indexes then matches a rescan.
-                          (let ((merged (list file
-                                              (append (org-roam--record-nodes rec) (list node))
-                                              (if (null? (org-roam--record-aliases rec)) als (org-roam--record-aliases rec))
-                                              (org-roam--record-refs rec)
-                                              (append links (org-roam--record-links rec)))))
-                            (loop (cdr rows)
-                                  (cons merged
-                                        (filter (lambda (r) (not (equal? (org-roam--record-file r) file)))
-                                                acc))))
-                          (loop (cdr rows) (cons (list file (list node) als '() links) acc)))))))))))
+                                      (list (cons (nth parts 0) ids)))))
+                      (cond
+                       ;; Fast path: rows arrive grouped by file, so a match
+                       ;; against the head record covers every row the writer
+                       ;; produced. Aliases/refs ride the file-level row (line
+                       ;; 0) — i.e. the group's FIRST row, which created this
+                       ;; record.
+                       ((and (pair? acc)
+                             (equal? (org-roam--record-file (car acc)) file))
+                        (let ((head (car acc)))
+                          (loop (cdr rows)
+                                (cons (list file
+                                            ;; Rows arrive in ascending line
+                                            ;; order, so APPEND keeps the node
+                                            ;; order a fresh scan would
+                                            ;; produce — first-seen-wins in
+                                            ;; the indexes then matches a
+                                            ;; rescan.
+                                            (append (org-roam--record-nodes head) (list node))
+                                            (if (null? (org-roam--record-aliases head)) als (org-roam--record-aliases head))
+                                            (if (null? (org-roam--record-refs head)) refs (org-roam--record-refs head))
+                                            (append links (org-roam--record-links head))
+                                            (org-roam--record-mtime head))
+                                      (cdr acc))
+                                seen)))
+                       ;; Hand-edited cache: this file's rows continue (or
+                       ;; resume) after other files intervened — linear merge.
+                       ((hash-contains? seen file)
+                        (let hit ((rs acc))
+                          (if (null? rs)
+                              (loop (cdr rows) acc seen)
+                              (if (equal? (org-roam--record-file (car rs)) file)
+                                  ;; Merge the row into the existing record.
+                                  (let ((merged (list file
+                                                      (append (org-roam--record-nodes (car rs)) (list node))
+                                                      (if (null? (org-roam--record-aliases (car rs))) als (org-roam--record-aliases (car rs)))
+                                                      (if (null? (org-roam--record-refs (car rs))) refs (org-roam--record-refs (car rs)))
+                                                      (append links (org-roam--record-links (car rs)))
+                                                      (org-roam--record-mtime (car rs)))))
+                                    (loop (cdr rows)
+                                          (cons merged
+                                                (filter (lambda (r) (not (equal? (org-roam--record-file r) file)))
+                                                        acc))
+                                          seen))
+                                  (hit (cdr rs))))))
+                       (else
+                        (loop (cdr rows)
+                              (cons (list file (list node) als refs links mtime) acc)
+                              (hash-insert seen file #t))))))))))))
+
+;; Bring the records a cache load produced back in line with the disk — what
+;; makes a cold start honest:
+;;   deleted — records whose file no longer exists are dropped;
+;;   changed — records whose stored mtime differs from the file's current
+;;             mtime are re-scanned (a row with no readable mtime — an older
+;;             cache format — is treated as changed);
+;;   added   — .org files on disk that the cache never heard of are scanned.
+;; Only the differing files are read; unchanged ones keep their cached records.
+(define (org-roam--reconcile-cache acc)
+  (let ((keep (let scan ((rs acc) (out '()))
+                (if (null? rs)
+                    out
+                    (let* ((r (car rs))
+                           (f (org-roam--record-file r)))
+                      (cond ((not (file-exists? f)) (scan (cdr rs) out))
+                            ((not (= (org-roam--record-mtime r) (file-mtime f)))
+                             (scan (cdr rs) (cons (org-roam--scan-file f) out)))
+                            (else (scan (cdr rs) (cons r out)))))))))
+    (let ((known (let tab ((rs keep) (h (hash)))
+                   (if (null? rs) h (tab (cdr rs) (hash-insert h (org-roam--record-file (car rs)) #t))))))
+      (let loop ((fs (walk-files (org-roam-directory))) (out keep))
+        (if (null? fs)
+            out
+            (loop (cdr fs)
+                  (if (and (ends-with? (car fs) ".org")
+                           (not (hash-contains? known (car fs))))
+                      (cons (org-roam--scan-file (car fs)) out)
+                      out)))))))
 
 ;; ===========================================================================
 ;; Templated node creation
@@ -1005,7 +1188,13 @@
     (call-process "mkdir" (list "-p" (parent-directory file)))
     (write-file file body)
     (if (ends-with? file ".org")
-        (org-roam-db-sync-file file)
+        (begin
+          (org-roam-db-sync-file file)
+          ;; A template body without an :ID: yields a scan record with no
+          ;; nodes, so the per-file sync indexes nothing — keep the in-memory
+          ;; node the old path inserted so the capture is still reachable.
+          (when (not (org-roam--node-by-id id))
+            (org-roam--index-insert node)))
         (org-roam--index-insert node))
     node))
 

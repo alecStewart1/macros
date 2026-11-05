@@ -15882,12 +15882,12 @@ mod org_roam_scaling_lib {
         std::fs::create_dir_all(dir.join("daily")).unwrap();
         std::fs::write(
             dir.join("a.org"),
-            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n\nlink [[id:id-b][B]] and [[id:id-sub][S]].\n",
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n:ROAM_REFS: \"https://example.com/a\"\n\nlink [[id:id-b][B]] and [[id:id-sub][S]].\n",
         )
         .unwrap();
         std::fs::write(
             dir.join("b.org"),
-            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:END:\nback [[id:id-a][A]].\n",
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:END:\nback [[id:id-a][A]].\n\n* Other\nno id here, link [[id:id-a][A]].\n",
         )
         .unwrap();
 
@@ -15921,7 +15921,9 @@ mod org_roam_scaling_lib {
             // insertion for a node used to keep only (car ids).
             r#"(("id-a" "id-b" "id-sub"))"#
         );
-        // The link under b.org's *Sub heading belongs to the subtree node.
+        // The link under b.org's *Sub heading belongs to the subtree node;
+        // the link under * Other — a SIBLING heading with no :ID: — belongs
+        // to the FILE node (org-roam climbs ancestors; a sibling isn't one).
         assert_eq!(
             v(&format!(
                 r#"(org-roam--record-links
@@ -15929,8 +15931,10 @@ mod org_roam_scaling_lib {
                                 *org-roam-files*)))"#,
                 dir.join("b.org").display()
             )),
-            r#"(("id-sub" "id-a"))"#
+            r#"(("id-sub" "id-a") ("id-b" "id-a"))"#
         );
+        // ROAM_REFS land in the ref index at scan time.
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
 
         // Task 2: all four hash indexes are populated.
         assert_eq!(v(r#"(hash-contains? *org-roam-by-id* "id-a")"#), "#true");
@@ -15962,8 +15966,20 @@ mod org_roam_scaling_lib {
             v(r#"(sort-strings
                  (map (lambda (e) (string-append (car e) "->" (cdr e)))
                       (org-roam--edges)))"#),
-            r#"("id-a->id-b" "id-a->id-sub" "id-sub->id-a")"#
+            r#"("id-a->id-b" "id-a->id-sub" "id-b->id-a" "id-sub->id-a")"#
         );
+
+        // set-directory must re-arm the watch: the old vault's registration
+        // pointed at the previous directory (WatchTree is replace-per-owner,
+        // so the next sync re-registers against the new one).
+        engine
+            .eval(r#"(org-roam-set-directory "/nonexistent-vault-xyz")"#)
+            .unwrap();
+        assert_eq!(v("*org-roam-watching*"), "#false");
+        engine
+            .eval(&format!(r#"(org-roam-set-directory "{}")"#, dir.display()))
+            .unwrap();
+        engine.eval("(org-roam--sync)").unwrap();
 
         // Task 4: the sync saved the cache beside the notes; a fresh engine
         // loads it back with indexes populated (no rescan).
@@ -15988,12 +16004,14 @@ mod org_roam_scaling_lib {
             v2(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
             "#true"
         );
+        // ROAM_REFS survive the cache round-trip.
+        assert_eq!(v2("(length *org-roam-refs*)"), "1");
         // Per-node edges survive the cache round-trip (subtree link column).
         assert_eq!(
             v2(r#"(sort-strings
                   (map (lambda (e) (string-append (car e) "->" (cdr e)))
                        (org-roam--edges)))"#),
-            r#"("id-a->id-b" "id-a->id-sub" "id-sub->id-a")"#
+            r#"("id-a->id-b" "id-a->id-sub" "id-b->id-a" "id-sub->id-a")"#
         );
 
         // Task 3: per-file sync replaces one record in place (title edit + save).
@@ -16121,10 +16139,12 @@ mod org_roam_scaling_lib {
         // record) survives, since id-b is still indexed.
         assert_eq!(v("(org-roam--edges)"), r#"(("id-a" . "id-b"))"#);
 
-        // Now drop the link from a.org; its per-file sync removes the edge.
+        // Now drop the link AND the alias from a.org; its per-file sync (the
+        // incremental index-update path) removes both the edge and the
+        // alias's by-alias entry.
         std::fs::write(
             dir.join("a.org"),
-            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n\nno links anymore.\n",
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_REFS: \"https://example.com/a\"\n\nno links anymore.\n",
         )
         .unwrap();
         engine
@@ -16134,6 +16154,11 @@ mod org_roam_scaling_lib {
             ))
             .unwrap();
         assert_eq!(v("(org-roam--edges)"), "()");
+        assert_eq!(
+            v(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
+            "#false"
+        );
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
 
         // After-save hook: saving an in-vault buffer re-indexes its file
         // (title B3); the file is read from the snapshot's path, as the live
@@ -16152,6 +16177,10 @@ mod org_roam_scaling_lib {
             v(r#"(if (org-roam--node-by-title "Node B3") "y" "n")"#),
             "\"y\""
         );
+        // The save stamps its own fs echo even when the cache bytes don't
+        // change (plain body edit): without the stamp the .org write's fs
+        // event would schedule a full vault rescan.
+        assert!(v("*org-roam-last-cache-write*") != "0");
 
         // create-node routes through the per-file sync (the record — and thus
         // the cache — picks the node up immediately), and TSV fields escape
@@ -16177,6 +16206,33 @@ mod org_roam_scaling_lib {
                 dir.join("d.org").display()
             ))
             .unwrap();
+
+        // A comma in the FILENAME is escaped in the cache; the record key must
+        // load back UNESCAPED or per-file syncs of the real path add a second
+        // record and duplicate the node.
+        let comma = dir.join("foo, bar.org");
+        std::fs::write(
+            &comma,
+            ":PROPERTIES:\n:ID:       id-comma\n:END:\n#+title: Comma\n\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(r#"(org-roam-db-sync-file "{}")"#, comma.display()))
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-id "id-comma") "y" "n")"#),
+            "\"y\""
+        );
+
+        // A capture whose template body has NO :ID: stays reachable: the scan
+        // finds no node, so the in-memory node must be inserted by hand.
+        engine
+            .eval(r##"(org-roam--create-node-templated "Node T" (list "t" "T" "${slug}.org" "#+title: ${title}\n\nbody without an id.\n"))"##)
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-title "Node T") "y" "n")"#),
+            "\"y\""
+        );
         let (engine3, _rx3) = ScriptEngine::new();
         engine3
             .eval(include_str!("../../scheme/core.scm"))
@@ -16206,15 +16262,47 @@ mod org_roam_scaling_lib {
             v3(r#"(if (org-roam--node-by-title "Node C, part\tB") "y" "n")"#),
             "\"y\""
         );
+        // The comma-filename loads back under its REAL path: exactly one
+        // record keyed by it, the node's file field unescaped, by-file hit.
+        assert_eq!(
+            v3(&format!(
+                r#"(length (filter (lambda (r) (equal? (org-roam--record-file r) "{}"))
+                              *org-roam-files*))"#,
+                comma.display()
+            )),
+            "1"
+        );
+        assert_eq!(
+            v3(&format!(
+                r#"(if (equal? (nth (org-roam--node-by-id "id-comma") 2) "{}") "y" "n")"#,
+                comma.display()
+            )),
+            "\"y\""
+        );
+        assert_eq!(
+            v3(&format!(
+                r#"(if (org-roam--node-by-file "{}") "y" "n")"#,
+                comma.display()
+            )),
+            "\"y\""
+        );
 
-        // A corrupted cache row (non-numeric line column) is dropped instead of
-        // aborting the load: overwrite the cache with one good row and one bad.
+        // Cache reconciliation at load: overwrite the cache with hand-built
+        // rows — one STALE (mtime 0, title no longer on disk → rescan picks
+        // up the disk title), one with a non-numeric line column (dropped),
+        // one whose file no longer exists (record dropped).
+        std::fs::write(
+            dir.join("x.org"),
+            ":PROPERTIES:\n:ID:       id-x\n:END:\n#+title: Disk X\n\n",
+        )
+        .unwrap();
         std::fs::write(
             &cache_file,
             format!(
-                "id-x\tX\t{}\t\t0\nid-bad\tBad\t{}\t\tnotanumber\n",
+                "id-x\tOld X\t{}\t\t0\t\t0\nid-bad\tBad\t{}\t\tnotanumber\t0\nid-gone\tGone\t{}\t\t0\t\t0\n",
                 dir.join("x.org").display(),
-                dir.join("bad.org").display()
+                dir.join("bad.org").display(),
+                dir.join("gone.org").display()
             ),
         )
         .unwrap();
@@ -16233,10 +16321,21 @@ mod org_roam_scaling_lib {
             .unwrap();
         let v4 = |q: &str| engine4.eval(q).unwrap().value.unwrap();
         assert_eq!(v4("(org-roam--load-cache)"), "#true");
-        assert_eq!(v4("(length *org-roam-nodes*)"), "1");
-        assert_eq!(v4(r#"(if (org-roam--node-by-id "id-x") "y" "n")"#), "\"y\"");
+        // The stale row was rescanned: the DISK title wins, "Old X" is gone.
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-title "Disk X") "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-title "Old X") "y" "n")"#),
+            "\"n\""
+        );
         assert_eq!(
             v4(r#"(if (org-roam--node-by-id "id-bad") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-id "id-gone") "y" "n")"#),
             "\"n\""
         );
 
