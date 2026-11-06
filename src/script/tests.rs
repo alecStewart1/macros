@@ -4124,6 +4124,66 @@ mod magit_tests {
         assert_eq!(finds("font orange", "font-size"), "#false");
     }
 
+    /// describe-function / describe-variable scopes: `function-list` is every
+    /// top-level define (functions AND `*star*` variables AND options), so the
+    /// function picker filters to non-variable, non-option names while the
+    /// variable picker keeps star-globals and options.
+    #[test]
+    fn help_pick_scope_functions_exclude_variables_and_options() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("startup script failed to load");
+        }
+        let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
+
+        // Precondition: the doc index mixes functions and `*star*` variables
+        // (options are NOT in the index — they only join via `option-list`).
+        assert_eq!(
+            v(r#"(if (member "*recentf*" (function-list)) #t #f)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(if (member "sort-strings" (function-list)) #t #f)"#),
+            "#true"
+        );
+
+        // The function picker: no star-variables, no options, but real fns stay.
+        assert_eq!(
+            v(r#"(if (member "*recentf*" (function-candidates)) #t #f)"#),
+            "#false"
+        );
+        assert_eq!(
+            v(r#"(if (member "font-size" (function-candidates)) #t #f)"#),
+            "#false"
+        );
+        assert_eq!(
+            v(r#"(if (member "sort-strings" (function-candidates)) #t #f)"#),
+            "#true"
+        );
+
+        // The variable picker: star-globals and options in, functions out.
+        assert_eq!(
+            v(r#"(if (member "*recentf*" (variable-list)) #t #f)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(if (member "font-size" (variable-list)) #t #f)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(if (member "sort-strings" (variable-list)) #t #f)"#),
+            "#false"
+        );
+
+        // Belt and braces: the two scopes are disjoint.
+        assert_eq!(
+            v(
+                r#"(if (null? (filter (lambda (n) (member n (variable-list))) (function-candidates))) #t #f)"#
+            ),
+            "#true"
+        );
+    }
+
     #[test]
     fn package_url_and_option_parsing() {
         let (engine, _rx) = ScriptEngine::new();
@@ -4985,6 +5045,132 @@ mod magit_tests {
         // `* Foo` at column 0 is a heading; an indented `*` is a bullet.
         assert_eq!(v(r#"(if (org--list-line-prefix "* Foo") 1 0)"#), "0");
         assert_eq!(v(r#"(if (org--list-line-prefix "  * item") 1 0)"#), "1");
+    }
+
+    /// C-c C-n / C-c C-p visibility: the hidden-interval derivation mirrors what
+    /// TAB actually folds (subtree state and drawers), so heading navigation
+    /// skips exactly the headlines that are not on screen.
+    #[test]
+    fn org_visible_heading_navigation_skips_folded() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        for src in crate::runtime::script_with_deps("org") {
+            engine.eval(src).expect("org.scm and its deps");
+        }
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // The Emacs chords are on the org-mode keymap.
+        assert_eq!(
+            v(r#"(key-binding "org-mode" "ctrl-c ctrl-n")"#),
+            "\"org-next-visible-heading\""
+        );
+        assert_eq!(
+            v(r#"(key-binding "org-mode" "ctrl-c ctrl-p")"#),
+            "\"org-previous-visible-heading\""
+        );
+        assert_eq!(v(r#"(key-binding "fundamental" "ctrl-_")"#), "\"undo\"");
+
+        // Buffer: h1(0) … h2(2) … h3(4) … — line indices 0-based.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("* one\nbody\n** two\ninner\n*** three\ntail\n"),
+            ..Default::default()
+        });
+        // Nothing folded: every heading visible, all intervals empty.
+        assert_eq!(v(r#"(org--hidden-intervals)"#), "()");
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 4)"#),
+            "#false"
+        );
+
+        // Fold the level-1 subtree (line 0): its body (lines 1-6) is hidden, so
+        // the child headlines at 2 and 4 are invisible.
+        engine
+            .eval(r#"(org--fold-state-set (list (cons 0 'folded)))"#)
+            .unwrap();
+        assert_eq!(v(r#"(org--hidden-intervals)"#), "((1 . 6))");
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 2)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 4)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 0)"#),
+            "#false"
+        );
+
+        // `children` on the same heading hides only the grandchildren bodies —
+        // the direct child's headline line (2) stays visible, its body and the
+        // level-3 headline do not.
+        engine
+            .eval(r#"(org--fold-state-set (list (cons 0 'children) (cons 2 'subtree)))"#)
+            .unwrap();
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 2)"#),
+            "#false"
+        );
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 3)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 4)"#),
+            "#true"
+        );
+
+        // A folded drawer hides its body and :END:, but not the opener.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("* h\n:PROPERTIES:\n:x: 1\n:END:\ntail\n"),
+            ..Default::default()
+        });
+        engine
+            .eval(r#"(org--fold-state-set (list (cons 1 'folded)))"#)
+            .unwrap();
+        assert_eq!(v(r#"(org--hidden-intervals)"#), "((2 . 3))");
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 1)"#),
+            "#false"
+        );
+        assert_eq!(
+            v(r#"(org--line-hidden? (org--hidden-intervals) 4)"#),
+            "#false"
+        );
+
+        // The COMMANDS run end to end: with the level-1 subtree folded, C-c C-n
+        // from the top skips the folded children to the next top-level heading —
+        // and lands on a heading by queueing GotoLine (0-based). Note
+        // `(buffer-line)` reads the snapshot's `line` field, not point.
+        let set = |line: usize| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str("* one\nbody\n** two\ninner\n*** three\ntail\n* four\n"),
+                line,
+                ..Default::default()
+            });
+        };
+        set(0);
+        engine
+            .eval(r#"(org--fold-state-set (list (cons 0 'folded)))"#)
+            .unwrap();
+        let cmds = engine.eval("(org-next-visible-heading)").unwrap().commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoLine(6))),
+            "C-c C-n from an overview should skip folded children to line 6: {cmds:?}"
+        );
+        // From that heading, C-c C-p walks back to the top-level heading — the
+        // folded children at 2/4 are invisible.
+        set(6);
+        let cmds = engine
+            .eval("(org-previous-visible-heading)")
+            .unwrap()
+            .commands;
+        assert!(
+            cmds.iter().any(|c| matches!(c, EditorCommand::GotoLine(0))),
+            "C-c C-p from below should return to line 0: {cmds:?}"
+        );
     }
 
     /// org-roam.scm loads on top of core + org and its new pure helpers behave.
