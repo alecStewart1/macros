@@ -1,4 +1,4 @@
-;; requires: core folding
+;; requires: core folding defoption
 
 ;; markdown-mode — major mode for Markdown, the Macros analogue of markdown-mode.el.
 ;; Tree-sitter (tree-sitter-md) already fontifies once the mode is set, so this
@@ -46,11 +46,15 @@
 ;; Hide the leading `#` markers (and the following space) on heading lines —
 ;; display-only, and revealed while point is on the line. Set `#f` in init.scm
 ;; to keep the markers visible.
-(define *markdown-hide-heading-markers* #t)
+(defoption *markdown-hide-heading-markers* #t
+  "Hide heading `#` markers (display-only; revealed while point is on the line)."
+  :type 'boolean)
 
 ;; Render heading lines in a larger font, tapering by level (the multipliers are
 ;; in `md--heading-scale`). Set `#f` in init.scm to keep headings at body size.
-(define *markdown-scale-headings* #t)
+(defoption *markdown-scale-headings* #t
+  "Render heading lines in a larger font, tapering by level (see `md--heading-scale`)."
+  :type 'boolean)
 
 (define (md--active?)
   ;; The visited file's path (the buffer name of a uniquified buffer is
@@ -92,7 +96,9 @@
 ;; line threshold we skip it — the Emacs `so-long` move. tree-sitter still colors
 ;; the visible region; only the heading hide/scale and fold chevrons are dropped.
 ;; Mirrors folding.scm's *fold-auto-limit*.
-(define *markdown-fontify-line-limit* 20000)
+(defoption *markdown-fontify-line-limit* 20000
+  "Line count past which markdown skips whole-buffer fontification (the `so-long` move); mirrors *fold-auto-limit*."
+  :type 'integer)
 (define (md--fontify-ok?)
   (and (md--active?) (<= (line-count) *markdown-fontify-line-limit*)))
 

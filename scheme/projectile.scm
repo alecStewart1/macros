@@ -1,4 +1,4 @@
-;; requires: core lib-results persistence
+;; requires: core lib-results persistence defoption
 
 ;; Projectile — project-aware navigation, the projectile.el pattern. The root
 ;; resolver (`project-root`, walk-up-to-marker) lives in core.scm (Emacs's
@@ -127,7 +127,10 @@
 ;; which is session-only. Reuses persistence.scm's config dir (required above)
 ;; and core.scm's mru-push.
 (define *projectile-recent* '())
-(define *projectile-recent-max* 20)
+;; Recently-opened project roots kept in the ring.
+(defoption *projectile-recent-max* 20
+  "Recently-opened project roots kept in the ring."
+  :type 'integer)
 (define (projectile-recent-file) (string-append (persistence-dir) "/projects"))
 
 ;; Promote `root` to the front of the ring; persist immediately if it changed,

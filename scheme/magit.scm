@@ -1,4 +1,4 @@
-;; requires: core lib-async lib-section lib-transient
+;; requires: core lib-async lib-section lib-transient defoption
 
 ;; Magit — a git porcelain, built entirely in Scheme on the special-buffer and
 ;; transient primitives (the Rust side knows nothing about git):
@@ -69,8 +69,14 @@
 
 ;; History depth caps: how many commits the log views fetch, and how many the
 ;; unpushed/unpulled sections walk before cutting off.
-(define *magit-log-limit* 200)
-(define *magit-unpushed-limit* 256)
+;; How many commits the log views fetch.
+(defoption *magit-log-limit* 200
+  "How many commits the log views fetch."
+  :type 'integer)
+;; How many commits the unpushed/unpulled sections walk before cutting off.
+(defoption *magit-unpushed-limit* 256
+  "How many commits the unpushed/unpulled sections walk before cutting off."
+  :type 'integer)
 
 ;; The repo root magit is operating on. Resolved from the buffer you launch from
 ;; (NOT the process cwd) — like Emacs's `magit-toplevel` over `default-directory`.
@@ -323,7 +329,10 @@
 ;; "Unstaged changes", "Staged changes"), so `s`/`u` on a header act on the
 ;; whole section (stage/unstage every file in it), like magit.
 (define *magit-headings* '())
-(define *magit-show-history* #t)  ; stashes/unpushed/unpulled — cheap via gix (no subprocess), so shown by default
+;; Show the stashes/unpushed/unpulled sections (cheap via gix, no subprocess).
+(defoption *magit-show-history* #t
+  "Show the stashes/unpushed/unpulled sections (cheap via gix, no subprocess), so on by default."
+  :type 'boolean)
 ;; When set, `magit-render` updates the buffer in place without stealing focus
 ;; (a background refresh, e.g. from `after-save-hook`). It also skips the sub-line
 ;; accent overlays, which target the *active* buffer — see magit-maybe-refresh.
@@ -536,7 +545,10 @@
 ;; with `v`. Live state is a plain global (like *magit-show-history*) so a toggle
 ;; takes effect on the very next render; set it in init.scm to change the default:
 ;;   (set! *magit-diff-view* "structural")
-(define *magit-diff-view* "line")  ; "line" | "structural"
+;; Which shape `magit-render` draws diffs in: \"line\" (hunks) | \"structural\" (per-function).
+(defoption *magit-diff-view* "line"
+  "Which shape diffs render in: \"line\" (hunks) or \"structural\" (per-function)."
+  :type 'any)
 (define (magit-structural?) (equal? *magit-diff-view* "structural"))
 
 ;; The funcname context of a hunk: everything after the second "@@" on its
@@ -1878,7 +1890,10 @@
 ;; seconds, so no calendar arithmetic is needed.
 (define (magit-blame-age-seconds epoch)
   (- (or (string->number (current-time "%s")) 0) epoch))
-(define *magit-blame-day* 86400)
+;; Seconds in a blame \"day\" (86400 = one calendar day).
+(defoption *magit-blame-day* 86400
+  "Seconds in a blame \"day\" (86400 = one calendar day)."
+  :type 'integer)
 (define (magit-blame-humanize epoch)
   (let ((age (magit-blame-age-seconds epoch)) (day *magit-blame-day*))
     (cond ((< age 0) "in the future")

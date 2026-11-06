@@ -1,4 +1,4 @@
-;; requires: core
+;; requires: core defoption
 
 ;; rainbow-delimiters: color nested brackets by their nesting depth, using the
 ;; live tree-sitter parse tree (the `tree-sitter-query` bridge). Because we ask
@@ -19,11 +19,20 @@
 ;; Interactively: `M-x rainbow-delimiters` toggles, `M-x rainbow-refresh` repaints.
 
 ;; --- configuration (mutable; change via the setters below) ------------------
-(define *rainbow-colors*
-  (list "#e6194b" "#f58231" "#ffe119" "#3cb44b" "#4363d8" "#911eb4" "#f032e6"))
+;; Colors cycled by nesting depth — a palette of any length.
+(defoption *rainbow-colors*
+  '("#e6194b" "#f58231" "#ffe119" "#3cb44b" "#4363d8" "#911eb4" "#f032e6")
+  "Colors cycled by nesting depth, a palette of any length."
+  :type 'any)
 (define *rainbow-count* (length *rainbow-colors*))
-(define *rainbow-enabled* #f)       ; off by default
-(define *rainbow-delay* 250)        ; debounce (ms) for live refresh
+;; Whether rainbow-delimiters coloring is on (off by default).
+(defoption *rainbow-enabled* #f
+  "Whether rainbow-delimiters coloring is on; off by default."
+  :type 'boolean)
+;; Debounce, in milliseconds, for live refresh while typing.
+(defoption *rainbow-delay* 250
+  "Debounce, in milliseconds, for live refresh while typing."
+  :type 'integer)
 
 ;; Register the palette as theme faces "rainbow-1".."rainbow-N" so
 ;; `overlay-set-face` can name them.
@@ -103,8 +112,11 @@
 ;;     bracket-heavy code (Lisp, C, JS, …), so skip prose too.
 ;; The check is by name so it holds synchronously at find-file time, before a
 ;; mode's buffer-local state is set. Edit via the setters below.
-(define *rainbow-skip-extensions*
-  (list ".org" ".md" ".markdown" ".mdown" ".mkd" ".mkdn" ".txt"))
+;; File extensions where rainbow-delimiters is suppressed, matched by name.
+(defoption *rainbow-skip-extensions*
+  '(".org" ".md" ".markdown" ".mdown" ".mkd" ".mkdn" ".txt")
+  "File extensions where rainbow-delimiters is suppressed (prose formats etc.)."
+  :type 'any)
 (define (rainbow--skip?)
   ;; The visited path, not the (possibly uniquified `x.md<dir>`) buffer name;
   ;; fall back to the name for fileless buffers.

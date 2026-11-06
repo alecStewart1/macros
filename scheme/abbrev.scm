@@ -1,4 +1,4 @@
-;; requires: core completion hooks modeline minor-mode
+;; requires: core completion hooks modeline minor-mode defoption
 
 ;; abbrev — Emacs-style abbreviations, the Macros port of `abbrev`.
 ;; See web/content/docs/abbrev.md for the user-facing docs (including the
@@ -624,7 +624,10 @@
 ;;     when the default changes keep their state (call it from init.scm).
 
 (define *abbrev-capf-registered* #f)
-(define *abbrev-capf-min-prefix* 2)  ; decline prefixes shorter than this
+;; Decline completion for prefixes shorter than this.
+(defoption *abbrev-capf-min-prefix* 2
+  "Decline completion for prefixes shorter than this."
+  :type 'integer)
 (define (set-abbrev-capf-min-prefix n) (set! *abbrev-capf-min-prefix* n))
 
 ;; Reads the PRE-command snapshot (see the caveat in minor-mode.scm).
@@ -703,7 +706,10 @@
 ;; (key-binding), so a user's own escape binding is never overwritten — when
 ;; nothing was bound, the plain state-exit command goes back.
 
-(define *abbrev-expand-on-insert-exit* #f)
+;; Leaving insert mode (escape) expands the abbrev before point, silently.
+(defoption *abbrev-expand-on-insert-exit* #f
+  "Leaving insert mode (escape) expands the abbrev before point, silently."
+  :type 'boolean)
 ;; ((mode . command) …) — the escape bindings captured on enable.
 (define *abbrev--saved-escape* '())
 
@@ -781,7 +787,10 @@
 ;; abbrev; keep those definitions in init.scm.
 
 (define *abbrev-file-name* "")   ; default set at the bottom of this section
-(define *save-abbrevs* 'silent)  ; 'silent — auto-save on exit, no messages
+;; When to write the abbrev file: 'silent — auto-save on exit, no messages.
+(defoption *save-abbrevs* 'silent
+  "When to write the abbrev file: 'silent — auto-save on exit, no messages."
+  :type 'any)
 
 ;; Scheme string literal escaping for the serialized forms: backslash and
 ;; quote, then ANY control char (<32 — \n, \t, \r, …) uniformly as a \u{hex};

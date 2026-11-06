@@ -1,4 +1,4 @@
-;; requires: core lib-async
+;; requires: core lib-async defoption
 
 ;; shell-command.scm — Emacs's one-shot shell commands:
 ;;
@@ -15,8 +15,14 @@
 ;; command reports its exit status; a command ending in `&` given to M-! runs
 ;; asynchronously, as in Emacs.
 
-(define *shell-command-output-buffer* "*Shell Command Output*")
-(define *async-shell-command-buffer* "*Async Shell Command*")
+;; Buffer for shell-command output longer than the echo area.
+(defoption *shell-command-output-buffer* "*Shell Command Output*"
+  "Buffer for shell-command output longer than the echo area."
+  :type 'string)
+;; Buffer an async (M-&) command's output streams into.
+(defoption *async-shell-command-buffer* "*Async Shell Command*"
+  "Buffer an async (M-&) command's output streams into."
+  :type 'string)
 
 ;; Show `name` (rendered from `text`) in a window below the current one,
 ;; leaving focus where it was; a window already showing it is refreshed in place.

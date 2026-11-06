@@ -1,4 +1,4 @@
-;; requires: core fundamental
+;; requires: core fundamental defoption
 
 ;; Helm — a generic selection framework (the behaviour is in Rust; sources,
 ;; actions, and applications are written in Scheme). These keys are active only
@@ -96,7 +96,10 @@
 ;; the path it visits ((current-buffer) is only the uniquified basename). Keep
 ;; real files (skip *scratch*, *magit*, …).
 (define *recentf* '())
-(define *recentf-max* 50)
+;; Recently-visited files kept in the ring.
+(defoption *recentf-max* 50
+  "Recently-visited files kept in the ring."
+  :type 'integer)
 (define (recentf-track)
   (let ((f (buffer-file-name)))
     (when (and (not (equal? f "")) (file-exists? f))

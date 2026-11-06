@@ -1,4 +1,4 @@
-;; requires: core
+;; requires: core defoption
 
 ;; org-roam.scm — a Zettelkasten over your .org files, in the org-roam style,
 ;; built entirely in Scheme on the editor primitives. No SQLite: the node index
@@ -29,17 +29,24 @@
 (define *org-roam-aliases* '())
 (define *org-roam-refs* '())
 ;; Sub-directory (under the roam dir) holding daily notes.
-(define *org-roam-dailies-directory* "daily")
+(defoption *org-roam-dailies-directory* "daily"
+  "Sub-directory (under the roam dir) holding daily notes."
+  :type 'string)
 ;; Capture templates: (KEY DESC FILENAME-TEMPLATE BODY-TEMPLATE). Templates may
 ;; use ${title} ${slug} ${id} ${date} ${time}. Empty ⇒ the simple title prompt.
-(define *org-roam-capture-templates* '())
+(defoption *org-roam-capture-templates* '()
+  "Capture templates: (KEY DESC FILENAME-TEMPLATE BODY-TEMPLATE), expanding
+${title} ${slug} ${id} ${date} ${time}. Empty ⇒ the simple title prompt."
+  :type 'any)
 
 ;; ===========================================================================
 ;; Configuration + small helpers
 ;; ===========================================================================
 ;; The directory scanned for nodes. Empty = ~/org-roam. Set from init.scm with
 ;; (org-roam-set-directory "~/notes").
-(define *org-roam-directory* "")
+(defoption *org-roam-directory* ""
+  "The directory scanned for nodes. Empty = ~/org-roam."
+  :type 'string)
 ;; With no argument (M-x org-roam-set-directory) it prompts for the directory.
 (define-command (org-roam-set-directory . rest)
   (if (null? rest)
@@ -56,15 +63,22 @@
 
 ;; Command used to open external (http / file) links. macOS "open"; set to
 ;; "xdg-open" on Linux from init.scm via (set! *org-open-command* "xdg-open").
-(define *org-open-command* "open")
+(defoption *org-open-command* "open"
+  "Command used to open external (http / file) links (macOS \"open\"; set to
+\"xdg-open\" on Linux)."
+  :type 'string)
 
-;; Inline display width (px) of the graph image, and the graphviz render DPI.
-;; Raise the width to see a large graph bigger (it's capped to its natural size,
-;; so the DPI controls how much detail there is to show). Set from init.scm:
+;; Inline display width (px) of the graph image. Raise it to see a large
+;; graph bigger — it's capped to its natural size. Set from init.scm:
 ;;   (set! *org-roam-graph-width* 1600)
+(defoption *org-roam-graph-width* 1200
+  "Inline display width (px) of the org-roam graph image."
+  :type 'integer)
+;; Graphviz render DPI — how much detail there is to show. Set from init.scm:
 ;;   (set! *org-roam-graph-dpi* 200)
-(define *org-roam-graph-width* 1200)
-(define *org-roam-graph-dpi* 150)
+(defoption *org-roam-graph-dpi* 150
+  "Graphviz render DPI of the org-roam graph image."
+  :type 'integer)
 
 (define (org-roam-directory)
   (expand-file-name
@@ -128,7 +142,10 @@
 
 ;; How many lines below a headline the :PROPERTIES: drawer scan looks before
 ;; giving up (a well-formed drawer sits directly under its heading).
-(define *org-roam-drawer-scan-limit* 12)
+(defoption *org-roam-drawer-scan-limit* 12
+  "How many lines below a headline the :PROPERTIES: drawer scan looks before
+giving up (a well-formed drawer sits directly under its heading)."
+  :type 'integer)
 
 ;; The :ID: of a :PROPERTIES: drawer in the lines following a headline (scanning
 ;; up to the drawer's :END: or the next headline), or #f.

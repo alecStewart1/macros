@@ -1,4 +1,4 @@
-;; requires: core evil modeline minor-mode
+;; requires: core evil modeline minor-mode defoption
 
 ;; spell.scm — flyspell-style live spell checking with squiggly underlines.
 ;;
@@ -22,6 +22,12 @@
 ;;   (spell-auto-enable '(".org" ".md" ".txt"))   ; spell-mode on at find-file
 ;;   (spell-set-delay 600)                        ; recheck debounce (ms)
 ;;   (spell-set-program "hunspell" '("-a"))       ; alternative pipe checker
+;;
+;; The user-tunable knobs are DECLARED user options (defoption) —
+;; *spell-program*, *spell-program-args*, *spell-delay* — so C-h v shows
+;; type/default/current and M-x customize-option lists them; the
+;; spell-set-* wrappers remain the convenient setters. Internal state uses
+;; the `spell--` prefix (invisible to the variable pickers).
 
 ;; --- faces --------------------------------------------------------------------
 ;; Defaults so squiggles work even if the active theme predates the face; the
@@ -32,13 +38,16 @@
 (spell--register-faces)
 
 ;; --- state ----------------------------------------------------------------------
-(define *spell-backend* #f)           ; 'native | 'pipe, resolved on first enable
-(define *spell-delay* 400)            ; recheck debounce (ms)
-(define *spell-errors* '())           ; ((start end word) ...) absolute bytes, ascending
-(define *spell-errors-buffer* "")     ; buffer the ranges belong to
-(define *spell-suggest-cache* (hash)) ; word -> suggestions, from the last pipe pass
-(define *spell-auto-exts* '())        ; find-file auto-enable extensions
-(define *spell-ignored* '())          ; words accepted for this session (both backends)
+(define spell--backend #f)           ; 'native | 'pipe, resolved on first enable
+;; Recheck debounce, in milliseconds, after an edit settles.
+(defoption *spell-delay* 400
+  "Recheck debounce, in milliseconds, after an edit settles."
+  :type 'integer)
+(define spell--error-ranges '())     ; ((start end word) ...) absolute bytes, ascending
+(define spell--errors-buffer "")     ; buffer the ranges belong to
+(define spell--suggest-cache (hash)) ; word -> suggestions, from the last pipe pass
+(define spell--auto-exts '())        ; find-file auto-enable extensions
+(define spell--ignored '())          ; words accepted for this session (both backends)
 
 ;; On/off is the buffer's mode stack (spell-mode is a real stack entry). Reads
 ;; the PRE-command snapshot — see the caveat in minor-mode.scm — so code that
@@ -47,17 +56,25 @@
 
 ;; The cached error list, valid only for the buffer it was computed in.
 (define (spell--errors)
-  (if (equal? *spell-errors-buffer* (current-buffer)) *spell-errors* '()))
+  (if (equal? spell--errors-buffer (current-buffer)) spell--error-ranges '()))
 ;; Store a fresh error list, dropping session-ignored words — the single
 ;; choke point through which every backend's results flow.
 (define (spell--set-errors errors)
-  (set! *spell-errors*
-        (filter (lambda (e) (not (member (nth e 2) *spell-ignored*))) errors))
-  (set! *spell-errors-buffer* (current-buffer)))
+  (set! spell--error-ranges
+        (filter (lambda (e) (not (member (nth e 2) spell--ignored))) errors))
+  (set! spell--errors-buffer (current-buffer)))
 
 ;; --- configuration ----------------------------------------------------------------
-(define *spell-program* "aspell")
-(define *spell-program-args* '("-a" "--encoding=utf-8"))
+;; External spell-checker program (an ispell-protocol checker for the pipe
+;; backend; unused by the native backend).
+(defoption *spell-program* "aspell"
+  "External spell-checker program (an ispell-protocol checker for the
+pipe backend; unused by the native backend)."
+  :type 'string)
+;; Command-line arguments passed to `*spell-program*`.
+(defoption *spell-program-args* '("-a" "--encoding=utf-8")
+  "Command-line arguments passed to `*spell-program*`."
+  :type 'any)
 
 ;; Use a different ispell-protocol checker, e.g. (spell-set-program "hunspell" '("-a")).
 (define (spell-set-program program args)
@@ -69,7 +86,7 @@
 
 ;; Turn spell-mode on automatically when a file with one of these extensions
 ;; is opened: (spell-auto-enable '(".org" ".md" ".txt"))
-(define (spell-auto-enable exts) (set! *spell-auto-exts* exts))
+(define (spell-auto-enable exts) (set! spell--auto-exts exts))
 
 ;; --- backend probe --------------------------------------------------------------
 (define (spell--pipe-program-exists?)
@@ -117,20 +134,20 @@
 ;; Requests are answered asynchronously in order, so a FIFO of
 ;; (region-start edit-tick buffer) entries pairs each reply with the offsets —
 ;; and the exact buffer text — it was computed against.
-(define *spell-native-fifo* '())
+(define spell--native-fifo '())
 
 (define (spell--check-native start text)
-  (set! *spell-native-fifo*
-        (append *spell-native-fifo*
+  (set! spell--native-fifo
+        (append spell--native-fifo
                 (list (list start (buffer-tick) (current-buffer)))))
   (spell-check-text text "spell--native-apply"))
 
 ;; Callback: "start\tend\tword" rows, byte offsets relative to the checked text.
 (define (spell--native-apply rows)
-  (unless (null? *spell-native-fifo*)
-    (let* ((entry (car *spell-native-fifo*))
+  (unless (null? spell--native-fifo)
+    (let* ((entry (car spell--native-fifo))
            (base (nth entry 0)))
-      (set! *spell-native-fifo* (cdr *spell-native-fifo*))
+      (set! spell--native-fifo (cdr spell--native-fifo))
       (spell--apply-results
        (map (lambda (row)
               (let ((p (split-many row "\t")))
@@ -147,50 +164,50 @@
 ;; pairs replies with the line they describe; `final?` marks a region's last
 ;; line, whose terminator triggers the repaint (tick + buffer let it prove the
 ;; offsets still describe the current text — see spell--apply-results).
-(define *spell-proc* #f)
-(define *spell-pipe-buf* "")
-(define *spell-pipe-fifo* '())
-(define *spell-pipe-acc* '())
+(define spell--proc #f)
+(define spell--pipe-buf "")
+(define spell--pipe-fifo '())
+(define spell--pipe-acc '())
 
 (define (spell--pipe-ensure)
-  (unless *spell-proc*
-    (set! *spell-pipe-buf* "")
-    (set! *spell-pipe-fifo* '())
-    (set! *spell-pipe-acc* '())
-    (set! *spell-proc*
+  (unless spell--proc
+    (set! spell--pipe-buf "")
+    (set! spell--pipe-fifo '())
+    (set! spell--pipe-acc '())
+    (set! spell--proc
           (make-process *spell-program* *spell-program-args*
                         "spell--pipe-output" "spell--pipe-exit"))
     ;; Terse mode: report only misspellings (no per-word `*` acks).
-    (process-send-string *spell-proc* "!\n"))
-  *spell-proc*)
+    (process-send-string spell--proc "!\n"))
+  spell--proc)
 
 (define (spell--pipe-stop)
-  (when *spell-proc* (kill-process *spell-proc*))
-  (set! *spell-proc* #f))
+  (when spell--proc (kill-process spell--proc))
+  (set! spell--proc #f))
 
-(define (spell--pipe-exit code) (set! *spell-proc* #f))
+(define (spell--pipe-exit code) (set! spell--proc #f))
 
 (define (spell--check-pipe start text)
   (let ((id (spell--pipe-ensure))
         (tick (buffer-tick))
         (buf (current-buffer)))
-    (when (null? *spell-pipe-fifo*) (set! *spell-pipe-acc* '()))
+    (when (null? spell--pipe-fifo) (set! spell--pipe-acc '()))
     (let loop ((ls (split-many text "\n")) (off start))
       (unless (null? ls)
         (let ((line (car ls)))
-          (set! *spell-pipe-fifo*
-                (append *spell-pipe-fifo*
+          (set! spell--pipe-fifo
+                (append spell--pipe-fifo
                         (list (list off line (null? (cdr ls)) tick buf))))
           (process-send-string id (string-append "^" line "\n"))
           (loop (cdr ls) (+ off (utf8-length line) 1)))))))
 
 ;; Stdout arrives in arbitrary chunks; keep the trailing partial line buffered.
 (define (spell--pipe-output chunk)
-  (set! *spell-pipe-buf* (string-append *spell-pipe-buf* chunk))
-  (let* ((parts (split-many *spell-pipe-buf* "\n"))
+  (set! spell--pipe-buf (string-append spell--pipe-buf chunk))
+  (let* ((parts (split-many spell--pipe-buf "\n"))
          (n (length parts)))
     (when (> n 1)
-      (set! *spell-pipe-buf* (nth parts (- n 1)))
+      (set! spell--pipe-buf (nth parts (- n 1)))
       (let loop ((k 0))
         (when (< k (- n 1))
           (spell--pipe-line (nth parts k))
@@ -204,12 +221,12 @@
      (spell--pipe-record line))
     ;; Blank terminator: the line at the head of the FIFO is fully answered.
     ((equal? line "")
-     (unless (null? *spell-pipe-fifo*)
-       (let ((entry (car *spell-pipe-fifo*)))
-         (set! *spell-pipe-fifo* (cdr *spell-pipe-fifo*))
+     (unless (null? spell--pipe-fifo)
+       (let ((entry (car spell--pipe-fifo)))
+         (set! spell--pipe-fifo (cdr spell--pipe-fifo))
          (when (nth entry 2)
-           (let ((acc (reverse *spell-pipe-acc*)))
-             (set! *spell-pipe-acc* '())
+           (let ((acc (reverse spell--pipe-acc)))
+             (set! spell--pipe-acc '())
              (spell--apply-results acc (nth entry 3) (nth entry 4)))))))
     (else #f)))
 
@@ -234,15 +251,15 @@
               '()))))
 
 (define (spell--pipe-record record)
-  (unless (null? *spell-pipe-fifo*)
-    (let* ((parsed (spell--pipe-parse record (car *spell-pipe-fifo*)))
+  (unless (null? spell--pipe-fifo)
+    (let* ((parsed (spell--pipe-parse record (car spell--pipe-fifo)))
            (word (nth parsed 2))
            (suggestions (nth parsed 3)))
       (unless (null? suggestions)
-        (set! *spell-suggest-cache*
-              (hash-insert *spell-suggest-cache* word suggestions)))
-      (set! *spell-pipe-acc*
-            (cons (list (nth parsed 0) (nth parsed 1) word) *spell-pipe-acc*)))))
+        (set! spell--suggest-cache
+              (hash-insert spell--suggest-cache word suggestions)))
+      (set! spell--pipe-acc
+            (cons (list (nth parsed 0) (nth parsed 1) word) spell--pipe-acc)))))
 
 ;; --- checking -------------------------------------------------------------------
 (define (spell--check-now)
@@ -256,8 +273,8 @@
          (end (cdr region)))
     (when (> end start)
       (let ((text (buffer-substring start end)))
-        (cond ((eq? *spell-backend* 'native) (spell--check-native start text))
-              ((eq? *spell-backend* 'pipe) (spell--check-pipe start text))
+        (cond ((eq? spell--backend 'native) (spell--check-native start text))
+              ((eq? spell--backend 'pipe) (spell--check-pipe start text))
               (else #f))))))
 
 (define spell--debounce
@@ -266,12 +283,12 @@
   (when (spell--on?) (spell--debounce *spell-delay*)))
 
 ;; Cursor-line motion (paging included) can reveal unchecked text.
-(define *spell-last-visible* '(-1 -1))
+(define spell--last-visible '(-1 -1))
 (define (spell--follow-view)
   (when (spell--on?)
     (let ((vl (visible-lines)))
-      (unless (equal? vl *spell-last-visible*)
-        (set! *spell-last-visible* vl)
+      (unless (equal? vl spell--last-visible)
+        (set! spell--last-visible vl)
         (spell--schedule)))))
 
 ;; --- mode stack entry ------------------------------------------------------------
@@ -290,10 +307,10 @@
 ;; load: spell-mode is off by default, and an unregistered hook costs nothing
 ;; (registered, it dispatches to the engine on every edit even when the guard
 ;; then no-ops).
-(define *spell-hooks-registered* #f)
+(define spell--hooks-registered #f)
 (define (spell--ensure-hooks)
-  (unless *spell-hooks-registered*
-    (set! *spell-hooks-registered* #t)
+  (unless spell--hooks-registered
+    (set! spell--hooks-registered #t)
     (add-hook "after-change-functions" "spell--schedule")
     (add-hook "post-command-hook" "spell--follow-view")))
 
@@ -311,8 +328,8 @@
         (clear-overlay-faces-matching "spell-error")
         (message "spell-mode off"))
       (begin
-        (unless *spell-backend* (set! *spell-backend* (spell--resolve-backend)))
-        (if (not *spell-backend*)
+        (unless spell--backend (set! spell--backend (spell--resolve-backend)))
+        (if (not spell--backend)
             (message (string-append "spell-mode: no checker — install aspell, or "
                                     "(spell-set-program \"hunspell\" '(\"-a\"))"))
             (begin
@@ -320,11 +337,11 @@
               (enable-minor-mode "spell-mode")
               (spell--check-visible)
               (message (string-append "spell-mode on ("
-                                      (symbol->string *spell-backend*) ")")))))))
+                                      (symbol->string spell--backend) ")")))))))
 
 (define (spell--maybe-auto-enable)
-  (when (and (not (null? *spell-auto-exts*)) (not (spell--on?)))
-    (when (ends-with-any? (buffer-path-or-name) *spell-auto-exts*)
+  (when (and (not (null? spell--auto-exts)) (not (spell--on?)))
+    (when (ends-with-any? (buffer-path-or-name) spell--auto-exts)
       (spell-mode))))
 
 ;; --- navigation -----------------------------------------------------------------
@@ -343,22 +360,22 @@
 ;; Native fallback for ]s past the cached (visible) errors: scan the rest of
 ;; the buffer on demand — the whole-buffer "keep hitting next" flow. Skips
 ;; session-ignored words (the OS scan doesn't know about them).
-(define *spell-next-base* 0)
+(define spell--next-base 0)
 (define (spell--native-next-apply rows)
   (let loop ((lines (non-empty-lines rows)))
     (if (null? lines)
         (message "No more spelling errors")
         (let ((p (split-many (car lines) "\t")))
-          (if (member (nth p 2) *spell-ignored*)
+          (if (member (nth p 2) spell--ignored)
               (loop (cdr lines))
-              (goto-char (+ *spell-next-base* (string->number (nth p 0)))))))))
+              (goto-char (+ spell--next-base (string->number (nth p 0)))))))))
 
 (define-command (spell-next-error)
   (let ((e (spell--error-after (point))))
     (cond (e (goto-char (nth e 0)))
-          ((eq? *spell-backend* 'native)
+          ((eq? spell--backend 'native)
            (let ((from (min (point-max) (+ (point) 1))))
-             (set! *spell-next-base* from)
+             (set! spell--next-base from)
              (spell-check-text (buffer-substring from (point-max))
                                "spell--native-next-apply")))
           (else (message "No more spelling errors")))))
@@ -384,7 +401,7 @@
 
 ;; Add `word` to the permanent dictionary (backend-appropriate).
 (define (spell--learn word)
-  (if (eq? *spell-backend* 'native)
+  (if (eq? spell--backend 'native)
       (spell-learn-word word)
       ;; ispell protocol: `*word` adds to the personal dictionary,
       ;; `#` saves it to disk.
@@ -396,8 +413,8 @@
 ;; Accept `word` for this session only: a Scheme-side ignore list filtered in
 ;; spell--set-errors, so it works identically on both backends.
 (define (spell--ignore word)
-  (unless (member word *spell-ignored*)
-    (set! *spell-ignored* (cons word *spell-ignored*)))
+  (unless (member word spell--ignored)
+    (set! spell--ignored (cons word spell--ignored)))
   (spell--set-errors (spell--errors))
   (spell--repaint)
   (message (string-append "Ignoring: " word)))
@@ -421,11 +438,11 @@
                                     (callback->name (lambda (_) (spell--ignore word))))))))))
 
 ;; Stash for the native suggestion round-trip (one interactive query at a time).
-(define *spell-offer* #f)
+(define spell--offer #f)
 (define (spell--suggest-apply rows)
-  (when *spell-offer*
-    (let ((offer *spell-offer*))
-      (set! *spell-offer* #f)
+  (when spell--offer
+    (let ((offer spell--offer))
+      (set! spell--offer #f)
       (offer (non-empty-lines rows)))))
 
 (define-command (spell-correct-word)
@@ -435,13 +452,13 @@
         (let* ((start (car r))
                (end (cdr r))
                (word (buffer-substring start end)))
-          (if (eq? *spell-backend* 'native)
+          (if (eq? spell--backend 'native)
               (begin
-                (set! *spell-offer*
+                (set! spell--offer
                       (lambda (suggestions)
                         (spell--offer-corrections word start end suggestions)))
                 (spell-suggest word "spell--suggest-apply"))
-              (let ((cached (hash-try-get *spell-suggest-cache* word)))
+              (let ((cached (hash-try-get spell--suggest-cache word)))
                 (spell--offer-corrections word start end
                                           (if cached cached '()))))))))
 

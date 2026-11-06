@@ -1,4 +1,4 @@
-;; requires: core helm projectile tutorial
+;; requires: core helm projectile tutorial defoption
 
 ;; welcome.scm — the startup splash. A read-only special buffer (welcome-mode)
 ;; shown on launch instead of *scratch*: a Macros ASCII banner over a
@@ -23,12 +23,16 @@
 ;; Candidate "default" files to open when a project row is clicked, in order.
 ;; README first; later entries are the "something else" fallback so an opened
 ;; file always exists to register the project with projectile.
-(define *welcome-default-files*
-  (list "README.md" "README.org" "README.rst" "README.txt" "README"
-        "Cargo.toml" "package.json" "go.mod" "Makefile" "main.rs" "index.js"))
+(defoption *welcome-default-files*
+  '("README.md" "README.org" "README.rst" "README.txt" "README"
+    "Cargo.toml" "package.json" "go.mod" "Makefile" "main.rs" "index.js")
+  "Candidate \"default\" files to open when a project row is clicked, in order (README first; later entries are the fallback so an opened file always exists)."
+  :type 'any)
 
 ;; How many recent projects to list.
-(define *welcome-recent-count* 5)
+(defoption *welcome-recent-count* 5
+  "How many recent projects to list."
+  :type 'integer)
 
 ;; Colors come from faces the active theme already defines, so the splash tracks
 ;; the current theme (and any `load-theme` switch) instead of hardcoding hex —
