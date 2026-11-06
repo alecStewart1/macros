@@ -1,4 +1,4 @@
-;; requires: core helm
+;; requires: core helm defoption
 
 ;; help.scm — discoverability: an M-x that lists Scheme commands too, plus
 ;; describe-key / apropos / describe-bindings. Requires helm.scm so it loads
@@ -167,8 +167,14 @@
   (filter (lambda (n) (all-words-match? pat (string-append n " " (function-doc n))))
           (all-names)))
 
-;; apropos (C-h a): names OR docs containing a pattern → a help buffer.
-(define (apropos) (read-string "Apropos: " 'apropos-finish))
+;; apropos (C-h a): names OR docs containing a pattern → a help buffer. The
+;; prompt is a DYNAMIC completing-read — candidates is a fn NAME, re-queried
+;; per keystroke with the current input — so the prompt narrows as you type,
+;; with TAB completing from the same pool. (Plain read-string has no
+;; completions; this was the fix for "the Apropos prompt never completes".)
+(define (apropos-dynamic pat)
+  (if (< (string-length pat) 2) '() (apropos-matches pat)))
+(define (apropos) (completing-read "Apropos: " 'apropos-dynamic 'apropos-finish))
 (define (apropos-finish pat)
   (let ((matches (apropos-matches pat)))
     (render-buffer "*apropos*" "help-mode"
@@ -221,12 +227,15 @@
 
 ;; A candidate as a `(name summary)` pair so Helm dims the one-line doc as a
 ;; right-aligned annotation; matching/the action still see the bare `name`.
-;; Options are tagged "option" (with their value when set); a name with no doc
+;; Editor options are tagged "option" (with their value when set); defoption
+;; variables are tagged "user option" with their type; a name with no doc
 ;; shows as itself.
 (define (apropos-pair n)
   (cond
     ((member n (option-list))
      (list n (string-append "option · " (option-display (get-option n)))))
+    ((defoption-registered? n)
+     (list n (string-append "user option · " (defoption--value-text (eval-string n)))))
     (else (let ((s (doc-summary n)))
             (if (equal? s "") n (list n s))))))
 

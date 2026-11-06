@@ -1915,7 +1915,7 @@ fn abbrev_and_spell_modes_live_on_each_buffers_stack(cx: &mut gpui::TestAppConte
     });
     // A backend symbol with no checker arm: spell-mode turns on without
     // touching the OS (nothing to check against in CI).
-    run_cmd(&editor, cx, "(set! *spell-backend* 'test)");
+    run_cmd(&editor, cx, "(set! spell--backend 'test)");
     run_cmd(&editor, cx, "(abbrev-mode)");
     run_cmd(&editor, cx, "(spell-mode)");
     editor.read_with(cx, |e, _| {
@@ -1989,7 +1989,7 @@ fn abbrev_and_spell_modes_live_on_each_buffers_stack(cx: &mut gpui::TestAppConte
     });
     let errors = editor.read_with(cx, |e, _| {
         e.script
-            .eval("(length *spell-errors*)")
+            .eval("(length spell--error-ranges)")
             .unwrap()
             .value
             .unwrap()
@@ -2643,4 +2643,35 @@ fn help_finds_mode_scoped_bindings(cx: &mut TestAppContext) {
     for row in ["ctrl-c 1", "ctrl-c 3", "ctrl-c 9", "ctrl-c 8"] {
         assert!(text.contains(row), "describe-mode lacks {row}:\n{text}");
     }
+}
+
+/// helm-apropos (C-h C-a) is a SELF-FILTERED (raw) source: candidates are
+/// computed in Scheme per keystroke. Pins that the raw fn actually answers in
+/// a live session — a per-keystroke error in it shows as "no matches", the
+/// exact symptom the defoption migration briefly caused via the doc index.
+#[gpui::test]
+fn helm_apropos_raw_source_narrows_live(cx: &mut TestAppContext) {
+    let ed = setup(cx, "");
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking("(helm-apropos)", cx);
+    });
+    settle(&ed, cx);
+    // Before typing, the >=2-char guard keeps the pool empty.
+    ed.read_with(cx, |e, _| {
+        let n = e.helm.as_ref().map(|s| s.match_count()).expect("helm open");
+        assert_eq!(n, 0, "guard: no candidates under 2 chars");
+    });
+    // Typing past the guard narrows over the doc index, live.
+    ed.update(cx, |e, cx| {
+        e.helm_input("spell-", cx);
+    });
+    settle(&ed, cx);
+    ed.read_with(cx, |e, _| {
+        let n = e
+            .helm
+            .as_ref()
+            .map(|s| s.match_count())
+            .expect("helm still open");
+        assert!(n > 0, "raw source must answer per keystroke, got {n}");
+    });
 }

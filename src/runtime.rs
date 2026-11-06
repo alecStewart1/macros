@@ -167,12 +167,14 @@ pub fn defined_names() -> Vec<String> {
 }
 
 /// The name bound by a top-level `(define name …)`, `(define (name …) …)`,
-/// `(define-syntax name …)`, or `(define-command (name …) …)` line, if the line
-/// is such a define. Shared by [`defined_names`] and [`function_docs`].
+/// `(define-syntax name …)`, `(define-command (name …) …)`, or
+/// `(defoption name …)` line, if the line is such a define. Shared by
+/// [`defined_names`] and [`function_docs`].
 pub(crate) fn define_name(line: &str) -> Option<String> {
     let rest = line
         .strip_prefix("(define-syntax ")
         .or_else(|| line.strip_prefix("(define-command "))
+        .or_else(|| line.strip_prefix("(defoption "))
         .or_else(|| line.strip_prefix("(define "))?;
     // `(define (name …)` — skip the opening paren of the arg list.
     let token = rest
@@ -824,6 +826,13 @@ mod tests {
             se.file
         );
         assert!(se.line >= 1, "line should be 1-based, got {}", se.line);
+
+        // A defoption form is scanned like a define: its NAME enters the doc
+        // index so the variable pickers and apropos see it (the macro's
+        // expansion has no top-level `(define` line to scrape).
+        let opt = entry("*spell-program*").expect("defoption should be scraped");
+        assert!(opt.file.ends_with("spell.scm"), "got: {:?}", opt.file);
+        assert!(opt.line >= 1);
     }
 
     /// `scrape_docs` attributes defines to the file it is told, and counts lines
