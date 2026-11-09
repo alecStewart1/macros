@@ -548,7 +548,7 @@
 ;; Which shape `magit-render` draws diffs in: \"line\" (hunks) | \"structural\" (per-function).
 (defoption *magit-diff-view* "line"
   "Which shape diffs render in: \"line\" (hunks) or \"structural\" (per-function)."
-  :type 'any)
+  :type 'string)
 (define (magit-structural?) (equal? *magit-diff-view* "structural"))
 
 ;; The funcname context of a hunk: everything after the second "@@" on its

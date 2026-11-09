@@ -91,7 +91,7 @@
 ;; Rings persisted, by name.
 (defoption *savehist-rings* '("minibuffer" "search" "command" "kill")
   "Rings persisted, by name."
-  :type 'any)
+  :type 'list)
 
 (define (savehist-file) (string-append (persistence-dir) "/savehist"))
 

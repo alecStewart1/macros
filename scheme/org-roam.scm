@@ -37,7 +37,7 @@
 (defoption *org-roam-capture-templates* '()
   "Capture templates: (KEY DESC FILENAME-TEMPLATE BODY-TEMPLATE), expanding
 ${title} ${slug} ${id} ${date} ${time}. Empty ⇒ the simple title prompt."
-  :type 'any)
+  :type 'list)
 
 ;; ===========================================================================
 ;; Configuration + small helpers

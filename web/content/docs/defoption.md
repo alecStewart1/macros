@@ -18,7 +18,7 @@ That one form defines `*spell-program*` to `"aspell"` and registers it. `C-h v` 
 ## Semantics
 
 - **VALUE is the default**, as in Emacs `defvar`: it is a constant expression, and your `init.scm` — which loads *after* the bundled modules — overrides it by re-defining the name.
-- **`:type`** is metadata for the help layer: `'boolean`, `'integer`, `'float`, `'string`, or `'any` (the default when omitted). It is displayed by `describe-variable`; values are not coerced.
+- **`:type`** is metadata for the help layer: `'boolean`, `'integer`, `'float`, `'string`, `'symbol`, `'list`, `'alist`, `'plist`, or `'any` (the default when omitted). It is a *descriptor* of the shape the value can take — displayed by `describe-variable`, but **not enforced**: nothing validates or coerces the value at `set!` or `customize-option` time, so the label is a promise by the author, not a checked invariant.
 - The docstring shows up in `C-h v` and as the dimmed annotation in `M-x` pickers (tagged `user option`).
 
 ## Declared vs. everything else

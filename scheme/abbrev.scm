@@ -790,7 +790,7 @@
 ;; When to write the abbrev file: 'silent — auto-save on exit, no messages.
 (defoption *save-abbrevs* 'silent
   "When to write the abbrev file: 'silent — auto-save on exit, no messages."
-  :type 'any)
+  :type 'symbol)
 
 ;; Scheme string literal escaping for the serialized forms: backslash and
 ;; quote, then ANY control char (<32 — \n, \t, \r, …) uniformly as a \u{hex};

@@ -77,8 +77,12 @@
 
 ;; --- the macro ---------------------------------------------------------------
 ;; Grammar: (defoption NAME VALUE DOC [:type KIND])
-;; KIND is one of 'boolean 'integer 'float 'string 'any (metadata for the
-;; help/customize layer; 'any is the default when :type is omitted).
+;; KIND is one of 'boolean 'integer 'float 'string 'symbol 'list 'alist
+;; 'plist 'any (metadata for the help/customize layer; 'any is the default
+;; when :type is omitted). KIND is a DESCRIPTOR of the shape the value can
+;; take — nothing validates or enforces it: set! and customize-option accept
+;; any value regardless of the declared type, so the label is only what
+;; describe-variable renders and what tells the user what to write.
 ;; Expansion shape:
 ;;   (begin
 ;;     (define NAME <value>)                       ; the default, as written
@@ -122,7 +126,8 @@
                                  (cadr k)
                                  k)))
                       (unless (and (symbol? k)
-                                   (memq k '(boolean integer float string any)))
+                                   (memq k '(boolean integer float string
+                                             symbol list alist plist any)))
                         (error "defoption: unsupported :type:" k))
                       (parse-keywords (cddr items) k))))
                  ((and (pair? items) (symbol? (car items))

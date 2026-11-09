@@ -77,7 +77,7 @@
 (defoption *org-custom-keywords* '()
   "Custom heading keyword labels, appended to the C-c C-t cycle after the
 TODO vocabulary. Empty by default; set from init.scm."
-  :type 'any)
+  :type 'list)
 
 ;; Per-keyword colors: an alist (LABEL . "#rrggbb"). Empty by default, so every
 ;; custom keyword inherits the title color. Set from init.scm, then call
@@ -85,7 +85,7 @@ TODO vocabulary. Empty by default; set from init.scm."
 (defoption *org-custom-keyword-colors* '()
   "Per-keyword colors: an alist (LABEL . \"#rrggbb\"). Empty by default, so
 every custom keyword inherits the title color."
-  :type 'any)
+  :type 'alist)
 
 ;; The face name carrying a custom keyword's color (e.g. "org-kw-BUG").
 (define (org--keyword-face-name kw) (string-append "org-kw-" kw))
@@ -1295,7 +1295,7 @@ Emacs `so-long` move), so huge files don't block the engine."
 (defoption *org-agenda-files* '()
   "The set of files the agenda scans. If unset, every .org file under the
 current project (or buffer directory)."
-  :type 'any)
+  :type 'list)
 (define (org-set-agenda-files lst) (set! *org-agenda-files* lst))
 (define (org--agenda-file-list)
   (if (not (null? *org-agenda-files*))
@@ -1426,7 +1426,7 @@ current project (or buffer directory)."
 ;; below, can test it; populate from init.scm.
 (defoption *org-capture-templates* '()
   "Capture templates (see Layer 7f for the engine); populate from init.scm."
-  :type 'any)
+  :type 'list)
 ;; C-c c — capture. With no templates configured this is the simple "* TODO"
 ;; prompt; configure *org-capture-templates* (see Layer 7f) for the full flow.
 (define-command (org-capture)
@@ -2800,7 +2800,7 @@ current project (or buffer directory)."
 (defoption *org-agenda-custom-commands* '()
   "Custom agenda commands: each is (KEY DESCRIPTION TYPE ARG), TYPE one of
 \"agenda\", \"todo\" (ARG = keyword), \"tags\" (ARG = tag expression)."
-  :type 'any)
+  :type 'list)
 (define-command (org-agenda-dispatch)
   (if (null? *org-agenda-custom-commands*)
       (org-agenda)

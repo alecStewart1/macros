@@ -16198,6 +16198,43 @@ mod defoption_lib {
     }
 
     #[test]
+    fn defoption_shape_kinds_accepted_and_unknown_still_errors() {
+        let engine = engine();
+        load_with_deps(&engine, "defoption");
+        // The widened shape vocabulary — symbol/list/alist/plist — registers
+        // fine. The kind is a descriptor only: nothing validates the value
+        // against it (see the notes in defoption.scm).
+        engine
+            .eval(
+                r#"(defoption *t-list* '("a") "List." :type 'list)
+                   (defoption *t-alist* '() "Alist." :type 'alist)
+                   (defoption *t-plist* '() "Plist." :type 'plist)
+                   (defoption *t-sym* 'x "Symbol." :type 'symbol)"#,
+            )
+            .unwrap();
+        for (name, kind) in [
+            ("*t-list*", "list"),
+            ("*t-alist*", "alist"),
+            ("*t-plist*", "plist"),
+            ("*t-sym*", "symbol"),
+        ] {
+            assert_eq!(
+                v(
+                    &engine,
+                    &format!(r#"(if (eq? (defoption-type '{name}) '{kind}) "y" "n")"#)
+                ),
+                "\"y\""
+            );
+        }
+        // Unknown kinds still error loudly at expansion time.
+        assert!(
+            engine
+                .eval(r#"(defoption *t-bad* 1 "Bad." :type 'regex)"#)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn defoption_lists_registered_names_sorted() {
         let engine = engine();
         load_with_deps(&engine, "defoption");

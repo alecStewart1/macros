@@ -27,7 +27,7 @@
   '("README.md" "README.org" "README.rst" "README.txt" "README"
     "Cargo.toml" "package.json" "go.mod" "Makefile" "main.rs" "index.js")
   "Candidate \"default\" files to open when a project row is clicked, in order (README first; later entries are the fallback so an opened file always exists)."
-  :type 'any)
+  :type 'list)
 
 ;; How many recent projects to list.
 (defoption *welcome-recent-count* 5

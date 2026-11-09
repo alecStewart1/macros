@@ -23,7 +23,7 @@
 (defoption *rainbow-colors*
   '("#e6194b" "#f58231" "#ffe119" "#3cb44b" "#4363d8" "#911eb4" "#f032e6")
   "Colors cycled by nesting depth, a palette of any length."
-  :type 'any)
+  :type 'list)
 (define *rainbow-count* (length *rainbow-colors*))
 ;; Whether rainbow-delimiters coloring is on (off by default).
 (defoption *rainbow-enabled* #f
@@ -116,7 +116,7 @@
 (defoption *rainbow-skip-extensions*
   '(".org" ".md" ".markdown" ".mdown" ".mkd" ".mkdn" ".txt")
   "File extensions where rainbow-delimiters is suppressed (prose formats etc.)."
-  :type 'any)
+  :type 'list)
 (define (rainbow--skip?)
   ;; The visited path, not the (possibly uniquified `x.md<dir>`) buffer name;
   ;; fall back to the name for fileless buffers.

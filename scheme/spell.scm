@@ -74,7 +74,7 @@ pipe backend; unused by the native backend)."
 ;; Command-line arguments passed to `*spell-program*`.
 (defoption *spell-program-args* '("-a" "--encoding=utf-8")
   "Command-line arguments passed to `*spell-program*`."
-  :type 'any)
+  :type 'list)
 
 ;; Use a different ispell-protocol checker, e.g. (spell-set-program "hunspell" '("-a")).
 (define (spell-set-program program args)
