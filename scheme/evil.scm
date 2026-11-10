@@ -1,4 +1,4 @@
-;; requires: core
+;; requires: core defoption
 
 ;; evil-mode — Vim-style modal editing, built on Macros' keymaps. The Rust side
 ;; only decides *when* plain keys are commands (Normal/Visual) vs. text (Insert);
@@ -2001,8 +2001,14 @@
 ;; terminal, Insert state — the ALT leader (Doom's `doom-leader-alt-key`, M-SPC
 ;; by default) opens the same chords: `M-SPC n o` in a pod shell works like
 ;; `SPC n o` in a file.
-(define *evil-leader* "space")
-(define *evil-leader-alt* "alt-space")
+;; The leader key chord that prefixes global leader bindings.
+(defoption *evil-leader* "space"
+  "Leader key chord prefixing global leader bindings (\"space\" by default)."
+  :type 'string)
+;; The alt leader, for where a plain key must type (terminals, Insert state).
+(defoption *evil-leader-alt* "alt-space"
+  "Alt leader chord (opens the same chords where the leader can't be typed, e.g. terminals); \"\" disables it."
+  :type 'string)
 
 ;; Set the leader to a chord string ("space", "comma", "space space", …).
 (define (evil-set-leader key) (set! *evil-leader* key))

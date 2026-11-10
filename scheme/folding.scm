@@ -1,4 +1,4 @@
-;; requires: core
+;; requires: core defoption
 
 ;; folding.scm — generic code folding (Emacs hideshow). A gutter chevron on each
 ;; foldable header line toggles the visibility of its indented body. Rust renders
@@ -101,7 +101,9 @@
 
 ;; Don't auto-scan very large buffers on open (the marker pass is O(lines));
 ;; `M-x fold-refresh` still works on demand.
-(define *fold-auto-limit* 20000)
+(defoption *fold-auto-limit* 20000
+  "Line count past which buffers are not auto-scanned on open (the marker pass is O(lines)); `M-x fold-refresh` still works on demand."
+  :type 'integer)
 
 ;; --- indentation model ------------------------------------------------------
 ;; Next non-blank line at/after `line` (blank lines report indentation -1), or #f.

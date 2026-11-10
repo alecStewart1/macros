@@ -1,4 +1,4 @@
-;; requires: core help abbrev spell
+;; requires: core help abbrev spell defoption
 
 ;; help-extras.scm — C-h v describe-variable and C-h m describe-mode.
 
@@ -7,14 +7,27 @@
 ;; bundled file follows) plus the editor options. Any other global can still
 ;; be typed by name. `help--variable-name?` is shared with help.scm's function
 ;; picker, which excludes these same names.
+;; describe-variable's hook coverage is `-hook`-suffixed names ONLY (decided
+;; 2026-11): other hook keys (after-change-functions, bare mode-name
+;; spellings) are not variables — offering one in the picker would only fall
+;; through to "No variable named …".
+(define (help--hook-name? name)
+  (and (>= (string-length name) 5)
+       (equal? "-hook" (substring name (- (string-length name) 5)))))
+
 (define (variable-list)
-  (sort-strings (dedup (append (filter help--variable-name? (function-list)) (option-list)))))
+  (sort-strings
+   (dedup (append (filter help--variable-name? (function-list))
+                  (option-list)
+                  (defoption-list)
+                  (filter help--hook-name? (hook-names))))))
 
 ;; A value as readable text: strings quoted, everything else as Steel prints it.
-(define (help--value-text v)
-  (cond ((string? v) (string-append "\"" v "\""))
-        ((boolean? v) (if v "#t" "#f"))
-        (else (to-string v))))
+(define (help--value-text v) (defoption--value-text v))
+
+;; Bare mode names are NOT hooks: `rust-mode` is a command, `rust-mode-hook`
+;; is the variable describe-variable renders. (A bare-name arm would be a
+;; one-clause addition here if that ever changes.)
 
 ;; describe-variable (C-h v): a Helm picker over the variables (annotated like
 ;; the function picker — see apropos-pair in help.scm; options show their
@@ -27,6 +40,35 @@
   (cond
     ((equal? name "") #f)
     ((member name (option-list)) (describe-option name))
+    ((defoption-registered? name) (describe-defoption name))
+    ((and (help--hook-name? name)
+          (not (null? (hook-registered-functions name))))
+     ;; A live hook (no more inert NAME-hook #f decoy): show the functions
+     ;; registered on the string-keyed hook. Hooks are separate from the mode
+     ;; itself: a `<mode>-mode-hook` key names a mode command to point at;
+     ;; other hooks (find-file-hook, kill-buffer-hook, NAME-hook spellings)
+     ;; belong to no mode and get no mode line. Note `#'` does not work in
+     ;; add-hook (Steel's `#'` is `syntax`) — the hint shows the working form.
+     (let* ((fns (hook-registered-functions name))
+            (mode (if (and (>= (string-length name) 10)
+                           (equal? "-mode-hook"
+                                   (substring name (- (string-length name) 10))))
+                      (substring name 0 (- (string-length name) 5))
+                      #f)))
+       (render-buffer "*help*" "help-mode"
+                      (string-append
+                       (if mode
+                           (string-append name " is the hook of mode " mode ".\n\n")
+                           (string-append name " is a hook.\n\n"))
+                       "Registered functions:\n"
+                       (join-lines (map (lambda (f) (string-append "  " f)) fns))
+                       "\n\nAdd with: (add-hook '" name " 'fn)\n"
+                       (if mode
+                           (string-append
+                            "\nThis hook belongs to " mode " — see the mode itself with\n"
+                            "M-x describe-function (" mode "), and its bindings with C-h m.\n")
+                           ""))
+                      '())))
     ((not (member name (function-list)))
      (message (string-append "No variable named " name)))
     (else
@@ -39,6 +81,53 @@
                        "Set it from your config or M-: with\n"
                        "  (set! " name " <value>)")
                       '())))))
+
+;; The declared user-option branch of describe-variable: type, default, the
+;; current value, and a drift note when the two differ — the one piece of
+;; "enforcement" defoption buys over a bare `*star*` global.
+(define (describe-defoption name)
+  (let* ((doc (defoption-doc name))
+         (default (defoption-default name))
+         (current (eval-string name))
+         (drifted (not (equal? current default))))
+    (render-buffer "*help*" "help-mode"
+                   (string-append
+                    name " is a user option (declared with defoption).\n\n"
+                    "Type: " (symbol->string (defoption-type name)) "\n"
+                    "Default value: " (help--value-text default) "\n"
+                    "Current value: " (help--value-text current)
+                    (if drifted
+                        "  (changed from the default)"
+                        "")
+                    "\n\n"
+                    (if (equal? doc "") "(no documentation)" doc)
+                    "\n\n"
+                    "Set it from your config or M-: with\n"
+                    "  (set! " name " <value>)\n"
+                    "or M-x customize-option.")
+                   '())))
+
+;; M-x customize-option: pick a DECLARED user option and set its value. Only
+;; defoption-declared variables are listed — "what can I tune" is the
+;; registry, not every global. The new value is read as a Scheme expression
+;; (a string needs its quotes, like M-:); a failed read leaves the option
+;; untouched.
+(define (customize-option)
+  (helm (list (list "User options"
+                    (map apropos-pair (defoption-list))
+                    (list (list "Set value" 'customize-option--set))))))
+(define (customize-option--set name)
+  (when (not (equal? name ""))
+    (read-string
+     (string-append "Set " name " to (Scheme expression): ")
+     (lambda (input)
+       (when (not (equal? input ""))
+         ;; INPUT is evaluated as Scheme (a string needs its quotes, like
+         ;; M-:); a malformed expression raises and the option is left
+         ;; untouched — there is no catch primitive to pre-validate with, so
+         ;; the engine's error echo is the feedback.
+         (eval-string (string-append "(set! " name " " input ")"))
+         (describe-defoption name))))))
 
 ;; --- describe-mode (C-h m) ----------------------------------------------------
 ;; The buffer's major mode, the minor modes on in it, and the bindings each
@@ -122,5 +211,7 @@
 
 (define-key "fundamental" "ctrl-h v" 'describe-variable)
 (define-key "fundamental" "ctrl-h m" 'describe-mode)
+(define-key "fundamental" "ctrl-h shift-o" 'customize-option)
+(register-command 'customize-option)
 (register-command 'describe-variable)
 (register-command 'describe-mode)

@@ -1,4 +1,4 @@
-;; requires: core persistence
+;; requires: core persistence defoption
 
 ;; dap.scm — a Debug Adapter Protocol client (Emacs dap-mode / dape): the
 ;; protocol core. The transport is Rust and deliberately dumb — `dap-start`
@@ -634,7 +634,10 @@
     *dap-watches*))
 
 ;; --- *dap-console*: program output + a REPL against the selected frame -------------
-(define *dap-console-name* "*dap-console*")
+;; Name of the dap console buffer (program output + REPL).
+(defoption *dap-console-name* "*dap-console*"
+  "Name of the dap console buffer (program output + a REPL against the selected frame)."
+  :type 'string)
 ;; `append-to-buffer` on a buffer that isn't in any window SWITCHES the
 ;; selected window to it — fine for a console the user is watching, but
 ;; debuggee output must never yank focus once the console has been closed.
@@ -705,7 +708,9 @@
 ;; --- bundled adapters ------------------------------------------------------------------
 ;; python — debugpy speaks DAP on stdio (`python -m debugpy.adapter`).
 ;; `pip install debugpy`; point *dap-python* at a venv's python if needed.
-(define *dap-python* "python3")
+(defoption *dap-python* "python3"
+  "Python interpreter used to run debugpy (`python -m debugpy.adapter`); point it at a venv's python if needed."
+  :type 'string)
 (dap-register-adapter "debugpy" (list "py")
   (lambda ()
     (dap--session-up

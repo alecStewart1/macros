@@ -1,4 +1,4 @@
-;; requires: core hooks persistence perspectives
+;; requires: core hooks persistence perspectives defoption
 
 ;; session.scm — survive a restart (Emacs `savehist-mode` + `desktop-save-mode`).
 ;;
@@ -68,12 +68,30 @@
 ;; savehist
 ;; =============================================================================
 
-(define *savehist-enabled* #t)
-(define *savehist-max* 300)              ; entries kept per ring
-(define *savehist-kill-ring* #t)         ; persist the kill ring? (may hold secrets)
-(define *savehist-kill-ring-max* 60)     ; kills kept on disk
-(define *savehist-kill-entry-max* 8192)  ; longer kills are not written
-(define *savehist-rings* (list "minibuffer" "search" "command" "kill"))
+;; Persist command history across restarts (savehist).
+(defoption *savehist-enabled* #t
+  "Persist command history across restarts (savehist)."
+  :type 'boolean)
+;; Entries kept per history ring.
+(defoption *savehist-max* 300
+  "Entries kept per history ring."
+  :type 'integer)
+;; Persist the kill ring too (may hold secrets).
+(defoption *savehist-kill-ring* #t
+  "Persist the kill ring too (may hold secrets)."
+  :type 'boolean)
+;; Kill-ring entries kept on disk.
+(defoption *savehist-kill-ring-max* 60
+  "Kill-ring entries kept on disk."
+  :type 'integer)
+;; Kills longer than this many bytes are not written.
+(defoption *savehist-kill-entry-max* 8192
+  "Kills longer than this many bytes are not written."
+  :type 'integer)
+;; Rings persisted, by name.
+(defoption *savehist-rings* '("minibuffer" "search" "command" "kill")
+  "Rings persisted, by name."
+  :type 'list)
 
 (define (savehist-file) (string-append (persistence-dir) "/savehist"))
 
@@ -144,7 +162,10 @@
 ;; desktop
 ;; =============================================================================
 
-(define *desktop-save-mode* #t)
+;; Save and restore the desktop (open buffers, window layout, perspective).
+(defoption *desktop-save-mode* #t
+  "Save and restore the desktop (open buffers, window layout, perspective)."
+  :type 'boolean)
 (define *desktop-primary* #f)  ; this window owns the desktop (first in process)
 (define *desktop-cleared* #f)  ; desktop-clear: stop writing until desktop-save
 
@@ -308,7 +329,10 @@
 ;; lifecycle
 ;; =============================================================================
 
-(define *session-autosave-ms* 300000)  ; 5 minutes
+;; Autosave interval in milliseconds (the default is 5 minutes).
+(defoption *session-autosave-ms* 300000
+  "Autosave interval in milliseconds (the default is 5 minutes)."
+  :type 'integer)
 (define (session-set-autosave-interval ms) (set! *session-autosave-ms* ms))
 
 ;; Everything that writes on a fresh `session-refresh`.

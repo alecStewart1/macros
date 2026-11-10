@@ -1,4 +1,4 @@
-;; requires: core
+;; requires: core defoption
 
 ;; avy — jump to any visible character in a couple of keystrokes (the Macros port
 ;; of avy / ace-jump). Type the target character; every on-screen occurrence is
@@ -11,7 +11,10 @@
 ;; positions by src/element.rs); the next key is captured by the editor and sent
 ;; to `avy-pick`, so picking a hint is a single keypress. C-g cancels.
 
-(define *avy-keys* "asdfghjklqwertyuiopzxcvbnm")
+;; The keys available for avy hints, in preference order.
+(defoption *avy-keys* "asdfghjklqwertyuiopzxcvbnm"
+  "The keys available for avy hints, in preference order."
+  :type 'string)
 (define *avy-map* '())   ; label -> byte position, for the active hint set
 
 ;; Byte offsets of `ch` (a one-char string) on lines [first,last), tracking the

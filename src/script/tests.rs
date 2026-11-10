@@ -163,7 +163,7 @@ mod engine_tests {
         assert!(val("(string-length (tls-last-error))") != "0");
         // Operations on a bogus id fail soft.
         assert!(
-            val("(tls-send 9999 \"x\")").contains("#f")
+            val("(tls-send 9999 \"x\")").contains("#false")
                 || val("(tls-send 9999 \"x\")").contains("false")
         );
         assert_eq!(val("(string-length (tls-recv-line 9999))"), "0");
@@ -180,7 +180,7 @@ mod engine_tests {
             .eval(r#"(define srv (tcp-listen "127.0.0.1" 0))"#)
             .unwrap();
         assert!(
-            val("(> srv 0)").contains("#t"),
+            val("(> srv 0)").contains("#true"),
             "listen failed: {}",
             val("(socket-last-error)")
         );
@@ -195,15 +195,15 @@ mod engine_tests {
         });
         engine.eval("(define conn (tcp-accept srv))").unwrap();
         assert!(
-            val("(> conn 0)").contains("#t"),
+            val("(> conn 0)").contains("#true"),
             "accept failed: {}",
             val("(socket-last-error)")
         );
         assert!(val("(socket-recv-line conn)").contains("ping"));
-        assert!(val(r#"(socket-send conn "pong\n")"#).contains("#t"));
+        assert!(val(r#"(socket-send conn "pong\n")"#).contains("#true"));
         assert!(client.join().unwrap().contains("pong"));
-        assert!(val("(socket-close conn)").contains("#t"));
-        assert!(val("(tcp-listener-close srv)").contains("#t"));
+        assert!(val("(socket-close conn)").contains("#true"));
+        assert!(val("(tcp-listener-close srv)").contains("#true"));
     }
 
     #[test]
@@ -220,13 +220,15 @@ mod engine_tests {
             server.send_to(&buf[..n], from).unwrap();
         });
         engine.eval("(define u (udp-open))").unwrap();
-        assert!(val("(> u 0)").contains("#t"));
+        assert!(val("(> u 0)").contains("#true"));
         // 68656c6c6f = "hello"
-        assert!(val(&format!(r#"(udp-send u "127.0.0.1" {sport} "68656c6c6f")"#)).contains("#t"));
+        assert!(
+            val(&format!(r#"(udp-send u "127.0.0.1" {sport} "68656c6c6f")"#)).contains("#true")
+        );
         let got = val("(udp-recv u 64)");
         assert!(got.contains("68656c6c6f"), "udp echo wrong: {got}");
         echo.join().unwrap();
-        assert!(val("(udp-close u)").contains("#t"));
+        assert!(val("(udp-close u)").contains("#true"));
     }
 
     #[test]
@@ -245,18 +247,18 @@ mod engine_tests {
                 .unwrap()
                 > 0
         );
-        assert!(val(r#"(socket-async-send 1 "6869")"#).contains("#t"));
-        assert!(val("(socket-async-close 1)").contains("#t"));
+        assert!(val(r#"(socket-async-send 1 "6869")"#).contains("#true"));
+        assert!(val("(socket-async-close 1)").contains("#true"));
         assert!(
             val(r#"(ws-connect "wss://example.com/socket" 'on-msg 'on-close)"#)
                 .parse::<i64>()
                 .unwrap()
                 > 0
         );
-        assert!(val(r#"(ws-send 1 "hello")"#).contains("#t"));
-        assert!(val("(ws-close 1)").contains("#t"));
+        assert!(val(r#"(ws-send 1 "hello")"#).contains("#true"));
+        assert!(val("(ws-close 1)").contains("#true"));
         // http-request / http-request-full both queue and return #t.
-        assert!(val(r#"(http-request-full "GET" "https://x" '() "" 'k)"#).contains("#t"));
+        assert!(val(r#"(http-request-full "GET" "https://x" '() "" 'k)"#).contains("#true"));
     }
 
     #[test]
@@ -266,12 +268,12 @@ mod engine_tests {
         let dir = std::env::temp_dir().join(format!("macros-del-{}", std::process::id()));
         let f = dir.join("x.txt");
         let p = f.display();
-        assert!(val(&format!(r#"(write-file-text "{p}" "hi")"#)).contains("#t"));
-        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#t"));
-        assert!(val(&format!(r#"(file-exists? "{p}")"#)).contains("#f"));
+        assert!(val(&format!(r#"(write-file-text "{p}" "hi")"#)).contains("#true"));
+        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#true"));
+        assert!(val(&format!(r#"(file-exists? "{p}")"#)).contains("#false"));
         // Already-absent is #t (idempotent retract); a directory is #f.
-        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#t"));
-        assert!(val(&format!(r#"(delete-file "{}")"#, dir.display())).contains("#f"));
+        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#true"));
+        assert!(val(&format!(r#"(delete-file "{}")"#, dir.display())).contains("#false"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -281,22 +283,22 @@ mod engine_tests {
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         // In-memory db; create a plain table + an FTS5 virtual table, insert
         // bound rows, and query both ways.
-        assert!(val(r#"(define db (sqlite-open ":memory:")) (> db 0)"#).contains("#t"));
+        assert!(val(r#"(define db (sqlite-open ":memory:")) (> db 0)"#).contains("#true"));
         assert!(val(
             r#"(sqlite-exec db "CREATE TABLE t(id TEXT, n INT); CREATE VIRTUAL TABLE ft USING fts5(id, body);" (list))"#
         )
-        .contains("#t"));
+        .contains("#true"));
         assert!(
             val(r#"(sqlite-exec db "INSERT INTO t VALUES (?1, ?2)" (list "a" "7"))"#)
-                .contains("#t")
+                .contains("#true")
         );
         // Bound params are injection-safe: this text is stored literally.
-        assert!(val(r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m1" "invoice payment overdue"))"#).contains("#t"));
+        assert!(val(r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m1" "invoice payment overdue"))"#).contains("#true"));
         assert!(
             val(
                 r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m2" "lunch tomorrow"))"#
             )
-            .contains("#t")
+            .contains("#true")
         );
         // Column values come back US-joined (0x1f); integer coerced to text.
         let row = val(r#"(car (sqlite-query db "SELECT id, n FROM t" (list)))"#);
@@ -316,9 +318,9 @@ mod engine_tests {
             )
             .contains('1')
         );
-        assert!(val("(sqlite-close db)").contains("#t"));
+        assert!(val("(sqlite-close db)").contains("#true"));
         // Ops on a closed/bogus id fail soft.
-        assert!(val("(sqlite-exec 9999 \"SELECT 1\" (list))").contains("#f"));
+        assert!(val("(sqlite-exec 9999 \"SELECT 1\" (list))").contains("#false"));
         assert_eq!(val("(length (sqlite-query 9999 \"SELECT 1\" (list)))"), "0");
     }
 
@@ -353,11 +355,11 @@ mod engine_tests {
         let (engine, _rx) = ScriptEngine::new();
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         assert!(val(r#"(tcp-connect "127.0.0.1" 1 500 500)"#).contains('0'));
-        assert!(val("(socket-send 9999 \"x\")").contains("#f"));
+        assert!(val("(socket-send 9999 \"x\")").contains("#false"));
         assert_eq!(val("(string-length (socket-recv-line 9999))"), "0");
-        assert!(val("(tls-upgrade 9999 \"x\")").contains("#f"));
-        assert!(val("(socket-set-timeout 9999 100)").contains("#f"));
-        assert!(val("(> (string-length (socket-last-error)) 0)").contains("#t"));
+        assert!(val("(tls-upgrade 9999 \"x\")").contains("#false"));
+        assert!(val("(socket-set-timeout 9999 100)").contains("#false"));
+        assert!(val("(> (string-length (socket-last-error)) 0)").contains("#true"));
         assert!(val("(tcp-accept 9999)").contains('0'));
     }
 
@@ -383,13 +385,13 @@ mod engine_tests {
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         let _ = engine.eval(r#"(define tls-test-conn (tls-connect "imap.gmail.com" 993 0 0))"#);
         assert!(
-            val("(> tls-test-conn 0)").contains("#t"),
+            val("(> tls-test-conn 0)").contains("#true"),
             "connect failed: {}",
             val("(tls-last-error)")
         );
         let greeting = val("(tls-recv-line tls-test-conn)");
         assert!(greeting.contains("* OK"), "unexpected greeting: {greeting}");
-        assert!(val("(tls-close tls-test-conn)").contains("#t"));
+        assert!(val("(tls-close tls-test-conn)").contains("#true"));
     }
 
     #[test]
@@ -470,7 +472,7 @@ mod engine_tests {
             .value
             .unwrap();
         assert!(
-            bad.contains("#f") || bad.contains("false"),
+            bad.contains("#false") || bad.contains("false"),
             "bad hex wrote: {bad}"
         );
         let missing = engine
@@ -606,7 +608,7 @@ mod engine_tests {
         // arrives split at awkward chunk boundaries.
         let _ = engine
             .eval(
-                r#"(set! *spell-pipe-fifo*
+                r#"(set! spell--pipe-fifo
                      (list (list 0 "helllo world" #f (buffer-tick) (current-buffer))
                            (list 13 "ok wrld" #t (buffer-tick) (current-buffer))))"#,
             )
@@ -619,16 +621,16 @@ mod engine_tests {
             .unwrap();
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         // Both lines answered: errors are (0 6 helllo) and (13+3 13+7 wrld).
-        assert_eq!(val("(length *spell-errors*)"), "2");
-        assert_eq!(val("(car (car *spell-errors*))"), "0");
-        assert_eq!(val("(nth (car *spell-errors*) 1)"), "6");
-        assert_eq!(val("(car (car (cdr *spell-errors*)))"), "16");
-        assert_eq!(val("(nth (car (cdr *spell-errors*)) 1)"), "20");
+        assert_eq!(val("(length spell--error-ranges)"), "2");
+        assert_eq!(val("(car (car spell--error-ranges))"), "0");
+        assert_eq!(val("(nth (car spell--error-ranges) 1)"), "6");
+        assert_eq!(val("(car (car (cdr spell--error-ranges)))"), "16");
+        assert_eq!(val("(nth (car (cdr spell--error-ranges)) 1)"), "20");
         // The suggestion cache picked up the `&` records' candidates.
-        assert!(val(r#"(car (hash-try-get *spell-suggest-cache* "helllo"))"#).contains("hello"));
+        assert!(val(r#"(car (hash-try-get spell--suggest-cache "helllo"))"#).contains("hello"));
         // FIFO drained; nothing left buffered.
-        assert_eq!(val("(length *spell-pipe-fifo*)"), "0");
-        assert_eq!(val("(string-length *spell-pipe-buf*)"), "0");
+        assert_eq!(val("(length spell--pipe-fifo)"), "0");
+        assert_eq!(val("(string-length spell--pipe-buf)"), "0");
     }
 
     #[test]
@@ -647,7 +649,7 @@ mod engine_tests {
         // neither the macOS checker nor aspell, and toggling on would
         // otherwise no-op there). The commands under test are generated by
         // pure Scheme — no OS spell call is made in this test.
-        let _ = engine.eval("(set! *spell-backend* 'native)").unwrap();
+        let _ = engine.eval("(set! spell--backend 'native)").unwrap();
         // Enabling must push the stack entry and emit one SpellCheck over the
         // visible region (the check runs even though this command's snapshot
         // still has the mode off).
@@ -717,7 +719,7 @@ mod engine_tests {
             ..Default::default()
         };
         engine.set_snapshot(snapshot(5, false));
-        let _ = engine.eval("(set! *spell-backend* 'native)").unwrap();
+        let _ = engine.eval("(set! spell--backend 'native)").unwrap();
         // Enabling runs the first check: the FIFO records (start tick buffer).
         engine.eval("(spell-mode)").unwrap();
         engine.set_snapshot(snapshot(5, true));
@@ -813,7 +815,7 @@ mod engine_tests {
         let _ = engine.eval(
             r#"(begin
                  (spell--set-errors '((5 10 "aa") (20 25 "bb")))
-                 (set! *spell-errors-buffer* (current-buffer)))"#,
+                 (set! spell--errors-buffer (current-buffer)))"#,
         );
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         assert_eq!(val("(car (spell--error-after 10))"), "20");
@@ -938,6 +940,16 @@ mod engine_tests {
         assert!(matches!(
             removed.commands.as_slice(),
             [EditorCommand::RemoveHook(m, f)] if m == "steel" && f == "enable-lsp"
+        ));
+        // The Emacs idiom keeps working: a QUOTED-SYMBOL hook name
+        // (`(add-hook 'foo-mode-hook 'fn)`) coerces into the string-keyed
+        // registry — `<mode>-hook` is the documented public spelling.
+        let emacs_idiom = engine
+            .eval(r#"(add-hook 'foo-mode-hook 'my-setup)"#)
+            .unwrap();
+        assert!(matches!(
+            emacs_idiom.commands.as_slice(),
+            [EditorCommand::AddHook(m, f)] if m == "foo-mode-hook" && f == "my-setup"
         ));
     }
 
@@ -1114,6 +1126,9 @@ mod engine_tests {
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
 
@@ -1166,6 +1181,9 @@ mod engine_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
         let cmds = engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm")
@@ -1194,6 +1212,9 @@ mod engine_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
         let cmds = engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm")
@@ -1342,6 +1363,9 @@ mod engine_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
         engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
@@ -1632,6 +1656,9 @@ mod engine_tests {
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
         engine.set_snapshot(EditorSnapshot {
@@ -1739,6 +1766,9 @@ mod engine_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
         engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
@@ -1860,6 +1890,9 @@ mod engine_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
         engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
@@ -2047,6 +2080,9 @@ mod engine_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
         engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
@@ -2279,6 +2315,9 @@ mod engine_tests {
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
 
@@ -2350,6 +2389,7 @@ mod engine_tests {
             .expect("core.scm");
         // evil.scm calls `(evil-collection-init)` at load, populating the
         // `evil-normal:<mode>` overlay keymaps for every special mode.
+        engine.eval(include_str!("../../scheme/defoption.scm"));
         let cmds = engine
             .eval(include_str!("../../scheme/evil.scm"))
             .unwrap()
@@ -2590,6 +2630,9 @@ mod engine_tests {
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm");
         let c = engine.eval(r#"(evil-use-register "a")"#).unwrap().commands;
@@ -2623,6 +2666,9 @@ mod engine_tests {
         engine
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
         let cmds = engine
             .eval(include_str!("../../scheme/evil.scm"))
             .expect("evil.scm")
@@ -3249,6 +3295,9 @@ mod magit_tests {
         engine
             .eval(include_str!("../../scheme/lib-async.scm"))
             .unwrap();
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
         engine
             .eval(&format!(
@@ -3351,6 +3400,9 @@ mod magit_tests {
             .unwrap();
         engine
             .eval(include_str!("../../scheme/lib-async.scm"))
+            .unwrap();
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
             .unwrap();
         engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
         engine
@@ -5255,6 +5307,9 @@ mod magit_tests {
             )
             .expect("fixture");
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
             .eval(include_str!("../../scheme/folding.scm"))
             .expect("folding.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
@@ -5502,6 +5557,9 @@ mod magit_tests {
             .expect("core.scm");
         // markdown.scm registers its chevron handler with the folding registry.
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
             .eval(include_str!("../../scheme/folding.scm"))
             .expect("folding.scm");
         engine
@@ -5584,6 +5642,9 @@ mod magit_tests {
             .eval(include_str!("../../scheme/core.scm"))
             .expect("core.scm");
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
             .eval(include_str!("../../scheme/org-roam.scm"))
             .expect("org-roam.scm");
         let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
@@ -5612,18 +5673,24 @@ mod magit_tests {
         );
 
         // Node lookups over a hand-built index (5-element records: …line).
+        // Lookups go through the hash indexes now, so insert via the
+        // index-insert path the create-node commands use.
         engine
             .eval(
-                r#"(set! *org-roam-nodes* (list (list "ID1" "Alpha" "/n/a.org" '() 0)
-                                                  (list "ID2" "Beta" "/n/b.org" '() 7)))"#,
+                r#"(for-each org-roam--index-insert
+                   (list (list "ID1" "Alpha" "/n/a.org" '() 0)
+                         (list "ID2" "Beta" "/n/b.org" '() 7)))"#,
             )
             .unwrap();
         assert_eq!(v(r#"(nth (org-roam--node-by-title "Beta") 0)"#), "\"ID2\"");
         assert_eq!(v(r#"(nth (org-roam--node-by-id "ID1") 1)"#), "\"Alpha\"");
+        // Completion candidates: bare titles (no duplicates → no annotations),
+        // resolving through the picker map.
         assert_eq!(
-            v(r#"(string-join (org-roam--titles) "|")"#),
-            "\"Alpha|Beta\""
+            v(r#"(string-join (org-roam--picker-candidates *org-roam-nodes*) "|")"#),
+            "\"Beta|Alpha\""
         );
+        assert_eq!(v(r#"(car (org-roam--picker-resolve "Alpha"))"#), "\"ID1\"");
         // Subtree node carries its headline line; file-level node is line 0.
         assert_eq!(
             v(r#"(org-roam--node-line (org-roam--node-by-id "ID2"))"#),
@@ -9389,6 +9456,9 @@ mod perspectives_lib {
     fn engine() -> (ScriptEngine, UnboundedReceiver<ScriptOutcome>) {
         let (engine, rx) = ScriptEngine::new();
         engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
         engine
             .eval(&format!(
@@ -9590,6 +9660,9 @@ mod perspectives_lib {
     fn perspective_track_sticks_across_non_project_buffers() {
         let (engine, _rx) = ScriptEngine::new();
         engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
         // Stubs must precede perspectives.scm: Steel resolves free identifiers
         // at definition time, so later redefinitions wouldn't be seen.
@@ -9638,6 +9711,9 @@ mod perspectives_lib {
     fn perspective_installs_scope_hooks() {
         let (engine, _rx) = ScriptEngine::new();
         engine.eval(include_str!("../../scheme/core.scm")).unwrap();
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .unwrap();
         engine.eval(include_str!("../../scheme/helm.scm")).unwrap();
         // Stubs precede perspectives.scm so its hooks capture them (definition-
         // time resolution). gix-toplevel echoes its arg so the resolved root
@@ -10236,6 +10312,9 @@ mod session_lib {
             ))
             .unwrap();
         engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm loads");
+        engine
             .eval(include_str!("../../scheme/session.scm"))
             .expect("session.scm loads");
         (engine, rx, dir)
@@ -10564,6 +10643,9 @@ mod session_lib {
                    (define (perspective-current) #f)
                    (define (perspective-restore-current! r) #f)"#,
             )
+            .unwrap();
+        let out = engine
+            .eval(include_str!("../../scheme/defoption.scm"))
             .unwrap();
         let out = engine
             .eval(include_str!("../../scheme/session.scm"))
@@ -12262,7 +12344,7 @@ mod audit_fixes {
             go_rx.recv().unwrap();
         });
         engine.eval("(define conn (tcp-accept srv))").unwrap();
-        assert!(val("(socket-set-timeout conn 200)").contains("#t"));
+        assert!(val("(socket-set-timeout conn 200)").contains("#true"));
         assert_eq!(val("(socket-recv-line conn)"), "\"\"");
         go_tx.send(()).unwrap();
         assert_eq!(val("(socket-recv-line conn)"), "\"hello\\n\"");
@@ -12272,8 +12354,8 @@ mod audit_fixes {
         assert_eq!(val("(socket-recv-bytes conn 4)"), "\"ABCD\"");
         go_tx.send(()).unwrap();
         client.join().unwrap();
-        assert!(val("(socket-close conn)").contains("#t"));
-        assert!(val("(tcp-listener-close srv)").contains("#t"));
+        assert!(val("(socket-close conn)").contains("#true"));
+        assert!(val("(tcp-listener-close srv)").contains("#true"));
     }
 }
 
@@ -14738,6 +14820,101 @@ mod minor_mode_lib {
     }
 
     #[test]
+    fn minor_mode_expansion_defines_no_hook_decoy() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        // define-minor-mode no longer defines an inert NAME-hook binding:
+        // evaluating it errors as an unbound identifier.
+        let r = engine.eval("test-hook");
+        assert!(
+            r.is_err(),
+            "NAME-hook decoy is back: evaluating it returned {:?}",
+            r.map(|res| res.value)
+        );
+        // ...and describe-variable can render the live hook registrations:
+        // the hook-listing primitive exists and returns the empty list for an
+        // unregistered hook.
+        assert_eq!(
+            v(&engine, r#"(hook-registered-functions "foo-mode-hook")"#),
+            "()"
+        );
+        assert_eq!(v(&engine, r#"(hook-names)"#), "()");
+    }
+
+    #[test]
+    fn describe_variable_renders_hook_keys_not_bare_mode_names() {
+        let engine = engine();
+        load_with_deps(&engine, "help-extras");
+        // A hook KEY renders its registered functions.
+        engine.set_snapshot(EditorSnapshot {
+            hooks: vec![("rust-mode-hook".into(), vec!["my-setup".into()])],
+            ..Default::default()
+        });
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "rust-mode-hook" (variable-list)) "y" "n")"#
+            ),
+            "\"y\"",
+            "hook key missing from the C-h v picker"
+        );
+        let out = engine
+            .eval(r#"(describe-variable-show "rust-mode-hook")"#)
+            .unwrap();
+        let rendered = out.commands.iter().find_map(|c| match c {
+            EditorCommand::RenderBuffer { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let text = rendered.expect("describe-variable-show must render a buffer");
+        assert!(text.contains("Registered functions"), "got: {text}");
+        assert!(text.contains("my-setup"), "got: {text}");
+        // Hooks are separate from the mode itself: a <mode>-hook names the
+        // mode command to view instead.
+        assert!(
+            text.contains("describe-function (rust-mode)"),
+            "hook help must point at the mode: {text}"
+        );
+        // A non-mode hook (no -mode-hook suffix) has no mode to point at.
+        engine.set_snapshot(EditorSnapshot {
+            hooks: vec![("kill-buffer-hook".into(), vec!["save-stuff".into()])],
+            ..Default::default()
+        });
+        let out = engine
+            .eval(r#"(describe-variable-show "kill-buffer-hook")"#)
+            .unwrap();
+        let rendered = out.commands.iter().find_map(|c| match c {
+            EditorCommand::RenderBuffer { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let text = rendered.expect("describe-variable-show must render a buffer");
+        assert!(
+            !text.contains("belongs to"),
+            "non-mode hook must not name a mode: {text}"
+        );
+        // A BARE mode name is a command, not a variable: it is NOT offered by
+        // the picker and does NOT grab the mode's hook.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "rust-mode" (variable-list)) "y" "n")"#
+            ),
+            "\"n\"",
+            "bare mode name must not be offered as a variable"
+        );
+        let out = engine
+            .eval(r#"(describe-variable-show "rust-mode")"#)
+            .unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .all(|c| !matches!(c, EditorCommand::RenderBuffer { text, .. }
+                     if text.contains("Registered functions"))),
+            "bare mode name must not render the hook: {:?}",
+            out.commands
+        );
+    }
+
+    #[test]
     fn minor_mode_registry_roundtrip() {
         let engine = engine();
         load_with_deps(&engine, "minor-mode");
@@ -14889,7 +15066,11 @@ mod minor_mode_lib {
             "test-mode-map missing bindings: {:?}",
             v(&engine, "test-mode-map")
         );
-        assert_eq!(v(&engine, "test-mode-hook"), "#false");
+        // The inert NAME-hook decoy is gone — evaluating it errors as unbound.
+        assert!(
+            engine.eval("test-mode-hook").is_err(),
+            "NAME-hook decoy is back"
+        );
         // No mode-line slot is registered at define time — the lighter renders
         // from the stack entry RegisterMinorMode just created.
         assert!(
@@ -15243,7 +15424,11 @@ mod derived_mode_lib {
             "\"y\""
         );
         assert!(v(&engine, "mylang-mode-map").contains("ctrl-c z"));
-        assert_eq!(v(&engine, "mylang-mode-hook"), "#false");
+        // The inert NAME-hook decoy is gone — evaluating it errors as unbound.
+        assert!(
+            engine.eval("mylang-mode-hook").is_err(),
+            "NAME-hook decoy is back"
+        );
         // The bare spelling of CHILD works identically.
         engine
             .eval(r#"(define-derived-mode other fundamental "O.")"#)
@@ -15442,6 +15627,16 @@ mod auto_mode_lib {
     }
 
     #[test]
+    fn regex_valid_distinguishes_bad_pattern() {
+        let engine = engine();
+        assert_eq!(v(&engine, r#"(regex-valid? "\\.el$")"#), "#true");
+        // NOTE: Emacs `\'` compiles here (redundant punctuation escapes are
+        // allowed) — the dialect gotcha is match semantics, not compile. Use a
+        // genuinely invalid pattern: unclosed bracket class.
+        assert_eq!(v(&engine, r#"(regex-valid? "[a-")"#), "#false");
+    }
+
+    #[test]
     fn auto_mode_alist_walks_first_match_wins_and_dedups() {
         let engine = engine();
         load_with_deps(&engine, "derived-mode");
@@ -15484,6 +15679,47 @@ mod auto_mode_lib {
                 .iter()
                 .any(|c| matches!(c, EditorCommand::AddAutoMode { pattern, mode }
                 if pattern == "\\.special$" && mode == "magit-status"))
+        );
+    }
+
+    #[test]
+    fn add_auto_mode_rejects_bad_pattern_loudly() {
+        let engine = engine();
+        load_with_deps(&engine, "derived-mode");
+        // ONE eval containing a bad pattern AND a later good entry — a real
+        // init.scm loads all its entries in a single eval, so "the rest of the
+        // file still lands" must hold within THAT eval, not across separate
+        // eval calls.
+        let (commands, err) = engine.eval_collecting(
+            r#"(add-auto-mode "[a-" "foo-mode")
+               (add-auto-mode "\\.el$" "emacs-lisp-mode")"#,
+        );
+        // The bad pattern warns loudly (echo message naming the pattern) and
+        // the eval does NOT error — a runtime error would drop every form
+        // after the bad one, bricking the rest of init.
+        assert!(
+            err.is_none(),
+            "bad pattern must not abort the eval: {err:?}"
+        );
+        let warned = commands.iter().find_map(|c| match c {
+            EditorCommand::Message(text) => Some(text.clone()),
+            _ => None,
+        });
+        let warned = warned.expect("bad pattern must warn");
+        assert!(warned.contains("entry disabled"), "got: {warned}");
+        assert!(
+            warned.contains("[a-"),
+            "message must name the pattern: {warned}"
+        );
+        // The bad entry must NOT be registered (either table).
+        assert_eq!(
+            v(&engine, r#"(member "[a-" (map car *auto-mode-alist*))"#),
+            "#false"
+        );
+        // The LATER entry from the SAME eval still landed.
+        assert_eq!(
+            v(&engine, r#"(auto-mode--match "x.el")"#),
+            "\"emacs-lisp-mode\""
         );
     }
 
@@ -16027,3 +16263,1054 @@ mod minor_mode_stack_lib {
         );
     }
 }
+
+#[cfg(test)]
+mod org_roam_scaling_lib {
+    use super::*;
+
+    /// The scaling plan (docs/plans/2026-11-02-org-roam-scaling.md): single-read
+    /// scan records, hash-table indexes, fs-watch registration and the per-file
+    /// sync entry point, exercised against a fixture tree.
+    #[test]
+    fn org_roam_indexes_and_live_sync() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        // org-roam.scm's options migrated to defoption (feat/actual-user-options);
+        // its `;; requires:` header lists defoption, so load it before org-roam.
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // Task 3: the hook handlers exist.
+        assert_eq!(
+            v("(if (procedure? org-roam-on-fs-change) \"y\" \"n\")"),
+            "\"y\""
+        );
+        assert_eq!(
+            v("(if (procedure? org-roam-db-sync-file) \"y\" \"n\")"),
+            "\"y\""
+        );
+
+        // Fixture tree: two nodes, an alias on A, a link A → B, a subtree node.
+        // Pid-suffixed so concurrent test runs/checkouts can't collide.
+        let dir = std::env::temp_dir().join(format!("macros-org-roam-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("daily")).unwrap();
+        std::fs::write(
+            dir.join("a.org"),
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n:ROAM_REFS: \"https://example.com/a\"\n\nlink [[id:id-b][B]] and [[id:id-sub][S]].\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:END:\nback [[id:id-a][A]].\n\n* Other\nno id here, link [[id:id-a][A]].\n",
+        )
+        .unwrap();
+
+        engine
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let out = engine.eval("(org-roam--sync)").unwrap();
+
+        // Task 3: the first sync registers the tree watch + the fs hook.
+        assert!(out.commands.iter().any(
+            |c| matches!(c, EditorCommand::WatchTree(o, d) if o == "org-roam" && d == &vec![dir.to_string_lossy().into_owned()])
+        ));
+        assert!(out.commands.iter().any(
+            |c| matches!(c, EditorCommand::AddHook(h, f) if h == "directory-changed-hook" && f == "org-roam-on-fs-change")
+        ));
+
+        // Task 1: one record per file; links attributed per node (deduped).
+        // Records are consed in walk order, so find files by path.
+        assert_eq!(v("(length *org-roam-files*)"), "2");
+        assert_eq!(
+            v(&format!(
+                r#"(org-roam--record-links
+                   (car (filter (lambda (r) (equal? (org-roam--record-file r) "{}"))
+                                *org-roam-files*)))"#,
+                dir.join("a.org").display()
+            )),
+            // Two distinct targets on one line — regression: the first link
+            // insertion for a node used to keep only (car ids).
+            r#"(("id-a" "id-b" "id-sub"))"#
+        );
+        // The link under b.org's *Sub heading belongs to the subtree node;
+        // the link under * Other — a SIBLING heading with no :ID: — belongs
+        // to the FILE node (org-roam climbs ancestors; a sibling isn't one).
+        assert_eq!(
+            v(&format!(
+                r#"(org-roam--record-links
+                   (car (filter (lambda (r) (equal? (org-roam--record-file r) "{}"))
+                                *org-roam-files*)))"#,
+                dir.join("b.org").display()
+            )),
+            r#"(("id-sub" "id-a") ("id-b" "id-a"))"#
+        );
+        // ROAM_REFS land in the ref index at scan time.
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
+
+        // Task 2: all four hash indexes are populated.
+        assert_eq!(v(r#"(hash-contains? *org-roam-by-id* "id-a")"#), "#true");
+        assert_eq!(v(r#"(hash-contains? *org-roam-by-id* "id-sub")"#), "#true");
+        assert_eq!(
+            v(r#"(hash-contains? *org-roam-by-title* "Node B")"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
+            "#true"
+        );
+        assert_eq!(
+            v(&format!(
+                r#"(nth (hash-try-get *org-roam-by-file* "{}") 1)"#,
+                dir.join("b.org").display()
+            )),
+            "\"Node B\""
+        );
+        // Lookups resolve; the alias path lands on the file-level node.
+        assert_eq!(v(r#"(nth (org-roam--node-by-id "id-b") 0)"#), "\"id-b\"");
+        assert_eq!(
+            v(r#"(nth (org-roam--node-by-title "alpha a") 0)"#),
+            "\"id-a\""
+        );
+        // Edges come from the per-node link lists (deduped), no re-reads.
+        // (Normalized: walk order — and thus edge order — is not stable.)
+        assert_eq!(
+            v(r#"(sort-strings
+                 (map (lambda (e) (string-append (car e) "->" (cdr e)))
+                      (org-roam--edges)))"#),
+            r#"("id-a->id-b" "id-a->id-sub" "id-b->id-a" "id-sub->id-a")"#
+        );
+
+        // set-directory must re-arm the watch: the old vault's registration
+        // pointed at the previous directory (WatchTree is replace-per-owner,
+        // so the next sync re-registers against the new one).
+        engine
+            .eval(r#"(org-roam-set-directory "/nonexistent-vault-xyz")"#)
+            .unwrap();
+        assert_eq!(v("*org-roam-watching*"), "#false");
+        engine
+            .eval(&format!(r#"(org-roam-set-directory "{}")"#, dir.display()))
+            .unwrap();
+        engine.eval("(org-roam--sync)").unwrap();
+
+        // Task 4: the sync saved the cache beside the notes; a fresh engine
+        // loads it back with indexes populated (no rescan).
+        assert!(dir.join(".org-roam-cache.tsv").exists());
+        let (engine2, _rx2) = ScriptEngine::new();
+        engine2
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine2
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine2
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine2
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v2 = |q: &str| engine2.eval(q).unwrap().value.unwrap();
+        assert_eq!(v2("(org-roam--load-cache)"), "#true");
+        assert_eq!(v2("(length *org-roam-nodes*)"), "3");
+        assert_eq!(
+            v2(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
+            "#true"
+        );
+        // ROAM_REFS survive the cache round-trip.
+        assert_eq!(v2("(length *org-roam-refs*)"), "1");
+        // Per-node edges survive the cache round-trip (subtree link column).
+        assert_eq!(
+            v2(r#"(sort-strings
+                  (map (lambda (e) (string-append (car e) "->" (cdr e)))
+                       (org-roam--edges)))"#),
+            r#"("id-a->id-b" "id-a->id-sub" "id-b->id-a" "id-sub->id-a")"#
+        );
+
+        // Task 3: per-file sync replaces one record in place (title edit + save).
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B2\n\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("b.org").display()
+            ))
+            .unwrap();
+        assert_eq!(
+            v("(hash-contains? *org-roam-by-title* \"Node B2\")"),
+            "#true"
+        );
+        assert_eq!(
+            v("(hash-contains? *org-roam-by-title* \"Node B\")"),
+            "#false"
+        );
+        // A path outside the vault is refused — proven with REAL foreign files,
+        // not a missing path: a /tmp stray and a sibling directory whose name
+        // extends the vault's (the guard must anchor to the path start, not
+        // substring-match). Both exist on disk, so an unguarded sync-file
+        // would actually index them. Cache bytes must be untouched, too.
+        let rogue = std::env::temp_dir().join(format!("rogue-org-roam-{}.org", std::process::id()));
+        std::fs::write(
+            &rogue,
+            ":PROPERTIES:\n:ID:       id-rogue\n:END:\n#+title: Rogue\n\n",
+        )
+        .unwrap();
+        let sib = std::env::temp_dir().join(format!(
+            "{}-archive",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&sib).unwrap();
+        std::fs::write(
+            sib.join("x.org"),
+            ":PROPERTIES:\n:ID:       id-sib\n:END:\n#+title: Sib\n\n",
+        )
+        .unwrap();
+        let cache_file = dir.join(".org-roam-cache.tsv");
+        let cache_before = std::fs::read(&cache_file).unwrap();
+        engine
+            .eval(&format!(r#"(org-roam-db-sync-file "{}")"#, rogue.display()))
+            .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                sib.join("x.org").display()
+            ))
+            .unwrap();
+        assert_eq!(v("(length *org-roam-files*)"), "2");
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-id "id-rogue") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-id "id-sib") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(std::fs::read(&cache_file).unwrap(), cache_before);
+        // The fs-change handler schedules the debounced re-sync for a dir under
+        // the vault and ignores dirs outside it. First pin the self-write
+        // suppression: with the cache-write timestamp fresh (just stamped),
+        // even an under-vault event must schedule nothing. A timestamp in the
+        // FUTURE (negative diff — wall clock jumped back) must NOT suppress:
+        // the handler lets the event through and forgets the stamp. Then clear
+        // the stamp and expect exactly one RunWithTimer.
+        engine
+            .eval(r#"(set! *org-roam-last-cache-write* (string->number (current-time "%s")))"#)
+            .unwrap();
+        let out_fs_suppressed = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, dir.display()))
+            .unwrap();
+        assert!(
+            !out_fs_suppressed
+                .commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+        );
+        engine
+            .eval(
+                r#"(set! *org-roam-last-cache-write* (+ (string->number (current-time "%s")) 60))"#,
+            )
+            .unwrap();
+        let out_fs_clockjump = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, dir.display()))
+            .unwrap();
+        assert_eq!(
+            out_fs_clockjump
+                .commands
+                .iter()
+                .filter(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(v("*org-roam-last-cache-write*"), "0");
+        engine.eval("(set! *org-roam-last-cache-write* 0)").unwrap();
+        let out_fs = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, dir.display()))
+            .unwrap();
+        assert_eq!(
+            out_fs
+                .commands
+                .iter()
+                .filter(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+                .count(),
+            1
+        );
+        let out_fs_outside = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, sib.display()))
+            .unwrap();
+        assert!(
+            !out_fs_outside
+                .commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+        );
+        let _ = std::fs::remove_dir_all(&sib);
+        let _ = std::fs::remove_file(&rogue);
+        // b.org's title changed but the A→B edge (which lives in a.org's
+        // record) survives, since id-b is still indexed.
+        assert_eq!(v("(org-roam--edges)"), r#"(("id-a" . "id-b"))"#);
+
+        // Now drop the link AND the alias from a.org; its per-file sync (the
+        // incremental index-update path) removes both the edge and the
+        // alias's by-alias entry.
+        std::fs::write(
+            dir.join("a.org"),
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_REFS: \"https://example.com/a\"\n\nno links anymore.\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("a.org").display()
+            ))
+            .unwrap();
+        assert_eq!(v("(org-roam--edges)"), "()");
+        assert_eq!(
+            v(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
+            "#false"
+        );
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
+
+        // After-save hook: saving an in-vault buffer re-indexes its file
+        // (title B3); the file is read from the snapshot's path, as the live
+        // hook would see it.
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B3\n\n",
+        )
+        .unwrap();
+        engine.set_snapshot(EditorSnapshot {
+            path: dir.join("b.org").to_string_lossy().into_owned(),
+            ..Default::default()
+        });
+        engine.eval("(org-roam-on-save)").unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-title "Node B3") "y" "n")"#),
+            "\"y\""
+        );
+        // The save stamps its own fs echo even when the cache bytes don't
+        // change (plain body edit): without the stamp the .org write's fs
+        // event would schedule a full vault rescan.
+        assert!(v("*org-roam-last-cache-write*") != "0");
+
+        // create-node routes through the per-file sync (the record — and thus
+        // the cache — picks the node up immediately), and TSV fields escape
+        // cleanly: this title carries a tab and a comma, which would shift the
+        // cache's column split unescaped.
+        engine
+            .eval(r#"(org-roam--create-node "Node C, part\tB")"#)
+            .unwrap();
+        assert_eq!(v("(length *org-roam-files*)"), "3");
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-title "Node C, part\tB") "y" "n")"#),
+            "\"y\""
+        );
+        // A tag containing a comma (from :a,b:c filetags) survives too.
+        std::fs::write(
+            dir.join("d.org"),
+            ":PROPERTIES:\n:ID:       id-d\n:END:\n#+title: Node D\n#+filetags: :a,b:c\n\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("d.org").display()
+            ))
+            .unwrap();
+
+        // A comma in the FILENAME is escaped in the cache; the record key must
+        // load back UNESCAPED or per-file syncs of the real path add a second
+        // record and duplicate the node.
+        let comma = dir.join("foo, bar.org");
+        std::fs::write(
+            &comma,
+            ":PROPERTIES:\n:ID:       id-comma\n:END:\n#+title: Comma\n\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(r#"(org-roam-db-sync-file "{}")"#, comma.display()))
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-id "id-comma") "y" "n")"#),
+            "\"y\""
+        );
+
+        // A capture whose template body has NO :ID: stays reachable: the scan
+        // finds no node, so the in-memory node must be inserted by hand.
+        engine
+            .eval(r##"(org-roam--create-node-templated "Node T" (list "t" "T" "${slug}.org" "#+title: ${title}\n\nbody without an id.\n"))"##)
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-title "Node T") "y" "n")"#),
+            "\"y\""
+        );
+        let (engine3, _rx3) = ScriptEngine::new();
+        engine3
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine3
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine3
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine3
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v3 = |q: &str| engine3.eval(q).unwrap().value.unwrap();
+        assert_eq!(v3("(org-roam--load-cache)"), "#true");
+        // Round-trip equality is checked INSIDE Scheme — the printed repr
+        // escapes tabs/quotes and would be ambiguous.
+        assert_eq!(
+            v3(r#"(if (equal? (nth (org-roam--node-by-id "id-d") 1) "Node D") "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v3(r#"(if (equal? (nth (org-roam--node-by-id "id-d") 3) (list "a,b" "c")) "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v3(r#"(if (org-roam--node-by-title "Node C, part\tB") "y" "n")"#),
+            "\"y\""
+        );
+        // The comma-filename loads back under its REAL path: exactly one
+        // record keyed by it, the node's file field unescaped, by-file hit.
+        assert_eq!(
+            v3(&format!(
+                r#"(length (filter (lambda (r) (equal? (org-roam--record-file r) "{}"))
+                              *org-roam-files*))"#,
+                comma.display()
+            )),
+            "1"
+        );
+        assert_eq!(
+            v3(&format!(
+                r#"(if (equal? (nth (org-roam--node-by-id "id-comma") 2) "{}") "y" "n")"#,
+                comma.display()
+            )),
+            "\"y\""
+        );
+        assert_eq!(
+            v3(&format!(
+                r#"(if (org-roam--node-by-file "{}") "y" "n")"#,
+                comma.display()
+            )),
+            "\"y\""
+        );
+
+        // Cache reconciliation at load: overwrite the cache with hand-built
+        // rows — one STALE (mtime 0, title no longer on disk → rescan picks
+        // up the disk title), one with a non-numeric line column (dropped),
+        // one whose file no longer exists (record dropped).
+        std::fs::write(
+            dir.join("x.org"),
+            ":PROPERTIES:\n:ID:       id-x\n:END:\n#+title: Disk X\n\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &cache_file,
+            format!(
+                "id-x\tOld X\t{}\t\t0\t\t0\nid-bad\tBad\t{}\t\tnotanumber\t0\nid-gone\tGone\t{}\t\t0\t\t0\n",
+                dir.join("x.org").display(),
+                dir.join("bad.org").display(),
+                dir.join("gone.org").display()
+            ),
+        )
+        .unwrap();
+        let (engine4, _rx4) = ScriptEngine::new();
+        engine4
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine4
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine4
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine4
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v4 = |q: &str| engine4.eval(q).unwrap().value.unwrap();
+        assert_eq!(v4("(org-roam--load-cache)"), "#true");
+        // The stale row was rescanned: the DISK title wins, "Old X" is gone.
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-title "Disk X") "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-title "Old X") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-id "id-bad") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-id "id-gone") "y" "n")"#),
+            "\"n\""
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod defoption_lib {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, expr: &str) -> String {
+        engine.eval(expr).unwrap().value.unwrap()
+    }
+
+    #[test]
+    fn defoption_registers_metadata_and_defines_the_default() {
+        let engine = engine();
+        load_with_deps(&engine, "defoption");
+        engine
+            .eval(
+                r#"(defoption *test-opt* "aspell"
+                     "External spell-checker program."
+                     :type 'string)"#,
+            )
+            .unwrap();
+        // The default is defined in the caller's scope, as written.
+        assert_eq!(
+            v(&engine, r#"(if (equal? *test-opt* "aspell") "y" "n")"#),
+            "\"y\""
+        );
+        // Registered under the name, reachable as string AND symbol.
+        assert_eq!(
+            v(&engine, r#"(defoption-registered? "*test-opt*")"#),
+            "#true"
+        );
+        assert_eq!(
+            v(&engine, r#"(defoption-registered? '*test-opt*)"#),
+            "#true"
+        );
+        assert_eq!(v(&engine, "(defoption-registered? '*nope*)"), "#false");
+        // Metadata round-trips: doc, type, default (in-Scheme probes — the
+        // printed repr of strings double-quotes and escapes, so compare there).
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (equal? (defoption-doc '*test-opt*) "External spell-checker program.") "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(
+                &engine,
+                "(if (eq? (defoption-type '*test-opt*) 'string) \"y\" \"n\")"
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (equal? (defoption-default "*test-opt*") "aspell") "y" "n")"#
+            ),
+            "\"y\""
+        );
+        // A quoted-symbol default survives as a symbol (VALUE is a constant
+        // expression, evaluated for the define and the registration).
+        engine
+            .eval(r#"(defoption *test-sym-opt* 'foo "Symbol default." :type 'any)"#)
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                "(if (eq? (defoption-default '*test-sym-opt*) 'foo) \"y\" \"n\")"
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(&engine, "(if (eq? *test-sym-opt* 'foo) \"y\" \"n\")"),
+            "\"y\""
+        );
+    }
+
+    #[test]
+    fn defoption_accepts_list_defaults_and_defaults_type_to_any() {
+        let engine = engine();
+        load_with_deps(&engine, "defoption");
+        engine
+            .eval(r#"(defoption *test-faces* '("green" face-green) "Faces." :type 'any)"#)
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (equal? *test-faces* '("green" face-green)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (equal? (defoption-default '*test-faces*) '("green" face-green)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        // :type omitted → 'any.
+        engine
+            .eval(r#"(defoption *test-any* 42 "Untyped.")"#)
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                "(if (eq? (defoption-type '*test-any*) 'any) \"y\" \"n\")"
+            ),
+            "\"y\""
+        );
+    }
+
+    #[test]
+    fn defoption_shape_kinds_accepted_and_unknown_still_errors() {
+        let engine = engine();
+        load_with_deps(&engine, "defoption");
+        // The widened shape vocabulary — symbol/list/alist/plist — registers
+        // fine. The kind is a descriptor only: nothing validates the value
+        // against it (see the notes in defoption.scm).
+        engine
+            .eval(
+                r#"(defoption *t-list* '("a") "List." :type 'list)
+                   (defoption *t-alist* '() "Alist." :type 'alist)
+                   (defoption *t-plist* '() "Plist." :type 'plist)
+                   (defoption *t-sym* 'x "Symbol." :type 'symbol)"#,
+            )
+            .unwrap();
+        for (name, kind) in [
+            ("*t-list*", "list"),
+            ("*t-alist*", "alist"),
+            ("*t-plist*", "plist"),
+            ("*t-sym*", "symbol"),
+        ] {
+            assert_eq!(
+                v(
+                    &engine,
+                    &format!(r#"(if (eq? (defoption-type '{name}) '{kind}) "y" "n")"#)
+                ),
+                "\"y\""
+            );
+        }
+        // Unknown kinds still error loudly at expansion time.
+        assert!(
+            engine
+                .eval(r#"(defoption *t-bad* 1 "Bad." :type 'regex)"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn defoption_lists_registered_names_sorted() {
+        let engine = engine();
+        load_with_deps(&engine, "defoption");
+        engine
+            .eval(
+                r#"(defoption *test-zeta* 1 "Z." :type 'integer)
+                   (defoption *test-alpha* 2 "A." :type 'integer)"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (equal? (defoption-list) '("*test-alpha*" "*test-zeta*")) "y" "n")"#
+            ),
+            "\"y\""
+        );
+    }
+
+    #[test]
+    fn defoption_errors_loudly_on_bad_keywords_and_types() {
+        let engine = engine();
+        load_with_deps(&engine, "defoption");
+        // Unknown keyword.
+        assert!(
+            engine
+                .eval(r#"(defoption *bad* 1 "Doc." :lighter "X")"#)
+                .is_err()
+        );
+        // Unknown :type.
+        assert!(
+            engine
+                .eval(r#"(defoption *bad* 1 "Doc." :type 'symbol-list)"#)
+                .is_err()
+        );
+        // Dangling keyword (no value).
+        assert!(engine.eval(r#"(defoption *bad* 1 "Doc." :type)"#).is_err());
+        // Doc that isn't a string.
+        assert!(engine.eval(r#"(defoption *bad* 1 'not-a-doc)"#).is_err());
+        // None of the failures left a registration behind.
+        assert_eq!(v(&engine, "(defoption-registered? '*bad*)"), "#false");
+    }
+
+    #[test]
+    fn defoption_current_value_reads_through_eval_string() {
+        let engine = engine();
+        load_with_deps(&engine, "defoption");
+        engine
+            .eval(
+                r#"(defoption *test-opt* "aspell" "Doc." :type 'string)
+                   (set! *test-opt* "hunspell")"#,
+            )
+            .unwrap();
+        // describe-variable's drift display needs the CURRENT value, read by
+        // name at runtime — pin that eval-string sees module-scope defines.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (equal? (eval-string "*test-opt*") "hunspell") "y" "n")"#
+            ),
+            "\"y\""
+        );
+    }
+}
+
+#[cfg(test)]
+mod defoption_integration {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+    }
+
+    fn v(engine: &ScriptEngine, expr: &str) -> String {
+        engine.eval(expr).unwrap().value.unwrap()
+    }
+
+    #[test]
+    fn spell_module_declares_its_user_options_and_hides_internals() {
+        let engine = engine();
+        load_with_deps(&engine, "help-extras");
+        // The pilot module's knobs are registered user options.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (defoption-registered? "*spell-program*") "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (defoption-registered? "*spell-delay*") "y" "n")"#
+            ),
+            "\"y\""
+        );
+        // customize-option lists them; help.scm's pickers see them via the
+        // doc index (the scanner recognizes `(defoption NAME …)` lines), and
+        // renamed internals drop out of the star-name variable filter.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "*spell-program*" (function-list)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        // Renamed internal state drops out of the star-name variable filter.
+        assert_eq!(
+            v(
+                &engine,
+                "(if (help--variable-name? \"spell--pipe-buf\") \"y\" \"n\")"
+            ),
+            "\"n\""
+        );
+        assert_eq!(
+            v(
+                &engine,
+                "(if (help--variable-name? \"*spell-program*\") \"y\" \"n\")"
+            ),
+            "\"y\""
+        );
+    }
+
+    #[test]
+    fn help_extras_defoption_branch_renders_drift() {
+        let engine = engine();
+        load_with_deps(&engine, "help-extras");
+        // describe-defoption composes: type, default, current, drift note.
+        let out = engine
+            .eval(
+                r#"(defoption *test-drift* 5 "Docs." :type 'integer)
+                   (set! *test-drift* 7)
+                   (describe-defoption "*test-drift*")"#,
+            )
+            .unwrap();
+        // render-buffer queues a Rust command; the drift note is in its text.
+        let text = out
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                EditorCommand::RenderBuffer { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("render-buffer queued");
+        assert!(text.contains("Type: integer"));
+        assert!(text.contains("Default value: 5"));
+        assert!(text.contains("Current value: 7"));
+        assert!(text.contains("(changed from the default)"));
+    }
+}
+
+#[cfg(test)]
+mod apropos_dynamic {
+    use super::*;
+
+    #[test]
+    fn apropos_prompt_is_a_dynamic_completing_read() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "help");
+        let out = engine.eval("(apropos)").unwrap();
+        assert!(out.commands.iter().any(|c| matches!(
+            c,
+            EditorCommand::CompletingRead { dynamic: Some(f), callback, .. }
+                if f == "apropos-dynamic" && callback == "apropos-finish"
+        )));
+        // The dynamic fn guards short input and answers for real patterns.
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        assert_eq!(
+            v(r#"(if (null? (apropos-dynamic "s")) "empty" "bad")"#),
+            "\"empty\""
+        );
+        assert_eq!(
+            v(r#"(if (member "spell-mode" (apropos-dynamic "spell mode")) "y" "n")"#),
+            "\"y\""
+        );
+    }
+}
+mod org_roam_links_lib {
+    use super::*;
+
+    /// The link/alias/ref tier of the org-roam index: reverse-link backlinks,
+    /// per-node drawer aliases, annotated duplicate-title pickers, ROAM_REFS
+    /// and the incremental rename — exercised on a fixture vault.
+    #[test]
+    fn org_roam_links_aliases_dup_titles_refs() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        // org-roam.scm now declares its options via defoption (merged from the
+        // options branch); the file's `requires:` header would load defoption
+        // through the normal loader, but this test evals the file directly.
+        engine
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // Fixture: a links to B and the subtree S (which aliases itself);
+        // c.org and d.org share the SAME title (duplicate-title pickers).
+        let dir =
+            std::env::temp_dir().join(format!("macros-org-roam-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.org"),
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n:ROAM_REFS: \"https://example.com/a\"\n\nsee [[id:id-b][B]] and [[id:id-sub][S]].\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:ROAM_ALIASES: \"sub alias\"\n:END:\nback [[id:id-a][A]].\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("c.org"),
+            ":PROPERTIES:\n:ID:       id-c\n:END:\n#+title: Shared Title\n\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("d.org"),
+            ":PROPERTIES:\n:ID:       id-d\n:END:\n#+title: Shared Title\n\n",
+        )
+        .unwrap();
+
+        engine
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        engine.eval("(org-roam--sync)").unwrap();
+
+        // Backlinks come from the reverse index (no vault grep): b.org's only
+        // link sits under the * Sub subtree, so its source is id-sub — the
+        // file node id-b contributed nothing. Unknown targets have no entry.
+        assert_eq!(
+            v(r#"(sort-strings (map car (hash-try-get *org-roam-by-link* "id-a")))"#),
+            r#"("id-sub")"#
+        );
+        assert_eq!(
+            v(r#"(if (hash-try-get *org-roam-by-link* "id-nobody") 1 0)"#),
+            "0"
+        );
+        // Per-node aliases: the drawer alias lands on the subtree node, the
+        // file-level `:ROAM_ALIASES:` on the file node.
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-by-alias* "sub alias"))"#),
+            "\"id-sub\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-by-alias* "alpha a"))"#),
+            "\"id-a\""
+        );
+        // ROAM_REFS index to the file-level node (for org-roam-ref-find).
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
+        assert_eq!(v(r#"(car (cdr (car *org-roam-refs*)))"#), "\"id-a\"");
+
+        // Duplicate titles get file-annotated candidates; unique titles stay
+        // bare. The label map resolves to the right node.
+        assert_eq!(
+            v(
+                r#"(if (member "Shared Title — c.org" (org-roam--picker-candidates *org-roam-nodes*)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(
+                r#"(if (member "Shared Title — d.org" (org-roam--picker-candidates *org-roam-nodes*)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(if (member "Node A" (org-roam--picker-candidates *org-roam-nodes*)) "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-find-targets* "Shared Title — c.org"))"#),
+            "\"id-c\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-find-targets* "Shared Title — d.org"))"#),
+            "\"id-d\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-find-targets* "Node A"))"#),
+            "\"id-a\""
+        );
+        // A bare duplicate title typed by hand still falls through to the
+        // by-title lookup (first-seen wins; walk order isn't pinned) — it
+        // must resolve to one of the EXISTING nodes, not create a new one.
+        assert_eq!(
+            v(
+                r#"(if (member (car (org-roam--picker-resolve "Shared Title")) (list "id-c" "id-d")) "y" "n")"#
+            ),
+            "\"y\""
+        );
+
+        // Cache round-trip: the per-node drawer alias and the reverse index
+        // both survive a load into a fresh engine.
+        let (engine2, _rx2) = ScriptEngine::new();
+        engine2
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine2
+            .eval(include_str!("../../scheme/defoption.scm"))
+            .expect("defoption.scm");
+        engine2
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine2
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v2 = |q: &str| engine2.eval(q).unwrap().value.unwrap();
+        assert_eq!(v2("(org-roam--load-cache)"), "#true");
+        assert_eq!(
+            v2(r#"(car (hash-try-get *org-roam-by-alias* "sub alias"))"#),
+            "\"id-sub\""
+        );
+        assert_eq!(
+            v2(r#"(sort-strings (map car (hash-try-get *org-roam-by-link* "id-a")))"#),
+            r#"("id-sub")"#
+        );
+
+        // Incremental rename on a real buffer: the disk files that LINK to the
+        // renamed node are rewritten AND per-file-synced; the live indexes get
+        // the new title without invalidating the session index.
+        engine.set_snapshot(EditorSnapshot {
+            name: "a.org".into(),
+            path: dir.join("a.org").to_string_lossy().into_owned(),
+            text: Rope::from_str(
+                ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n:ROAM_REFS: \"https://example.com/a\"\n\nsee [[id:id-b][B]] and [[id:id-sub][S]].\n",
+            ),
+            ..Default::default()
+        });
+        engine
+            .eval(r#"(org-roam--rename-apply "id-a" "Renamed A")"#)
+            .unwrap();
+        assert_eq!(v("*org-roam-synced*"), "#true");
+        assert_eq!(
+            v(r#"(if (hash-contains? *org-roam-by-title* "Renamed A") "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(if (hash-contains? *org-roam-by-title* "Node A") "y" "n")"#),
+            "\"n\""
+        );
+        // The renaming buffer keeps its alias through the title rewrite.
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-by-alias* "alpha a"))"#),
+            "\"id-a\""
+        );
+        // b.org's inbound link description was rewritten on disk.
+        let b = std::fs::read_to_string(dir.join("b.org")).unwrap();
+        assert!(b.contains("[[id:id-a][Renamed A]]"));
+
+        // Per-file sync of a file whose links were REMOVED drops its sources
+        // from the reverse index (id-b and id-sub no longer link to id-a),
+        // and the drawer alias went with the rewritten subtree drawer.
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:END:\nno links.\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("b.org").display()
+            ))
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (hash-try-get *org-roam-by-link* "id-a") 1 0)"#),
+            "0"
+        );
+        assert_eq!(
+            v(r#"(if (hash-try-get *org-roam-by-alias* "sub alias") 1 0)"#),
+            "0"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+

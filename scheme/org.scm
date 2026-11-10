@@ -1,4 +1,4 @@
-;; requires: core folding bookmarks narrow
+;; requires: core folding bookmarks narrow defoption
 
 ;; org.scm — Org mode, implemented entirely in Scheme on the editor primitives.
 ;;
@@ -74,12 +74,18 @@
 ;;   (define (org-toggle-bug) (org-set-keyword "BUG"))
 ;;   (define-key "org-mode" "ctrl-c ctrl-b" "org-toggle-bug")
 ;;   (register-command "org-toggle-bug")
-(define *org-custom-keywords* '())
+(defoption *org-custom-keywords* '()
+  "Custom heading keyword labels, appended to the C-c C-t cycle after the
+TODO vocabulary. Empty by default; set from init.scm."
+  :type 'list)
 
 ;; Per-keyword colors: an alist (LABEL . "#rrggbb"). Empty by default, so every
 ;; custom keyword inherits the title color. Set from init.scm, then call
 ;; `org--register-custom-keyword-faces` to apply.
-(define *org-custom-keyword-colors* '())
+(defoption *org-custom-keyword-colors* '()
+  "Per-keyword colors: an alist (LABEL . \"#rrggbb\"). Empty by default, so
+every custom keyword inherits the title color."
+  :type 'alist)
 
 ;; The face name carrying a custom keyword's color (e.g. "org-kw-BUG").
 (define (org--keyword-face-name kw) (string-append "org-kw-" kw))
@@ -109,14 +115,25 @@
 ;; just the all-but-one of Emacs's `org-hide-leading-stars`. Disable from init.scm
 ;; with
 ;;   (set! *org-hide-leading-stars* #f)  ; then M-x org-mode, or reopen the file
-(define *org-hide-leading-stars* #t)
+(defoption *org-hide-leading-stars* #t
+  "Hide the leading stars on every headline from display (the text stays in
+the buffer), so a heading shows only its colored title."
+  :type 'boolean)
 
 ;; Virtual indentation (Emacs `org-indent-mode`): indent each heading by its depth
 ;; and the body text beneath it one level further, all display-only — no spaces
 ;; are written to the buffer, so there is nothing for the cursor to step through.
 ;; A heading of level L is indented (L-1)*per-level columns and its body L*per.
-(define *org-indent* #t)
-(define *org-indent-per-level* 4)
+(defoption *org-indent* #t
+  "Virtual indentation (Emacs `org-indent-mode`): indent each heading by its
+depth and the body text beneath it one level further, all display-only."
+  :type 'boolean)
+
+;; Columns of virtual indentation per heading level (a heading of level L is
+;; indented (L-1)*per-level columns and its body L*per).
+(defoption *org-indent-per-level* 4
+  "Columns of virtual indentation per heading level."
+  :type 'integer)
 
 ;; ===========================================================================
 ;; Tiny utilities
@@ -429,7 +446,10 @@
 ;; auto passes — the Emacs `so-long` move. The mode, fold-style, and keymap are
 ;; still set, so editing works; only the org face/indent/chevron decoration is
 ;; dropped. Mirrors folding.scm's *fold-auto-limit* and markdown's guard.
-(define *org-fontify-line-limit* 20000)
+(defoption *org-fontify-line-limit* 20000
+  "Line threshold past which the auto fontification passes are skipped (the
+Emacs `so-long` move), so huge files don't block the engine."
+  :type 'integer)
 (define (org--fontify-ok?)
   (and (org--active?) (<= (line-count) *org-fontify-line-limit*)))
 
@@ -1272,7 +1292,10 @@
 ;; ===========================================================================
 ;; The set of files the agenda scans. If unset, every .org file under the
 ;; current project (or buffer directory).
-(define *org-agenda-files* '())
+(defoption *org-agenda-files* '()
+  "The set of files the agenda scans. If unset, every .org file under the
+current project (or buffer directory)."
+  :type 'list)
 (define (org-set-agenda-files lst) (set! *org-agenda-files* lst))
 (define (org--agenda-file-list)
   (if (not (null? *org-agenda-files*))
@@ -1401,7 +1424,9 @@
         (if (null? files) (path-join (buffer-directory) "inbox.org") (car files)))))
 ;; Capture templates (see Layer 7f for the engine). Defined here so org-capture,
 ;; below, can test it; populate from init.scm.
-(define *org-capture-templates* '())
+(defoption *org-capture-templates* '()
+  "Capture templates (see Layer 7f for the engine); populate from init.scm."
+  :type 'list)
 ;; C-c c — capture. With no templates configured this is the simple "* TODO"
 ;; prompt; configure *org-capture-templates* (see Layer 7f) for the full flow.
 (define-command (org-capture)
@@ -1966,8 +1991,13 @@
 ;; --- LaTeX preview ----------------------------------------------------------
 ;; Render `$…$` fragments to PNG with the system TeX toolchain (latex + dvipng)
 ;; and display them inline — the org-preview-latex model. Tunable from init.scm.
-(define *org-latex-density* "150")               ; dvipng -D (dots per inch)
-(define *org-latex-fg* "rgb 0.85 0.85 0.85")     ; light, for dark themes
+(defoption *org-latex-density* "150"
+  "dvipng -D density (dots per inch) for LaTeX preview fragments."
+  :type 'string)
+;; Foreground color for rendered fragments — light, for dark themes.
+(defoption *org-latex-fg* "rgb 0.85 0.85 0.85"
+  "Foreground color for LaTeX preview fragments — light, for dark themes."
+  :type 'string)
 (define (org--latex-tmpdir)
   (let ((t (getenv "TMPDIR"))) (path-join (if (equal? t "") "/tmp" t) "macros-org-latex")))
 
@@ -2767,7 +2797,10 @@
 ;;   (set! *org-agenda-custom-commands*
 ;;     (list (list "w" "Waiting" "todo" "WAITING")
 ;;           (list "u" "Urgent"  "tags" "urgent")))
-(define *org-agenda-custom-commands* '())
+(defoption *org-agenda-custom-commands* '()
+  "Custom agenda commands: each is (KEY DESCRIPTION TYPE ARG), TYPE one of
+\"agenda\", \"todo\" (ARG = keyword), \"tags\" (ARG = tag expression)."
+  :type 'list)
 (define-command (org-agenda-dispatch)
   (if (null? *org-agenda-custom-commands*)
       (org-agenda)
@@ -3213,7 +3246,10 @@
 ;; ===========================================================================
 ;; Layer 7k — column view (read-only, driven by #+COLUMNS:)
 ;; ===========================================================================
-(define *org-columns-default* "%40ITEM %TODO %PRIORITY %TAGS")
+;; Default column format when a buffer has no #+COLUMNS: line.
+(defoption *org-columns-default* "%40ITEM %TODO %PRIORITY %TAGS"
+  "Default column-view format when a buffer has no #+COLUMNS: line."
+  :type 'string)
 (define (org--columns-spec)
   (let loop ((ls (org--lines)))
     (cond ((null? ls) *org-columns-default*)
