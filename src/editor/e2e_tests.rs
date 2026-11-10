@@ -2644,3 +2644,63 @@ fn help_finds_mode_scoped_bindings(cx: &mut TestAppContext) {
         assert!(text.contains(row), "describe-mode lacks {row}:\n{text}");
     }
 }
+
+#[gpui::test]
+fn init_value_minor_is_retroactive_to_existing_buffers(cx: &mut TestAppContext) {
+    // `:init-value` is a defvar-local GLOBAL DEFAULT in Emacs — RETROACTIVE to
+    // buffers that already exist when the defining file loads. The old single
+    // per-buffer `init_minors_ran` bool meant a mode registered after the
+    // buffer's first activation never reached it; per-mode marks fix that.
+    let editor = setup(cx, "hello");
+    editor.update(cx, |e, cx| {
+        // The buffer's first activation has already applied init minors.
+        e.push_init_minors();
+        // Register an :init-value minor LATE (simulates config load after the
+        // buffer's first activation).
+        let (cmds, err) = e.script.eval_collecting(
+            r#"(define-minor-mode late-mode "L." :init-value #t)"#,
+        );
+        assert!(err.is_none(), "{err:?}");
+        for c in cmds {
+            e.apply_command(c, cx);
+        }
+        // The buffer's first activation already ran, so push again — the
+        // per-mode mark must treat late-mode as never-applied.
+        e.push_init_minors();
+        assert!(e.active.modes.minor("late-mode"), "retroactive push failed");
+        // A later explicit disable must stick (the mark is set on first
+        // application either way).
+        e.apply_command(
+            EditorCommand::DisableMinorMode("late-mode".into()),
+            cx,
+        );
+        e.push_init_minors();
+        assert!(!e.active.modes.minor("late-mode"), "disable did not stick");
+    });
+}
+
+#[gpui::test]
+fn empty_hook_keys_drop_out_of_the_snapshot(cx: &mut TestAppContext) {
+    // remove-hook retains an EMPTY key in the editor's hook table; the
+    // snapshot must not publish it, or C-h v offers a hook whose page falls
+    // through to "No variable named …".
+    let editor = setup(cx, "hello");
+    editor.update(cx, |e, cx| {
+        e.publish_point();
+        e.run_script_blocking(r#"(add-hook "foo-hook" 'my-setup)"#, cx);
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.publish_point();
+        e.run_script_blocking(r#"(remove-hook "foo-hook" 'my-setup)"#, cx);
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, _| {
+        e.publish_point();
+        let names = e.script.eval("(hook-names)").unwrap().value.unwrap();
+        assert!(
+            !names.contains("foo-hook"),
+            "empty hook key leaked into the snapshot: {names}"
+        );
+    });
+}
