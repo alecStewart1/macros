@@ -14766,10 +14766,7 @@ mod minor_mode_lib {
             v(&engine, r#"(hook-registered-functions "foo-mode-hook")"#),
             "()"
         );
-        assert_eq!(
-            v(&engine, r#"(hook-names)"#),
-            "()"
-        );
+        assert_eq!(v(&engine, r#"(hook-names)"#), "()");
     }
 
     #[test]
@@ -14782,7 +14779,10 @@ mod minor_mode_lib {
             ..Default::default()
         });
         assert_eq!(
-            v(&engine, r#"(if (member "rust-mode-hook" (variable-list)) "y" "n")"#),
+            v(
+                &engine,
+                r#"(if (member "rust-mode-hook" (variable-list)) "y" "n")"#
+            ),
             "\"y\"",
             "hook key missing from the C-h v picker"
         );
@@ -14822,11 +14822,16 @@ mod minor_mode_lib {
         // A BARE mode name is a command, not a variable: it is NOT offered by
         // the picker and does NOT grab the mode's hook.
         assert_eq!(
-            v(&engine, r#"(if (member "rust-mode" (variable-list)) "y" "n")"#),
+            v(
+                &engine,
+                r#"(if (member "rust-mode" (variable-list)) "y" "n")"#
+            ),
             "\"n\"",
             "bare mode name must not be offered as a variable"
         );
-        let out = engine.eval(r#"(describe-variable-show "rust-mode")"#).unwrap();
+        let out = engine
+            .eval(r#"(describe-variable-show "rust-mode")"#)
+            .unwrap();
         assert!(
             out.commands
                 .iter()
@@ -15620,14 +15625,20 @@ mod auto_mode_lib {
         // The bad pattern warns loudly (echo message naming the pattern) and
         // the eval does NOT error — a runtime error would drop every form
         // after the bad one, bricking the rest of init.
-        assert!(err.is_none(), "bad pattern must not abort the eval: {err:?}");
+        assert!(
+            err.is_none(),
+            "bad pattern must not abort the eval: {err:?}"
+        );
         let warned = commands.iter().find_map(|c| match c {
             EditorCommand::Message(text) => Some(text.clone()),
             _ => None,
         });
         let warned = warned.expect("bad pattern must warn");
         assert!(warned.contains("entry disabled"), "got: {warned}");
-        assert!(warned.contains("[a-"), "message must name the pattern: {warned}");
+        assert!(
+            warned.contains("[a-"),
+            "message must name the pattern: {warned}"
+        );
         // The bad entry must NOT be registered (either table).
         assert_eq!(
             v(&engine, r#"(member "[a-" (map car *auto-mode-alist*))"#),

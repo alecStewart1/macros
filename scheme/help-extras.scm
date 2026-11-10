@@ -7,11 +7,19 @@
 ;; bundled file follows) plus the editor options. Any other global can still
 ;; be typed by name. `help--variable-name?` is shared with help.scm's function
 ;; picker, which excludes these same names.
+;; describe-variable's hook coverage is `-hook`-suffixed names ONLY (decided
+;; 2026-11): other hook keys (after-change-functions, bare mode-name
+;; spellings) are not variables — offering one in the picker would only fall
+;; through to "No variable named …".
+(define (help--hook-name? name)
+  (and (>= (string-length name) 5)
+       (equal? "-hook" (substring name (- (string-length name) 5)))))
+
 (define (variable-list)
   (sort-strings
    (dedup (append (filter help--variable-name? (function-list))
                   (option-list)
-                  (hook-names)))))
+                  (filter help--hook-name? (hook-names))))))
 
 ;; A value as readable text: strings quoted, everything else as Steel prints it.
 (define (help--value-text v)
@@ -34,21 +42,15 @@
   (cond
     ((equal? name "") #f)
     ((member name (option-list)) (describe-option name))
-    ((and (< 0 (string-length name))
-          (equal? "-hook" (substring name (max 0 (- (string-length name) 5))))
+    ((and (help--hook-name? name)
           (not (null? (hook-registered-functions name))))
-     ;; A mode hook (no more inert NAME-hook #f decoy): show the functions
-     ;; registered on the live string-keyed hook. Bare mode names are NOT
-     ;; hooks — `rust-mode` is a command, `rust-mode-hook` is the variable.
-     ;; Hooks are a separate thing from the mode itself, so a hook whose key
-     ;; names a mode (`<mode>-hook`) points at how to view THE MODE — the
-     ;; mode command via describe-function, its bindings via C-h m (Emacs's
-     ;; C-h v <mode>-hook is the same separation). Note `#'` does not work in
+     ;; A live hook (no more inert NAME-hook #f decoy): show the functions
+     ;; registered on the string-keyed hook. Hooks are separate from the mode
+     ;; itself: a `<mode>-mode-hook` key names a mode command to point at;
+     ;; other hooks (find-file-hook, kill-buffer-hook, NAME-hook spellings)
+     ;; belong to no mode and get no mode line. Note `#'` does not work in
      ;; add-hook (Steel's `#'` is `syntax`) — the hint shows the working form.
      (let* ((fns (hook-registered-functions name))
-            ;; A `<mode>-mode-hook` key names the mode command `<mode>-mode`;
-            ;; other hooks (kill-buffer-hook, NAME-hook spellings) have no
-            ;; single mode command to point at.
             (mode (if (and (>= (string-length name) 10)
                            (equal? "-mode-hook"
                                    (substring name (- (string-length name) 10))))
@@ -56,7 +58,9 @@
                       #f)))
        (render-buffer "*help*" "help-mode"
                       (string-append
-                       name " is a mode hook.\n\n"
+                       (if mode
+                           (string-append name " is the hook of mode " mode ".\n\n")
+                           (string-append name " is a hook.\n\n"))
                        "Registered functions:\n"
                        (join-lines (map (lambda (f) (string-append "  " f)) fns))
                        "\n\nAdd with: (add-hook '" name " 'fn)\n"

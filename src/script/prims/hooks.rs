@@ -3,7 +3,9 @@
 use super::*;
 
 pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
-    let EngineShared { queue, snapshot, .. } = ctx;
+    let EngineShared {
+        queue, snapshot, ..
+    } = ctx;
     reg.section(Section::HooksTimers);
     register_binary(reg, queue, "add-hook", EditorCommand::AddHook);
     register_binary(reg, queue, "remove-hook", EditorCommand::RemoveHook);
@@ -28,14 +30,17 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // Empty for an unknown hook.
     {
         let shared = snapshot.clone();
-        reg.register_fn("hook-registered-functions", move |hook: String| -> Vec<String> {
-            let snap = shared.load();
-            snap.hooks
-                .iter()
-                .find(|(k, _)| *k == hook)
-                .map(|(_, fns)| fns.clone())
-                .unwrap_or_default()
-        });
+        reg.register_fn(
+            "hook-registered-functions",
+            move |hook: String| -> Vec<String> {
+                let snap = shared.load();
+                snap.hooks
+                    .iter()
+                    .find(|(k, _)| *k == hook)
+                    .map(|(_, fns)| fns.clone())
+                    .unwrap_or_default()
+            },
+        );
     }
     register_unary(
         reg,

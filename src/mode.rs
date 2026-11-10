@@ -522,7 +522,10 @@ mod tests {
         // reports the unknown parent instead of silently producing
         // fundamental→child.
         let err = reg.build_stack_checked("child").unwrap_err();
-        assert!(err.contains("typo-parent"), "error must name the parent: {err}");
+        assert!(
+            err.contains("typo-parent"),
+            "error must name the parent: {err}"
+        );
         // A parent that registers LATER makes the same mode build fine.
         reg.register("typo-parent", ModeDef::default());
         assert!(reg.build_stack_checked("child").is_ok());

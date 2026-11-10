@@ -301,11 +301,12 @@ struct Document {
     read_only: bool,
     /// Whether this buffer's mode hooks have run (Emacs: once per buffer).
     hooks_ran: bool,
-    /// The `:init-value` minor modes this buffer has applied init for
+    /// The `:init-value` minor modes this buffer has decided init state for
     /// (per-mode marks): a mode registered LATE still reaches this buffer
-    /// (Emacs's `:init-value` is retroactive), while a user's explicit
-    /// disable stays sticky — the mark is set on first application either
-    /// way.
+    /// (Emacs's `:init-value` is retroactive), while an explicit toggle —
+    /// including a disable before the first init push — stays sticky; the
+    /// mark is set on first application and by every explicit toggle
+    /// (`set_minor_mode`).
     init_minors_done: std::collections::HashSet<String>,
     /// Globalized minor modes whose TURN-ON already ran in this buffer since
     /// the global mode was last switched on (once per buffer per enable).
@@ -4518,8 +4519,19 @@ impl Editor {
             return;
         }
         if on == self.active.modes.minor(name) {
+            // A no-op explicit disable still counts as "applied": the user
+            // turned the mode off before this buffer ever applied its init,
+            // and that decision must survive the first init push.
+            if !on {
+                self.active.init_minors_done.insert(name.to_string());
+            }
             return;
         }
+        // Any explicit toggle counts as this buffer having decided the mode's
+        // init state: `push_init_minors` (first activation, and re-runs for
+        // late-registered modes) must not re-decide over it, or the disable
+        // resurrects on the next buffer switch.
+        self.active.init_minors_done.insert(name.to_string());
         if on {
             let lighter = self.mode_registry.get(name).and_then(|d| d.lighter.clone());
             self.active.modes.push(Mode {

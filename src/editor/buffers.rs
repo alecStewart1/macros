@@ -269,15 +269,16 @@ impl Editor {
     /// per-mode (Emacs's `:init-value` is a `defvar-local` GLOBAL DEFAULT, i.e.
     /// retroactive to buffers that never applied its init), so a mode
     /// registered LATE still reaches buffers that were activated before it
-    /// loaded. The per-mode mark also means a user's explicit disable sticks
-    /// (no re-push per switch). Also run at startup for the initial buffer,
+    /// loaded. The per-mode mark also means an explicit toggle sticks —
+    /// `set_minor_mode` marks too, so even a disable in a buffer that never
+    /// applied the mode's init survives the first push (no re-push per
+    /// switch). Also run at startup for the initial buffer,
     /// which is never "activated".
     pub(crate) fn push_init_minors(&mut self) {
         for (name, lighter) in self.mode_registry.init_minors() {
             // `insert` returns true only on FIRST insertion — that IS the
             // per-mode mark.
-            if self.active.init_minors_done.insert(name.clone())
-                && !self.active.modes.minor(&name)
+            if self.active.init_minors_done.insert(name.clone()) && !self.active.modes.minor(&name)
             {
                 self.active.modes.push(Mode {
                     name: name.clone(),
