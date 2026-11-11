@@ -5439,10 +5439,13 @@ mod magit_tests {
             .unwrap();
         assert_eq!(v(r#"(nth (org-roam--node-by-title "Beta") 0)"#), "\"ID2\"");
         assert_eq!(v(r#"(nth (org-roam--node-by-id "ID1") 1)"#), "\"Alpha\"");
+        // Completion candidates: bare titles (no duplicates → no annotations),
+        // resolving through the picker map.
         assert_eq!(
-            v(r#"(string-join (org-roam--titles) "|")"#),
+            v(r#"(string-join (org-roam--picker-candidates *org-roam-nodes*) "|")"#),
             "\"Beta|Alpha\""
         );
+        assert_eq!(v(r#"(car (org-roam--picker-resolve "Alpha"))"#), "\"ID1\"");
         // Subtree node carries its headline line; file-level node is line 0.
         assert_eq!(
             v(r#"(org-roam--node-line (org-roam--node-by-id "ID2"))"#),
@@ -16337,6 +16340,208 @@ mod org_roam_scaling_lib {
         assert_eq!(
             v4(r#"(if (org-roam--node-by-id "id-gone") "y" "n")"#),
             "\"n\""
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+mod org_roam_links_lib {
+    use super::*;
+
+    /// The link/alias/ref tier of the org-roam index: reverse-link backlinks,
+    /// per-node drawer aliases, annotated duplicate-title pickers, ROAM_REFS
+    /// and the incremental rename — exercised on a fixture vault.
+    #[test]
+    fn org_roam_links_aliases_dup_titles_refs() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // Fixture: a links to B and the subtree S (which aliases itself);
+        // c.org and d.org share the SAME title (duplicate-title pickers).
+        let dir =
+            std::env::temp_dir().join(format!("macros-org-roam-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.org"),
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n:ROAM_REFS: \"https://example.com/a\"\n\nsee [[id:id-b][B]] and [[id:id-sub][S]].\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:ROAM_ALIASES: \"sub alias\"\n:END:\nback [[id:id-a][A]].\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("c.org"),
+            ":PROPERTIES:\n:ID:       id-c\n:END:\n#+title: Shared Title\n\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("d.org"),
+            ":PROPERTIES:\n:ID:       id-d\n:END:\n#+title: Shared Title\n\n",
+        )
+        .unwrap();
+
+        engine
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        engine.eval("(org-roam--sync)").unwrap();
+
+        // Backlinks come from the reverse index (no vault grep): b.org's only
+        // link sits under the * Sub subtree, so its source is id-sub — the
+        // file node id-b contributed nothing. Unknown targets have no entry.
+        assert_eq!(
+            v(r#"(sort-strings (map car (hash-try-get *org-roam-by-link* "id-a")))"#),
+            r#"("id-sub")"#
+        );
+        assert_eq!(
+            v(r#"(if (hash-try-get *org-roam-by-link* "id-nobody") 1 0)"#),
+            "0"
+        );
+        // Per-node aliases: the drawer alias lands on the subtree node, the
+        // file-level `:ROAM_ALIASES:` on the file node.
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-by-alias* "sub alias"))"#),
+            "\"id-sub\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-by-alias* "alpha a"))"#),
+            "\"id-a\""
+        );
+        // ROAM_REFS index to the file-level node (for org-roam-ref-find).
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
+        assert_eq!(v(r#"(car (cdr (car *org-roam-refs*)))"#), "\"id-a\"");
+
+        // Duplicate titles get file-annotated candidates; unique titles stay
+        // bare. The label map resolves to the right node.
+        assert_eq!(
+            v(
+                r#"(if (member "Shared Title — c.org" (org-roam--picker-candidates *org-roam-nodes*)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(
+                r#"(if (member "Shared Title — d.org" (org-roam--picker-candidates *org-roam-nodes*)) "y" "n")"#
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(if (member "Node A" (org-roam--picker-candidates *org-roam-nodes*)) "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-find-targets* "Shared Title — c.org"))"#),
+            "\"id-c\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-find-targets* "Shared Title — d.org"))"#),
+            "\"id-d\""
+        );
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-find-targets* "Node A"))"#),
+            "\"id-a\""
+        );
+        // A bare duplicate title typed by hand still falls through to the
+        // by-title lookup (first-seen wins; walk order isn't pinned) — it
+        // must resolve to one of the EXISTING nodes, not create a new one.
+        assert_eq!(
+            v(
+                r#"(if (member (car (org-roam--picker-resolve "Shared Title")) (list "id-c" "id-d")) "y" "n")"#
+            ),
+            "\"y\""
+        );
+
+        // Cache round-trip: the per-node drawer alias and the reverse index
+        // both survive a load into a fresh engine.
+        let (engine2, _rx2) = ScriptEngine::new();
+        engine2
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine2
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine2
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v2 = |q: &str| engine2.eval(q).unwrap().value.unwrap();
+        assert_eq!(v2("(org-roam--load-cache)"), "#true");
+        assert_eq!(
+            v2(r#"(car (hash-try-get *org-roam-by-alias* "sub alias"))"#),
+            "\"id-sub\""
+        );
+        assert_eq!(
+            v2(r#"(sort-strings (map car (hash-try-get *org-roam-by-link* "id-a")))"#),
+            r#"("id-sub")"#
+        );
+
+        // Incremental rename on a real buffer: the disk files that LINK to the
+        // renamed node are rewritten AND per-file-synced; the live indexes get
+        // the new title without invalidating the session index.
+        engine.set_snapshot(EditorSnapshot {
+            name: "a.org".into(),
+            path: dir.join("a.org").to_string_lossy().into_owned(),
+            text: Rope::from_str(
+                ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n:ROAM_REFS: \"https://example.com/a\"\n\nsee [[id:id-b][B]] and [[id:id-sub][S]].\n",
+            ),
+            ..Default::default()
+        });
+        engine
+            .eval(r#"(org-roam--rename-apply "id-a" "Renamed A")"#)
+            .unwrap();
+        assert_eq!(v("*org-roam-synced*"), "#true");
+        assert_eq!(
+            v(r#"(if (hash-contains? *org-roam-by-title* "Renamed A") "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v(r#"(if (hash-contains? *org-roam-by-title* "Node A") "y" "n")"#),
+            "\"n\""
+        );
+        // The renaming buffer keeps its alias through the title rewrite.
+        assert_eq!(
+            v(r#"(car (hash-try-get *org-roam-by-alias* "alpha a"))"#),
+            "\"id-a\""
+        );
+        // b.org's inbound link description was rewritten on disk.
+        let b = std::fs::read_to_string(dir.join("b.org")).unwrap();
+        assert!(b.contains("[[id:id-a][Renamed A]]"));
+
+        // Per-file sync of a file whose links were REMOVED drops its sources
+        // from the reverse index (id-b and id-sub no longer link to id-a),
+        // and the drawer alias went with the rewritten subtree drawer.
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:END:\nno links.\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("b.org").display()
+            ))
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (hash-try-get *org-roam-by-link* "id-a") 1 0)"#),
+            "0"
+        );
+        assert_eq!(
+            v(r#"(if (hash-try-get *org-roam-by-alias* "sub alias") 1 0)"#),
+            "0"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
